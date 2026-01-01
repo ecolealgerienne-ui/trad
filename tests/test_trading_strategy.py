@@ -236,20 +236,26 @@ def backtest_filter_strategy(df, filter_func, filter_name, trim_edges=100):
     # =====================================================================
     # CALCUL DES RENDEMENTS - LOGIQUE CORRECTE DE TRADING
     # =====================================================================
+    # CRITIQUE: Signal à t → Trade exécuté à Open[t+1]
+    #
     # On entre en position au changement de signal
     # On sort (et calcule le rendement) au prochain changement de signal
     #
     # Exemple LONG:
-    #   t=10: BUY → Entre LONG à open[11] = $95k
+    #   t=10: Signal BUY détecté
+    #   t=11: Entre LONG à entry_price = open[11] ← NEXT CANDLE
     #   t=11-13: Garde position LONG
-    #   t=14: SELL → Sort LONG à open[15] = $96k
-    #         Rendement = (96k - 95k) / 95k = +1.05%
+    #   t=14: Signal SELL détecté
+    #   t=15: Sort LONG à exit_price = open[15] ← NEXT CANDLE
+    #         Rendement LONG = (exit_price - entry_price) / entry_price
     #
     # Exemple SHORT:
-    #   t=14: SELL → Entre SHORT à open[15] = $96k
+    #   t=14: Signal SELL détecté
+    #   t=15: Entre SHORT à entry_price = open[15] ← NEXT CANDLE
     #   t=15-19: Garde position SHORT
-    #   t=20: BUY → Sort SHORT à open[21] = $95k
-    #         Rendement = (96k - 95k) / 96k = +1.04%
+    #   t=20: Signal BUY détecté
+    #   t=21: Sort SHORT à exit_price = open[21] ← NEXT CANDLE
+    #         Rendement SHORT = (entry_price - exit_price) / entry_price
     # =====================================================================
 
     trades_list = []
@@ -257,15 +263,15 @@ def backtest_filter_strategy(df, filter_func, filter_name, trim_edges=100):
     entry_position = None
     entry_idx = None
 
-    for idx in range(len(df_trade)):
+    for idx in range(len(df_trade) - 1):  # -1 car on a besoin de t+1
         current_pos = df_trade.iloc[idx]['position']
-        current_open = df_trade.iloc[idx]['open']
+        next_open = df_trade.iloc[idx + 1]['open']  # ← CRITIQUE: Trade à t+1
 
         # Détecter changement de position
         if idx == 0:
             # Premier signal
             if current_pos != 0:
-                entry_price = current_open
+                entry_price = next_open  # ← FIX: Entre à open[t+1]
                 entry_position = current_pos
                 entry_idx = idx
         else:
@@ -275,7 +281,7 @@ def backtest_filter_strategy(df, filter_func, filter_name, trim_edges=100):
             if current_pos != prev_pos:
                 # Fermer la position précédente si elle existait
                 if entry_price is not None:
-                    exit_price = current_open
+                    exit_price = next_open  # ← FIX: Sort à open[t+1]
 
                     # Calculer le rendement selon le type de position
                     if entry_position == 1:  # LONG
@@ -297,7 +303,7 @@ def backtest_filter_strategy(df, filter_func, filter_name, trim_edges=100):
 
                 # Ouvrir nouvelle position
                 if current_pos != 0:
-                    entry_price = current_open
+                    entry_price = next_open  # ← FIX: Entre à open[t+1]
                     entry_position = current_pos
                     entry_idx = idx
                 else:
@@ -306,6 +312,7 @@ def backtest_filter_strategy(df, filter_func, filter_name, trim_edges=100):
                     entry_idx = None
 
     # Fermer la dernière position si elle est ouverte
+    # ATTENTION: On ferme à la dernière bougie disponible
     if entry_price is not None:
         exit_price = df_trade.iloc[-1]['open']
 
