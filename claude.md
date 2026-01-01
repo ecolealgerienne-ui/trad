@@ -136,6 +136,136 @@ Chaque indicateur sur **plusieurs fenêtres temporelles** (multi-timeframe).
 
 ---
 
+## 🆕 Mise à Jour CRITIQUE: Filtres Adaptatifs Zero-Lag (2026-01-01)
+
+### Objectif: Path vers 90%+ Accuracy
+
+**Problème identifié:** Les filtres statiques ont un lag fixe qui nuit à la précision.
+
+**Solution:** Filtres adaptatifs qui s'ajustent dynamiquement au marché.
+
+### Architecture Mise à Jour
+
+```
+FEATURES (X) - STRICTEMENT CAUSALES:
+├─ Ghost Candles (O, H, L, C)
+├─ Features Avancées (velocity, amplitude, log returns, Z-Score)
+├─ Indicateurs Classiques (RSI, CCI, MACD, BB)
+└─ 🆕 FILTRES ADAPTATIFS ZERO-LAG:
+    ├─ KAMA (Kaufman Adaptive MA)        - Le plus robuste
+    ├─ HMA (Hull MA)                      - Le plus rapide
+    ├─ Ehlers SuperSmoother              - Le plus précis
+    ├─ Ehlers Decycler                   - Suppression bruit
+    ├─ Ensemble (moyenne des 4)          - Robustesse max
+    └─ 🔥 Efficiency Ratio (vitesse alpha) - Feature critique
+
+LABELS (Y) - NON-CAUSALES (INCHANGÉ):
+└─ filtfilt (Butterworth) sur RSI        - Cible idéale
+```
+
+### Filtres Implémentés
+
+**1. KAMA - Kaufman's Adaptive Moving Average ⭐**
+```python
+# Efficiency Ratio (ER)
+ER = |Prix[t] - Prix[t-10]| / Σ|Prix[i] - Prix[i-1]|
+
+# ER proche de 1 → Tendance forte → Filtre rapide
+# ER proche de 0 → Consolidation → Filtre lent
+
+# Feature CRITIQUE: filter_reactivity = ER
+# Si ER devient soudainement élevé → Explosion volatilité imminente
+```
+
+**2. HMA - Hull Moving Average ⚡**
+- Détecte les retournements AVANT les MA classiques
+- Lag de phase minimal
+
+**3. Ehlers SuperSmoother 🎯**
+- Supprime bruit sans décaler la tendance
+- Optimal pour CNN-LSTM
+
+**4. Ehlers Decycler 🔄**
+- Isole la tendance pure
+- Supprime cycles courts
+
+### Fichiers
+
+- `src/adaptive_filters.py` - Implémentation 4 filtres + validation causalité
+- `src/adaptive_features.py` - Integration au pipeline
+- `SPEC_MISE_A_JOUR_FILTRES_ADAPTATIFS.md` - Doc complète équipe dev
+
+### Utilisation
+
+```python
+from adaptive_features import add_adaptive_filter_features
+
+# Ajouter filtres adaptatifs sur prix
+df = add_adaptive_filter_features(
+    df,
+    source_col='current_5m_close',
+    filters=['kama', 'hma', 'supersmoother', 'decycler', 'ensemble'],
+    add_slopes=True,        # Pentes des filtres
+    add_reactivity=True     # Efficiency Ratio
+)
+
+# Features créées:
+# - kama_filtered, kama_slope
+# - hma_filtered, hma_slope
+# - supersmoother_filtered, supersmoother_slope
+# - decycler_filtered, decycler_slope
+# - ensemble_filtered, ensemble_slope
+# - filter_reactivity ⭐ (vitesse du marché)
+```
+
+### ⚠️ AVERTISSEMENT CRITIQUE
+
+**INTERDICTION ABSOLUE: Fenêtres centrées**
+
+```python
+# ❌ JAMAIS FAIRE:
+df['ma'] = df['close'].rolling(window=10, center=True).mean()
+
+# ✅ TOUJOURS:
+df['ma'] = df['close'].rolling(window=10, center=False).mean()
+```
+
+**Pourquoi?** `center=True` utilise le FUTUR = Data leakage = Accuracy artificielle 98%+
+
+**Détection:** Si accuracy saute soudainement à 98%+, chercher fenêtres centrées!
+
+### Validation Obligatoire
+
+Avant chaque utilisation:
+
+```python
+from adaptive_filters import validate_causality
+
+# Vérifier que le filtre est causal
+result = validate_causality(signal, kama_filter)
+assert result['is_causal'], "Filtre non-causal détecté!"
+```
+
+### Impact Attendu
+
+| Métrique | Sans Filtres Adaptatifs | Avec Filtres Adaptatifs |
+|----------|------------------------|-------------------------|
+| Accuracy test | 75-80% | 85-92% ⭐ |
+| Lag moyen | Moyen | Minimal |
+| Features | ~15 | ~30 |
+| Robustesse | Bonne | Excellente |
+
+### Références Littérature
+
+- Kaufman (1995) - KAMA original
+- Ehlers (2001, 2013) - SuperSmoother, Decycler
+- Hull (2005) - Hull MA
+- Renaissance Technologies - Multi-asset strategies
+
+**Lire documentation complète:** `SPEC_MISE_A_JOUR_FILTRES_ADAPTATIFS.md`
+
+---
+
 ## Spec #2 : Architecture IA (Phase Future)
 
 ### Modèle Hybride CNN-LSTM ou TCN
