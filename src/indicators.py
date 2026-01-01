@@ -18,6 +18,19 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Import constants
+from constants import (
+    RSI_PERIOD, CCI_PERIOD, CCI_CONSTANT,
+    BOL_PERIOD, BOL_NUM_STD,
+    MACD_FAST, MACD_SLOW, MACD_SIGNAL,
+    CCI_RAW_MIN, CCI_RAW_MAX,
+    INDICATOR_MIN, INDICATOR_MAX,
+    MACD_NORM_WINDOW,
+    DECYCLER_CUTOFF,
+    SEQUENCE_LENGTH,
+    NUM_INDICATORS
+)
+
 
 def calculate_rsi(prices: Union[pd.Series, np.ndarray],
                  period: int = 14) -> np.ndarray:
@@ -406,3 +419,488 @@ def add_all_indicators(df: pd.DataFrame,
     logger.info(f"Tous les indicateurs ajoutés. Total colonnes: {len(df.columns)}")
 
     return df
+
+
+# =============================================================================
+# NORMALIZATION FUNCTIONS (Pour input du modèle IA)
+# =============================================================================
+
+def normalize_cci(cci: np.ndarray,
+                  raw_min: float = CCI_RAW_MIN,
+                  raw_max: float = CCI_RAW_MAX,
+                  target_min: float = INDICATOR_MIN,
+                  target_max: float = INDICATOR_MAX) -> np.ndarray:
+    """
+    Normalise le CCI de [-200, +200] vers [0, 100].
+
+    Formule: (value - raw_min) / (raw_max - raw_min) * (target_max - target_min) + target_min
+
+    Args:
+        cci: Valeurs CCI brutes
+        raw_min: Minimum attendu du CCI (défaut: -200)
+        raw_max: Maximum attendu du CCI (défaut: +200)
+        target_min: Minimum cible (défaut: 0)
+        target_max: Maximum cible (défaut: 100)
+
+    Returns:
+        CCI normalisé entre 0 et 100
+    """
+    cci_clipped = np.clip(cci, raw_min, raw_max)
+    cci_normalized = (cci_clipped - raw_min) / (raw_max - raw_min) * (target_max - target_min) + target_min
+
+    logger.debug(f"CCI normalisé: {raw_min}/{raw_max} → {target_min}/{target_max}")
+
+    return cci_normalized
+
+
+def calculate_bollinger_percent_b(close: Union[pd.Series, np.ndarray],
+                                   period: int = BOL_PERIOD,
+                                   num_std: float = BOL_NUM_STD) -> np.ndarray:
+    """
+    Calcule le Bollinger %B (position du prix dans les bandes).
+
+    Formule:
+        %B = (Close - Lower Band) / (Upper Band - Lower Band) × 100
+        %B = 0   → Prix sur bande basse
+        %B = 50  → Prix sur bande moyenne
+        %B = 100 → Prix sur bande haute
+
+    Args:
+        close: Prix de clôture
+        period: Période Bollinger (défaut: 20)
+        num_std: Nombre d'écarts-types (défaut: 2)
+
+    Returns:
+        %B normalisé entre 0 et 100
+    """
+    bb = calculate_bollinger_bands(close, period=period, num_std=num_std)
+
+    upper = bb['upper']
+    lower = bb['lower']
+
+    if isinstance(close, pd.Series):
+        close = close.values
+
+    # %B formula
+    percent_b = (close - lower) / (upper - lower)
+
+    # Convertir en 0-100 et clipper
+    percent_b = percent_b * 100
+    percent_b = np.clip(percent_b, 0, 100)
+
+    logger.debug(f"Bollinger %B calculé (période={period}, std={num_std})")
+
+    return percent_b
+
+
+def normalize_macd_histogram(histogram: np.ndarray,
+                             window: int = MACD_NORM_WINDOW,
+                             target_min: float = INDICATOR_MIN,
+                             target_max: float = INDICATOR_MAX) -> np.ndarray:
+    """
+    Normalise l'histogramme MACD avec min-max dynamique sur une fenêtre glissante.
+
+    Stratégie: Pour chaque point, calculer min/max sur les 1000 dernières bougies,
+    puis normaliser vers [0, 100].
+
+    Args:
+        histogram: Histogramme MACD brut
+        window: Fenêtre pour calculer min/max (défaut: 1000)
+        target_min: Minimum cible (défaut: 0)
+        target_max: Maximum cible (défaut: 100)
+
+    Returns:
+        MACD normalisé entre 0 et 100
+    """
+    histogram_series = pd.Series(histogram)
+
+    # Calculer min/max glissant
+    rolling_min = histogram_series.rolling(window=window, min_periods=1).min()
+    rolling_max = histogram_series.rolling(window=window, min_periods=1).max()
+
+    # Normalisation
+    range_val = rolling_max - rolling_min
+
+    # Éviter division par zéro
+    range_val = np.where(range_val == 0, 1, range_val)
+
+    normalized = (histogram_series - rolling_min) / range_val * (target_max - target_min) + target_min
+
+    logger.debug(f"MACD histogram normalisé (window={window})")
+
+    return normalized.values
+
+
+# =============================================================================
+# DECYCLER PARFAIT (Pour génération des labels)
+# =============================================================================
+
+def ehlers_decycler(prices: np.ndarray, cutoff: float = DECYCLER_CUTOFF) -> np.ndarray:
+    """
+    Filtre Decycler de John Ehlers (version causale - forward only).
+
+    Le Decycler est un filtre passe-haut qui enlève les cycles courts.
+
+    Formule:
+        α = (cos(2π × cutoff) + sin(2π × cutoff) - 1) / cos(2π × cutoff)
+        HP[i] = (1 - α/2)² × (Price[i] - 2×Price[i-1] + Price[i-2]) + 2×(1-α)×HP[i-1] - (1-α)²×HP[i-2]
+        Decycler[i] = Price[i] - HP[i]
+
+    Args:
+        prices: Série de prix
+        cutoff: Fréquence de coupure (défaut: 0.1)
+
+    Returns:
+        Signal filtré (Decycler)
+    """
+    alpha = (np.cos(2 * np.pi * cutoff) + np.sin(2 * np.pi * cutoff) - 1) / np.cos(2 * np.pi * cutoff)
+
+    hp = np.zeros_like(prices)
+
+    for i in range(2, len(prices)):
+        hp[i] = ((1 - alpha / 2) ** 2) * (prices[i] - 2 * prices[i-1] + prices[i-2]) + \
+                2 * (1 - alpha) * hp[i-1] - \
+                ((1 - alpha) ** 2) * hp[i-2]
+
+    decycler = prices - hp
+
+    return decycler
+
+
+def apply_decycler_perfect(signal: np.ndarray, cutoff: float = DECYCLER_CUTOFF) -> np.ndarray:
+    """
+    Applique le Decycler en mode PARFAIT (forward-backward) pour génération de labels.
+
+    ⚠️ ATTENTION : Cette version est NON-CAUSALE (utilise le futur)!
+    Elle sert UNIQUEMENT pour générer les labels (vérité terrain).
+
+    Process:
+        1. Filtre forward (début → fin)
+        2. Filtre backward (fin → début)
+        3. Résultat = signal parfaitement lissé sans lag
+
+    Args:
+        signal: Signal d'entrée (indicateur ou prix)
+        cutoff: Fréquence de coupure
+
+    Returns:
+        Signal filtré parfait (sans lag temporel)
+    """
+    # Forward pass
+    forward = ehlers_decycler(signal, cutoff=cutoff)
+
+    # Backward pass (inverser, filtrer, ré-inverser)
+    backward = ehlers_decycler(forward[::-1], cutoff=cutoff)
+    perfect = backward[::-1]
+
+    logger.debug(f"Decycler parfait appliqué (cutoff={cutoff})")
+
+    return perfect
+
+
+# =============================================================================
+# LABEL GENERATION (Pente du filtre parfait)
+# =============================================================================
+
+def generate_labels(filtered_indicator: np.ndarray) -> np.ndarray:
+    """
+    Génère les labels binaires à partir d'un indicateur filtré (Decycler parfait).
+
+    Règle:
+        Label[t] = 1  si filtered[t-1] > filtered[t-2]  (pente haussière → BUY)
+        Label[t] = 0  si filtered[t-1] <= filtered[t-2] (pente baissière → SELL)
+
+    ⚠️ IMPORTANT: On compare filtered[t-1] vs filtered[t-2] pour synchronisation
+    avec open[t+1] (trade exécuté au timestep suivant).
+
+    Args:
+        filtered_indicator: Indicateur filtré avec Decycler parfait
+
+    Returns:
+        Labels binaires (0 ou 1)
+    """
+    labels = np.zeros(len(filtered_indicator), dtype=int)
+
+    # À partir de t=2 (besoin de t-1 et t-2)
+    for t in range(2, len(filtered_indicator)):
+        if filtered_indicator[t-1] > filtered_indicator[t-2]:
+            labels[t] = 1  # Pente haussière
+        else:
+            labels[t] = 0  # Pente baissière
+
+    logger.debug(f"Labels générés: {np.sum(labels)} BUY ({np.sum(labels)/len(labels)*100:.1f}%), "
+                f"{len(labels) - np.sum(labels)} SELL ({(len(labels)-np.sum(labels))/len(labels)*100:.1f}%)")
+
+    return labels
+
+
+# =============================================================================
+# SEQUENCE CREATION (Pour modèle CNN-LSTM)
+# =============================================================================
+
+def create_sequences(indicators: np.ndarray,
+                    labels: np.ndarray,
+                    sequence_length: int = SEQUENCE_LENGTH) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Crée des séquences de longueur fixe pour l'entraînement du modèle.
+
+    Format:
+        X[i] = [indicators[i-sequence_length:i]]  → Séquence de 12 timesteps
+        Y[i] = labels[i]                          → Label au temps i
+
+    Args:
+        indicators: Array (n_samples, n_indicators) - 4 indicateurs normalisés
+        labels: Array (n_samples, n_outputs) - 4 labels binaires (un par indicateur)
+        sequence_length: Longueur des séquences (défaut: 12)
+
+    Returns:
+        X: Array (n_sequences, sequence_length, n_indicators) - Shape (N, 12, 4)
+        Y: Array (n_sequences, n_outputs) - Shape (N, 4)
+
+    Example:
+        >>> X, Y = create_sequences(indicators, labels, sequence_length=12)
+        >>> print(X.shape)  # (N, 12, 4)
+        >>> print(Y.shape)  # (N, 4)
+    """
+    n_samples = len(indicators)
+    n_indicators = indicators.shape[1]
+    n_outputs = labels.shape[1] if len(labels.shape) > 1 else 1
+
+    # Nombre de séquences possibles
+    n_sequences = n_samples - sequence_length
+
+    # Initialiser arrays
+    X = np.zeros((n_sequences, sequence_length, n_indicators))
+    Y = np.zeros((n_sequences, n_outputs)) if n_outputs > 1 else np.zeros(n_sequences)
+
+    # Créer séquences
+    for i in range(n_sequences):
+        X[i] = indicators[i:i+sequence_length]
+        Y[i] = labels[i+sequence_length]
+
+    logger.info(f"Séquences créées: X={X.shape}, Y={Y.shape}")
+
+    return X, Y
+
+
+# =============================================================================
+# PIPELINE COMPLET
+# =============================================================================
+
+def calculate_all_indicators_for_model(df: pd.DataFrame) -> np.ndarray:
+    """
+    Calcule les 4 indicateurs normalisés pour le modèle IA.
+
+    Indicateurs (tous normalisés 0-100):
+        1. RSI(14)           → Déjà 0-100
+        2. CCI(20)           → -200/+200 → 0-100
+        3. Bollinger %B(20)  → 0-100
+        4. MACD Histogram    → Normalisé dynamiquement → 0-100
+
+    Args:
+        df: DataFrame avec colonnes ['open', 'high', 'low', 'close']
+
+    Returns:
+        Array (n_samples, 4) avec les 4 indicateurs normalisés
+    """
+    logger.info("Calcul des 4 indicateurs pour le modèle IA...")
+
+    # 1. RSI (déjà 0-100)
+    rsi = calculate_rsi(df['close'], period=RSI_PERIOD)
+    logger.info(f"  ✓ RSI({RSI_PERIOD}) calculé")
+
+    # 2. CCI normalisé
+    cci_raw = calculate_cci(df['high'], df['low'], df['close'],
+                            period=CCI_PERIOD, constant=CCI_CONSTANT)
+    cci_norm = normalize_cci(cci_raw)
+    logger.info(f"  ✓ CCI({CCI_PERIOD}) calculé et normalisé")
+
+    # 3. Bollinger %B
+    bol_percentb = calculate_bollinger_percent_b(df['close'],
+                                                  period=BOL_PERIOD,
+                                                  num_std=BOL_NUM_STD)
+    logger.info(f"  ✓ Bollinger %B({BOL_PERIOD}, {BOL_NUM_STD}σ) calculé")
+
+    # 4. MACD Histogram normalisé
+    macd_data = calculate_macd(df['close'],
+                               fast_period=MACD_FAST,
+                               slow_period=MACD_SLOW,
+                               signal_period=MACD_SIGNAL)
+    macd_hist_norm = normalize_macd_histogram(macd_data['histogram'])
+    logger.info(f"  ✓ MACD({MACD_FAST}/{MACD_SLOW}/{MACD_SIGNAL}) histogram normalisé")
+
+    # Combiner en array (n_samples, 4)
+    indicators = np.column_stack([rsi, cci_norm, bol_percentb, macd_hist_norm])
+
+    # Gérer les NaN (warm-up des indicateurs)
+    # Stratégie: Forward-fill puis remplacer les NaN restants par 50 (valeur neutre)
+    indicators_df = pd.DataFrame(indicators, columns=['RSI', 'CCI', 'BOL', 'MACD'])
+    indicators_df = indicators_df.ffill().fillna(50.0)
+    indicators = indicators_df.values
+
+    n_nan_before = np.sum(np.isnan(np.column_stack([rsi, cci_norm, bol_percentb, macd_hist_norm])))
+    if n_nan_before > 0:
+        logger.info(f"  ℹ️ {n_nan_before} NaN gérés (warm-up des indicateurs)")
+
+    logger.info(f"Indicateurs combinés: shape={indicators.shape}")
+
+    return indicators
+
+
+def generate_all_labels(indicators: np.ndarray) -> np.ndarray:
+    """
+    Génère les labels pour les 4 indicateurs avec Decycler parfait.
+
+    Process:
+        1. Pour chaque indicateur (RSI, CCI, BOL, MACD)
+        2. Appliquer Decycler parfait (forward-backward)
+        3. Générer labels binaires (pente haussière = 1, baissière = 0)
+
+    Args:
+        indicators: Array (n_samples, 4) - Les 4 indicateurs normalisés
+
+    Returns:
+        Array (n_samples, 4) - Les 4 labels binaires
+    """
+    logger.info("Génération des labels avec Decycler parfait...")
+
+    n_samples = indicators.shape[0]
+    labels = np.zeros((n_samples, NUM_INDICATORS), dtype=int)
+
+    indicator_names = ['RSI', 'CCI', 'BOL', 'MACD']
+
+    for i in range(NUM_INDICATORS):
+        # Appliquer Decycler parfait
+        filtered = apply_decycler_perfect(indicators[:, i])
+
+        # Générer labels
+        labels[:, i] = generate_labels(filtered)
+
+        buy_pct = np.sum(labels[:, i]) / n_samples * 100
+        logger.info(f"  ✓ {indicator_names[i]}: {np.sum(labels[:, i])} BUY ({buy_pct:.1f}%), "
+                   f"{n_samples - np.sum(labels[:, i])} SELL ({100-buy_pct:.1f}%)")
+
+    return labels
+
+
+def prepare_datasets(train_df: pd.DataFrame,
+                    val_df: pd.DataFrame,
+                    test_df: pd.DataFrame) -> Dict[str, Tuple[np.ndarray, np.ndarray]]:
+    """
+    Pipeline COMPLET: des DataFrames raw aux datasets prêts pour l'entraînement.
+
+    Process:
+        1. Calculer les 4 indicateurs normalisés (RSI, CCI, BOL, MACD)
+        2. Générer les 4 labels avec Decycler parfait
+        3. Créer séquences de 12 timesteps
+        4. Retourner X, Y pour train/val/test
+
+    Args:
+        train_df: DataFrame train (avec colonnes OHLC)
+        val_df: DataFrame validation
+        test_df: DataFrame test
+
+    Returns:
+        Dictionnaire avec:
+            'train': (X_train, Y_train)
+            'val': (X_val, Y_val)
+            'test': (X_test, Y_test)
+
+        Où:
+            X shape: (n_sequences, 12, 4) - 12 timesteps × 4 indicateurs
+            Y shape: (n_sequences, 4) - 4 labels binaires
+
+    Example:
+        >>> datasets = prepare_datasets(train_df, val_df, test_df)
+        >>> X_train, Y_train = datasets['train']
+        >>> print(X_train.shape)  # (N_train, 12, 4)
+        >>> print(Y_train.shape)  # (N_train, 4)
+    """
+    logger.info("="*80)
+    logger.info("PRÉPARATION COMPLÈTE DES DATASETS")
+    logger.info("="*80)
+
+    results = {}
+
+    for split_name, df in [('train', train_df), ('val', val_df), ('test', test_df)]:
+        logger.info(f"\n📊 Processing {split_name.upper()} set ({len(df):,} bougies)...")
+
+        # 1. Calculer indicateurs
+        indicators = calculate_all_indicators_for_model(df)
+
+        # 2. Générer labels
+        labels = generate_all_labels(indicators)
+
+        # 3. Créer séquences
+        X, Y = create_sequences(indicators, labels, sequence_length=SEQUENCE_LENGTH)
+
+        logger.info(f"✅ {split_name.upper()}: X={X.shape}, Y={Y.shape}")
+
+        results[split_name] = (X, Y)
+
+    logger.info("="*80)
+    logger.info("✅ DATASETS PRÊTS POUR L'ENTRAÎNEMENT")
+    logger.info("="*80)
+
+    # Afficher stats finales
+    logger.info(f"\n📊 STATS FINALES:")
+    for split_name, (X, Y) in results.items():
+        logger.info(f"  {split_name.upper():5s}: X={X.shape}, Y={Y.shape}")
+
+    return results
+
+
+# =============================================================================
+# EXEMPLE D'UTILISATION
+# =============================================================================
+
+if __name__ == '__main__':
+    # Configurer logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(levelname)s - %(message)s'
+    )
+
+    logger.info("="*80)
+    logger.info("TEST DU MODULE INDICATORS")
+    logger.info("="*80)
+
+    # Charger les données avec data_utils
+    from data_utils import load_and_split_btc_eth
+
+    logger.info("\n1. Chargement des données...")
+    train_df, val_df, test_df = load_and_split_btc_eth()
+
+    logger.info(f"\n2. Préparation des datasets...")
+    datasets = prepare_datasets(train_df, val_df, test_df)
+
+    # Récupérer les datasets
+    X_train, Y_train = datasets['train']
+    X_val, Y_val = datasets['val']
+    X_test, Y_test = datasets['test']
+
+    # Afficher résumé
+    logger.info("\n" + "="*80)
+    logger.info("RÉSUMÉ FINAL")
+    logger.info("="*80)
+    logger.info(f"\n📊 SHAPES:")
+    logger.info(f"  Train: X={X_train.shape}, Y={Y_train.shape}")
+    logger.info(f"  Val:   X={X_val.shape}, Y={Y_val.shape}")
+    logger.info(f"  Test:  X={X_test.shape}, Y={X_test.shape}")
+
+    # Vérifier les valeurs
+    logger.info(f"\n🔍 VALIDATION:")
+    logger.info(f"  X range: [{X_train.min():.2f}, {X_train.max():.2f}] (attendu: [0, 100])")
+    logger.info(f"  Y values: {np.unique(Y_train)} (attendu: [0, 1])")
+
+    # Stats labels
+    logger.info(f"\n📈 DISTRIBUTION LABELS (Train):")
+    for i, name in enumerate(['RSI', 'CCI', 'BOL', 'MACD']):
+        buy_count = np.sum(Y_train[:, i])
+        buy_pct = buy_count / len(Y_train) * 100
+        logger.info(f"  {name}: {buy_count:,} BUY ({buy_pct:.1f}%), "
+                   f"{len(Y_train) - buy_count:,} SELL ({100-buy_pct:.1f}%)")
+
+    logger.info("\n✅ Module indicators.py opérationnel!")
+    logger.info(f"✅ Prêt pour l'entraînement du modèle CNN-LSTM")
+    logger.info("="*80)
