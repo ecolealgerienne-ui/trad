@@ -28,6 +28,7 @@ from utils import (
     save_dataset,
     check_data_leakage
 )
+from advanced_features import add_all_advanced_features
 
 # Préférer indicators_ta (bibliothèque ta) si disponible
 try:
@@ -80,7 +81,9 @@ def create_ghost_candles(df_5m: pd.DataFrame,
     df = df.sort_values('timestamp').reset_index(drop=True)
 
     # Déterminer à quelle bougie 30m appartient chaque bougie 5m
-    df['candle_30m_timestamp'] = df['timestamp'].dt.floor(target_timeframe)
+    # FIX: Décalage de -1ms pour inclure le 6ème step (ex: 14:30 dans bloc 14:00-14:30)
+    # Convention: timestamp = FIN de bougie
+    df['candle_30m_timestamp'] = (df['timestamp'] - pd.Timedelta('1ms')).dt.floor(target_timeframe)
 
     # Grouper par bougie 30m
     grouped = df.groupby('candle_30m_timestamp')
@@ -230,6 +233,16 @@ def build_dataset(input_file: str,
     logger.info("\n[2/7] Création des bougies fantômes...")
     df_ghost = create_ghost_candles(df_5m, target_timeframe=target_timeframe)
 
+    # 2b. Ajouter les features avancées (velocity, log returns, Z-Score, etc.)
+    logger.info("\n[2b/7] Ajout des features avancées...")
+    df_ghost = add_all_advanced_features(
+        df_ghost,
+        ghost_prefix='ghost',
+        open_zscore_window=50,
+        max_steps=6
+    )
+    logger.info("✅ Features avancées ajoutées")
+
     # 3. Features historiques (optionnel)
     if add_history:
         logger.info("\n[3/7] Ajout des features historiques...")
@@ -278,12 +291,16 @@ def build_dataset(input_file: str,
     # 5. Normalisation
     logger.info("\n[5/7] Normalisation des features...")
 
-    # Normaliser la bougie fantôme (Relative Open)
-    df = normalize_ohlc_ghost(df, ghost_prefix='ghost', method='relative_open')
+    # IMPORTANT: On n'utilise PLUS normalize_ohlc_ghost avec relative_open
+    # car les features avancées contiennent déjà:
+    # - ghost_high_log, ghost_low_log, ghost_close_log (log returns)
+    # - ghost_open_zscore (Z-Score contexte)
+    # Ces features sont déjà normalisées et prêtes pour le modèle.
 
     # Normaliser les indicateurs (Z-Score)
     if indicator_cols:
         df = normalize_features(df, indicator_cols, method='zscore', window=50)
+        logger.info("Indicateurs normalisés (Z-Score)")
 
     # 6. Créer les labels
     logger.info("\n[6/7] Création des labels...")
@@ -319,6 +336,168 @@ def build_dataset(input_file: str,
     logger.info("="*80)
 
     return df
+
+
+def build_multiasset_dataset(input_files: Dict[str, str],
+                             output_file: str,
+                             target_timeframe: str = '30T',
+                             add_indicators: bool = True,
+                             label_source: str = 'rsi',
+                             smoothing: float = 0.25) -> pd.DataFrame:
+    """
+    Pipeline multi-actifs avec normalisation séparée par actif.
+
+    ⚠️ CRITIQUE: Normalise chaque actif SÉPARÉMENT pour éviter le leakage inter-actifs.
+
+    Stratégie "Hedge Fund" (Renaissance Technologies, Two Sigma):
+    - BTC et ETH sont normalisés avec LEURS propres statistiques
+    - Le modèle apprend des patterns universels, pas les différences de prix
+    - Permet de généraliser à de nouveaux actifs (XRP, ADA, etc.)
+
+    Args:
+        input_files: Dict {'ASSET_NAME': 'path/to/5m.csv'}
+                     Ex: {'BTC': '../data_trad/BTCUSD_all_5m.csv',
+                          'ETH': '../data_trad/ETHUSD_all_5m.csv'}
+        output_file: Chemin de sortie pour le dataset combiné
+        target_timeframe: Timeframe cible (défaut: '30T')
+        add_indicators: Si True, calcule les indicateurs
+        label_source: Source pour labels ('rsi' ou 'close')
+        smoothing: Paramètre de lissage du filtre
+
+    Returns:
+        DataFrame combiné avec colonne 'asset' identifiant l'origine
+
+    Example:
+        >>> datasets = build_multiasset_dataset(
+        ...     input_files={'BTC': 'btc_5m.csv', 'ETH': 'eth_5m.csv'},
+        ...     output_file='data/processed/multi_asset_dataset.csv'
+        ... )
+    """
+    logger.info("="*80)
+    logger.info("PIPELINE MULTI-ACTIFS AVEC NORMALISATION SÉPARÉE")
+    logger.info("="*80)
+
+    all_datasets = []
+
+    for asset_name, input_file in input_files.items():
+        logger.info(f"\n{'='*60}")
+        logger.info(f"TRAITEMENT DE L'ACTIF: {asset_name}")
+        logger.info(f"{'='*60}")
+
+        # 1. Charger les données 5min
+        logger.info(f"\n[{asset_name}][1/6] Chargement des données 5min...")
+        df_5m = load_ohlcv_data(input_file)
+        logger.info(f"Données chargées: {len(df_5m)} bougies 5min")
+
+        # 2. Créer les bougies fantômes
+        logger.info(f"\n[{asset_name}][2/6] Création des bougies fantômes...")
+        df_ghost = create_ghost_candles(df_5m, target_timeframe=target_timeframe)
+
+        # 2b. Ajouter les features avancées
+        logger.info(f"\n[{asset_name}][2b/6] Ajout des features avancées...")
+        df_ghost = add_all_advanced_features(
+            df_ghost,
+            ghost_prefix='ghost',
+            open_zscore_window=50,
+            max_steps=6
+        )
+
+        # 3. Indicateurs techniques
+        if add_indicators:
+            logger.info(f"\n[{asset_name}][3/6] Calcul des indicateurs techniques...")
+
+            df_current_5m = df_ghost[['timestamp', 'current_5m_open', 'current_5m_high',
+                                      'current_5m_low', 'current_5m_close']].copy()
+
+            df_current_5m = df_current_5m.rename(columns={
+                'current_5m_open': 'open',
+                'current_5m_high': 'high',
+                'current_5m_low': 'low',
+                'current_5m_close': 'close'
+            })
+
+            df_with_indicators = add_all_indicators(
+                df_current_5m,
+                rsi_periods=[14, 21],
+                cci_periods=[20],
+                macd_params=[(12, 26, 9)],
+                bb_periods=[20]
+            )
+
+            indicator_cols = [col for col in df_with_indicators.columns
+                             if col not in ['timestamp', 'open', 'high', 'low', 'close', 'volume']]
+
+            for col in indicator_cols:
+                df_ghost[col] = df_with_indicators[col].values
+
+            logger.info(f"Indicateurs ajoutés: {len(indicator_cols)} colonnes")
+        else:
+            indicator_cols = []
+
+        # 4. Normalisation (PAR ACTIF - CRITIQUE!)
+        logger.info(f"\n[{asset_name}][4/6] Normalisation PAR ACTIF...")
+        logger.info(f"⚠️  IMPORTANT: Normalisation basée sur les statistiques de {asset_name} UNIQUEMENT")
+
+        # Les features avancées sont déjà normalisées (log returns, Z-Score)
+        # On normalise seulement les indicateurs
+        if indicator_cols:
+            df_ghost = normalize_features(df_ghost, indicator_cols, method='zscore', window=50)
+            logger.info(f"Indicateurs normalisés avec statistiques de {asset_name}")
+
+        # 5. Créer les labels
+        logger.info(f"\n[{asset_name}][5/6] Création des labels...")
+        df_ghost = add_labels_to_dataframe(
+            df_ghost,
+            label_source=label_source,
+            smoothing=smoothing,
+            validate=True
+        )
+
+        # 6. Ajouter la colonne asset pour identifier l'origine
+        logger.info(f"\n[{asset_name}][6/6] Ajout de l'identifiant d'actif...")
+        df_ghost['asset'] = asset_name
+
+        # Vérification du leakage pour cet actif
+        feature_cols = [col for col in df_ghost.columns
+                       if col not in ['timestamp', 'label', 'candle_30m_timestamp',
+                                     'slope', 'slope_shifted', 'rsi_filtered',
+                                     'close_filtered', 'asset']]
+
+        leakage_check = check_data_leakage(df_ghost, feature_cols, label_col='label')
+
+        if leakage_check['suspicious_features']:
+            logger.warning(f"⚠️  {asset_name}: {len(leakage_check['suspicious_features'])} features suspectes!")
+        else:
+            logger.info(f"✅ {asset_name}: Pas de data leakage détecté")
+
+        all_datasets.append(df_ghost)
+        logger.info(f"\n✅ {asset_name} traité: {len(df_ghost)} lignes")
+
+    # Combiner tous les datasets
+    logger.info("\n" + "="*80)
+    logger.info("COMBINAISON DES DATASETS")
+    logger.info("="*80)
+
+    df_combined = pd.concat(all_datasets, axis=0, ignore_index=True)
+
+    # Trier par timestamp pour avoir un dataset temporel cohérent
+    df_combined = df_combined.sort_values('timestamp').reset_index(drop=True)
+
+    logger.info(f"Dataset combiné: {len(df_combined)} lignes")
+    for asset_name in input_files.keys():
+        count = len(df_combined[df_combined['asset'] == asset_name])
+        pct = count / len(df_combined) * 100
+        logger.info(f"  - {asset_name}: {count} lignes ({pct:.1f}%)")
+
+    # Sauvegarder
+    logger.info("\nSauvegarde du dataset combiné...")
+    save_dataset(df_combined, output_file, compress=False)
+
+    logger.info("="*80)
+    logger.info("PIPELINE MULTI-ACTIFS TERMINÉ AVEC SUCCÈS")
+    logger.info("="*80)
+
+    return df_combined
 
 
 def main():

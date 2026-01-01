@@ -255,6 +255,79 @@ def split_train_test_temporal(df: pd.DataFrame,
     return train_df, val_df, test_df
 
 
+def split_train_val_test_with_gap(df: pd.DataFrame,
+                                  train_end_date: str,
+                                  val_start_date: str,
+                                  val_end_date: str,
+                                  test_start_date: str,
+                                  timestamp_col: str = 'timestamp') -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Split temporal avec GAP PERIOD pour éviter la contamination.
+
+    ⚠️ CRITIQUE pour éviter le data leakage avec les filtres non-causaux!
+
+    Le gap period (période de buffer) évite que les données de fin de train
+    soient influencées par le début de validation à cause des filtres bidirectionnels.
+
+    Args:
+        df: DataFrame avec timestamp
+        train_end_date: Date de fin du train (ex: '2023-10-31')
+        val_start_date: Date de début validation APRÈS gap (ex: '2023-11-07')
+        val_end_date: Date de fin validation (ex: '2023-11-30')
+        test_start_date: Date de début test (ex: '2023-12-01')
+        timestamp_col: Nom de la colonne timestamp
+
+    Returns:
+        (train_df, val_df, test_df)
+
+    Example:
+        >>> train, val, test = split_train_val_test_with_gap(
+        ...     df,
+        ...     train_end_date='2023-10-31',
+        ...     val_start_date='2023-11-07',  # GAP de 7 jours (01-06 Nov supprimés)
+        ...     val_end_date='2023-11-30',
+        ...     test_start_date='2023-12-01'
+        ... )
+    """
+    logger.info("\n" + "="*60)
+    logger.info("Split Temporal avec GAP PERIOD Anti-Contamination")
+    logger.info("="*60)
+
+    # S'assurer que timestamp est datetime
+    if not pd.api.types.is_datetime64_any_dtype(df[timestamp_col]):
+        df[timestamp_col] = pd.to_datetime(df[timestamp_col])
+
+    # Convertir les dates
+    train_end = pd.to_datetime(train_end_date)
+    val_start = pd.to_datetime(val_start_date)
+    val_end = pd.to_datetime(val_end_date)
+    test_start = pd.to_datetime(test_start_date)
+
+    # Calculer le gap
+    gap_days = (val_start - train_end).days - 1
+    logger.info(f"GAP PERIOD: {gap_days} jours ({train_end.date()} → {val_start.date()})")
+
+    if gap_days < 1:
+        logger.warning(f"⚠️  GAP insuffisant ({gap_days} jours)! Recommandé: ≥7 jours")
+
+    # Split
+    train_df = df[df[timestamp_col] <= train_end].copy()
+    val_df = df[(df[timestamp_col] >= val_start) & (df[timestamp_col] <= val_end)].copy()
+    test_df = df[df[timestamp_col] >= test_start].copy()
+
+    # Calculer les lignes supprimées dans le gap
+    gap_rows = len(df[(df[timestamp_col] > train_end) & (df[timestamp_col] < val_start)])
+
+    logger.info(f"Train: {len(train_df)} lignes (jusqu'au {train_end.date()})")
+    logger.info(f"GAP: {gap_rows} lignes SUPPRIMÉES")
+    logger.info(f"Validation: {len(val_df)} lignes ({val_start.date()} → {val_end.date()})")
+    logger.info(f"Test: {len(test_df)} lignes (à partir du {test_start.date()})")
+    logger.info(f"Total utilisé: {len(train_df) + len(val_df) + len(test_df)} / {len(df)}")
+    logger.info("="*60 + "\n")
+
+    return train_df, val_df, test_df
+
+
 def save_dataset(df: pd.DataFrame,
                 filepath: str,
                 compress: bool = False) -> None:
