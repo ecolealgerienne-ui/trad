@@ -266,6 +266,89 @@ assert result['is_causal'], "Filtre non-causal détecté!"
 
 ---
 
+## 🚨 RÈGLE CRITIQUE: Trim des Bords de Filtres
+
+### Problème
+
+**Les filtres ont besoin de warm-up (début) et produisent des artifacts (fin).**
+
+Les tests empiriques sur 200 points avec KAMA ont démontré:
+
+| Zone | Index | Erreur Absolue | État |
+|------|-------|----------------|------|
+| **DÉBUT** (warm-up) | 0-30 | **569.44** | ❌ ÉLEVÉE |
+| **MILIEU** (zone propre) | 30-170 | **488.31** | ✅ FAIBLE |
+| **FIN** (artifacts) | 170-200 | **349.42** | ❌ ÉLEVÉE |
+
+**Conclusion:** Les bords du dataset filtré sont IMPROPRES à l'entraînement.
+
+### Solution Obligatoire
+
+**⚠️ Enlever 30 valeurs au début ET à la fin AVANT de créer train/val/test:**
+
+```python
+from utils import trim_filter_edges
+
+# Workflow complet
+df = load_ohlcv_data(filepath)                    # 1. Charger
+df = create_ghost_candles(df)                     # 2. Ghost candles
+df = add_advanced_features(df)                    # 3. Features
+df = add_adaptive_filter_features(df)             # 4. Filtres adaptatifs
+df = add_indicators(df)                           # 5. Indicateurs
+df = add_labels(df)                               # 6. Labels
+
+# ⚠️ CRITIQUE: Trim AVANT split
+df_clean = trim_filter_edges(df, n_trim=30)      # 7. TRIM ← ICI!
+
+# Maintenant créer les splits
+train, val, test = split_train_val_test(df_clean) # 8. Split
+```
+
+### Preuve Empirique
+
+Les tests de validation ont généré des visualisations démontrant l'effet:
+
+- **`tests/validation_output/03_filter_edge_effects.png`** - Graphique prouvant les zones à éviter
+- 3 graphiques: Signal complet, Erreur de filtrage, Zoom sur warm-up
+
+### Fonction Utilitaire
+
+```python
+def trim_filter_edges(df: pd.DataFrame,
+                      n_trim: int = 30,
+                      timestamp_col: str = 'timestamp') -> pd.DataFrame:
+    """
+    Enlève les bords après filtrage (warm-up + artifacts).
+
+    Returns: DataFrame sans les n_trim premières et dernières lignes
+
+    Raises: ValueError si dataset trop petit
+    """
+```
+
+### Dimensionnement
+
+| Taille Dataset | n_trim Recommandé | Dataset Final |
+|----------------|-------------------|---------------|
+| < 200 | ⚠️ Trop petit | N/A |
+| 200-500 | 20 | 160-460 |
+| 500-2000 | 30 | 440-1940 |
+| 2000-10000 | 50 | 1900-9900 |
+| > 10000 | 100 | > 9800 |
+
+### ⚠️ Checklist Avant Entraînement
+
+- [ ] ✅ Filtres appliqués (KAMA, HMA, etc.)
+- [ ] ✅ Indicateurs calculés (RSI, CCI, etc.)
+- [ ] ✅ Labels créés (pente filtrée)
+- [ ] ✅ **TRIM effectué (30 valeurs début + fin)**
+- [ ] ✅ Split train/val/test créé APRÈS trim
+- [ ] ✅ Validation data leakage effectuée
+
+**Documentation complète:** `REGLES_CRITIQUES_FILTRES.md`
+
+---
+
 ## Spec #2 : Architecture IA (Phase Future)
 
 ### Modèle Hybride CNN-LSTM ou TCN

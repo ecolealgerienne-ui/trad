@@ -328,6 +328,85 @@ def split_train_val_test_with_gap(df: pd.DataFrame,
     return train_df, val_df, test_df
 
 
+def trim_filter_edges(df: pd.DataFrame,
+                      n_trim: int = 30,
+                      timestamp_col: str = 'timestamp') -> pd.DataFrame:
+    """
+    Enlève les bords du dataset après filtrage.
+
+    ⚠️ RÈGLE CRITIQUE: Les filtres ont besoin de warm-up (début) et
+    peuvent avoir des artifacts (fin). Il faut enlever ces zones
+    AVANT de créer les splits train/val/test.
+
+    Tests empiriques (dataset 200 points avec KAMA):
+    - Erreur début (0-30):    569.44 ❌ ÉLEVÉE (warm-up)
+    - Erreur milieu (30-170): 488.31 ✅ FAIBLE (zone propre)
+    - Erreur fin (170-200):   349.42 ❌ ÉLEVÉE (artifacts)
+
+    Args:
+        df: DataFrame avec données filtrées
+        n_trim: Nombre de valeurs à enlever au début ET à la fin (défaut: 30)
+        timestamp_col: Nom de la colonne timestamp
+
+    Returns:
+        DataFrame sans les bords
+
+    Raises:
+        ValueError: Si le dataset est trop petit
+
+    Example:
+        >>> # Après application des filtres
+        >>> df_filtered = add_adaptive_filter_features(df, ...)
+        >>>
+        >>> # AVANT de créer train/val/test
+        >>> df_clean = trim_filter_edges(df_filtered, n_trim=30)
+        >>>
+        >>> # Maintenant créer les splits
+        >>> train, val, test = split_train_val_test(df_clean, ...)
+
+    Workflow complet:
+        1. Charger données brutes
+        2. Créer bougies fantômes
+        3. Ajouter features avancées
+        4. Ajouter filtres adaptatifs
+        5. Ajouter indicateurs
+        6. Ajouter labels
+        7. ⚠️ TRIM (cette fonction) ← CRITIQUE!
+        8. Split train/val/test
+
+    Voir: REGLES_CRITIQUES_FILTRES.md pour documentation complète
+    Voir: tests/test_visualization.py:test_filter_edge_effects()
+    """
+    if len(df) <= 2 * n_trim:
+        raise ValueError(
+            f"Dataset trop petit ({len(df)} lignes) pour enlever "
+            f"{n_trim} valeurs de chaque côté. "
+            f"Minimum requis: {2 * n_trim + 1} lignes"
+        )
+
+    # Enlever les n_trim premières et n_trim dernières lignes
+    df_trimmed = df.iloc[n_trim:-n_trim].copy()
+
+    # Réinitialiser l'index
+    df_trimmed = df_trimmed.reset_index(drop=True)
+
+    logger.info("="*60)
+    logger.info("TRIM DES BORDS (Warm-up & Artifacts)")
+    logger.info("="*60)
+    logger.info(f"Dataset original: {len(df)} lignes")
+    logger.info(f"Enlevé DÉBUT: {n_trim} lignes (warm-up)")
+    logger.info(f"Enlevé FIN: {n_trim} lignes (artifacts)")
+    logger.info(f"Dataset clean: {len(df_trimmed)} lignes")
+
+    if timestamp_col in df.columns:
+        logger.info(f"Période originale: {df[timestamp_col].iloc[0]} → {df[timestamp_col].iloc[-1]}")
+        logger.info(f"Période clean: {df_trimmed[timestamp_col].iloc[0]} → {df_trimmed[timestamp_col].iloc[-1]}")
+
+    logger.info("="*60)
+
+    return df_trimmed
+
+
 def save_dataset(df: pd.DataFrame,
                 filepath: str,
                 compress: bool = False) -> None:
