@@ -590,3 +590,136 @@ if __name__ == '__main__':
     print("\n" + "="*60)
     print("✅ TOUS LES TESTS PASSÉS - Filtres prêts pour production")
     print("="*60)
+
+
+def kalman_filter_causal(
+    signal: Union[pd.Series, np.ndarray],
+    process_variance: float = 0.01,
+    measurement_variance: float = 0.1
+) -> np.ndarray:
+    """
+    Filtre de Kalman CAUSAL (n'utilise que le passé).
+
+    Contrairement à la version dans filters.py qui utilise smooth() (non-causal),
+    cette version utilise filter() et est STRICTEMENT CAUSALE.
+
+    Utilisable comme FEATURE pour l'IA.
+
+    Args:
+        signal: Signal d'entrée
+        process_variance: Variance du processus (Q) - Ajuste la réactivité
+                         Plus élevé = plus réactif au signal
+        measurement_variance: Variance de mesure (R) - Contrôle le lissage
+                            Plus élevé = plus lisse
+
+    Returns:
+        Signal filtré (causal)
+
+    Example:
+        >>> filtered = kalman_filter_causal(close_prices, 0.01, 0.1)
+        >>> # Plus réactif: process_variance=0.1, measurement_variance=0.1
+        >>> # Plus lisse: process_variance=0.001, measurement_variance=1.0
+    """
+    try:
+        from pykalman import KalmanFilter
+    except ImportError:
+        logger.warning("pykalman non installé, retour du signal original")
+        logger.warning("Installation: pip install pykalman")
+        if isinstance(signal, pd.Series):
+            return signal.values
+        return signal
+
+    if isinstance(signal, pd.Series):
+        signal = signal.values
+
+    # Gérer les NaN
+    mask = ~np.isnan(signal)
+    if not mask.any():
+        return signal
+
+    valid_data = signal[mask].reshape(-1, 1)
+
+    # Initialiser le filtre de Kalman
+    kf = KalmanFilter(
+        initial_state_mean=valid_data[0],
+        n_dim_obs=1,
+        n_dim_state=1,
+        transition_matrices=[1],
+        observation_matrices=[1],
+        initial_state_covariance=1,
+        observation_covariance=measurement_variance,
+        transition_covariance=process_variance
+    )
+
+    # Appliquer le FILTER (causal, pas smooth!)
+    # filter() utilise uniquement les données passées
+    state_means, _ = kf.filter(valid_data)
+
+    # Reconstruire
+    filtered = np.full_like(signal, np.nan, dtype=float)
+    filtered[mask] = state_means.flatten()
+
+    logger.debug(f"Kalman causal: Q={process_variance}, R={measurement_variance}")
+
+    return filtered
+
+
+def butterworth_causal(
+    signal: Union[pd.Series, np.ndarray],
+    cutoff: float = 0.25,
+    order: int = 3
+) -> np.ndarray:
+    """
+    Filtre Butterworth CAUSAL (n'utilise que le passé).
+
+    Contrairement à filtfilt() qui est bidirectionnel (non-causal),
+    cette version utilise lfilter() et est STRICTEMENT CAUSALE.
+
+    Utilisable comme FEATURE pour l'IA.
+
+    Args:
+        signal: Signal d'entrée
+        cutoff: Fréquence de coupure normalisée (0.0 à 1.0)
+                - 0.1 = filtre très lisse
+                - 0.25 = filtre modéré (défaut)
+                - 0.5 = filtre léger
+        order: Ordre du filtre (défaut: 3)
+
+    Returns:
+        Signal filtré (causal)
+
+    Example:
+        >>> filtered = butterworth_causal(close_prices, cutoff=0.25, order=3)
+        >>> # Plus lisse: cutoff=0.1
+        >>> # Plus réactif: cutoff=0.4
+
+    Note:
+        Ce filtre a un lag de phase (déphasage) contrairement à filtfilt(),
+        mais il est CAUSAL et peut être utilisé pour les features.
+    """
+    import scipy.signal
+
+    if isinstance(signal, pd.Series):
+        signal = signal.values
+
+    # Gérer les NaN
+    mask = ~np.isnan(signal)
+    if not mask.any():
+        return signal
+
+    valid_data = signal[mask]
+
+    # Créer le filtre Butterworth
+    B, A = scipy.signal.butter(order, cutoff, output='ba')
+
+    # Appliquer lfilter (causal, unidirectionnel)
+    # ⚠️ N'utilise QUE le passé!
+    filtered_valid = scipy.signal.lfilter(B, A, valid_data)
+
+    # Reconstruire
+    filtered = np.full_like(signal, np.nan, dtype=float)
+    filtered[mask] = filtered_valid
+
+    logger.debug(f"Butterworth causal: cutoff={cutoff}, order={order}")
+
+    return filtered

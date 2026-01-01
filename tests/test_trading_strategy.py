@@ -28,7 +28,9 @@ from adaptive_filters import (
     hma_filter,
     ehlers_supersmoother,
     ehlers_decycler,
-    adaptive_filter_ensemble
+    adaptive_filter_ensemble,
+    kalman_filter_causal,
+    butterworth_causal
 )
 
 # Configuration
@@ -233,6 +235,8 @@ def compare_all_filters():
         (hma_filter, 'HMA'),
         (ehlers_supersmoother, 'SuperSmoother'),
         (ehlers_decycler, 'Decycler'),
+        (kalman_filter_causal, 'Kalman'),
+        (butterworth_causal, 'Butterworth'),
         (adaptive_filter_ensemble, 'Ensemble')
     ]
 
@@ -278,7 +282,7 @@ def visualize_comparison(all_results):
     """
     Visualise les résultats de comparaison.
     """
-    fig, axes = plt.subplots(2, 3, figsize=(20, 12))
+    fig, axes = plt.subplots(2, 3, figsize=(22, 12))
 
     # Extraire données
     filter_names = [r['filter_name'] for r in all_results]
@@ -287,12 +291,13 @@ def visualize_comparison(all_results):
     drawdowns = [r['max_drawdown_pct'] for r in all_results]
     win_rates = [r['win_rate_pct'] for r in all_results]
 
-    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2']
 
     # 1. Rendements
     axes[0, 0].bar(filter_names, returns, color=colors, alpha=0.8)
     axes[0, 0].set_title('Rendement Total (%)', fontsize=14, fontweight='bold')
     axes[0, 0].set_ylabel('Rendement (%)')
+    axes[0, 0].set_xticklabels(filter_names, rotation=45, ha='right')
     axes[0, 0].grid(True, alpha=0.3)
     axes[0, 0].axhline(y=0, color='black', linestyle='--', linewidth=1)
     for i, v in enumerate(returns):
@@ -302,6 +307,7 @@ def visualize_comparison(all_results):
     axes[0, 1].bar(filter_names, sharpes, color=colors, alpha=0.8)
     axes[0, 1].set_title('Sharpe Ratio', fontsize=14, fontweight='bold')
     axes[0, 1].set_ylabel('Sharpe')
+    axes[0, 1].set_xticklabels(filter_names, rotation=45, ha='right')
     axes[0, 1].grid(True, alpha=0.3)
     for i, v in enumerate(sharpes):
         axes[0, 1].text(i, v + 0.05, f'{v:.2f}', ha='center', fontweight='bold')
@@ -310,6 +316,7 @@ def visualize_comparison(all_results):
     axes[0, 2].bar(filter_names, drawdowns, color=colors, alpha=0.8)
     axes[0, 2].set_title('Maximum Drawdown (%)', fontsize=14, fontweight='bold')
     axes[0, 2].set_ylabel('Drawdown (%)')
+    axes[0, 2].set_xticklabels(filter_names, rotation=45, ha='right')
     axes[0, 2].grid(True, alpha=0.3)
     for i, v in enumerate(drawdowns):
         axes[0, 2].text(i, v - 0.5, f'{v:.1f}%', ha='center', fontweight='bold')
@@ -318,6 +325,7 @@ def visualize_comparison(all_results):
     axes[1, 0].bar(filter_names, win_rates, color=colors, alpha=0.8)
     axes[1, 0].set_title('Win Rate (%)', fontsize=14, fontweight='bold')
     axes[1, 0].set_ylabel('Win Rate (%)')
+    axes[1, 0].set_xticklabels(filter_names, rotation=45, ha='right')
     axes[1, 0].grid(True, alpha=0.3)
     axes[1, 0].axhline(y=50, color='red', linestyle='--', linewidth=1, label='50% (hasard)')
     axes[1, 0].legend()
