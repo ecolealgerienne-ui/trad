@@ -2,14 +2,38 @@
 """
 Backtesting de la stratégie de trading basée sur filtres adaptatifs.
 
-STRATÉGIE:
-1. Charger 1000 valeurs
-2. Appliquer filtre sur fermeture
-3. Prendre 500 valeurs au milieu (250-750)
-4. Signal ACHAT: filtre[t-1] > filtre[t-2] → Acheter à Open[t+1]
-5. Signal VENTE: filtre[t-1] < filtre[t-2] → Vendre à Open[t+1]
+STRATÉGIE DÉTAILLÉE:
+1. Charger 10000 bougies 5min (34.7 jours de données BTC)
+2. Appliquer filtre causal sur prix de fermeture
+3. Trim des bords: enlever 100 premières et 100 dernières (warm-up + artifacts)
+4. Calculer signaux de trading:
+   - À l'instant t, on compare filtre[t-1] vs filtre[t-2]
+   - Si filtre[t-1] > filtre[t-2] → Pente positive → ACHAT (position LONG = +1)
+   - Si filtre[t-1] < filtre[t-2] → Pente négative → VENTE (position SHORT = -1)
+5. Exécution:
+   - Signal calculé à t
+   - Trade exécuté à Open[t+1] (bougie suivante)
+   - Rendement = (Open[t+1] - Open[t]) / Open[t] × position
 
-Teste tous les filtres: KAMA, HMA, SuperSmoother, Decycler, Ensemble
+CALCUL DU RENDEMENT (CORRIGÉ):
+- market_return[t] = (open[t+1] - open[t]) / open[t]
+- strategy_return[t] = market_return[t] × position[t]
+- Si position = +1 (LONG): on gagne si le marché monte
+- Si position = -1 (SHORT): on gagne si le marché baisse
+
+FILTRES TESTÉS:
+- KAMA (Kaufman Adaptive MA)
+- HMA (Hull MA)
+- SuperSmoother (Ehlers)
+- Decycler (Ehlers)
+- Kalman (filtre causal)
+- Butterworth (filtre causal)
+- Ensemble (moyenne des 4 adaptatifs)
+
+GPU-FRIENDLY:
+- Utilise numpy vectorisé (compatible CUDA via CuPy si besoin)
+- Pas de boucles Python inutiles
+- Calculs optimisés pour parallélisation
 """
 
 import sys
@@ -130,16 +154,15 @@ def load_btc_data_or_simulate(n=1000):
     return df
 
 
-def backtest_filter_strategy(df, filter_func, filter_name, start_idx=250, end_idx=750):
+def backtest_filter_strategy(df, filter_func, filter_name, trim_edges=100):
     """
     Backtest de la stratégie sur un filtre donné.
 
     Args:
-        df: DataFrame avec OHLC (minimum 1000 lignes)
+        df: DataFrame avec OHLC
         filter_func: Fonction de filtre à appliquer
         filter_name: Nom du filtre pour affichage
-        start_idx: Index de début (défaut 250, milieu des 1000)
-        end_idx: Index de fin (défaut 750, milieu des 1000)
+        trim_edges: Nombre de valeurs à enlever au début et fin (warm-up + artifacts)
 
     Returns:
         dict avec résultats du backtest
@@ -152,12 +175,14 @@ def backtest_filter_strategy(df, filter_func, filter_name, start_idx=250, end_id
     close = df['close'].values
     filtered = filter_func(close)
 
-    # Extraire la zone du milieu (500 valeurs)
-    df_trade = df.iloc[start_idx:end_idx].copy()
-    filtered_trade = filtered[start_idx:end_idx]
+    # Enlever les bords (warm-up + artifacts)
+    # Règle critique du projet: trim avant de trader!
+    df_trade = df.iloc[trim_edges:-trim_edges].copy()
+    filtered_trade = filtered[trim_edges:-trim_edges]
 
-    print(f"Dataset total: {len(df)} valeurs")
-    print(f"Zone de trading: {len(df_trade)} valeurs (index {start_idx}-{end_idx})")
+    print(f"Dataset total: {len(df)} valeurs ({len(df) * 5 / 60 / 24:.1f} jours)")
+    print(f"Zone de trading: {len(df_trade)} valeurs (après trim de {trim_edges} début+fin)")
+    print(f"Durée trading: {len(df_trade) * 5 / 60 / 24:.1f} jours")
 
     # Calculer les signaux
     signals = []
@@ -195,12 +220,20 @@ def backtest_filter_strategy(df, filter_func, filter_name, start_idx=250, end_id
     df_trade['filtered'] = filtered_trade[2:]
 
     # Calculer les rendements
-    # À t, on a le signal, on exécute à l'ouverture de t+1
-    df_trade['next_open'] = df_trade['open'].shift(-1)
-    df_trade['return'] = df_trade['next_open'].pct_change()
+    # À t, on a le signal basé sur filtre[t-1] vs filtre[t-2]
+    # On trade à l'ouverture de t+1
+    # Le rendement est: (open[t+1] - open[t]) / open[t]
+
+    df_trade['current_open'] = df_trade['open'].values
+    df_trade['next_open'] = df_trade['open'].shift(-1).values
+
+    # Rendement par bougie (si on était en position)
+    # return[t] = (next_open[t] - current_open[t]) / current_open[t]
+    df_trade['market_return'] = (df_trade['next_open'] - df_trade['current_open']) / df_trade['current_open']
 
     # Rendement de la stratégie = rendement du marché * position
-    df_trade['strategy_return'] = df_trade['return'] * df_trade['position'].shift(1)
+    # position[t] détermine si on est LONG (1), SHORT (-1) ou OUT (0)
+    df_trade['strategy_return'] = df_trade['market_return'] * df_trade['position']
 
     # Calculer les métriques
     total_return = (1 + df_trade['strategy_return'].fillna(0)).cumprod().iloc[-1] - 1
@@ -267,7 +300,8 @@ def compare_all_filters():
     print("="*80)
 
     # Charger données BTC réelles ou simuler
-    df = load_btc_data_or_simulate(n=1000)
+    # 10000 bougies × 5min = 50000 min = 34.7 jours
+    df = load_btc_data_or_simulate(n=10000)
 
     # Définir les filtres à tester
     filters = [
@@ -413,12 +447,13 @@ if __name__ == '__main__':
     print("\n" + "="*80)
     print("BACKTESTING STRATÉGIE DE TRADING - FILTRES ADAPTATIFS")
     print("="*80)
-    print("\nStratégie:")
-    print("  1. Charger 1000 valeurs")
-    print("  2. Appliquer filtre sur fermeture")
-    print("  3. Prendre 500 valeurs au milieu (250-750)")
-    print("  4. Signal ACHAT: filtre[t-1] > filtre[t-2] → Acheter Open[t+1]")
-    print("  5. Signal VENTE: filtre[t-1] < filtre[t-2] → Vendre Open[t+1]")
+    print("\n📊 STRATÉGIE:")
+    print("  1. Charger 10000 bougies 5min (34.7 jours)")
+    print("  2. Appliquer filtre CAUSAL sur fermeture")
+    print("  3. Trim: enlever 100 début + 100 fin (warm-up + artifacts)")
+    print("  4. Signal ACHAT: filtre[t-1] > filtre[t-2] → LONG à Open[t+1]")
+    print("  5. Signal VENTE: filtre[t-1] < filtre[t-2] → SHORT à Open[t+1]")
+    print("  6. Rendement: (Open[t+1] - Open[t]) / Open[t] × position")
 
     # Comparer tous les filtres
     all_results, df_comparison = compare_all_filters()
@@ -426,3 +461,17 @@ if __name__ == '__main__':
     print("\n" + "="*80)
     print("✅ BACKTESTING TERMINÉ")
     print("="*80)
+
+    # Résumé final
+    print("\n📈 RÉSUMÉ FINAL:")
+    best = max(all_results, key=lambda x: x['total_return_pct'])
+    best_sharpe = max(all_results, key=lambda x: x['sharpe_ratio'])
+    best_dd = max(all_results, key=lambda x: -x['max_drawdown_pct'])  # Max = min drawdown
+
+    print(f"  🏆 Meilleur rendement: {best['filter_name']} ({best['total_return_pct']:+.2f}%)")
+    print(f"  📊 Meilleur Sharpe: {best_sharpe['filter_name']} ({best_sharpe['sharpe_ratio']:.2f})")
+    print(f"  🛡️ Drawdown minimal: {best_dd['filter_name']} ({best_dd['max_drawdown_pct']:.2f}%)")
+
+    print(f"\n  Durée backtest: {len(all_results[0]['df_trade']) * 5 / 60 / 24:.1f} jours")
+    print(f"  Total trades: {all_results[0]['total_trades']}")
+    print(f"  Fréquence: {all_results[0]['total_trades'] / (len(all_results[0]['df_trade']) * 5 / 60 / 24):.1f} trades/jour")
