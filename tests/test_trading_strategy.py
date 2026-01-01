@@ -21,6 +21,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from datetime import datetime
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Imports des filtres
 from adaptive_filters import (
@@ -38,45 +41,75 @@ plt.style.use('seaborn-v0_8-darkgrid')
 sns.set_palette('husl')
 
 
-def create_test_data_trading(n=1000):
+def load_btc_data_or_simulate(n=1000):
     """
-    Crée un dataset de test réaliste pour le trading.
+    Charge les données BTC réelles si disponibles, sinon simule des données réalistes.
 
-    Inclut: tendance + cycles + bruit
+    Returns:
+        DataFrame avec OHLCV
     """
+    # Essayer de charger les données réelles
+    btc_path = Path('data/raw/BTCUSD_all_5m.csv')
+
+    if btc_path.exists():
+        logger.info(f"📂 Chargement données BTC réelles: {btc_path}")
+        df = pd.read_csv(btc_path)
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+
+        # Prendre les n dernières valeurs
+        if len(df) > n:
+            df = df.tail(n).reset_index(drop=True)
+            logger.info(f"✅ {len(df)} bougies BTC chargées (dernières {n})")
+        else:
+            logger.info(f"✅ {len(df)} bougies BTC chargées (toutes)")
+
+        return df
+
+    # Sinon, simuler des données réalistes inspirées du BTC
+    logger.warning(f"⚠️ Données BTC non trouvées, simulation de données réalistes")
+
     np.random.seed(42)
 
     # Timestamps
-    timestamps = pd.date_range('2024-01-01', periods=n, freq='5min')
+    timestamps = pd.date_range('2024-12-01', periods=n, freq='5min')
 
-    # Signal avec tendance + cycles + bruit
-    t = np.linspace(0, 10*np.pi, n)
+    # Prix BTC typique: 40000-100000 USD avec tendance et volatilité
+    base_price = 95000  # Prix BTC approximatif fin 2024
 
-    # Tendance lente avec plusieurs phases
-    trend = 50000 + 5000 * np.sin(t / 5) + 2000 * (t / (10*np.pi))
+    # Marche aléatoire géométrique (modèle GBM simplifié)
+    # Drift (tendance) et volatilité inspirés du BTC
+    dt = 5 / (60 * 24)  # 5 minutes en jours
+    drift = 0.0001  # Légère tendance haussière
+    volatility = 0.02  # 2% volatilité (typique BTC intraday)
 
-    # Cycles moyens
-    cycles = 1000 * np.sin(t) + 500 * np.sin(3*t)
+    # Générer les returns log
+    log_returns = np.random.normal(drift * dt, volatility * np.sqrt(dt), n)
 
-    # Bruit
-    noise = np.random.randn(n) * 200
+    # Convertir en prix
+    prices = base_price * np.exp(np.cumsum(log_returns))
 
-    # Prix = trend + cycles + noise
-    prices = trend + cycles + noise
+    # Ajouter cycles et micro-tendances
+    t = np.linspace(0, 4*np.pi, n)
+    cycles = prices * 0.005 * np.sin(t)  # 0.5% oscillations
+    prices = prices + cycles
 
-    # Créer OHLC
+    # Créer OHLC réaliste
     data = []
     for i, (ts, close) in enumerate(zip(timestamps, prices)):
         if i == 0:
             open_price = close
         else:
-            gap = np.random.normal(0, 50)
+            # Gap entre open et close précédent
+            gap = np.random.normal(0, close * 0.0005)  # 0.05% gap moyen
             open_price = prices[i-1] + gap
 
-        volatility = np.random.uniform(0.002, 0.008)
-        high = max(open_price, close) * (1 + volatility)
-        low = min(open_price, close) * (1 - volatility)
-        volume = np.random.uniform(100, 1000)
+        # Volatilité intra-bougie (high-low range)
+        intrabar_vol = np.random.uniform(0.001, 0.003)  # 0.1-0.3%
+        high = max(open_price, close) * (1 + intrabar_vol)
+        low = min(open_price, close) * (1 - intrabar_vol)
+
+        # Volume typique BTC (en BTC)
+        volume = np.random.lognormal(2, 1)  # Distribution log-normale
 
         data.append({
             'timestamp': ts,
@@ -87,7 +120,14 @@ def create_test_data_trading(n=1000):
             'volume': volume
         })
 
-    return pd.DataFrame(data)
+    df = pd.DataFrame(data)
+
+    logger.info(f"✅ {len(df)} bougies simulées (style BTC réaliste)")
+    logger.info(f"   Prix min: ${df['close'].min():.2f}")
+    logger.info(f"   Prix max: ${df['close'].max():.2f}")
+    logger.info(f"   Prix moyen: ${df['close'].mean():.2f}")
+
+    return df
 
 
 def backtest_filter_strategy(df, filter_func, filter_name, start_idx=250, end_idx=750):
@@ -226,8 +266,8 @@ def compare_all_filters():
     print("COMPARAISON DE TOUS LES FILTRES - STRATÉGIE DE TRADING")
     print("="*80)
 
-    # Créer données
-    df = create_test_data_trading(n=1000)
+    # Charger données BTC réelles ou simuler
+    df = load_btc_data_or_simulate(n=1000)
 
     # Définir les filtres à tester
     filters = [
