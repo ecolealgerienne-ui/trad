@@ -293,6 +293,309 @@ def backtest_perfect_world(df, filter_name='Kalman Perfect', use_noncausal=True,
     return results
 
 
+def apply_perfect_filter(close, filter_type):
+    """
+    Applique la version PARFAITE (non-causale) d'un filtre.
+
+    Args:
+        close: Prix de fermeture
+        filter_type: Type de filtre
+
+    Returns:
+        Signal filtré (connaît le futur)
+    """
+    if filter_type == 'Kalman':
+        # Utilise smooth (backward + forward)
+        return kalman_filter(close, process_variance=0.01, measurement_variance=0.1)
+
+    elif filter_type == 'Butterworth':
+        # Utilise filtfilt (backward + forward)
+        from scipy.signal import butter, filtfilt
+        b, a = butter(3, 0.25, output='ba')
+
+        # Gérer NaN
+        mask = ~np.isnan(close)
+        filtered = np.full_like(close, np.nan)
+        if mask.any():
+            filtered[mask] = filtfilt(b, a, close[mask])
+        return filtered
+
+    elif filter_type == 'KAMA':
+        # KAMA forward puis backward pour version smooth
+        from adaptive_filters import kama_filter
+        forward = kama_filter(close)
+        backward = kama_filter(forward[::-1])
+        return backward[::-1]
+
+    elif filter_type == 'HMA':
+        # HMA forward puis backward
+        from adaptive_filters import hma_filter
+        forward = hma_filter(close)
+        backward = hma_filter(forward[::-1])
+        return backward[::-1]
+
+    elif filter_type == 'SuperSmoother':
+        # SuperSmoother avec filtfilt
+        from adaptive_filters import ehlers_supersmoother
+        # Pour simuler version parfaite: appliquer forward-backward
+        forward = ehlers_supersmoother(close)
+        backward = ehlers_supersmoother(forward[::-1])
+        return backward[::-1]
+
+    elif filter_type == 'Decycler':
+        # Decycler avec filtfilt
+        from adaptive_filters import ehlers_decycler
+        forward = ehlers_decycler(close)
+        backward = ehlers_decycler(forward[::-1])
+        return backward[::-1]
+
+    else:
+        raise ValueError(f"Filtre inconnu: {filter_type}")
+
+
+def backtest_perfect_filter(df, filter_type, trim_edges=100):
+    """
+    Backtest d'un filtre en mode PARFAIT (non-causal).
+
+    Args:
+        df: DataFrame OHLCV
+        filter_type: Type de filtre
+        trim_edges: Edges à trim
+
+    Returns:
+        dict résultats
+    """
+    print(f"\n{'='*80}")
+    print(f"BACKTEST MONDE PARFAIT: {filter_type}")
+    print(f"{'='*80}")
+
+    close = df['close'].values
+
+    # Appliquer version parfaite du filtre
+    filtered = apply_perfect_filter(close, filter_type)
+
+    # Trim
+    df_trade = df.iloc[trim_edges:-trim_edges].copy()
+    filtered_trade = filtered[trim_edges:-trim_edges]
+
+    print(f"Dataset total: {len(df)} valeurs ({len(df) * 5 / 60 / 24:.1f} jours)")
+    print(f"Zone de trading: {len(df_trade)} valeurs")
+
+    # Calculer signaux (même logique que précédent)
+    signals = []
+    positions = []
+    position = 0
+
+    for i in range(2, len(filtered_trade)):
+        t_minus_1 = filtered_trade[i-1]
+        t_minus_2 = filtered_trade[i-2]
+
+        if t_minus_1 > t_minus_2:
+            signal = 'BUY'
+            new_position = 1
+        elif t_minus_1 < t_minus_2:
+            signal = 'SELL'
+            new_position = -1
+        else:
+            signal = 'HOLD'
+            new_position = position
+
+        signals.append(signal)
+        positions.append(new_position)
+        position = new_position
+
+    df_trade = df_trade.iloc[2:].copy()
+    df_trade['signal'] = signals
+    df_trade['position'] = positions
+    df_trade['filtered'] = filtered_trade[2:]
+
+    # Calculer rendements
+    trades_list = []
+    entry_price = None
+    entry_position = None
+    entry_idx = None
+
+    for idx in range(len(df_trade) - 1):
+        current_pos = df_trade.iloc[idx]['position']
+        next_open = df_trade.iloc[idx + 1]['open']
+
+        if idx == 0:
+            if current_pos != 0:
+                entry_price = next_open
+                entry_position = current_pos
+                entry_idx = idx
+        else:
+            prev_pos = df_trade.iloc[idx-1]['position']
+
+            if current_pos != prev_pos:
+                if entry_price is not None:
+                    exit_price = next_open
+
+                    if entry_position == 1:
+                        trade_return = (exit_price - entry_price) / entry_price
+                    elif entry_position == -1:
+                        trade_return = (entry_price - exit_price) / entry_price
+                    else:
+                        trade_return = 0.0
+
+                    trades_list.append({
+                        'entry_idx': entry_idx,
+                        'exit_idx': idx,
+                        'entry_price': entry_price,
+                        'exit_price': exit_price,
+                        'position_type': 'LONG' if entry_position == 1 else 'SHORT',
+                        'return': trade_return,
+                        'return_pct': trade_return * 100
+                    })
+
+                if current_pos != 0:
+                    entry_price = next_open
+                    entry_position = current_pos
+                    entry_idx = idx
+                else:
+                    entry_price = None
+                    entry_position = None
+                    entry_idx = None
+
+    # Fermer dernière position
+    if entry_price is not None:
+        exit_price = df_trade.iloc[-1]['open']
+
+        if entry_position == 1:
+            trade_return = (exit_price - entry_price) / entry_price
+        elif entry_position == -1:
+            trade_return = (entry_price - exit_price) / entry_price
+        else:
+            trade_return = 0.0
+
+        trades_list.append({
+            'entry_idx': entry_idx,
+            'exit_idx': len(df_trade) - 1,
+            'entry_price': entry_price,
+            'exit_price': exit_price,
+            'position_type': 'LONG' if entry_position == 1 else 'SHORT',
+            'return': trade_return,
+            'return_pct': trade_return * 100
+        })
+
+    df_trades = pd.DataFrame(trades_list)
+
+    # Métriques
+    if len(df_trades) > 0:
+        total_return = (1 + df_trades['return']).prod() - 1
+        total_return_pct = total_return * 100
+
+        wins = (df_trades['return'] > 0).sum()
+        losses = (df_trades['return'] < 0).sum()
+        win_rate = (wins / len(df_trades) * 100) if len(df_trades) > 0 else 0
+
+        gross_profit = df_trades[df_trades['return'] > 0]['return'].sum()
+        gross_loss = abs(df_trades[df_trades['return'] < 0]['return'].sum())
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else np.inf
+
+        returns_mean = df_trades['return'].mean()
+        returns_std = df_trades['return'].std()
+        n_days = len(df_trade) * 5 / 60 / 24
+        trades_per_year = (len(df_trades) / n_days) * 365 if n_days > 0 else 0
+        sharpe = (returns_mean / returns_std) * np.sqrt(trades_per_year) if returns_std > 0 else 0
+
+        df_trades['cumulative'] = (1 + df_trades['return']).cumprod()
+        running_max = df_trades['cumulative'].expanding().max()
+        df_trades['drawdown'] = (df_trades['cumulative'] - running_max) / running_max
+        max_drawdown = df_trades['drawdown'].min() * 100
+    else:
+        total_return_pct = 0
+        win_rate = 0
+        profit_factor = 0
+        sharpe = 0
+        max_drawdown = 0
+
+    buy_hold_return = (df_trade['close'].iloc[-1] / df_trade['close'].iloc[0] - 1) * 100
+
+    results = {
+        'filter_name': filter_type,
+        'total_return_pct': total_return_pct,
+        'buy_hold_return_pct': buy_hold_return,
+        'profit_factor': profit_factor,
+        'sharpe_ratio': sharpe,
+        'max_drawdown_pct': max_drawdown,
+        'win_rate_pct': win_rate,
+        'total_trades': len(df_trades),
+        'df_trade': df_trade,
+        'df_trades': df_trades
+    }
+
+    print(f"\n📊 RÉSULTATS:")
+    print(f"  Rendement stratégie: {total_return_pct:+.2f}%")
+    print(f"  Rendement Buy & Hold: {buy_hold_return:+.2f}%")
+    print(f"  💰 Profit Factor: {profit_factor:.2f}")
+    print(f"  Sharpe Ratio: {sharpe:.2f}")
+    print(f"  Max Drawdown: {max_drawdown:.2f}%")
+    print(f"  Win Rate: {win_rate:.1f}%")
+    print(f"  Total trades: {len(df_trades)}")
+
+    return results
+
+
+def compare_all_perfect_filters():
+    """Compare tous les filtres en mode PARFAIT."""
+    print("\n" + "="*80)
+    print("VALIDATION MÉTHODE - TOUS LES FILTRES EN MONDE PARFAIT")
+    print("="*80)
+
+    # Charger données
+    df = load_btc_data_or_simulate(n=10000)
+
+    # Filtres à tester
+    filters = ['KAMA', 'HMA', 'SuperSmoother', 'Decycler', 'Kalman', 'Butterworth']
+
+    all_results = []
+
+    for filter_type in filters:
+        try:
+            results = backtest_perfect_filter(df, filter_type)
+            all_results.append(results)
+        except Exception as e:
+            print(f"\n❌ Erreur avec {filter_type}: {e}")
+
+    # Tableau comparatif
+    print("\n" + "="*80)
+    print("TABLEAU COMPARATIF - MONDE PARFAIT (NON-CAUSAL)")
+    print("="*80)
+
+    comparison = pd.DataFrame([
+        {
+            'Filtre': r['filter_name'],
+            'Rendement (%)': f"{r['total_return_pct']:+.2f}",
+            'Profit Factor': f"{r['profit_factor']:.2f}",
+            'Sharpe': f"{r['sharpe_ratio']:.2f}",
+            'Max DD (%)': f"{r['max_drawdown_pct']:.2f}",
+            'Win Rate (%)': f"{r['win_rate_pct']:.1f}",
+            'Trades': r['total_trades']
+        }
+        for r in all_results
+    ])
+
+    print("\n" + comparison.to_string(index=False))
+
+    # Meilleur filtre
+    best = max(all_results, key=lambda x: x['profit_factor'])
+    print(f"\n🏆 MEILLEUR PROFIT FACTOR: {best['filter_name']}")
+    print(f"   Profit Factor: {best['profit_factor']:.2f}")
+    print(f"   Rendement: {best['total_return_pct']:+.2f}%")
+
+    print("\n" + "="*80)
+    print("INTERPRÉTATION:")
+    print("="*80)
+    print("\n✅ Ces résultats valident la MÉTHODE en conditions idéales")
+    print("   → Si Profit Factor > 2 : La méthode fonctionne théoriquement")
+    print("   → Target: PF ≈ 7.44 (comme dans ResultatsDesTests0.docx)")
+    print("\n💡 Le challenge: créer un filtre prédictif (CNN-LSTM) qui se rapproche")
+    print("   de ces performances en mode NON-CAUSAL")
+
+    return all_results, comparison
+
+
 def compare_perfect_vs_reality():
     """Compare monde parfait (non-causal) vs réalité (causal)."""
     print("\n" + "="*80)
@@ -370,8 +673,10 @@ if __name__ == '__main__':
     print("  ResultatsDesTests0.docx: Profit Factor 7.44, +982% sur 10 mois")
     print("\n⚠️ IMPORTANT:")
     print("  Ceci n'est PAS un backtest réaliste, c'est un PROOF OF CONCEPT")
+    print("  On teste la version NON-CAUSALE de chaque filtre (connaît le futur)")
 
-    results_perfect, results_reality = compare_perfect_vs_reality()
+    # Tester tous les filtres en monde parfait
+    all_results, comparison = compare_all_perfect_filters()
 
     print("\n" + "="*80)
     print("✅ VALIDATION TERMINÉE")
