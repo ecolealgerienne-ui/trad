@@ -81,7 +81,7 @@ class PipelineValidator:
 
         # Générer timestamps 5min
         start_date = pd.Timestamp('2024-01-01 00:00:00')
-        timestamps = pd.date_range(start=start_date, periods=n_candles, freq='5T')
+        timestamps = pd.date_range(start=start_date, periods=n_candles, freq='5min')
 
         # Générer prix avec random walk
         np.random.seed(42)
@@ -150,7 +150,7 @@ class PipelineValidator:
         logger.info("TEST 1: BOUGIES FANTÔMES")
         logger.info("="*80)
 
-        df_ghost = create_ghost_candles(df_5m, target_timeframe='30T')
+        df_ghost = create_ghost_candles(df_5m, target_timeframe='30min')
 
         # Vérification 1: 6 steps par bougie
         steps_per_candle = df_ghost.groupby('candle_30m_timestamp')['step'].nunique()

@@ -118,14 +118,14 @@ def validate_ohlc_integrity(df: pd.DataFrame,
 
 
 def resample_to_timeframe(df: pd.DataFrame,
-                         timeframe: str = '30T',
+                         timeframe: str = '30min',
                          ohlcv_only: bool = True) -> pd.DataFrame:
     """
     Resampling des données vers un timeframe plus large.
 
     Args:
         df: DataFrame avec timestamp en index ou colonne
-        timeframe: Timeframe cible (ex: '30T' pour 30 minutes)
+        timeframe: Timeframe cible (ex: '30min' pour 30 minutes)
         ohlcv_only: Si True, ne garde que les colonnes OHLCV
 
     Returns:

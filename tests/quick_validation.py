@@ -30,7 +30,7 @@ from utils import validate_ohlc_integrity
 
 def create_test_data(n=100):
     """Crée 100 bougies 5min de test."""
-    timestamps = pd.date_range('2024-01-01', periods=n, freq='5T')
+    timestamps = pd.date_range('2024-01-01', periods=n, freq='5min')
 
     # Prix simple qui monte/descend
     prices = 50000 + np.cumsum(np.random.randn(n) * 100)
@@ -68,7 +68,7 @@ def test_basic_pipeline():
 
     # 2. Bougies fantômes
     print("\n[2/5] Création bougies fantômes...")
-    df_ghost = create_ghost_candles(df_5m, target_timeframe='30T')
+    df_ghost = create_ghost_candles(df_5m, target_timeframe='30min')
 
     # Vérifier 6 steps
     steps_per_candle = df_ghost.groupby('candle_30m_timestamp')['step'].count()

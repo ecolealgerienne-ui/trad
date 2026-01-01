@@ -50,7 +50,7 @@ from labeling import add_labels_to_dataframe
 
 
 def create_ghost_candles(df_5m: pd.DataFrame,
-                        target_timeframe: str = '30T') -> pd.DataFrame:
+                        target_timeframe: str = '30min') -> pd.DataFrame:
     """
     Crée les "bougies fantômes" - snapshots intermédiaires de la bougie cible.
 
@@ -58,7 +58,7 @@ def create_ghost_candles(df_5m: pd.DataFrame,
 
     Args:
         df_5m: DataFrame avec données 5min [timestamp, open, high, low, close, volume]
-        target_timeframe: Timeframe cible (défaut: '30T' pour 30 minutes)
+        target_timeframe: Timeframe cible (défaut: '30min' pour 30 minutes)
 
     Returns:
         DataFrame avec colonnes:
@@ -190,7 +190,7 @@ def add_historical_features(df_ghost: pd.DataFrame,
 
 def build_dataset(input_file: str,
                  output_file: str,
-                 target_timeframe: str = '30T',
+                 target_timeframe: str = '30min',
                  add_indicators: bool = True,
                  add_history: bool = False,
                  lookback: int = 10,
@@ -341,7 +341,7 @@ def build_dataset(input_file: str,
 
 def build_multiasset_dataset(input_files: Dict[str, str],
                              output_file: str,
-                             target_timeframe: str = '30T',
+                             target_timeframe: str = '30min',
                              add_indicators: bool = True,
                              label_source: str = 'rsi',
                              smoothing: float = 0.25) -> pd.DataFrame:
@@ -360,7 +360,7 @@ def build_multiasset_dataset(input_files: Dict[str, str],
                      Ex: {'BTC': '../data_trad/BTCUSD_all_5m.csv',
                           'ETH': '../data_trad/ETHUSD_all_5m.csv'}
         output_file: Chemin de sortie pour le dataset combiné
-        target_timeframe: Timeframe cible (défaut: '30T')
+        target_timeframe: Timeframe cible (défaut: '30min')
         add_indicators: Si True, calcule les indicateurs
         label_source: Source pour labels ('rsi' ou 'close')
         smoothing: Paramètre de lissage du filtre
@@ -524,8 +524,8 @@ def main():
     parser.add_argument(
         '--timeframe',
         type=str,
-        default='30T',
-        help='Timeframe cible (défaut: 30T)'
+        default='30min',
+        help='Timeframe cible (défaut: 30min)'
     )
 
     parser.add_argument(

@@ -47,7 +47,7 @@ def example_multiasset_btc_eth():
     df_combined = build_multiasset_dataset(
         input_files=input_files,
         output_file=output_file,
-        target_timeframe='30T',
+        target_timeframe='30min',
         add_indicators=True,
         label_source='rsi',
         smoothing=0.25
@@ -82,7 +82,7 @@ def example_multiasset_with_gap_period():
     df_combined = build_multiasset_dataset(
         input_files=input_files,
         output_file=output_file,
-        target_timeframe='30T',
+        target_timeframe='30min',
         add_indicators=True,
         label_source='rsi',
         smoothing=0.25
@@ -134,7 +134,7 @@ def example_multiasset_three_assets():
     df_combined = build_multiasset_dataset(
         input_files=input_files,
         output_file=output_file,
-        target_timeframe='30T',
+        target_timeframe='30min',
         add_indicators=True,
         label_source='rsi',
         smoothing=0.25
