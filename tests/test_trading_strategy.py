@@ -15,11 +15,25 @@ STRATÉGIE DÉTAILLÉE:
    - Trade exécuté à Open[t+1] (bougie suivante)
    - Rendement = (Open[t+1] - Open[t]) / Open[t] × position
 
-CALCUL DU RENDEMENT (CORRIGÉ):
-- market_return[t] = (open[t+1] - open[t]) / open[t]
-- strategy_return[t] = market_return[t] × position[t]
-- Si position = +1 (LONG): on gagne si le marché monte
-- Si position = -1 (SHORT): on gagne si le marché baisse
+CALCUL DU RENDEMENT (LOGIQUE CORRECTE DE TRADING):
+On entre en position au changement de signal.
+On sort (et calcule le rendement) au prochain changement de signal.
+
+Exemple LONG:
+  t=10: Signal BUY → Entre LONG à entry_price = open[11] = $95,000
+  t=11-13: Garde position LONG (pas de calcul)
+  t=14: Signal SELL → Sort LONG à exit_price = open[15] = $96,000
+        Rendement LONG = (exit_price - entry_price) / entry_price
+                       = (96,000 - 95,000) / 95,000 = +1.05%
+
+Exemple SHORT:
+  t=14: Signal SELL → Entre SHORT à entry_price = open[15] = $96,000
+  t=15-19: Garde position SHORT (pas de calcul)
+  t=20: Signal BUY → Sort SHORT à exit_price = open[21] = $95,000
+        Rendement SHORT = (entry_price - exit_price) / entry_price
+                        = (96,000 - 95,000) / 96,000 = +1.04%
+
+Rendement total = Produit composé de tous les trades fermés
 
 FILTRES TESTÉS:
 - KAMA (Kaufman Adaptive MA)
@@ -219,25 +233,109 @@ def backtest_filter_strategy(df, filter_func, filter_name, trim_edges=100):
     df_trade['position'] = positions
     df_trade['filtered'] = filtered_trade[2:]
 
-    # Calculer les rendements
-    # À t, on a le signal basé sur filtre[t-1] vs filtre[t-2]
-    # On trade à l'ouverture de t+1
-    # Le rendement est: (open[t+1] - open[t]) / open[t]
+    # =====================================================================
+    # CALCUL DES RENDEMENTS - LOGIQUE CORRECTE DE TRADING
+    # =====================================================================
+    # On entre en position au changement de signal
+    # On sort (et calcule le rendement) au prochain changement de signal
+    #
+    # Exemple LONG:
+    #   t=10: BUY → Entre LONG à open[11] = $95k
+    #   t=11-13: Garde position LONG
+    #   t=14: SELL → Sort LONG à open[15] = $96k
+    #         Rendement = (96k - 95k) / 95k = +1.05%
+    #
+    # Exemple SHORT:
+    #   t=14: SELL → Entre SHORT à open[15] = $96k
+    #   t=15-19: Garde position SHORT
+    #   t=20: BUY → Sort SHORT à open[21] = $95k
+    #         Rendement = (96k - 95k) / 96k = +1.04%
+    # =====================================================================
 
-    df_trade['current_open'] = df_trade['open'].values
-    df_trade['next_open'] = df_trade['open'].shift(-1).values
+    trades_list = []
+    entry_price = None
+    entry_position = None
+    entry_idx = None
 
-    # Rendement par bougie (si on était en position)
-    # return[t] = (next_open[t] - current_open[t]) / current_open[t]
-    df_trade['market_return'] = (df_trade['next_open'] - df_trade['current_open']) / df_trade['current_open']
+    for idx in range(len(df_trade)):
+        current_pos = df_trade.iloc[idx]['position']
+        current_open = df_trade.iloc[idx]['open']
 
-    # Rendement de la stratégie = rendement du marché * position
-    # position[t] détermine si on est LONG (1), SHORT (-1) ou OUT (0)
-    df_trade['strategy_return'] = df_trade['market_return'] * df_trade['position']
+        # Détecter changement de position
+        if idx == 0:
+            # Premier signal
+            if current_pos != 0:
+                entry_price = current_open
+                entry_position = current_pos
+                entry_idx = idx
+        else:
+            prev_pos = df_trade.iloc[idx-1]['position']
 
-    # Calculer les métriques
-    total_return = (1 + df_trade['strategy_return'].fillna(0)).cumprod().iloc[-1] - 1
-    total_return_pct = total_return * 100
+            # Changement de position détecté
+            if current_pos != prev_pos:
+                # Fermer la position précédente si elle existait
+                if entry_price is not None:
+                    exit_price = current_open
+
+                    # Calculer le rendement selon le type de position
+                    if entry_position == 1:  # LONG
+                        trade_return = (exit_price - entry_price) / entry_price
+                    elif entry_position == -1:  # SHORT
+                        trade_return = (entry_price - exit_price) / entry_price
+                    else:
+                        trade_return = 0.0
+
+                    trades_list.append({
+                        'entry_idx': entry_idx,
+                        'exit_idx': idx,
+                        'entry_price': entry_price,
+                        'exit_price': exit_price,
+                        'position_type': 'LONG' if entry_position == 1 else 'SHORT',
+                        'return': trade_return,
+                        'return_pct': trade_return * 100
+                    })
+
+                # Ouvrir nouvelle position
+                if current_pos != 0:
+                    entry_price = current_open
+                    entry_position = current_pos
+                    entry_idx = idx
+                else:
+                    entry_price = None
+                    entry_position = None
+                    entry_idx = None
+
+    # Fermer la dernière position si elle est ouverte
+    if entry_price is not None:
+        exit_price = df_trade.iloc[-1]['open']
+
+        if entry_position == 1:  # LONG
+            trade_return = (exit_price - entry_price) / entry_price
+        elif entry_position == -1:  # SHORT
+            trade_return = (entry_price - exit_price) / entry_price
+        else:
+            trade_return = 0.0
+
+        trades_list.append({
+            'entry_idx': entry_idx,
+            'exit_idx': len(df_trade) - 1,
+            'entry_price': entry_price,
+            'exit_price': exit_price,
+            'position_type': 'LONG' if entry_position == 1 else 'SHORT',
+            'return': trade_return,
+            'return_pct': trade_return * 100
+        })
+
+    # Créer DataFrame des trades
+    df_trades = pd.DataFrame(trades_list)
+
+    # Calculer le rendement total (produit composé)
+    if len(df_trades) > 0:
+        total_return = (1 + df_trades['return']).prod() - 1
+        total_return_pct = total_return * 100
+    else:
+        total_return = 0
+        total_return_pct = 0
 
     buy_signals = (df_trade['signal'] == 'BUY').sum()
     sell_signals = (df_trade['signal'] == 'SELL').sum()
@@ -246,23 +344,38 @@ def backtest_filter_strategy(df, filter_func, filter_name, trim_edges=100):
     # Buy & Hold pour comparaison
     buy_hold_return = (df_trade['close'].iloc[-1] / df_trade['close'].iloc[0] - 1) * 100
 
-    # Sharpe ratio simplifié (annualisé)
-    # Assuming 5min candles, 12 per hour, 24h trading = 288 candles/day
-    returns_mean = df_trade['strategy_return'].mean()
-    returns_std = df_trade['strategy_return'].std()
-    sharpe = (returns_mean / returns_std) * np.sqrt(288 * 365) if returns_std > 0 else 0
+    # Sharpe ratio (annualisé)
+    # Basé sur les rendements des trades individuels
+    if len(df_trades) > 0:
+        returns_mean = df_trades['return'].mean()
+        returns_std = df_trades['return'].std()
 
-    # Drawdown maximum
-    cumulative = (1 + df_trade['strategy_return'].fillna(0)).cumprod()
-    running_max = cumulative.expanding().max()
-    drawdown = (cumulative - running_max) / running_max
-    max_drawdown = drawdown.min() * 100
+        # Nombre de trades par an (approximatif)
+        n_days = len(df_trade) * 5 / 60 / 24  # Durée en jours
+        trades_per_year = (len(df_trades) / n_days) * 365 if n_days > 0 else 0
+
+        sharpe = (returns_mean / returns_std) * np.sqrt(trades_per_year) if returns_std > 0 else 0
+    else:
+        sharpe = 0
+
+    # Drawdown maximum (basé sur le capital cumulatif)
+    if len(df_trades) > 0:
+        df_trades['cumulative'] = (1 + df_trades['return']).cumprod()
+        running_max = df_trades['cumulative'].expanding().max()
+        df_trades['drawdown'] = (df_trades['cumulative'] - running_max) / running_max
+        max_drawdown = df_trades['drawdown'].min() * 100
+    else:
+        max_drawdown = 0
 
     # Win rate (sur les trades fermés)
-    wins = (df_trade['strategy_return'] > 0).sum()
-    losses = (df_trade['strategy_return'] < 0).sum()
-    total_trades = wins + losses
-    win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
+    if len(df_trades) > 0:
+        wins = (df_trades['return'] > 0).sum()
+        losses = (df_trades['return'] < 0).sum()
+        total_trades = len(df_trades)
+        win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
+    else:
+        total_trades = 0
+        win_rate = 0
 
     results = {
         'filter_name': filter_name,
@@ -275,7 +388,8 @@ def backtest_filter_strategy(df, filter_func, filter_name, trim_edges=100):
         'buy_signals': buy_signals,
         'sell_signals': sell_signals,
         'hold_signals': hold_signals,
-        'df_trade': df_trade
+        'df_trade': df_trade,
+        'df_trades': df_trades  # DataFrame des trades individuels
     }
 
     # Afficher résultats
@@ -408,9 +522,12 @@ def visualize_comparison(all_results):
 
     # 5. Courbe de capital (cumulatif)
     for result in all_results:
-        df_trade = result['df_trade']
-        cumulative = (1 + df_trade['strategy_return'].fillna(0)).cumprod()
-        axes[1, 1].plot(cumulative.values, label=result['filter_name'], linewidth=2)
+        df_trades = result['df_trades']
+        if len(df_trades) > 0:
+            cumulative = (1 + df_trades['return']).cumprod()
+            axes[1, 1].plot(cumulative.values, label=result['filter_name'], linewidth=2)
+        else:
+            axes[1, 1].plot([1.0], label=result['filter_name'], linewidth=2)
 
     axes[1, 1].set_title('Courbe de Capital (cumulatif)', fontsize=14, fontweight='bold')
     axes[1, 1].set_xlabel('Trade #')
@@ -472,6 +589,9 @@ if __name__ == '__main__':
     print(f"  📊 Meilleur Sharpe: {best_sharpe['filter_name']} ({best_sharpe['sharpe_ratio']:.2f})")
     print(f"  🛡️ Drawdown minimal: {best_dd['filter_name']} ({best_dd['max_drawdown_pct']:.2f}%)")
 
-    print(f"\n  Durée backtest: {len(all_results[0]['df_trade']) * 5 / 60 / 24:.1f} jours")
-    print(f"  Total trades: {all_results[0]['total_trades']}")
-    print(f"  Fréquence: {all_results[0]['total_trades'] / (len(all_results[0]['df_trade']) * 5 / 60 / 24):.1f} trades/jour")
+    n_days = len(all_results[0]['df_trade']) * 5 / 60 / 24
+    print(f"\n  Durée backtest: {n_days:.1f} jours")
+    print(f"  Total trades fermés: {all_results[0]['total_trades']}")
+    if n_days > 0 and all_results[0]['total_trades'] > 0:
+        print(f"  Fréquence: {all_results[0]['total_trades'] / n_days:.1f} trades/jour")
+        print(f"  Durée moyenne par trade: {n_days / all_results[0]['total_trades']:.2f} jours")
