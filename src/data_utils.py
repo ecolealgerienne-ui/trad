@@ -41,17 +41,41 @@ def load_crypto_data(filepath, n_candles=None, asset_name='CRYPTO'):
 
     logger.info(f"📂 Chargement {asset_name} : {filepath}")
 
-    # Charger CSV
-    df = pd.read_csv(filepath)
+    # Charger CSV (essayer différents séparateurs)
+    try:
+        df = pd.read_csv(filepath, sep=';')  # Format : Date;Open;High;Low;Close
+    except:
+        df = pd.read_csv(filepath)  # Format standard avec virgule
 
-    # Vérifier colonnes requises
-    required_cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
+    # Normaliser les noms de colonnes (majuscules → minuscules)
+    df.columns = df.columns.str.lower()
+
+    # Renommer colonnes si nécessaire
+    column_mapping = {
+        'date': 'timestamp',
+        'time': 'timestamp'
+    }
+    df.rename(columns=column_mapping, inplace=True)
+
+    # Vérifier colonnes requises (volume optionnel)
+    required_cols = ['timestamp', 'open', 'high', 'low', 'close']
     missing_cols = set(required_cols) - set(df.columns)
     if missing_cols:
         raise ValueError(f"Colonnes manquantes : {missing_cols}")
 
+    # Ajouter colonne volume si absente (avec valeur par défaut)
+    if 'volume' not in df.columns:
+        df['volume'] = 1.0  # Valeur par défaut (pas utilisée pour l'instant)
+        logger.warning(f"  ⚠️ Colonne 'volume' absente, ajoutée avec valeur par défaut")
+
     # Convertir timestamp en datetime
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    # Le timestamp peut être en millisecondes (epoch) ou format date
+    try:
+        # Essayer conversion depuis epoch (millisecondes)
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    except:
+        # Sinon parser comme date
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
 
     # Prendre les dernières n bougies
     if n_candles is not None and len(df) > n_candles:
