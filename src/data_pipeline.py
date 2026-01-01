@@ -21,6 +21,13 @@ import argparse
 import logging
 from pathlib import Path
 
+# Configurer le logging AVANT les imports locaux
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 # Imports locaux (vérifier que les fonctions existent avant de les utiliser)
 from utils import (
     load_ohlcv_data,
@@ -40,12 +47,6 @@ except ImportError:
 
 from normalization import normalize_ohlc_ghost, normalize_features
 from labeling import add_labels_to_dataframe
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
 
 def create_ghost_candles(df_5m: pd.DataFrame,
