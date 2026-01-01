@@ -138,35 +138,107 @@ def plot_candlestick(df, ax, n_candles=50, title="Bougies", start_idx=0):
 
 def test_visualize_5min_vs_30min():
     """
-    Test 1: Visualiser données 5min vs bougies fantômes 30min.
+    Test 1: Visualiser données 5min vs bougies fantômes 30min sur MÊME courbe.
+
+    À chaque timestamp 5min, on affiche:
+    - Bougie 5min (vert/rouge plein)
+    - Ghost candle 30min équivalente (bleu transparent)
+
+    Permet de comparer visuellement OHLC 5min vs 30min.
     """
     print("\n" + "="*80)
-    print("TEST 1: VISUALISATION 5MIN VS 30MIN")
+    print("TEST 1: VISUALISATION 5MIN VS 30MIN SUR MÊME COURBE")
     print("="*80)
 
     # Créer données
-    df_5m = create_test_data_large(n=200)  # 200 bougies 5min = ~17 heures
+    df_5m = create_test_data_large(n=72)  # 72 bougies 5min = 6 heures = 12 bougies 30min
 
     # Créer bougies fantômes
     df_ghost = create_ghost_candles(df_5m, target_timeframe='30min')
 
-    # Prendre seulement les bougies complètes (step=6)
-    df_30m = df_ghost[df_ghost['step'] == 6].copy()
-    df_30m = df_30m.rename(columns={
-        'ghost_open': 'open',
-        'ghost_high': 'high',
-        'ghost_low': 'low',
-        'ghost_close': 'close'
-    })
+    # Nombre de bougies à afficher
+    n_candles = 60  # Afficher 60 bougies 5min (5 heures)
 
-    # Visualiser
-    fig, axes = plt.subplots(2, 1, figsize=(16, 10))
+    # Créer figure
+    fig, ax = plt.subplots(1, 1, figsize=(20, 10))
 
-    # 5min (50 premières bougies)
-    plot_candlestick(df_5m, axes[0], n_candles=50, title="Bougies 5min (50 premières)")
+    # Tracer les bougies 5min et 30min sur le même axe
+    for i in range(n_candles):
+        # Position x
+        x = i
 
-    # 30min (environ 8 bougies correspondantes)
-    plot_candlestick(df_30m, axes[1], n_candles=8, title="Bougies 30min (formées)")
+        # --- BOUGIE 5MIN (pleine opacité) ---
+        row_5m = df_5m.iloc[i]
+
+        # Couleur: vert si hausse, rouge si baisse
+        color_5m = 'green' if row_5m['close'] >= row_5m['open'] else 'red'
+
+        # Corps de la bougie 5min
+        body_height_5m = abs(row_5m['close'] - row_5m['open'])
+        body_bottom_5m = min(row_5m['open'], row_5m['close'])
+
+        rect_5m = Rectangle(
+            (x - 0.4, body_bottom_5m),
+            0.35,  # Largeur réduite pour laisser place à la 30min
+            body_height_5m,
+            facecolor=color_5m,
+            edgecolor='black',
+            alpha=0.8,
+            linewidth=1.5,
+            label='5min' if i == 0 else ''
+        )
+        ax.add_patch(rect_5m)
+
+        # Mèches 5min
+        ax.plot([x - 0.225, x - 0.225], [row_5m['low'], row_5m['high']],
+                color='black', linewidth=1.5)
+
+        # --- GHOST CANDLE 30MIN (transparente) ---
+        row_ghost = df_ghost.iloc[i]
+
+        # Couleur: bleu pour les ghost candles
+        color_30m = 'dodgerblue' if row_ghost['ghost_close'] >= row_ghost['ghost_open'] else 'navy'
+
+        # Corps de la bougie 30min
+        body_height_30m = abs(row_ghost['ghost_close'] - row_ghost['ghost_open'])
+        body_bottom_30m = min(row_ghost['ghost_open'], row_ghost['ghost_close'])
+
+        rect_30m = Rectangle(
+            (x - 0.05, body_bottom_30m),
+            0.35,  # Largeur réduite
+            body_height_30m,
+            facecolor=color_30m,
+            edgecolor='blue',
+            alpha=0.4,  # Plus transparent
+            linewidth=1.5,
+            label='30min (ghost)' if i == 0 else ''
+        )
+        ax.add_patch(rect_30m)
+
+        # Mèches 30min
+        ax.plot([x + 0.125, x + 0.125], [row_ghost['ghost_low'], row_ghost['ghost_high']],
+                color='blue', linewidth=1.5, alpha=0.6)
+
+    # Configuration axes
+    ax.set_xlim(-1, n_candles)
+    ax.set_xlabel('Index Bougie 5min', fontsize=14, fontweight='bold')
+    ax.set_ylabel('Prix', fontsize=14, fontweight='bold')
+    ax.set_title('Comparaison Bougies 5min (vert/rouge) vs Ghost Candles 30min (bleu)',
+                 fontsize=16, fontweight='bold')
+    ax.grid(True, alpha=0.3, linestyle='--')
+
+    # Légende
+    handles = [
+        mpatches.Patch(color='green', alpha=0.8, label='Bougie 5min Haussière'),
+        mpatches.Patch(color='red', alpha=0.8, label='Bougie 5min Baissière'),
+        mpatches.Patch(color='dodgerblue', alpha=0.4, label='Ghost Candle 30min Haussière'),
+        mpatches.Patch(color='navy', alpha=0.4, label='Ghost Candle 30min Baissière')
+    ]
+    ax.legend(handles=handles, loc='upper left', fontsize=12, framealpha=0.9)
+
+    # Ajouter grille de prix (échelle visible)
+    ax.yaxis.set_major_locator(plt.MaxNLocator(20))
+    ax.tick_params(axis='both', labelsize=11)
 
     plt.tight_layout()
     output_path = Path('tests/validation_output/01_5min_vs_30min_candles.png')
@@ -175,7 +247,11 @@ def test_visualize_5min_vs_30min():
     print(f"📊 Sauvegardé: {output_path}")
     plt.close()
 
-    print(f"✅ {len(df_5m)} bougies 5min → {len(df_30m)} bougies 30min complètes")
+    # Stats
+    df_30m_complete = df_ghost[df_ghost['step'] == 6]
+    print(f"✅ {len(df_5m)} bougies 5min → {len(df_30m_complete)} bougies 30min complètes")
+    print(f"✅ Visualisées: {n_candles} bougies superposées (5min + ghost 30min)")
+    print(f"✅ À chaque timestamp 5min: bougie 5min (opaque) + ghost 30min (transparent)")
 
 
 def test_visualize_filters_on_close():
