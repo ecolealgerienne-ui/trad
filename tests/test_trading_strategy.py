@@ -199,23 +199,25 @@ def backtest_filter_strategy(df, filter_func, filter_name, trim_edges=100):
     print(f"Durée trading: {len(df_trade) * 5 / 60 / 24:.1f} jours")
 
     # Calculer les signaux
+    # CRITIQUE: À l'instant t, on compare filtered[t-1] vs filtered[t-2] (PASSÉ SEULEMENT)
+    # Pas de look-ahead bias: on n'utilise PAS filtered[t] pour décider!
     signals = []
     positions = []  # 1 = LONG, 0 = OUT, -1 = SHORT
 
     position = 0  # Position initiale: OUT
 
     for i in range(2, len(filtered_trade)):
-        # Indice dans la zone de trading
-        t_minus_2 = filtered_trade[i-2]
-        t_minus_1 = filtered_trade[i-1]
+        # À l'instant t=i, on regarde le PASSÉ seulement
+        t_minus_1 = filtered_trade[i-1]  # Hier
+        t_minus_2 = filtered_trade[i-2]  # Avant-hier
 
-        # Signal
+        # Signal: compare PASSÉ vs PASSÉ (pas présent!)
         if t_minus_1 > t_minus_2:
-            # Tendance haussière → ACHAT
+            # Momentum haussier dans le passé → ACHAT
             signal = 'BUY'
             new_position = 1
         elif t_minus_1 < t_minus_2:
-            # Tendance baissière → VENTE
+            # Momentum baissier dans le passé → VENTE
             signal = 'SELL'
             new_position = -1
         else:
@@ -228,7 +230,10 @@ def backtest_filter_strategy(df, filter_func, filter_name, trim_edges=100):
         position = new_position
 
     # Ajouter les signaux au dataframe
-    df_trade = df_trade.iloc[2:].copy()  # Enlever les 2 premières (pas de signal)
+    # signals[0] est le signal à l'instant t=2 (regarde t=1 vs t=0)
+    # On associe ce signal à df_trade.iloc[2]
+    # On trade à df_trade.iloc[3]['open'] = open[t+1]
+    df_trade = df_trade.iloc[2:].copy()
     df_trade['signal'] = signals
     df_trade['position'] = positions
     df_trade['filtered'] = filtered_trade[2:]
