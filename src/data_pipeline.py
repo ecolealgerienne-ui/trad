@@ -28,7 +28,15 @@ from utils import (
     save_dataset,
     check_data_leakage
 )
-from indicators import add_all_indicators
+
+# Préférer indicators_ta (bibliothèque ta) si disponible
+try:
+    from indicators_ta import add_all_ta_features as add_all_indicators
+    logger.info("Utilisation de la bibliothèque 'ta' pour les indicateurs")
+except ImportError:
+    from indicators import add_all_indicators
+    logger.warning("Bibliothèque 'ta' non disponible, utilisation de indicators.py")
+
 from normalization import normalize_ohlc_ghost, normalize_features
 from labeling import add_labels_to_dataframe
 

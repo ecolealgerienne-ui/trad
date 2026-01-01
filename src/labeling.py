@@ -20,8 +20,12 @@ from typing import Union, Optional, Dict
 import logging
 
 # Import des fonctions locales
-from filters import octave_filter, calculate_slope
-from indicators import calculate_rsi
+from filters import signal_filtfilt, calculate_slope
+try:
+    from indicators_ta import calculate_rsi_ta as calculate_rsi
+except ImportError:
+    # Fallback sur l'implémentation manuelle
+    from indicators import calculate_rsi
 
 logger = logging.getLogger(__name__)
 
@@ -60,9 +64,9 @@ def create_labels_from_filtered_signal(signal: Union[pd.Series, np.ndarray],
     else:
         signal_array = np.array(signal)
 
-    # 1. Appliquer le filtre d'Octave (NON-CAUSAL)
-    logger.info(f"Application du filtre d'Octave (smoothing={smoothing})...")
-    filtered_signal = octave_filter(signal_array, smoothing=smoothing)
+    # 1. Appliquer le filtre signal_filtfilt (NON-CAUSAL)
+    logger.info(f"Application du filtre signal_filtfilt (step={smoothing})...")
+    filtered_signal = signal_filtfilt(signal_array, step=smoothing)
 
     # 2. Calculer la pente (différence)
     slope = calculate_slope(filtered_signal, periods=1)
