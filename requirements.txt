@@ -1,0 +1,35 @@
+# Core Data Science
+numpy>=1.21.0
+pandas>=1.3.0
+scipy>=1.7.0
+
+# Visualization
+matplotlib>=3.4.0
+seaborn>=0.11.0
+
+# Machine Learning (pour phase future)
+scikit-learn>=1.0.0
+
+# Deep Learning - TensorFlow (avec GPU)
+tensorflow>=2.10.0
+# OU PyTorch (décommenter si préféré):
+# torch>=1.12.0
+# torchvision>=0.13.0
+
+# Jupyter
+jupyter>=1.0.0
+notebook>=6.4.0
+ipykernel>=6.0.0
+
+# Utilities
+tqdm>=4.62.0
+python-dateutil>=2.8.0
+
+# Optional - Data fetching (pour collecter données futures)
+# requests>=2.26.0
+# ccxt>=1.95.0  # Pour API exchanges crypto
+
+# Development
+pytest>=7.0.0
+black>=22.0.0
+flake8>=4.0.0
