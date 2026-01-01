@@ -151,12 +151,12 @@ TRADING_DAYS_PER_YEAR = 365  # Crypto trade 24/7
 # =============================================================================
 
 # Données
-DATA_DIR = 'data'
-RAW_DATA_DIR = 'data/raw'
+DATA_DIR = '../data_trad'  # Dossier des données réelles
+RAW_DATA_DIR = '../data_trad'
 PROCESSED_DATA_DIR = 'data/processed'
 
-BTC_DATA_FILE = 'data/raw/BTCUSD_all_5m.csv'
-ETH_DATA_FILE = 'data/raw/ETHUSD_all_5m.csv'
+BTC_DATA_FILE = '../data_trad/BTCUSD_all_5m.csv'
+ETH_DATA_FILE = '../data_trad/ETHUSD_all_5m.csv'
 
 # Modèles
 MODELS_DIR = 'models'

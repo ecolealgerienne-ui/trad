@@ -229,7 +229,7 @@ LOSS_WEIGHT_MACD = 0.8  # Plus faible PF → poids réduit
 
 ### 8. Augmentation de Données (Mix BTC + ETH)
 
-**Méthode** : **Mélange aléatoire** (shuffle)
+**Méthode** : **Split temporel STRICT** (pas de shuffle global!)
 
 ```python
 # Charger BTC et ETH
@@ -240,19 +240,34 @@ eth_data = load_eth_data(n=100000)  # 100k bougies
 all_data = pd.concat([btc_data, eth_data], ignore_index=True)
 # Total : 200k bougies
 
-# Shuffle (mélange aléatoire)
-all_data = all_data.sample(frac=1, random_state=RANDOM_SEED).reset_index(drop=True)
+# ⚠️ CRITIQUE: Split TEMPOREL (PAS de shuffle avant split!)
+# Évite le data leakage (séquences proches dans train ET test)
+n_total = len(all_data)
+n_train = int(n_total * 0.7)
+n_val = int(n_total * 0.15)
 
-# Split train/val/test
-train_data, val_data, test_data = split_dataset(all_data)
+train_data = all_data[:n_train]           # 70% premiers
+val_data = all_data[n_train:n_train+n_val]  # 15% suivants
+test_data = all_data[n_train+n_val:]      # 15% derniers
+
+# Shuffle APRÈS split (uniquement dans train pour mélanger batches)
+train_data = train_data.sample(frac=1, random_state=RANDOM_SEED).reset_index(drop=True)
 ```
 
-**Avantages du shuffle** :
-- ✅ Évite le biais temporel (pas de "période BTC" puis "période ETH")
-- ✅ L'IA voit BTC et ETH de manière entremêlée
-- ✅ Plus robuste (généralisation)
+**Pourquoi split temporel ?**
+- ✅ **Évite data leakage** : Pas de séquences t et t+1 dans train ET test
+- ✅ **Réaliste** : L'IA s'entraîne sur le passé, valide sur le futur
+- ✅ **Simule production** : En prod, on prédit le futur, pas le passé
 
-**Alternative** : Stratified sampling (garder proportion BTC/ETH dans chaque batch) - plus complexe, pas nécessaire pour démarrage.
+**Pourquoi PAS shuffle global ?**
+- ❌ **Data leakage massif** : Fenêtres de 12 timesteps qui se chevauchent
+- ❌ **Triche** : L'IA reconnaît contexte immédiat (vu en train)
+- ❌ **Fausse accuracy** : 90%+ en test mais 50% en production
+
+**Shuffle APRÈS** (dans train seulement) :
+- ✅ Mélange l'ordre des batches
+- ✅ Évite biais d'ordre (BTC puis ETH)
+- ✅ N'introduit PAS de leakage (déjà split temporellement)
 
 ---
 
