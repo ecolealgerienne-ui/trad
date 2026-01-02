@@ -87,8 +87,15 @@ class SyncResult:
     n_samples: int
 
 
-def load_asset_data(asset: str) -> pd.DataFrame:
-    """Charge les donnees d'un asset."""
+def load_asset_data(asset: str, max_samples: int = None, step: int = 1) -> pd.DataFrame:
+    """
+    Charge les donnees d'un asset.
+
+    Args:
+        asset: Nom de l'asset (BTC, ETH, etc.)
+        max_samples: Nombre max de bougies (None = toutes)
+        step: Echantillonnage (1 = toutes, 2 = 1 sur 2, etc.)
+    """
     file_path = AVAILABLE_ASSETS_5M.get(asset)
     if not file_path:
         raise ValueError(f"Asset {asset} non disponible. Choix: {list(AVAILABLE_ASSETS_5M.keys())}")
@@ -105,6 +112,14 @@ def load_asset_data(asset: str) -> pd.DataFrame:
     # Trim edges
     if TRIM_EDGES > 0:
         df = df.iloc[TRIM_EDGES:-TRIM_EDGES].reset_index(drop=True)
+
+    # Limiter le nombre de samples
+    if max_samples and len(df) > max_samples:
+        df = df.iloc[-max_samples:].reset_index(drop=True)
+
+    # Appliquer le step (échantillonnage)
+    if step > 1:
+        df = df.iloc[::step].reset_index(drop=True)
 
     logger.info(f"  {asset}: {len(df):,} bougies chargees")
     return df
@@ -553,6 +568,14 @@ def parse_args():
                         choices=['auto', 'cuda', 'cpu'],
                         help='Device pour les calculs (auto=cuda si disponible)')
 
+    parser.add_argument('--max-samples', '-n', type=int,
+                        default=50000,
+                        help='Nombre max de bougies par asset (defaut: 50000)')
+
+    parser.add_argument('--step', '-s', type=int,
+                        default=1,
+                        help='Echantillonnage (1=toutes, 2=1sur2, etc.)')
+
     return parser.parse_args()
 
 
@@ -605,13 +628,13 @@ def main():
     # =========================================================================
     # 1. CHARGER DONNEES + KALMAN CLOSE (CPU)
     # =========================================================================
-    logger.info("\n1. Chargement des donnees et Kalman(Close) [CPU]...")
+    logger.info(f"\n1. Chargement des donnees (max={args.max_samples}, step={args.step}) + Kalman(Close) [CPU]...")
 
     dfs = {}
     ref_filtered_dict = {}  # Valeurs Kalman (pas labels!)
 
     for asset in all_assets:
-        df = load_asset_data(asset)
+        df = load_asset_data(asset, max_samples=args.max_samples, step=args.step)
         dfs[asset] = df
         # Kalman sur Close -> valeurs filtrées
         ref_filtered_dict[asset] = kalman_filter(
