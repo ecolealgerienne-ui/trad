@@ -4,9 +4,12 @@ Préparation des données avec labels 30min.
 Objectif: Prédire la pente des indicateurs 30min (moins de bruit)
 à partir des indicateurs 5min (haute résolution).
 
+Indicateurs: RSI, CCI, MACD (3 indicateurs)
+Note: BOL (Bollinger) retiré car impossible à synchroniser (toujours lag +1).
+
 Datasets générés:
-    1. dataset_5min_labels30min.npz: X=5min(4 features), Y=30min slopes
-    2. dataset_5min_30min_labels30min.npz: X=5min+30min(8 features), Y=30min slopes
+    1. dataset_5min_labels30min.npz: X=5min(3) + step_index(1) = 4 features, Y=30min slopes
+    2. dataset_5min_30min_labels30min.npz: X=5min(3) + 30min(3) + step_index(1) = 7 features
 
 SYNCHRONISATION CRITIQUE:
     - Pour chaque bougie 5min à temps T:
@@ -33,7 +36,6 @@ from constants import (
     LABEL_FILTER_TYPE,
     SEQUENCE_LENGTH,
     RSI_PERIOD, CCI_PERIOD, MACD_FAST, MACD_SLOW, MACD_SIGNAL,
-    BOL_PERIOD, BOL_NUM_STD,
     DECYCLER_CUTOFF, KALMAN_PROCESS_VAR, KALMAN_MEASURE_VAR
 )
 from data_utils import load_crypto_data, trim_edges, split_sequences_chronological
@@ -150,12 +152,12 @@ def prepare_single_asset_30min(df_5min: pd.DataFrame,
         df_5min: DataFrame 5min avec OHLCV
         filter_type: 'kalman' ou 'decycler'
         asset_name: Nom pour les logs
-        include_30min_features: Si True, ajoute les indicateurs 30min en features (8 total)
+        include_30min_features: Si True, ajoute les indicateurs 30min en features (7 total)
 
     Returns:
         (X, Y) où:
-            - X shape=(n_sequences, 12, 4 ou 8)
-            - Y shape=(n_sequences, 4)
+            - X shape=(n_sequences, 12, 4 ou 7)  # 3 indicators + step_index, or 6 + step_index
+            - Y shape=(n_sequences, 3)  # RSI, CCI, MACD (BOL retiré)
     """
     logger.info(f"\n{'='*60}")
     logger.info(f"📈 {asset_name}: Préparation avec labels 30min")
@@ -204,8 +206,8 @@ def prepare_single_asset_30min(df_5min: pd.DataFrame,
     labels_30min = generate_all_labels(indicators_30min, filter_type=filter_type)
     logger.info(f"     → Shape: {labels_30min.shape}")
 
-    # Stats des labels
-    for i, name in enumerate(['RSI', 'CCI', 'BOL', 'MACD']):
+    # Stats des labels (3 indicateurs: RSI, CCI, MACD - BOL retiré)
+    for i, name in enumerate(['RSI', 'CCI', 'MACD']):
         buy_pct = labels_30min[:, i].sum() / len(labels_30min) * 100
         logger.info(f"     {name}: {buy_pct:.1f}% BUY")
 
@@ -302,7 +304,7 @@ def prepare_and_save_30min(filter_type: str = LABEL_FILTER_TYPE,
 
     Args:
         filter_type: 'decycler' ou 'kalman'
-        include_30min_features: Si True, X a 8 features (5min+30min)
+        include_30min_features: Si True, X a 7 features (5min+30min+step_index)
         assets: Liste des assets à utiliser (défaut: DEFAULT_ASSETS)
         output_path: Chemin de sortie (défaut: auto-généré)
 
@@ -387,11 +389,12 @@ def prepare_and_save_30min(filter_type: str = LABEL_FILTER_TYPE,
     logger.info(f"   Test:  X={X_test.shape}, Y={Y_test.shape}")
 
     n_features = X_train.shape[2]
-    # Features: 4 (5min) + 4 (30min optionnel) + 1 (step_index) = 5 ou 9
-    if n_features == 9:
-        feature_desc = "5min(4) + 30min(4) + step_index(1)"
-    elif n_features == 5:
-        feature_desc = "5min(4) + step_index(1)"
+    # Features: 3 (5min) + 3 (30min optionnel) + 1 (step_index) = 4 ou 7
+    # Note: BOL retiré, maintenant 3 indicateurs (RSI, CCI, MACD)
+    if n_features == 7:
+        feature_desc = "5min(3) + 30min(3) + step_index(1)"
+    elif n_features == 4:
+        feature_desc = "5min(3) + step_index(1)"
     else:
         feature_desc = f"{n_features} features"
     logger.info(f"\n📈 Features: {n_features} ({feature_desc})")
@@ -425,11 +428,10 @@ def prepare_and_save_30min(filter_type: str = LABEL_FILTER_TYPE,
         'indicator_params': {
             'rsi_period': RSI_PERIOD,
             'cci_period': CCI_PERIOD,
-            'bol_period': BOL_PERIOD,
-            'bol_num_std': BOL_NUM_STD,
             'macd_fast': MACD_FAST,
             'macd_slow': MACD_SLOW,
             'macd_signal': MACD_SIGNAL
+            # Note: BOL retiré (non synchronisable)
         },
         'filter_params': {
             'decycler_cutoff': DECYCLER_CUTOFF,
@@ -504,7 +506,7 @@ Description:
     parser.add_argument('--filter', '-f', type=str, default=LABEL_FILTER_TYPE,
                         choices=['decycler', 'kalman'], help='Filtre pour les labels')
     parser.add_argument('--include-30min-features', action='store_true',
-                        help='Inclure les indicateurs 30min en features (+4 features)')
+                        help='Inclure les indicateurs 30min en features (+3 features)')
     parser.add_argument('--output', '-o', type=str, default=None,
                         help='Chemin de sortie (défaut: auto-généré)')
 

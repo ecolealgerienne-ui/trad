@@ -704,18 +704,18 @@ def create_sequences(indicators: np.ndarray,
         Y[i] = labels[i]                          → Label au temps i
 
     Args:
-        indicators: Array (n_samples, n_indicators) - 4 indicateurs normalisés
-        labels: Array (n_samples, n_outputs) - 4 labels binaires (un par indicateur)
+        indicators: Array (n_samples, n_indicators) - 3 indicateurs normalisés (RSI, CCI, MACD)
+        labels: Array (n_samples, n_outputs) - 3 labels binaires (un par indicateur)
         sequence_length: Longueur des séquences (défaut: 12)
 
     Returns:
-        X: Array (n_sequences, sequence_length, n_indicators) - Shape (N, 12, 4)
-        Y: Array (n_sequences, n_outputs) - Shape (N, 4)
+        X: Array (n_sequences, sequence_length, n_indicators) - Shape (N, 12, 3+)
+        Y: Array (n_sequences, n_outputs) - Shape (N, 3)
 
     Example:
         >>> X, Y = create_sequences(indicators, labels, sequence_length=12)
-        >>> print(X.shape)  # (N, 12, 4)
-        >>> print(Y.shape)  # (N, 4)
+        >>> print(X.shape)  # (N, 12, 3) ou (N, 12, 4) avec step_index
+        >>> print(Y.shape)  # (N, 3)
     """
     n_samples = len(indicators)
     n_indicators = indicators.shape[1]
