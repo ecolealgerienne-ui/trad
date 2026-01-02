@@ -21,8 +21,6 @@ from constants import (
     BEST_MODEL_PATH,
     RESULTS_DIR
 )
-from data_utils import load_and_split_btc_eth
-from indicators import prepare_datasets
 from model import create_model, compute_metrics
 from train import IndicatorDataset
 from prepare_data import load_prepared_data
@@ -188,7 +186,7 @@ def parse_args():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
-    parser.add_argument('--data', '-d', type=str, default=None,
+    parser.add_argument('--data', '-d', type=str, required=True,
                         help='Chemin vers les données préparées (.npz). '
                              'IMPORTANT: Doit être le même dataset utilisé pour l\'entraînement!')
 
@@ -223,22 +221,12 @@ def main():
     # =========================================================================
     # 1. CHARGER LES DONNÉES
     # =========================================================================
-    if args.data:
-        # Charger données préparées (même dataset que l'entraînement)
-        logger.info(f"\n1. Chargement des données préparées: {args.data}")
-        prepared = load_prepared_data(args.data)
-        X_test, Y_test = prepared['test']
-        metadata = prepared['metadata']
-        log_dataset_metadata(metadata, logger)
-    else:
-        # Préparer données à la volée (ATTENTION: labels 5min par défaut!)
-        logger.info("\n1. Chargement des données BTC + ETH...")
-        logger.warning("⚠️ Pas de --data spécifié, génération des labels 5min à la volée")
-        logger.warning("   Si le modèle a été entraîné sur labels 30min, utilisez:")
-        logger.warning("   python src/evaluate.py --data data/prepared/dataset_5min_labels30min_kalman.npz")
-        train_df, val_df, test_df = load_and_split_btc_eth()
-        datasets = prepare_datasets(train_df, val_df, test_df)
-        X_test, Y_test = datasets['test']
+    # Charger données préparées (même dataset que l'entraînement)
+    logger.info(f"\n1. Chargement des données préparées: {args.data}")
+    prepared = load_prepared_data(args.data)
+    X_test, Y_test = prepared['test']
+    metadata = prepared['metadata']
+    log_dataset_metadata(metadata, logger)
 
     logger.info(f"  Test: X={X_test.shape}, Y={Y_test.shape}")
 
