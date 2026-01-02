@@ -164,10 +164,29 @@ PROCESSED_DATA_DIR = 'data/processed'
 
 # Fichiers de données brutes par timeframe
 # Utilise DATA_TRAD_DIR pour centraliser le chemin
+
+# 1 minute data
 BTC_DATA_FILE_1M = f'{DATA_TRAD_DIR}/BTCUSD_all_1m.csv'
 ETH_DATA_FILE_1M = f'{DATA_TRAD_DIR}/ETHUSD_all_1m.csv'
+
+# 5 minutes data - tous les assets disponibles
 BTC_DATA_FILE_5M = f'{DATA_TRAD_DIR}/BTCUSD_all_5m.csv'
 ETH_DATA_FILE_5M = f'{DATA_TRAD_DIR}/ETHUSD_all_5m.csv'
+BNB_DATA_FILE_5M = f'{DATA_TRAD_DIR}/BNBUSD_all_5m.csv'
+ADA_DATA_FILE_5M = f'{DATA_TRAD_DIR}/ADAUSD_all_5m.csv'
+LTC_DATA_FILE_5M = f'{DATA_TRAD_DIR}/LTCUSD_all_5m.csv'
+
+# Liste des assets disponibles (pour les scripts multi-assets)
+AVAILABLE_ASSETS_5M = {
+    'BTC': BTC_DATA_FILE_5M,
+    'ETH': ETH_DATA_FILE_5M,
+    'BNB': BNB_DATA_FILE_5M,
+    'ADA': ADA_DATA_FILE_5M,
+    'LTC': LTC_DATA_FILE_5M,
+}
+
+# Assets par défaut pour l'entraînement
+DEFAULT_ASSETS = ['BTC', 'ETH']  # Peut être étendu à tous: list(AVAILABLE_ASSETS_5M.keys())
 
 # Timeframe par défaut (1 ou 5)
 DEFAULT_TIMEFRAME = 5  # Minutes

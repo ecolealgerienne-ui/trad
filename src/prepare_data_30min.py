@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 # Import modules locaux
 from constants import (
-    BTC_DATA_FILE_5M, ETH_DATA_FILE_5M,
+    AVAILABLE_ASSETS_5M, DEFAULT_ASSETS,
     TRIM_EDGES,
     TRAIN_SPLIT, VAL_SPLIT, TEST_SPLIT,
     LABEL_FILTER_TYPE,
@@ -295,6 +295,7 @@ def prepare_single_asset_30min(df_5min: pd.DataFrame,
 
 def prepare_and_save_30min(filter_type: str = LABEL_FILTER_TYPE,
                            include_30min_features: bool = False,
+                           assets: list = None,
                            output_path: str = None) -> str:
     """
     Prépare les datasets avec labels 30min et les sauvegarde.
@@ -302,11 +303,22 @@ def prepare_and_save_30min(filter_type: str = LABEL_FILTER_TYPE,
     Args:
         filter_type: 'decycler' ou 'kalman'
         include_30min_features: Si True, X a 8 features (5min+30min)
+        assets: Liste des assets à utiliser (défaut: DEFAULT_ASSETS)
         output_path: Chemin de sortie (défaut: auto-généré)
 
     Returns:
         Chemin du fichier sauvegardé
     """
+    # Utiliser les assets par défaut si non spécifiés
+    if assets is None:
+        assets = DEFAULT_ASSETS
+
+    # Valider les assets demandés
+    invalid_assets = [a for a in assets if a not in AVAILABLE_ASSETS_5M]
+    if invalid_assets:
+        raise ValueError(f"Assets invalides: {invalid_assets}. "
+                        f"Disponibles: {list(AVAILABLE_ASSETS_5M.keys())}")
+
     logger.info("="*80)
     logger.info("PRÉPARATION DONNÉES AVEC LABELS 30MIN")
     logger.info("="*80)
@@ -315,53 +327,56 @@ def prepare_and_save_30min(filter_type: str = LABEL_FILTER_TYPE,
     logger.info(f"📊 Features: {feature_type}")
     logger.info(f"🏷️ Labels: pente indicateurs 30min")
     logger.info(f"🔧 Filtre: {filter_type}")
+    logger.info(f"💰 Assets: {', '.join(assets)}")
 
     # =========================================================================
-    # 1. Charger données 5min
+    # 1. Charger données 5min pour chaque asset
     # =========================================================================
     logger.info(f"\n1. Chargement données 5min...")
 
-    btc_5m = load_crypto_data(BTC_DATA_FILE_5M, asset_name='BTC-5m')
-    eth_5m = load_crypto_data(ETH_DATA_FILE_5M, asset_name='ETH-5m')
-
-    btc_5m_trimmed = trim_edges(btc_5m, trim_start=TRIM_EDGES, trim_end=TRIM_EDGES)
-    eth_5m_trimmed = trim_edges(eth_5m, trim_start=TRIM_EDGES, trim_end=TRIM_EDGES)
-
-    logger.info(f"   BTC: {len(btc_5m_trimmed):,} bougies")
-    logger.info(f"   ETH: {len(eth_5m_trimmed):,} bougies")
+    asset_data = {}
+    for asset_name in assets:
+        file_path = AVAILABLE_ASSETS_5M[asset_name]
+        df = load_crypto_data(file_path, asset_name=f'{asset_name}-5m')
+        df_trimmed = trim_edges(df, trim_start=TRIM_EDGES, trim_end=TRIM_EDGES)
+        asset_data[asset_name] = df_trimmed
+        logger.info(f"   {asset_name}: {len(df_trimmed):,} bougies")
 
     # =========================================================================
     # 2. Préparer chaque asset
     # =========================================================================
     logger.info(f"\n2. Préparation par asset...")
 
-    X_btc, Y_btc = prepare_single_asset_30min(
-        btc_5m_trimmed, filter_type, "BTC", include_30min_features
-    )
-    X_eth, Y_eth = prepare_single_asset_30min(
-        eth_5m_trimmed, filter_type, "ETH", include_30min_features
-    )
+    prepared_assets = {}
+    for asset_name, df in asset_data.items():
+        X, Y = prepare_single_asset_30min(
+            df, filter_type, asset_name, include_30min_features
+        )
+        prepared_assets[asset_name] = (X, Y)
 
     # =========================================================================
     # 3. Split chronologique avec GAP (évite data leakage)
     # =========================================================================
     logger.info(f"\n3. Split chronologique avec GAP...")
 
-    (X_btc_train, Y_btc_train), (X_btc_val, Y_btc_val), (X_btc_test, Y_btc_test) = \
-        split_sequences(X_btc, Y_btc)
-    (X_eth_train, Y_eth_train), (X_eth_val, Y_eth_val), (X_eth_test, Y_eth_test) = \
-        split_sequences(X_eth, Y_eth)
+    split_data = {}
+    for asset_name, (X, Y) in prepared_assets.items():
+        (X_train_a, Y_train_a), (X_val_a, Y_val_a), (X_test_a, Y_test_a) = \
+            split_sequences(X, Y)
+        split_data[asset_name] = {
+            'train': (X_train_a, Y_train_a),
+            'val': (X_val_a, Y_val_a),
+            'test': (X_test_a, Y_test_a)
+        }
+        logger.info(f"   {asset_name}: Train={len(X_train_a)}, Val={len(X_val_a)}, Test={len(X_test_a)}")
 
-    logger.info(f"   BTC: Train={len(X_btc_train)}, Val={len(X_btc_val)}, Test={len(X_btc_test)}")
-    logger.info(f"   ETH: Train={len(X_eth_train)}, Val={len(X_eth_val)}, Test={len(X_eth_test)}")
-
-    # Concaténer les assets
-    X_train = np.concatenate([X_btc_train, X_eth_train], axis=0)
-    Y_train = np.concatenate([Y_btc_train, Y_eth_train], axis=0)
-    X_val = np.concatenate([X_btc_val, X_eth_val], axis=0)
-    Y_val = np.concatenate([Y_btc_val, Y_eth_val], axis=0)
-    X_test = np.concatenate([X_btc_test, X_eth_test], axis=0)
-    Y_test = np.concatenate([Y_btc_test, Y_eth_test], axis=0)
+    # Concaténer tous les assets
+    X_train = np.concatenate([split_data[a]['train'][0] for a in assets], axis=0)
+    Y_train = np.concatenate([split_data[a]['train'][1] for a in assets], axis=0)
+    X_val = np.concatenate([split_data[a]['val'][0] for a in assets], axis=0)
+    Y_val = np.concatenate([split_data[a]['val'][1] for a in assets], axis=0)
+    X_test = np.concatenate([split_data[a]['test'][0] for a in assets], axis=0)
+    Y_test = np.concatenate([split_data[a]['test'][1] for a in assets], axis=0)
 
     # =========================================================================
     # 4. Afficher stats finales
@@ -385,7 +400,8 @@ def prepare_and_save_30min(filter_type: str = LABEL_FILTER_TYPE,
     # 5. Sauvegarder
     # =========================================================================
     if output_path is None:
-        output_path = f"data/prepared/dataset_{feature_type}_labels30min_{filter_type}.npz"
+        assets_str = '_'.join(assets).lower()
+        output_path = f"data/prepared/dataset_{assets_str}_{feature_type}_labels30min_{filter_type}.npz"
 
     output_dir = Path(output_path).parent
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -393,6 +409,8 @@ def prepare_and_save_30min(filter_type: str = LABEL_FILTER_TYPE,
     # Métadonnées
     metadata = {
         'created_at': datetime.now().isoformat(),
+        'assets': assets,
+        'n_assets': len(assets),
         'feature_timeframe': feature_type,
         'label_timeframe': '30min',
         'filter_type': filter_type,
@@ -453,16 +471,23 @@ def prepare_and_save_30min(filter_type: str = LABEL_FILTER_TYPE,
 
 def main():
     """Point d'entrée CLI."""
+    available_assets = list(AVAILABLE_ASSETS_5M.keys())
+
     parser = argparse.ArgumentParser(
         description="Prépare les datasets avec labels 30min",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
+        epilog=f"""
 Exemples:
-  # Dataset 1: X=5min(4 features), Y=30min slopes
-  python src/prepare_data_30min.py --filter kalman
-
-  # Dataset 2: X=5min+30min(8 features), Y=30min slopes
+  # Dataset avec BTC et ETH (défaut)
   python src/prepare_data_30min.py --filter kalman --include-30min-features
+
+  # Dataset avec tous les assets disponibles
+  python src/prepare_data_30min.py --assets {' '.join(available_assets)} --include-30min-features
+
+  # Dataset avec assets spécifiques
+  python src/prepare_data_30min.py --assets BTC ETH BNB --include-30min-features
+
+Assets disponibles: {', '.join(available_assets)}
 
 Description:
   Prédire la pente des indicateurs 30min (moins de bruit) à partir
@@ -472,10 +497,14 @@ Description:
         """
     )
 
+    parser.add_argument('--assets', '-a', type=str, nargs='+',
+                        default=DEFAULT_ASSETS,
+                        choices=available_assets,
+                        help=f'Assets à inclure (défaut: {DEFAULT_ASSETS})')
     parser.add_argument('--filter', '-f', type=str, default=LABEL_FILTER_TYPE,
                         choices=['decycler', 'kalman'], help='Filtre pour les labels')
     parser.add_argument('--include-30min-features', action='store_true',
-                        help='Inclure les indicateurs 30min en features (8 total)')
+                        help='Inclure les indicateurs 30min en features (+4 features)')
     parser.add_argument('--output', '-o', type=str, default=None,
                         help='Chemin de sortie (défaut: auto-généré)')
 
@@ -491,6 +520,7 @@ Description:
     output_path = prepare_and_save_30min(
         filter_type=args.filter,
         include_30min_features=args.include_30min_features,
+        assets=args.assets,
         output_path=args.output
     )
 
