@@ -30,7 +30,6 @@ from constants import (
     LABEL_FILTER_TYPE,
     SEQUENCE_LENGTH, NUM_INDICATORS,
     RSI_PERIOD, CCI_PERIOD, MACD_FAST, MACD_SLOW, MACD_SIGNAL,
-    BOL_PERIOD, BOL_NUM_STD,
     DECYCLER_CUTOFF, KALMAN_PROCESS_VAR, KALMAN_MEASURE_VAR
 )
 from data_utils import load_crypto_data, trim_edges, split_sequences_chronological
@@ -51,17 +50,19 @@ def prepare_single_asset(df, filter_type: str, asset_name: str = "Asset") -> tup
     avant de merger, sinon les valeurs de fin d'un asset polluent le début
     du suivant (RSI, CCI, MACD utilisent les N valeurs précédentes).
 
+    Note: BOL retiré car impossible à synchroniser (toujours lag +1).
+
     Args:
         df: DataFrame avec OHLC pour un seul asset
         filter_type: 'kalman' ou 'decycler'
         asset_name: Nom pour les logs
 
     Returns:
-        (X, Y) où X shape=(n_sequences, 12, 4), Y shape=(n_sequences, 4)
+        (X, Y) où X shape=(n_sequences, 12, 3), Y shape=(n_sequences, 3)
     """
     logger.info(f"  📈 {asset_name}: Calcul indicateurs ({len(df):,} bougies)...")
 
-    # 1. Calculer indicateurs (RSI, CCI, BOL, MACD)
+    # 1. Calculer indicateurs (RSI, CCI, MACD - BOL retiré)
     indicators = calculate_all_indicators_for_model(df)
 
     # 2. Générer labels avec filtre
@@ -193,8 +194,6 @@ def prepare_and_save(timeframe: str = '5',
             'indicator_params': {
                 'rsi_period': RSI_PERIOD,
                 'cci_period': CCI_PERIOD,
-                'bol_period': BOL_PERIOD,
-                'bol_num_std': BOL_NUM_STD,
                 'macd_fast': MACD_FAST,
                 'macd_slow': MACD_SLOW,
                 'macd_signal': MACD_SIGNAL
@@ -349,8 +348,6 @@ def prepare_and_save(timeframe: str = '5',
             'indicator_params': {
                 'rsi_period': RSI_PERIOD,
                 'cci_period': CCI_PERIOD,
-                'bol_period': BOL_PERIOD,
-                'bol_num_std': BOL_NUM_STD,
                 'macd_fast': MACD_FAST,
                 'macd_slow': MACD_SLOW,
                 'macd_signal': MACD_SIGNAL

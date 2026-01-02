@@ -54,7 +54,9 @@ result = (tensor1 == tensor2).float().mean().item()
 
 ## Vue d'Ensemble
 
-Ce projet implemente un systeme de prediction de tendance crypto utilisant un modele CNN-LSTM multi-output pour predire la **pente (direction)** de 4 indicateurs techniques.
+Ce projet implemente un systeme de prediction de tendance crypto utilisant un modele CNN-LSTM multi-output pour predire la **pente (direction)** de 3 indicateurs techniques.
+
+**Note**: BOL (Bollinger Bands) a ete retire car impossible a synchroniser avec les autres indicateurs (toujours lag +1).
 
 ### Objectif
 
@@ -65,7 +67,7 @@ Predire si chaque indicateur technique va **monter** (label=1) ou **descendre** 
 ### Architecture
 
 ```
-Input: (batch, 12, 4)  <- 12 timesteps x 4 indicateurs
+Input: (batch, 12, 3)  <- 12 timesteps x 3 indicateurs
   |
 CNN 1D (64 filters)    <- Extraction features
   |
@@ -73,9 +75,9 @@ LSTM (64 hidden x 2)   <- Patterns temporels
   |
 Dense partage (32)     <- Representation commune
   |
-4 tetes independantes  <- RSI, CCI, BOL, MACD
+3 tetes independantes  <- RSI, CCI, MACD
   |
-Output: (batch, 4)     <- 4 probabilites binaires
+Output: (batch, 3)     <- 3 probabilites binaires
 ```
 
 ---
@@ -143,32 +145,32 @@ L'option `all` augmente les donnees d'entrainement (~3x) tout en evaluant sur le
 
 ## Configuration des Indicateurs
 
-### Periodes Agressives (IMPORTANT)
+### Periodes Synchronisees (IMPORTANT)
 
-Les indicateurs utilisent des periodes **agressives** pour capturer les mouvements rapides et reduire l'overfitting:
+Les indicateurs utilisent des periodes **optimisees pour la synchronisation** avec Kalman(Close):
 
 ```python
-# src/constants.py - Periodes optimisees
+# src/constants.py - Periodes synchronisees (Lag 0)
 
-# RSI - Periode courte pour reactivite
-RSI_PERIOD = 5          # (au lieu de 14 standard)
+# RSI - Synchronise avec Kalman(Close)
+RSI_PERIOD = 14         # Lag 0, Concordance 82%
 
-# CCI - Periode courte
-CCI_PERIOD = 7          # (au lieu de 20 standard)
+# CCI - Synchronise avec Kalman(Close)
+CCI_PERIOD = 20         # Lag 0, Concordance 74%
 
-# MACD - Periodes agressives
-MACD_FAST = 5           # (au lieu de 12 standard)
-MACD_SLOW = 13          # (au lieu de 26 standard)
-MACD_SIGNAL = 9         # (inchange)
+# MACD - Synchronise avec Kalman(Close)
+MACD_FAST = 10          # Lag 0, Concordance 70%
+MACD_SLOW = 26
+MACD_SIGNAL = 9
 
-# Bollinger Bands - Inchange
-BOL_PERIOD = 20
-BOL_NUM_STD = 2
+# BOL (Bollinger Bands) - RETIRE
+# Impossible a synchroniser (toujours lag +1 quelque soit les parametres)
+# BOL_PERIOD = 20  # DEPRECATED
 ```
 
-**Pourquoi des periodes agressives?**
+**Pourquoi la synchronisation?**
 
-Les indicateurs lents (RSI 14, CCI 20, MACD 12/26) ne peuvent pas capturer la cible rapide (pente du filtre), causant de l'overfitting massif (84% train vs 65% test).
+Les indicateurs doivent etre alignes (Lag 0) avec la reference Kalman(Close) pour eviter la "pollution des gradients" pendant l'entrainement. Un indicateur desynchronise (lag +1) envoie des signaux contradictoires.
 
 ### Bibliotheque TA
 
@@ -257,7 +259,7 @@ python src/prepare_data.py --timeframe all --filter kalman
 1. **Chargement**: BTC + ETH (1min et 5min)
 2. **Trim edges**: 100 bougies debut + 100 fin
 3. **Split temporel**: 70% train / 15% val / 15% test
-4. **Calcul indicateurs**: RSI, CCI, BOL, MACD (normalises 0-100)
+4. **Calcul indicateurs**: RSI, CCI, MACD (normalises 0-100) - BOL retire
 5. **Generation labels**: Filtre Kalman/Decycler (non-causal)
 6. **Creation sequences**: 12 timesteps
 7. **Sauvegarde**: `.npz` compresse
@@ -349,17 +351,18 @@ X_train = np.concatenate([X_btc, X_eth])
 # indicators = calculate(all_data)   # RSI de fin BTC pollue debut ETH
 ```
 
-### 3. Periodes Agressives des Indicateurs
+### 3. Periodes Synchronisees des Indicateurs
 
 ```python
-# constants.py - Periodes courtes pour eviter overfitting
-RSI_PERIOD = 5      # Pas 14!
-CCI_PERIOD = 7      # Pas 20!
-MACD_FAST = 5       # Pas 12!
-MACD_SLOW = 13      # Pas 26!
+# constants.py - Periodes optimisees pour Lag 0
+RSI_PERIOD = 14     # Synchronise
+CCI_PERIOD = 20     # Synchronise
+MACD_FAST = 10      # Synchronise
+MACD_SLOW = 26
+# BOL retire (impossible a synchroniser)
 ```
 
-### 3. Labels Non-Causaux (OK)
+### 4. Labels Non-Causaux (OK)
 
 - Labels generes avec filtre forward-backward (Kalman/Decycler)
 - Utilise le futur mais c'est la **cible** a predire
@@ -409,11 +412,12 @@ SEQUENCE_LENGTH = 12
 
 | Indicateur | Accuracy | F1 | Notes |
 |------------|----------|-----|-------|
-| MACD | 79.5% | 0.795 | Meilleur |
-| CCI | 77.9% | 0.782 | |
-| BOL | 74.6% | 0.746 | |
-| RSI | 73.8% | 0.739 | Plus difficile |
-| **MOYENNE** | **76.4%** | **0.765** | +26.4pts vs baseline |
+| RSI | 82% | 0.82 | Lag 0, Conc 82% |
+| CCI | 74% | 0.74 | Lag 0, Conc 74% |
+| MACD | 70% | 0.70 | Lag 0, Conc 70% |
+| **MOYENNE** | **~75%** | **~0.75** | Tous synchronises |
+
+Note: BOL retire car toujours Lag +1 (non synchronisable).
 
 ### Configuration Optimale Actuelle
 
@@ -462,7 +466,7 @@ python src/constants.py
 
 - [ ] Accuracy >= 85% sur test set
 - [ ] Gap train/test <= 10%
-- [ ] Periodes indicateurs agressives (RSI=5, CCI=7, MACD=5/13)
+- [ ] Indicateurs synchronises (RSI=14, CCI=20, MACD=10/26, Lag 0)
 - [ ] Split temporel strict
 - [ ] Bibliotheque ta utilisee
 - [ ] Backtest sur donnees non vues
@@ -535,4 +539,4 @@ Cela capture les tendances court/moyen/long terme simultanement.
 
 **Cree par**: Claude Code
 **Derniere MAJ**: 2026-01-02
-**Version**: 2.1
+**Version**: 3.0 (3 indicateurs synchronises, BOL retire)

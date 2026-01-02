@@ -2,15 +2,19 @@
 Modèle CNN-LSTM Multi-Output pour Prédiction de Pente d'Indicateurs.
 
 Architecture:
-    Input: (batch, 12, 4) - 12 timesteps × 4 indicateurs
+    Input: (batch, 12, 3) - 12 timesteps × 3 indicateurs
     → CNN (extraction features)
     → LSTM (patterns temporels)
     → Dense partagé
-    → 4 têtes de sortie indépendantes (RSI, CCI, BOL, MACD)
-    Output: (batch, 4) - 4 probabilités binaires
+    → 3 têtes de sortie indépendantes (RSI, CCI, MACD)
+    Output: (batch, 3) - 3 probabilités binaires
 
 Loss:
-    BCE moyenne sur les 4 outputs (poids égaux)
+    BCE moyenne sur les 3 outputs (poids égaux)
+
+Note:
+    BOL (Bollinger Bands) a été retiré car impossible à synchroniser
+    avec les autres indicateurs (toujours lag +1).
 """
 
 import torch
@@ -37,25 +41,24 @@ from constants import (
     DENSE_DROPOUT,
     LOSS_WEIGHT_RSI,
     LOSS_WEIGHT_CCI,
-    LOSS_WEIGHT_BOL,
     LOSS_WEIGHT_MACD
 )
 
 
 class MultiOutputCNNLSTM(nn.Module):
     """
-    Modèle CNN-LSTM avec 4 sorties indépendantes.
+    Modèle CNN-LSTM avec 3 sorties indépendantes.
 
     Architecture:
         1. CNN 1D pour extraction de features temporelles
         2. LSTM pour capturer patterns séquentiels
         3. Dense partagé
-        4. 4 têtes de sortie (une par indicateur)
+        4. 3 têtes de sortie (RSI, CCI, MACD)
 
     Args:
         sequence_length: Longueur des séquences (défaut: 12)
-        num_indicators: Nombre d'indicateurs en input (défaut: 4)
-        num_outputs: Nombre de sorties (défaut: 4)
+        num_indicators: Nombre d'indicateurs en input (défaut: 3)
+        num_outputs: Nombre de sorties (défaut: 3)
         cnn_filters: Nombre de filtres CNN (défaut: 64)
         cnn_kernel_size: Taille kernel CNN (défaut: 3)
         lstm_hidden_size: Taille hidden LSTM (défaut: 64)
@@ -130,13 +133,13 @@ class MultiOutputCNNLSTM(nn.Module):
         self.dense_dropout = nn.Dropout(dense_dropout)
 
         # =====================================================================
-        # Têtes de Sortie Indépendantes (4 outputs)
+        # Têtes de Sortie Indépendantes (3 outputs)
         # =====================================================================
         # Chaque tête prédit la pente d'un indicateur (0 ou 1)
+        # Note: BOL retiré car non synchronisable
 
         self.head_rsi = nn.Linear(dense_hidden_size, 1)
         self.head_cci = nn.Linear(dense_hidden_size, 1)
-        self.head_bol = nn.Linear(dense_hidden_size, 1)
         self.head_macd = nn.Linear(dense_hidden_size, 1)
 
         logger.info("✅ Modèle CNN-LSTM créé:")
@@ -191,17 +194,16 @@ class MultiOutputCNNLSTM(nn.Module):
         x = self.dense_dropout(x)
 
         # =====================================================================
-        # Têtes de Sortie (4 outputs indépendants)
+        # Têtes de Sortie (3 outputs indépendants)
         # =====================================================================
         # Chaque tête produit une logit → Sigmoid → probabilité
 
         out_rsi = torch.sigmoid(self.head_rsi(x))    # (batch, 1)
         out_cci = torch.sigmoid(self.head_cci(x))    # (batch, 1)
-        out_bol = torch.sigmoid(self.head_bol(x))    # (batch, 1)
         out_macd = torch.sigmoid(self.head_macd(x))  # (batch, 1)
 
-        # Concaténer les 4 sorties
-        outputs = torch.cat([out_rsi, out_cci, out_bol, out_macd], dim=1)  # (batch, 4)
+        # Concaténer les 3 sorties
+        outputs = torch.cat([out_rsi, out_cci, out_macd], dim=1)  # (batch, 3)
 
         return outputs
 
@@ -240,15 +242,14 @@ class MultiOutputBCELoss(nn.Module):
     Calcule la BCE pour chaque output et fait la moyenne pondérée.
 
     Args:
-        weights: Poids pour chaque output [RSI, CCI, BOL, MACD] (défaut: égaux)
+        weights: Poids pour chaque output [RSI, CCI, MACD] (défaut: égaux)
     """
 
     def __init__(
         self,
-        weights: Tuple[float, float, float, float] = (
+        weights: Tuple[float, float, float] = (
             LOSS_WEIGHT_RSI,
             LOSS_WEIGHT_CCI,
-            LOSS_WEIGHT_BOL,
             LOSS_WEIGHT_MACD
         )
     ):
@@ -261,8 +262,7 @@ class MultiOutputBCELoss(nn.Module):
         self.bce = nn.BCELoss(reduction='none')
 
         logger.info(f"✅ Loss multi-output créée:")
-        logger.info(f"  Poids: RSI={weights[0]}, CCI={weights[1]}, "
-                   f"BOL={weights[2]}, MACD={weights[3]}")
+        logger.info(f"  Poids: RSI={weights[0]}, CCI={weights[1]}, MACD={weights[2]}")
 
     def forward(
         self,
@@ -270,11 +270,11 @@ class MultiOutputBCELoss(nn.Module):
         targets: torch.Tensor
     ) -> torch.Tensor:
         """
-        Calcule la loss BCE moyenne pondérée sur les 4 outputs.
+        Calcule la loss BCE moyenne pondérée sur les 3 outputs.
 
         Args:
-            predictions: Prédictions (batch, 4)
-            targets: Labels (batch, 4)
+            predictions: Prédictions (batch, 3)
+            targets: Labels (batch, 3)
 
         Returns:
             Loss scalaire (moyenne pondérée)
@@ -283,10 +283,10 @@ class MultiOutputBCELoss(nn.Module):
         if self.weights.device != predictions.device:
             self.weights = self.weights.to(predictions.device)
 
-        # BCE pour chaque output: (batch, 4)
+        # BCE pour chaque output: (batch, 3)
         bce_per_output = self.bce(predictions, targets.float())
 
-        # Moyenne sur batch: (4,)
+        # Moyenne sur batch: (3,)
         bce_mean = bce_per_output.mean(dim=0)
 
         # Pondération: scalaire
@@ -310,7 +310,7 @@ def create_model(
 
     Args:
         device: Device ('cpu' ou 'cuda')
-        num_indicators: Nombre de features en entrée (défaut: 4)
+        num_indicators: Nombre de features en entrée (défaut: 3)
         cnn_filters: Nombre de filtres CNN
         lstm_hidden_size: Taille hidden LSTM
         lstm_num_layers: Nombre de couches LSTM
@@ -357,8 +357,8 @@ def compute_metrics(
     Calcule les métriques de classification pour multi-output.
 
     Args:
-        predictions: Probabilités (batch, 4)
-        targets: Labels (batch, 4)
+        predictions: Probabilités (batch, 3)
+        targets: Labels (batch, 3)
         threshold: Seuil de décision
 
     Returns:
@@ -370,7 +370,7 @@ def compute_metrics(
 
     metrics = {}
 
-    indicator_names = ['RSI', 'CCI', 'BOL', 'MACD']
+    indicator_names = ['RSI', 'CCI', 'MACD']
 
     for i, name in enumerate(indicator_names):
         # Extraire prédictions et targets pour cet indicateur
@@ -401,10 +401,10 @@ def compute_metrics(
         metrics[f'{name}_f1'] = f1
 
     # Moyennes
-    metrics['avg_accuracy'] = sum(metrics[f'{n}_accuracy'] for n in indicator_names) / 4
-    metrics['avg_precision'] = sum(metrics[f'{n}_precision'] for n in indicator_names) / 4
-    metrics['avg_recall'] = sum(metrics[f'{n}_recall'] for n in indicator_names) / 4
-    metrics['avg_f1'] = sum(metrics[f'{n}_f1'] for n in indicator_names) / 4
+    metrics['avg_accuracy'] = sum(metrics[f'{n}_accuracy'] for n in indicator_names) / 3
+    metrics['avg_precision'] = sum(metrics[f'{n}_precision'] for n in indicator_names) / 3
+    metrics['avg_recall'] = sum(metrics[f'{n}_recall'] for n in indicator_names) / 3
+    metrics['avg_f1'] = sum(metrics[f'{n}_f1'] for n in indicator_names) / 3
 
     return metrics
 
@@ -458,7 +458,7 @@ if __name__ == '__main__':
     metrics = compute_metrics(output, y_dummy)
 
     logger.info("  Métriques par indicateur:")
-    for name in ['RSI', 'CCI', 'BOL', 'MACD']:
+    for name in ['RSI', 'CCI', 'MACD']:
         logger.info(f"    {name}: Acc={metrics[f'{name}_accuracy']:.3f}, "
                    f"F1={metrics[f'{name}_f1']:.3f}")
 

@@ -86,23 +86,25 @@ def compute_vote_metrics(
     threshold: float = 0.5
 ) -> Dict[str, float]:
     """
-    Calcule les métriques du vote majoritaire (moyenne des 4 prédictions).
+    Calcule les métriques du vote majoritaire (moyenne des 3 prédictions).
+
+    Note: BOL retiré car impossible à synchroniser (toujours lag +1).
 
     Args:
-        predictions: Probabilités (batch, 4)
-        targets: Labels (batch, 4)
+        predictions: Probabilités (batch, 3)
+        targets: Labels (batch, 3)
         threshold: Seuil de décision
 
     Returns:
         Dictionnaire avec métriques du vote
     """
-    # Vote: moyenne des 4 probabilités
+    # Vote: moyenne des 3 probabilités
     vote_probs = predictions.mean(dim=1)  # (batch,)
 
     # Vote binaire
     vote_preds = (vote_probs >= threshold).float()
 
-    # Target du vote: majorité des labels (>=2 sur 4)
+    # Target du vote: majorité des labels (>=2 sur 3)
     vote_targets = (targets.sum(dim=1) >= 2).float()
 
     # Métriques
@@ -147,8 +149,8 @@ def print_metrics_table(metrics: Dict[str, float]):
     logger.info(f"{'Indicateur':<12} {'Accuracy':<10} {'Precision':<10} {'Recall':<10} {'F1':<10}")
     logger.info("-"*80)
 
-    # Lignes par indicateur
-    for name in ['RSI', 'CCI', 'BOL', 'MACD']:
+    # Lignes par indicateur (BOL retiré - non synchronisable)
+    for name in ['RSI', 'CCI', 'MACD']:
         acc = metrics.get(f'{name}_accuracy', 0.0)
         prec = metrics.get(f'{name}_precision', 0.0)
         rec = metrics.get(f'{name}_recall', 0.0)
@@ -168,7 +170,7 @@ def print_metrics_table(metrics: Dict[str, float]):
     # Vote majoritaire
     if 'vote_accuracy' in metrics:
         logger.info("="*80)
-        logger.info("VOTE MAJORITAIRE (Moyenne des 4 prédictions)")
+        logger.info("VOTE MAJORITAIRE (Moyenne des 3 prédictions)")
         logger.info("="*80)
 
         vote_acc = metrics['vote_accuracy']

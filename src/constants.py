@@ -25,22 +25,25 @@ ETH_CANDLES = 100000  # Nombre de bougies ETH à charger
 # =============================================================================
 # CONSTANTES INDICATEURS TECHNIQUES
 # =============================================================================
+# Paramètres optimisés pour synchronisation (lag 0 avec Kalman(Close))
+# Voir results/sync_optimization.json pour détails
 
 # RSI (Relative Strength Index)
-RSI_PERIOD = 5  # Période agressive pour capturer les mouvements rapides
+RSI_PERIOD = 14  # Synchronisé: Lag 0, Concordance 82%
 
 # CCI (Commodity Channel Index)
-CCI_PERIOD = 7  # Période agressive pour réactivité
+CCI_PERIOD = 20  # Synchronisé: Lag 0, Concordance 74%
 CCI_CONSTANT = 0.015  # Constante de scaling du CCI
 
-# Bollinger Bands
-BOL_PERIOD = 20  # Période de la moyenne mobile
-BOL_NUM_STD = 2  # Nombre d'écarts-types pour les bandes
-
 # MACD (Moving Average Convergence Divergence)
-MACD_FAST = 5  # Période EMA rapide (agressive)
-MACD_SLOW = 13  # Période EMA lente (agressive)
+MACD_FAST = 10  # Synchronisé: Lag 0, Concordance 70%
+MACD_SLOW = 26  # Période EMA lente
 MACD_SIGNAL = 9  # Période de la ligne de signal
+
+# NOTE: BOL (Bollinger Bands) retiré car impossible à synchroniser (toujours lag +1)
+# Les anciennes constantes sont gardées pour référence mais non utilisées
+BOL_PERIOD = 20  # DEPRECATED - non utilisé
+BOL_NUM_STD = 2  # DEPRECATED - non utilisé
 
 # =============================================================================
 # CONSTANTES NORMALISATION
@@ -82,8 +85,8 @@ LABEL_FILTER_TYPE = 'decycler'  # 'decycler' ou 'kalman'
 # =============================================================================
 
 # Architecture
-NUM_INDICATORS = 4  # RSI, CCI, BOL, MACD
-NUM_OUTPUTS = 4  # Une sortie par indicateur (multi-output)
+NUM_INDICATORS = 3  # RSI, CCI, MACD (BOL retiré - non synchronisable)
+NUM_OUTPUTS = 3  # Une sortie par indicateur (multi-output)
 
 # CNN
 CNN_FILTERS = 64  # Nombre de filtres CNN
@@ -121,7 +124,6 @@ RANDOM_SEED = 42
 # Loss weights (si on veut pondérer différemment les sorties)
 LOSS_WEIGHT_RSI = 1.0  # Poids pour la loss du RSI
 LOSS_WEIGHT_CCI = 1.0  # Poids pour la loss du CCI
-LOSS_WEIGHT_BOL = 1.0  # Poids pour la loss du BOL
 LOSS_WEIGHT_MACD = 1.0  # Poids pour la loss du MACD
 
 # =============================================================================
@@ -239,7 +241,7 @@ def validate_constants():
     assert BOL_PERIOD > 0, "BOL_PERIOD doit être > 0"
     assert MACD_FAST < MACD_SLOW, "MACD_FAST doit être < MACD_SLOW"
 
-    assert NUM_INDICATORS == 4, "NUM_INDICATORS doit être 4 (RSI, CCI, BOL, MACD)"
+    assert NUM_INDICATORS == 3, "NUM_INDICATORS doit être 3 (RSI, CCI, MACD)"
     assert NUM_OUTPUTS == NUM_INDICATORS, "NUM_OUTPUTS doit égaler NUM_INDICATORS"
 
     assert 0 < TRAIN_SPLIT < 1, "TRAIN_SPLIT doit être entre 0 et 1"
@@ -270,11 +272,11 @@ if __name__ == '__main__':
     print(f"  BTC candles: {BTC_CANDLES:,}")
     print(f"  ETH candles: {ETH_CANDLES:,}")
 
-    print(f"\n📈 INDICATEURS:")
+    print(f"\n📈 INDICATEURS (synchronisés lag 0):")
     print(f"  RSI period: {RSI_PERIOD}")
     print(f"  CCI period: {CCI_PERIOD}")
-    print(f"  Bollinger period: {BOL_PERIOD} (±{BOL_NUM_STD}σ)")
     print(f"  MACD: {MACD_FAST}/{MACD_SLOW}/{MACD_SIGNAL}")
+    print(f"  (BOL retiré - non synchronisable)")
 
     print(f"\n🤖 MODÈLE:")
     print(f"  Input: {NUM_INDICATORS} indicateurs × {SEQUENCE_LENGTH} timesteps")
