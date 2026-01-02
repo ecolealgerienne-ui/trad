@@ -105,7 +105,7 @@ DENSE_DROPOUT = 0.3  # Dropout après dense
 # =============================================================================
 
 # Hyperparamètres
-BATCH_SIZE = 32  # Taille du batch
+BATCH_SIZE = 128  # Taille du batch (augmenté pour utiliser GPU à >80%)
 LEARNING_RATE = 0.001  # Taux d'apprentissage (Adam)
 NUM_EPOCHS = 100  # Nombre d'époques
 EARLY_STOPPING_PATIENCE = 10  # Patience pour early stopping
