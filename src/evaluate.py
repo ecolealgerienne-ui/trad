@@ -268,8 +268,12 @@ def main():
     # Récupérer config du modèle (ou utiliser défauts si ancien checkpoint)
     model_config = checkpoint.get('model_config', {})
 
+    # Détecter le nombre de features depuis les données
+    num_features = X_test.shape[2]
+
     model, loss_fn = create_model(
         device=device,
+        num_indicators=num_features,
         cnn_filters=model_config.get('cnn_filters', 64),
         lstm_hidden_size=model_config.get('lstm_hidden_size', 64),
         lstm_num_layers=model_config.get('lstm_num_layers', 2),
