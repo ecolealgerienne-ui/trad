@@ -10,6 +10,7 @@ from torch.utils.data import DataLoader
 from pathlib import Path
 import logging
 import json
+import argparse
 from typing import Dict
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,8 @@ from data_utils import load_and_split_btc_eth
 from indicators import prepare_datasets
 from model import create_model, compute_metrics
 from train import IndicatorDataset
+from prepare_data import load_prepared_data
+from utils import log_dataset_metadata
 
 
 def evaluate_model(
@@ -178,8 +181,24 @@ def print_metrics_table(metrics: Dict[str, float]):
         logger.info(f"{'VOTE':<12} {vote_acc:<10.3f} {vote_prec:<10.3f} {vote_rec:<10.3f} {vote_f1:<10.3f}")
 
 
+def parse_args():
+    """Parse les arguments CLI."""
+    parser = argparse.ArgumentParser(
+        description='Évaluation du modèle CNN-LSTM sur le test set',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+
+    parser.add_argument('--data', '-d', type=str, default=None,
+                        help='Chemin vers les données préparées (.npz). '
+                             'IMPORTANT: Doit être le même dataset utilisé pour l\'entraînement!')
+
+    return parser.parse_args()
+
+
 def main():
     """Pipeline complet d'évaluation."""
+    # Parser arguments
+    args = parse_args()
 
     # Configurer logging
     logging.basicConfig(
@@ -204,16 +223,22 @@ def main():
     # =========================================================================
     # 1. CHARGER LES DONNÉES
     # =========================================================================
-    logger.info("\n1. Chargement des données BTC + ETH...")
-    train_df, val_df, test_df = load_and_split_btc_eth()
-
-    # =========================================================================
-    # 2. PRÉPARER LES DATASETS
-    # =========================================================================
-    logger.info("\n2. Préparation des datasets...")
-    datasets = prepare_datasets(train_df, val_df, test_df)
-
-    X_test, Y_test = datasets['test']
+    if args.data:
+        # Charger données préparées (même dataset que l'entraînement)
+        logger.info(f"\n1. Chargement des données préparées: {args.data}")
+        prepared = load_prepared_data(args.data)
+        X_test, Y_test = prepared['test']
+        metadata = prepared['metadata']
+        log_dataset_metadata(metadata, logger)
+    else:
+        # Préparer données à la volée (ATTENTION: labels 5min par défaut!)
+        logger.info("\n1. Chargement des données BTC + ETH...")
+        logger.warning("⚠️ Pas de --data spécifié, génération des labels 5min à la volée")
+        logger.warning("   Si le modèle a été entraîné sur labels 30min, utilisez:")
+        logger.warning("   python src/evaluate.py --data data/prepared/dataset_5min_labels30min_kalman.npz")
+        train_df, val_df, test_df = load_and_split_btc_eth()
+        datasets = prepare_datasets(train_df, val_df, test_df)
+        X_test, Y_test = datasets['test']
 
     logger.info(f"  Test: X={X_test.shape}, Y={Y_test.shape}")
 
