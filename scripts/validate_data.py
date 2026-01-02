@@ -16,7 +16,7 @@ Usage:
     python scripts/validate_data.py
 
     # Vérifier un fichier spécifique
-    python scripts/validate_data.py --file ../data_trad/BTCUSD_all_5m.csv
+    python scripts/validate_data.py --file data_trad/BTCUSD_all_5m.csv
 
     # Corriger les problèmes automatiquement
     python scripts/validate_data.py --fix
@@ -27,12 +27,20 @@ Usage:
 
 import argparse
 import logging
+import sys
 from datetime import timedelta
 from pathlib import Path
 from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
+
+# Ajouter le dossier src au path pour importer les constantes
+SCRIPT_DIR = Path(__file__).parent.absolute()
+SRC_DIR = SCRIPT_DIR.parent / 'src'
+sys.path.insert(0, str(SRC_DIR))
+
+from constants import DATA_TRAD_DIR
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,7 +49,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Configuration
-DATA_DIR = Path('../data_trad')
+DATA_DIR = Path(SRC_DIR / DATA_TRAD_DIR).resolve()
 INTERVALS = {
     '1m': timedelta(minutes=1),
     '5m': timedelta(minutes=5),

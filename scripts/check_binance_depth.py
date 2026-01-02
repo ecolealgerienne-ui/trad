@@ -15,14 +15,22 @@ Usage:
 
 import argparse
 import os
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
 
+# Ajouter le dossier src au path pour importer les constantes
+SCRIPT_DIR = Path(__file__).parent.absolute()
+SRC_DIR = SCRIPT_DIR.parent / 'src'
+sys.path.insert(0, str(SRC_DIR))
+
+from constants import DATA_TRAD_DIR
+
 # Configuration
-OUTPUT_DIR = Path('../data_trad')
+OUTPUT_DIR = Path(SRC_DIR / DATA_TRAD_DIR).resolve()
 
 # Top cryptos par capitalisation (avec dates de listing approximatives sur Binance)
 TOP_CRYPTOS = {

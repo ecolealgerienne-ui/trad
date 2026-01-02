@@ -33,7 +33,7 @@ from constants import (
     BOL_PERIOD, BOL_NUM_STD,
     DECYCLER_CUTOFF, KALMAN_PROCESS_VAR, KALMAN_MEASURE_VAR
 )
-from data_utils import load_crypto_data, trim_edges
+from data_utils import load_crypto_data, trim_edges, split_sequences_chronological
 from utils import log_dataset_metadata
 from indicators import (
     prepare_datasets,
@@ -75,61 +75,12 @@ def prepare_single_asset(df, filter_type: str, asset_name: str = "Asset") -> tup
     return X, Y
 
 
-def split_sequences(X, Y, train_ratio=TRAIN_SPLIT, val_ratio=VAL_SPLIT,
-                    test_ratio=TEST_SPLIT, random_seed=42):
-    """
-    Split les séquences (pas les données brutes) avec:
-    - TEST = fin (données les plus récentes)
-    - VAL = échantillonné aléatoirement du reste
-    - TRAIN = le reste
-
-    IMPORTANT: Le split est fait sur les SÉQUENCES déjà créées, pas sur les
-    données brutes. Cela garantit que les indicateurs ont été calculés sur
-    des données contiguës.
-
-    Args:
-        X: array de shape (n_sequences, seq_len, n_features)
-        Y: array de shape (n_sequences, n_outputs)
-        train_ratio, val_ratio, test_ratio: proportions
-        random_seed: seed pour reproductibilité
-
-    Returns:
-        (X_train, Y_train), (X_val, Y_val), (X_test, Y_test)
-    """
-    # Vérifier les ratios
-    total_ratio = train_ratio + val_ratio + test_ratio
-    if abs(total_ratio - 1.0) > 0.01:
-        raise ValueError(f"Ratios doivent sommer à 1.0, got {total_ratio}")
-
-    n_total = len(X)
-    n_test = int(n_total * test_ratio)
-    n_val = int(n_total * val_ratio)
-
-    # 1. TEST = toujours à la fin (données les plus récentes)
-    X_test = X[-n_test:]
-    Y_test = Y[-n_test:]
-
-    # Remaining (pour train + val)
-    X_remaining = X[:-n_test]
-    Y_remaining = Y[:-n_test]
-
-    # 2. VAL = échantillonné aléatoirement du reste
-    np.random.seed(random_seed)
-    val_indices = np.random.choice(len(X_remaining), size=n_val, replace=False)
-    train_indices = np.setdiff1d(np.arange(len(X_remaining)), val_indices)
-
-    X_val = X_remaining[val_indices]
-    Y_val = Y_remaining[val_indices]
-
-    # 3. TRAIN = le reste
-    X_train = X_remaining[train_indices]
-    Y_train = Y_remaining[train_indices]
-
-    # Vérification finale
-    assert len(X_train) + len(X_val) + len(X_test) == n_total, \
-        f"Split error: {len(X_train)} + {len(X_val)} + {len(X_test)} != {n_total}"
-
-    return (X_train, Y_train), (X_val, Y_val), (X_test, Y_test)
+# Note: split_sequences remplacée par split_sequences_chronological importée de data_utils
+# La nouvelle fonction utilise un GAP entre train/val/test pour éviter le data leakage
+# causé par l'overlap des séquences sliding window.
+#
+# Alias pour compatibilité (sera supprimé dans une version future)
+split_sequences = split_sequences_chronological
 
 
 def prepare_and_save(timeframe: str = '5',
@@ -193,9 +144,9 @@ def prepare_and_save(timeframe: str = '5',
         X_eth, Y_eth = prepare_single_asset(eth_trimmed, filter_type, "ETH")
 
         # =====================================================================
-        # SPLIT DES SÉQUENCES (Test=fin, Val=échantillonné)
+        # SPLIT CHRONOLOGIQUE AVEC GAP (évite data leakage)
         # =====================================================================
-        logger.info(f"\n📊 Split des séquences (Test=fin, Val=échantillonné)...")
+        logger.info(f"\n📊 Split chronologique avec GAP (évite leakage)...")
 
         (X_btc_train, Y_btc_train), (X_btc_val, Y_btc_val), (X_btc_test, Y_btc_test) = \
             split_sequences(X_btc, Y_btc)
@@ -257,7 +208,9 @@ def prepare_and_save(timeframe: str = '5',
                 'train': TRAIN_SPLIT,
                 'val': VAL_SPLIT,
                 'test': TEST_SPLIT
-            }
+            },
+            'split_strategy': 'chronological_with_gap',
+            'gap_size': SEQUENCE_LENGTH
         }
 
         # Sauvegarder
@@ -331,9 +284,9 @@ def prepare_and_save(timeframe: str = '5',
         X_eth_5m, Y_eth_5m = prepare_single_asset(eth_5m_trimmed, filter_type, "ETH-5m")
 
         # =====================================================================
-        # SPLIT DES SÉQUENCES 5min (Test=fin, Val=échantillonné)
+        # SPLIT CHRONOLOGIQUE 5min AVEC GAP (évite data leakage)
         # =====================================================================
-        logger.info(f"\n📊 Split des séquences 5min (Test=fin, Val=échantillonné)...")
+        logger.info(f"\n📊 Split chronologique 5min avec GAP (évite leakage)...")
 
         (X_btc_5m_train, Y_btc_5m_train), (X_btc_5m_val, Y_btc_5m_val), (X_btc_5m_test, Y_btc_5m_test) = \
             split_sequences(X_btc_5m, Y_btc_5m)
@@ -388,7 +341,8 @@ def prepare_and_save(timeframe: str = '5',
                 '1min_sequences': train_1m_seqs,
                 '5min_sequences': train_5m_seqs
             },
-            'split_strategy': 'test=end, val=sampled',
+            'split_strategy': 'chronological_with_gap',
+            'gap_size': SEQUENCE_LENGTH,
             'val_test_source': '5min_only',
             'sequence_length': SEQUENCE_LENGTH,
             'num_indicators': NUM_INDICATORS,

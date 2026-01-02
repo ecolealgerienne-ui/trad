@@ -24,11 +24,19 @@ Usage:
 import argparse
 import logging
 import os
+import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
+
+# Ajouter le dossier src au path pour importer les constantes
+SCRIPT_DIR = Path(__file__).parent.absolute()
+SRC_DIR = SCRIPT_DIR.parent / 'src'
+sys.path.insert(0, str(SRC_DIR))
+
+from constants import DATA_TRAD_DIR
 
 logging.basicConfig(
     level=logging.INFO,
@@ -40,7 +48,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_SYMBOLS = ['BTCUSDT', 'ETHUSDT']
 DEFAULT_INTERVAL = '5m'
 DEFAULT_DAYS = 365  # 1 an par défaut
-OUTPUT_DIR = Path('../data_trad')
+OUTPUT_DIR = Path(SRC_DIR / DATA_TRAD_DIR).resolve()
 
 # Mapping symbole Binance -> nom fichier
 SYMBOL_MAP = {

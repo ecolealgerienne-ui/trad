@@ -36,14 +36,16 @@ from constants import (
     BOL_PERIOD, BOL_NUM_STD,
     DECYCLER_CUTOFF, KALMAN_PROCESS_VAR, KALMAN_MEASURE_VAR
 )
-from data_utils import load_crypto_data, trim_edges
+from data_utils import load_crypto_data, trim_edges, split_sequences_chronological
 from indicators import (
     calculate_all_indicators_for_model,
     generate_all_labels,
     create_sequences
 )
 from utils import resample_to_timeframe
-from prepare_data import split_sequences
+
+# Alias pour compatibilité
+split_sequences = split_sequences_chronological
 
 
 def resample_5min_to_30min(df_5min: pd.DataFrame) -> pd.DataFrame:
@@ -312,9 +314,9 @@ def prepare_and_save_30min(filter_type: str = LABEL_FILTER_TYPE,
     )
 
     # =========================================================================
-    # 3. Split des séquences (Test=fin, Val=échantillonné)
+    # 3. Split chronologique avec GAP (évite data leakage)
     # =========================================================================
-    logger.info(f"\n3. Split des séquences...")
+    logger.info(f"\n3. Split chronologique avec GAP...")
 
     (X_btc_train, Y_btc_train), (X_btc_val, Y_btc_val), (X_btc_test, Y_btc_test) = \
         split_sequences(X_btc, Y_btc)
@@ -382,6 +384,8 @@ def prepare_and_save_30min(filter_type: str = LABEL_FILTER_TYPE,
             'val': VAL_SPLIT,
             'test': TEST_SPLIT
         },
+        'split_strategy': 'chronological_with_gap',
+        'gap_size': SEQUENCE_LENGTH,
         'description': f"Features {feature_type}, Labels = pente indicateurs 30min"
     }
 

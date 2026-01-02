@@ -153,16 +153,21 @@ TRADING_DAYS_PER_YEAR = 365  # Crypto trade 24/7
 # CONSTANTES CHEMINS
 # =============================================================================
 
-# Données
-DATA_DIR = '../data_trad'  # Dossier des données réelles
-RAW_DATA_DIR = '../data_trad'
+# Dossier racine des données brutes (relatif au dossier src/)
+# IMPORTANT: Ce chemin est utilisé par tous les scripts de données
+DATA_TRAD_DIR = '../data_trad'
+
+# Alias pour compatibilité
+DATA_DIR = DATA_TRAD_DIR
+RAW_DATA_DIR = DATA_TRAD_DIR
 PROCESSED_DATA_DIR = 'data/processed'
 
 # Fichiers de données brutes par timeframe
-BTC_DATA_FILE_1M = '../data_trad/BTCUSD_all_1m.csv'
-ETH_DATA_FILE_1M = '../data_trad/ETHUSD_all_1m.csv'
-BTC_DATA_FILE_5M = '../data_trad/BTCUSD_all_5m.csv'
-ETH_DATA_FILE_5M = '../data_trad/ETHUSD_all_5m.csv'
+# Utilise DATA_TRAD_DIR pour centraliser le chemin
+BTC_DATA_FILE_1M = f'{DATA_TRAD_DIR}/BTCUSD_all_1m.csv'
+ETH_DATA_FILE_1M = f'{DATA_TRAD_DIR}/ETHUSD_all_1m.csv'
+BTC_DATA_FILE_5M = f'{DATA_TRAD_DIR}/BTCUSD_all_5m.csv'
+ETH_DATA_FILE_5M = f'{DATA_TRAD_DIR}/ETHUSD_all_5m.csv'
 
 # Timeframe par défaut (1 ou 5)
 DEFAULT_TIMEFRAME = 5  # Minutes
