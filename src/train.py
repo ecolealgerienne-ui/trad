@@ -20,6 +20,7 @@ from tqdm import tqdm
 import json
 from typing import Dict, Tuple
 import sys
+import argparse
 
 logger = logging.getLogger(__name__)
 
@@ -324,8 +325,42 @@ def train_model(
     return history
 
 
+def parse_args():
+    """Parse les arguments de ligne de commande."""
+    parser = argparse.ArgumentParser(
+        description='Entraînement du modèle CNN-LSTM Multi-Output',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+
+    # Hyperparamètres d'entraînement
+    parser.add_argument('--batch-size', type=int, default=BATCH_SIZE,
+                        help='Taille des batches')
+    parser.add_argument('--lr', '--learning-rate', type=float, default=LEARNING_RATE,
+                        dest='learning_rate', help='Learning rate')
+    parser.add_argument('--epochs', type=int, default=NUM_EPOCHS,
+                        help='Nombre maximum d\'époques')
+    parser.add_argument('--patience', type=int, default=EARLY_STOPPING_PATIENCE,
+                        help='Patience pour early stopping')
+
+    # Chemins
+    parser.add_argument('--save-path', type=str, default=BEST_MODEL_PATH,
+                        help='Chemin pour sauvegarder le meilleur modèle')
+
+    # Autres
+    parser.add_argument('--seed', type=int, default=RANDOM_SEED,
+                        help='Random seed pour reproductibilité')
+    parser.add_argument('--device', type=str, default='auto',
+                        choices=['auto', 'cuda', 'cpu'],
+                        help='Device à utiliser (auto détecte automatiquement)')
+
+    return parser.parse_args()
+
+
 def main():
     """Pipeline complet d'entraînement."""
+
+    # Parser arguments
+    args = parse_args()
 
     # Configurer logging
     logging.basicConfig(
@@ -338,12 +373,23 @@ def main():
     logger.info("="*80)
 
     # Seed pour reproductibilité
-    torch.manual_seed(RANDOM_SEED)
-    np.random.seed(RANDOM_SEED)
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
 
     # Device
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    if args.device == 'auto':
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    else:
+        device = args.device
     logger.info(f"\nDevice: {device}")
+
+    # Afficher hyperparamètres
+    logger.info(f"\n⚙️ Hyperparamètres:")
+    logger.info(f"  Batch size: {args.batch_size}")
+    logger.info(f"  Learning rate: {args.learning_rate}")
+    logger.info(f"  Max epochs: {args.epochs}")
+    logger.info(f"  Early stopping patience: {args.patience}")
+    logger.info(f"  Random seed: {args.seed}")
 
     # =========================================================================
     # 1. CHARGER LES DONNÉES
@@ -376,7 +422,7 @@ def main():
 
     train_loader = DataLoader(
         train_dataset,
-        batch_size=BATCH_SIZE,
+        batch_size=args.batch_size,
         shuffle=True,
         num_workers=0,  # 0 pour éviter problèmes multiprocessing
         pin_memory=True if device == 'cuda' else False
@@ -384,7 +430,7 @@ def main():
 
     val_loader = DataLoader(
         val_dataset,
-        batch_size=BATCH_SIZE,
+        batch_size=args.batch_size,
         shuffle=False,
         num_workers=0,
         pin_memory=True if device == 'cuda' else False
@@ -400,12 +446,12 @@ def main():
     model, loss_fn = create_model(device=device)
 
     # Optimizer
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
 
     # =========================================================================
     # 5. ENTRAÎNEMENT
     # =========================================================================
-    logger.info(f"\n5. Entraînement ({NUM_EPOCHS} époques max)...")
+    logger.info(f"\n5. Entraînement ({args.epochs} époques max)...")
 
     history = train_model(
         train_loader=train_loader,
@@ -414,9 +460,9 @@ def main():
         loss_fn=loss_fn,
         optimizer=optimizer,
         device=device,
-        num_epochs=NUM_EPOCHS,
-        patience=EARLY_STOPPING_PATIENCE,
-        save_path=BEST_MODEL_PATH
+        num_epochs=args.epochs,
+        patience=args.patience,
+        save_path=args.save_path
     )
 
     # =========================================================================
@@ -441,7 +487,7 @@ def main():
     logger.info(f"\nMeilleur modèle:")
     logger.info(f"  Époque: {history['best_epoch']}")
     logger.info(f"  Val Loss: {history['best_val_loss']:.4f}")
-    logger.info(f"  Sauvegardé: {BEST_MODEL_PATH}")
+    logger.info(f"  Sauvegardé: {args.save_path}")
 
     logger.info(f"\nProchaines étapes:")
     logger.info(f"  - Évaluer sur test set: python src/evaluate.py")
