@@ -437,7 +437,12 @@ def main():
         X_val, Y_val = prepared['val']
         X_test, Y_test = prepared['test']
         metadata = prepared['metadata']
-        logger.info(f"  Timeframe: {metadata['timeframe']}m")
+        # Support ancien et nouveau format de metadata
+        if 'timeframe' in metadata:
+            logger.info(f"  Timeframe: {metadata['timeframe']}m")
+        else:
+            logger.info(f"  Features: {metadata.get('feature_timeframe', 'unknown')}")
+            logger.info(f"  Labels: {metadata.get('label_timeframe', 'unknown')}")
         logger.info(f"  Filtre: {metadata['filter_type']}")
         logger.info(f"  Créé: {metadata['created_at']}")
     else:
