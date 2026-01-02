@@ -82,6 +82,10 @@ def split_sequences(X, Y, train_ratio=TRAIN_SPLIT, val_ratio=VAL_SPLIT,
     - VAL = échantillonné aléatoirement du reste
     - TRAIN = le reste
 
+    IMPORTANT: Le split est fait sur les SÉQUENCES déjà créées, pas sur les
+    données brutes. Cela garantit que les indicateurs ont été calculés sur
+    des données contiguës.
+
     Args:
         X: array de shape (n_sequences, seq_len, n_features)
         Y: array de shape (n_sequences, n_outputs)
@@ -91,11 +95,16 @@ def split_sequences(X, Y, train_ratio=TRAIN_SPLIT, val_ratio=VAL_SPLIT,
     Returns:
         (X_train, Y_train), (X_val, Y_val), (X_test, Y_test)
     """
+    # Vérifier les ratios
+    total_ratio = train_ratio + val_ratio + test_ratio
+    if abs(total_ratio - 1.0) > 0.01:
+        raise ValueError(f"Ratios doivent sommer à 1.0, got {total_ratio}")
+
     n_total = len(X)
     n_test = int(n_total * test_ratio)
     n_val = int(n_total * val_ratio)
 
-    # 1. TEST = toujours à la fin
+    # 1. TEST = toujours à la fin (données les plus récentes)
     X_test = X[-n_test:]
     Y_test = Y[-n_test:]
 
@@ -114,6 +123,10 @@ def split_sequences(X, Y, train_ratio=TRAIN_SPLIT, val_ratio=VAL_SPLIT,
     # 3. TRAIN = le reste
     X_train = X_remaining[train_indices]
     Y_train = Y_remaining[train_indices]
+
+    # Vérification finale
+    assert len(X_train) + len(X_val) + len(X_test) == n_total, \
+        f"Split error: {len(X_train)} + {len(X_val)} + {len(X_test)} != {n_total}"
 
     return (X_train, Y_train), (X_val, Y_val), (X_test, Y_test)
 
