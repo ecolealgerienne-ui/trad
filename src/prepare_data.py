@@ -33,7 +33,7 @@ from constants import (
     BOL_PERIOD, BOL_NUM_STD,
     DECYCLER_CUTOFF, KALMAN_PROCESS_VAR, KALMAN_MEASURE_VAR
 )
-from data_utils import load_crypto_data, trim_edges, temporal_split
+from data_utils import load_crypto_data, trim_edges
 from indicators import (
     prepare_datasets,
     calculate_all_indicators_for_model,
@@ -74,6 +74,50 @@ def prepare_single_asset(df, filter_type: str, asset_name: str = "Asset") -> tup
     return X, Y
 
 
+def split_sequences(X, Y, train_ratio=TRAIN_SPLIT, val_ratio=VAL_SPLIT,
+                    test_ratio=TEST_SPLIT, random_seed=42):
+    """
+    Split les séquences (pas les données brutes) avec:
+    - TEST = fin (données les plus récentes)
+    - VAL = échantillonné aléatoirement du reste
+    - TRAIN = le reste
+
+    Args:
+        X: array de shape (n_sequences, seq_len, n_features)
+        Y: array de shape (n_sequences, n_outputs)
+        train_ratio, val_ratio, test_ratio: proportions
+        random_seed: seed pour reproductibilité
+
+    Returns:
+        (X_train, Y_train), (X_val, Y_val), (X_test, Y_test)
+    """
+    n_total = len(X)
+    n_test = int(n_total * test_ratio)
+    n_val = int(n_total * val_ratio)
+
+    # 1. TEST = toujours à la fin
+    X_test = X[-n_test:]
+    Y_test = Y[-n_test:]
+
+    # Remaining (pour train + val)
+    X_remaining = X[:-n_test]
+    Y_remaining = Y[:-n_test]
+
+    # 2. VAL = échantillonné aléatoirement du reste
+    np.random.seed(random_seed)
+    val_indices = np.random.choice(len(X_remaining), size=n_val, replace=False)
+    train_indices = np.setdiff1d(np.arange(len(X_remaining)), val_indices)
+
+    X_val = X_remaining[val_indices]
+    Y_val = Y_remaining[val_indices]
+
+    # 3. TRAIN = le reste
+    X_train = X_remaining[train_indices]
+    Y_train = Y_remaining[train_indices]
+
+    return (X_train, Y_train), (X_val, Y_val), (X_test, Y_test)
+
+
 def prepare_and_save(timeframe: str = '5',
                      filter_type: str = LABEL_FILTER_TYPE,
                      output_path: str = None,
@@ -112,7 +156,8 @@ def prepare_and_save(timeframe: str = '5',
             eth_file = ETH_DATA_FILE_5M
             logger.info(f"📊 Timeframe: 5 minutes")
 
-        logger.info(f"   → Indicateurs calculés PAR ASSET (pas de pollution entre assets)")
+        logger.info(f"   → Indicateurs calculés PAR ASSET sur données CONTIGUËS")
+        logger.info(f"   → Split appliqué aux SÉQUENCES (pas aux données brutes)")
 
         btc = load_crypto_data(btc_file, n_candles=btc_candles, asset_name='BTC')
         eth = load_crypto_data(eth_file, n_candles=eth_candles, asset_name='ETH')
@@ -126,43 +171,31 @@ def prepare_and_save(timeframe: str = '5',
         logger.info(f"🔧 Filtre pour labels: {filter_type}")
 
         # =====================================================================
-        # SPLIT TEMPOREL PAR ASSET (avant calcul indicateurs!)
+        # CALCUL INDICATEURS SUR DONNÉES CONTIGUËS (AVANT SPLIT!)
         # =====================================================================
-        logger.info(f"\n📊 Split temporel (70/15/15)...")
+        logger.info(f"\n📈 Calcul des indicateurs sur données CONTIGUËS...")
 
-        btc_train, btc_val, btc_test = temporal_split(
-            btc_trimmed, train_ratio=TRAIN_SPLIT, val_ratio=VAL_SPLIT,
-            test_ratio=TEST_SPLIT, shuffle_train=False
-        )
-
-        eth_train, eth_val, eth_test = temporal_split(
-            eth_trimmed, train_ratio=TRAIN_SPLIT, val_ratio=VAL_SPLIT,
-            test_ratio=TEST_SPLIT, shuffle_train=False
-        )
+        X_btc, Y_btc = prepare_single_asset(btc_trimmed, filter_type, "BTC")
+        X_eth, Y_eth = prepare_single_asset(eth_trimmed, filter_type, "ETH")
 
         # =====================================================================
-        # CALCUL INDICATEURS PAR ASSET SÉPARÉMENT (évite pollution)
+        # SPLIT DES SÉQUENCES (Test=fin, Val=échantillonné)
         # =====================================================================
-        logger.info(f"\n📈 Calcul des indicateurs PAR ASSET (évite pollution)...")
+        logger.info(f"\n📊 Split des séquences (Test=fin, Val=échantillonné)...")
 
-        # TRAIN
-        logger.info(f"\n🏋️ TRAIN SET:")
-        X_btc_train, Y_btc_train = prepare_single_asset(btc_train, filter_type, "BTC-train")
-        X_eth_train, Y_eth_train = prepare_single_asset(eth_train, filter_type, "ETH-train")
+        (X_btc_train, Y_btc_train), (X_btc_val, Y_btc_val), (X_btc_test, Y_btc_test) = \
+            split_sequences(X_btc, Y_btc)
+        (X_eth_train, Y_eth_train), (X_eth_val, Y_eth_val), (X_eth_test, Y_eth_test) = \
+            split_sequences(X_eth, Y_eth)
+
+        logger.info(f"  BTC: Train={len(X_btc_train)}, Val={len(X_btc_val)}, Test={len(X_btc_test)}")
+        logger.info(f"  ETH: Train={len(X_eth_train)}, Val={len(X_eth_val)}, Test={len(X_eth_test)}")
+
+        # Concaténer les assets
         X_train = np.concatenate([X_btc_train, X_eth_train], axis=0)
         Y_train = np.concatenate([Y_btc_train, Y_eth_train], axis=0)
-
-        # VAL
-        logger.info(f"\n✅ VAL SET:")
-        X_btc_val, Y_btc_val = prepare_single_asset(btc_val, filter_type, "BTC-val")
-        X_eth_val, Y_eth_val = prepare_single_asset(eth_val, filter_type, "ETH-val")
         X_val = np.concatenate([X_btc_val, X_eth_val], axis=0)
         Y_val = np.concatenate([Y_btc_val, Y_eth_val], axis=0)
-
-        # TEST
-        logger.info(f"\n🧪 TEST SET:")
-        X_btc_test, Y_btc_test = prepare_single_asset(btc_test, filter_type, "BTC-test")
-        X_eth_test, Y_eth_test = prepare_single_asset(eth_test, filter_type, "ETH-test")
         X_test = np.concatenate([X_btc_test, X_eth_test], axis=0)
         Y_test = np.concatenate([Y_btc_test, Y_eth_test], axis=0)
 
@@ -269,51 +302,42 @@ def prepare_and_save(timeframe: str = '5',
         logger.info(f"\n🔧 Filtre pour labels: {filter_type}")
 
         # =====================================================================
-        # SPLIT TEMPOREL PAR ASSET (5min seulement pour val/test)
+        # CALCUL INDICATEURS SUR DONNÉES CONTIGUËS (AVANT SPLIT!)
         # =====================================================================
-        logger.info(f"\n📊 Split temporel 5min (70/15/15)...")
+        logger.info(f"\n📈 Calcul des indicateurs sur données CONTIGUËS...")
 
-        # Split BTC-5m
-        btc_5m_train, btc_5m_val, btc_5m_test = temporal_split(
-            btc_5m_trimmed, train_ratio=TRAIN_SPLIT, val_ratio=VAL_SPLIT,
-            test_ratio=TEST_SPLIT, shuffle_train=False
-        )
-
-        # Split ETH-5m
-        eth_5m_train, eth_5m_val, eth_5m_test = temporal_split(
-            eth_5m_trimmed, train_ratio=TRAIN_SPLIT, val_ratio=VAL_SPLIT,
-            test_ratio=TEST_SPLIT, shuffle_train=False
-        )
-
-        # =====================================================================
-        # CALCUL INDICATEURS PAR ASSET SÉPARÉMENT (évite pollution)
-        # =====================================================================
-        logger.info(f"\n📈 Calcul des indicateurs PAR ASSET (évite pollution)...")
-
-        # --- TRAIN: 1min complet + train de 5min ---
-        logger.info(f"\n🏋️ TRAIN SET:")
+        # 1min - tout pour le train
+        logger.info(f"\n🏋️ Données 1min (tout pour train):")
         X_btc_1m, Y_btc_1m = prepare_single_asset(btc_1m_trimmed, filter_type, "BTC-1m")
         X_eth_1m, Y_eth_1m = prepare_single_asset(eth_1m_trimmed, filter_type, "ETH-1m")
-        X_btc_5m_train, Y_btc_5m_train = prepare_single_asset(btc_5m_train, filter_type, "BTC-5m-train")
-        X_eth_5m_train, Y_eth_5m_train = prepare_single_asset(eth_5m_train, filter_type, "ETH-5m-train")
 
-        # Merger les trains
+        # 5min - sera splitté
+        logger.info(f"\n📊 Données 5min (sera splitté):")
+        X_btc_5m, Y_btc_5m = prepare_single_asset(btc_5m_trimmed, filter_type, "BTC-5m")
+        X_eth_5m, Y_eth_5m = prepare_single_asset(eth_5m_trimmed, filter_type, "ETH-5m")
+
+        # =====================================================================
+        # SPLIT DES SÉQUENCES 5min (Test=fin, Val=échantillonné)
+        # =====================================================================
+        logger.info(f"\n📊 Split des séquences 5min (Test=fin, Val=échantillonné)...")
+
+        (X_btc_5m_train, Y_btc_5m_train), (X_btc_5m_val, Y_btc_5m_val), (X_btc_5m_test, Y_btc_5m_test) = \
+            split_sequences(X_btc_5m, Y_btc_5m)
+        (X_eth_5m_train, Y_eth_5m_train), (X_eth_5m_val, Y_eth_5m_val), (X_eth_5m_test, Y_eth_5m_test) = \
+            split_sequences(X_eth_5m, Y_eth_5m)
+
+        logger.info(f"  BTC-5m: Train={len(X_btc_5m_train)}, Val={len(X_btc_5m_val)}, Test={len(X_btc_5m_test)}")
+        logger.info(f"  ETH-5m: Train={len(X_eth_5m_train)}, Val={len(X_eth_5m_val)}, Test={len(X_eth_5m_test)}")
+
+        # Combiner: Train = 1min + 5min_train
         X_train = np.concatenate([X_btc_1m, X_eth_1m, X_btc_5m_train, X_eth_5m_train], axis=0)
         Y_train = np.concatenate([Y_btc_1m, Y_eth_1m, Y_btc_5m_train, Y_eth_5m_train], axis=0)
 
-        # --- VAL: 5min seulement ---
-        logger.info(f"\n✅ VAL SET (5min only):")
-        X_btc_5m_val, Y_btc_5m_val = prepare_single_asset(btc_5m_val, filter_type, "BTC-5m-val")
-        X_eth_5m_val, Y_eth_5m_val = prepare_single_asset(eth_5m_val, filter_type, "ETH-5m-val")
-
+        # Val = 5min_val seulement
         X_val = np.concatenate([X_btc_5m_val, X_eth_5m_val], axis=0)
         Y_val = np.concatenate([Y_btc_5m_val, Y_eth_5m_val], axis=0)
 
-        # --- TEST: 5min seulement ---
-        logger.info(f"\n🧪 TEST SET (5min only):")
-        X_btc_5m_test, Y_btc_5m_test = prepare_single_asset(btc_5m_test, filter_type, "BTC-5m-test")
-        X_eth_5m_test, Y_eth_5m_test = prepare_single_asset(eth_5m_test, filter_type, "ETH-5m-test")
-
+        # Test = 5min_test seulement
         X_test = np.concatenate([X_btc_5m_test, X_eth_5m_test], axis=0)
         Y_test = np.concatenate([Y_btc_5m_test, Y_eth_5m_test], axis=0)
 
@@ -333,7 +357,8 @@ def prepare_and_save(timeframe: str = '5',
         # Métadonnées
         total_1m = len(btc_1m_trimmed) + len(eth_1m_trimmed)
         total_5m = len(btc_5m_trimmed) + len(eth_5m_trimmed)
-        train_5m_total = len(btc_5m_train) + len(eth_5m_train)
+        train_5m_seqs = len(X_btc_5m_train) + len(X_eth_5m_train)
+        train_1m_seqs = len(X_btc_1m) + len(X_eth_1m)
 
         metadata = {
             'created_at': datetime.now().isoformat(),
@@ -346,9 +371,10 @@ def prepare_and_save(timeframe: str = '5',
             'val_size': len(X_val),
             'test_size': len(X_test),
             'train_composition': {
-                '1min': total_1m,
-                '5min': train_5m_total
+                '1min_sequences': train_1m_seqs,
+                '5min_sequences': train_5m_seqs
             },
+            'split_strategy': 'test=end, val=sampled',
             'val_test_source': '5min_only',
             'sequence_length': SEQUENCE_LENGTH,
             'num_indicators': NUM_INDICATORS,
