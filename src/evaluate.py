@@ -237,15 +237,31 @@ def main():
     # =========================================================================
     logger.info(f"\n4. Chargement du modèle depuis {BEST_MODEL_PATH}...")
 
-    model, loss_fn = create_model(device=device)
+    # Charger checkpoint pour récupérer la config du modèle
+    checkpoint = torch.load(BEST_MODEL_PATH, map_location=device)
+
+    # Récupérer config du modèle (ou utiliser défauts si ancien checkpoint)
+    model_config = checkpoint.get('model_config', {})
+
+    model, loss_fn = create_model(
+        device=device,
+        cnn_filters=model_config.get('cnn_filters', 64),
+        lstm_hidden_size=model_config.get('lstm_hidden_size', 64),
+        lstm_num_layers=model_config.get('lstm_num_layers', 2),
+        lstm_dropout=model_config.get('lstm_dropout', 0.2),
+        dense_hidden_size=model_config.get('dense_hidden_size', 32),
+        dense_dropout=model_config.get('dense_dropout', 0.3),
+    )
 
     # Charger poids
-    checkpoint = torch.load(BEST_MODEL_PATH, map_location=device)
     model.load_state_dict(checkpoint['model_state_dict'])
 
     logger.info(f"  ✅ Modèle chargé (époque {checkpoint['epoch']})")
     logger.info(f"     Val Loss: {checkpoint['val_loss']:.4f}")
     logger.info(f"     Val Acc: {checkpoint['val_accuracy']:.3f}")
+    if model_config:
+        logger.info(f"     Config: CNN={model_config.get('cnn_filters')}, "
+                   f"LSTM={model_config.get('lstm_hidden_size')}x{model_config.get('lstm_num_layers')}")
 
     # =========================================================================
     # 5. ÉVALUATION

@@ -233,7 +233,8 @@ def train_model(
     device: str,
     num_epochs: int = NUM_EPOCHS,
     patience: int = EARLY_STOPPING_PATIENCE,
-    save_path: str = BEST_MODEL_PATH
+    save_path: str = BEST_MODEL_PATH,
+    model_config: Dict = None
 ) -> Dict:
     """
     Boucle d'entraînement complète avec early stopping.
@@ -308,6 +309,7 @@ def train_model(
                 'optimizer_state_dict': optimizer.state_dict(),
                 'val_loss': val_metrics['loss'],
                 'val_accuracy': val_metrics['avg_accuracy'],
+                'model_config': model_config,
             }, save_path)
 
             logger.info(f"  ✅ Meilleur modèle sauvegardé (val_loss: {val_metrics['loss']:.4f})")
@@ -506,6 +508,16 @@ def main():
     # =========================================================================
     logger.info(f"\n4. Entraînement ({args.epochs} époques max)...")
 
+    # Config du modèle pour sauvegarde
+    model_config = {
+        'cnn_filters': args.cnn_filters,
+        'lstm_hidden_size': args.lstm_hidden,
+        'lstm_num_layers': args.lstm_layers,
+        'lstm_dropout': args.lstm_dropout,
+        'dense_hidden_size': args.dense_hidden,
+        'dense_dropout': args.dense_dropout,
+    }
+
     history = train_model(
         train_loader=train_loader,
         val_loader=val_loader,
@@ -515,7 +527,8 @@ def main():
         device=device,
         num_epochs=args.epochs,
         patience=args.patience,
-        save_path=args.save_path
+        save_path=args.save_path,
+        model_config=model_config
     )
 
     # =========================================================================
