@@ -25,22 +25,25 @@ ETH_CANDLES = 100000  # Nombre de bougies ETH à charger
 # =============================================================================
 # CONSTANTES INDICATEURS TECHNIQUES
 # =============================================================================
+# Paramètres optimisés pour synchronisation (lag 0 avec Kalman(Close))
+# Voir results/sync_optimization.json pour détails
 
 # RSI (Relative Strength Index)
-RSI_PERIOD = 14  # Période standard du RSI
+RSI_PERIOD = 14  # Synchronisé: Lag 0, Concordance 82%
 
 # CCI (Commodity Channel Index)
-CCI_PERIOD = 20  # Période du CCI
+CCI_PERIOD = 20  # Synchronisé: Lag 0, Concordance 74%
 CCI_CONSTANT = 0.015  # Constante de scaling du CCI
 
-# Bollinger Bands
-BOL_PERIOD = 20  # Période de la moyenne mobile
-BOL_NUM_STD = 2  # Nombre d'écarts-types pour les bandes
-
 # MACD (Moving Average Convergence Divergence)
-MACD_FAST = 12  # Période EMA rapide
+MACD_FAST = 10  # Synchronisé: Lag 0, Concordance 70%
 MACD_SLOW = 26  # Période EMA lente
 MACD_SIGNAL = 9  # Période de la ligne de signal
+
+# NOTE: BOL (Bollinger Bands) retiré car impossible à synchroniser (toujours lag +1)
+# Les anciennes constantes sont gardées pour référence mais non utilisées
+BOL_PERIOD = 20  # DEPRECATED - non utilisé
+BOL_NUM_STD = 2  # DEPRECATED - non utilisé
 
 # =============================================================================
 # CONSTANTES NORMALISATION
@@ -82,8 +85,8 @@ LABEL_FILTER_TYPE = 'decycler'  # 'decycler' ou 'kalman'
 # =============================================================================
 
 # Architecture
-NUM_INDICATORS = 4  # RSI, CCI, BOL, MACD
-NUM_OUTPUTS = 4  # Une sortie par indicateur (multi-output)
+NUM_INDICATORS = 3  # RSI, CCI, MACD (BOL retiré - non synchronisable)
+NUM_OUTPUTS = 3  # Une sortie par indicateur (multi-output)
 
 # CNN
 CNN_FILTERS = 64  # Nombre de filtres CNN
@@ -105,7 +108,7 @@ DENSE_DROPOUT = 0.3  # Dropout après dense
 # =============================================================================
 
 # Hyperparamètres
-BATCH_SIZE = 32  # Taille du batch
+BATCH_SIZE = 128  # Taille du batch (augmenté pour utiliser GPU à >80%)
 LEARNING_RATE = 0.001  # Taux d'apprentissage (Adam)
 NUM_EPOCHS = 100  # Nombre d'époques
 EARLY_STOPPING_PATIENCE = 10  # Patience pour early stopping
@@ -121,7 +124,6 @@ RANDOM_SEED = 42
 # Loss weights (si on veut pondérer différemment les sorties)
 LOSS_WEIGHT_RSI = 1.0  # Poids pour la loss du RSI
 LOSS_WEIGHT_CCI = 1.0  # Poids pour la loss du CCI
-LOSS_WEIGHT_BOL = 1.0  # Poids pour la loss du BOL
 LOSS_WEIGHT_MACD = 1.0  # Poids pour la loss du MACD
 
 # =============================================================================
@@ -153,13 +155,51 @@ TRADING_DAYS_PER_YEAR = 365  # Crypto trade 24/7
 # CONSTANTES CHEMINS
 # =============================================================================
 
-# Données
-DATA_DIR = '../data_trad'  # Dossier des données réelles
-RAW_DATA_DIR = '../data_trad'
+# Dossier racine des données brutes (relatif à la racine du projet)
+# IMPORTANT: Exécuter les scripts depuis la racine: python src/script.py
+DATA_TRAD_DIR = 'data_trad'
+
+# Alias pour compatibilité
+DATA_DIR = DATA_TRAD_DIR
+RAW_DATA_DIR = DATA_TRAD_DIR
 PROCESSED_DATA_DIR = 'data/processed'
 
-BTC_DATA_FILE = '../data_trad/BTCUSD_all_5m.csv'
-ETH_DATA_FILE = '../data_trad/ETHUSD_all_5m.csv'
+# Fichiers de données brutes par timeframe
+# Utilise DATA_TRAD_DIR pour centraliser le chemin
+
+# 1 minute data
+BTC_DATA_FILE_1M = f'{DATA_TRAD_DIR}/BTCUSD_all_1m.csv'
+ETH_DATA_FILE_1M = f'{DATA_TRAD_DIR}/ETHUSD_all_1m.csv'
+
+# 5 minutes data - tous les assets disponibles
+BTC_DATA_FILE_5M = f'{DATA_TRAD_DIR}/BTCUSD_all_5m.csv'
+ETH_DATA_FILE_5M = f'{DATA_TRAD_DIR}/ETHUSD_all_5m.csv'
+BNB_DATA_FILE_5M = f'{DATA_TRAD_DIR}/BNBUSD_all_5m.csv'
+ADA_DATA_FILE_5M = f'{DATA_TRAD_DIR}/ADAUSD_all_5m.csv'
+LTC_DATA_FILE_5M = f'{DATA_TRAD_DIR}/LTCUSD_all_5m.csv'
+
+# Liste des assets disponibles (pour les scripts multi-assets)
+AVAILABLE_ASSETS_5M = {
+    'BTC': BTC_DATA_FILE_5M,
+    'ETH': ETH_DATA_FILE_5M,
+    'BNB': BNB_DATA_FILE_5M,
+    'ADA': ADA_DATA_FILE_5M,
+    'LTC': LTC_DATA_FILE_5M,
+}
+
+# Assets par défaut pour l'entraînement
+DEFAULT_ASSETS = ['BTC', 'ETH']  # Peut être étendu à tous: list(AVAILABLE_ASSETS_5M.keys())
+
+# Timeframe par défaut (1 ou 5)
+DEFAULT_TIMEFRAME = 5  # Minutes
+
+# Aliases pour compatibilité (utilisent le timeframe par défaut)
+BTC_DATA_FILE = BTC_DATA_FILE_5M
+ETH_DATA_FILE = ETH_DATA_FILE_5M
+
+# Fichiers de données préparées (numpy)
+PREPARED_DATA_DIR = 'data/prepared'
+PREPARED_DATA_FILE = 'data/prepared/dataset.npz'
 
 # Modèles
 MODELS_DIR = 'models'
@@ -201,7 +241,7 @@ def validate_constants():
     assert BOL_PERIOD > 0, "BOL_PERIOD doit être > 0"
     assert MACD_FAST < MACD_SLOW, "MACD_FAST doit être < MACD_SLOW"
 
-    assert NUM_INDICATORS == 4, "NUM_INDICATORS doit être 4 (RSI, CCI, BOL, MACD)"
+    assert NUM_INDICATORS == 3, "NUM_INDICATORS doit être 3 (RSI, CCI, MACD)"
     assert NUM_OUTPUTS == NUM_INDICATORS, "NUM_OUTPUTS doit égaler NUM_INDICATORS"
 
     assert 0 < TRAIN_SPLIT < 1, "TRAIN_SPLIT doit être entre 0 et 1"
@@ -232,11 +272,11 @@ if __name__ == '__main__':
     print(f"  BTC candles: {BTC_CANDLES:,}")
     print(f"  ETH candles: {ETH_CANDLES:,}")
 
-    print(f"\n📈 INDICATEURS:")
+    print(f"\n📈 INDICATEURS (synchronisés lag 0):")
     print(f"  RSI period: {RSI_PERIOD}")
     print(f"  CCI period: {CCI_PERIOD}")
-    print(f"  Bollinger period: {BOL_PERIOD} (±{BOL_NUM_STD}σ)")
     print(f"  MACD: {MACD_FAST}/{MACD_SLOW}/{MACD_SIGNAL}")
+    print(f"  (BOL retiré - non synchronisable)")
 
     print(f"\n🤖 MODÈLE:")
     print(f"  Input: {NUM_INDICATORS} indicateurs × {SEQUENCE_LENGTH} timesteps")

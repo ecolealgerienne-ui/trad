@@ -10,6 +10,7 @@ from torch.utils.data import DataLoader
 from pathlib import Path
 import logging
 import json
+import argparse
 from typing import Dict
 
 logger = logging.getLogger(__name__)
@@ -20,10 +21,10 @@ from constants import (
     BEST_MODEL_PATH,
     RESULTS_DIR
 )
-from data_utils import load_and_split_btc_eth
-from indicators import prepare_datasets
 from model import create_model, compute_metrics
 from train import IndicatorDataset
+from prepare_data import load_prepared_data
+from utils import log_dataset_metadata
 
 
 def evaluate_model(
@@ -85,23 +86,25 @@ def compute_vote_metrics(
     threshold: float = 0.5
 ) -> Dict[str, float]:
     """
-    Calcule les métriques du vote majoritaire (moyenne des 4 prédictions).
+    Calcule les métriques du vote majoritaire (moyenne des 3 prédictions).
+
+    Note: BOL retiré car impossible à synchroniser (toujours lag +1).
 
     Args:
-        predictions: Probabilités (batch, 4)
-        targets: Labels (batch, 4)
+        predictions: Probabilités (batch, 3)
+        targets: Labels (batch, 3)
         threshold: Seuil de décision
 
     Returns:
         Dictionnaire avec métriques du vote
     """
-    # Vote: moyenne des 4 probabilités
+    # Vote: moyenne des 3 probabilités
     vote_probs = predictions.mean(dim=1)  # (batch,)
 
     # Vote binaire
     vote_preds = (vote_probs >= threshold).float()
 
-    # Target du vote: majorité des labels (>=2 sur 4)
+    # Target du vote: majorité des labels (>=2 sur 3)
     vote_targets = (targets.sum(dim=1) >= 2).float()
 
     # Métriques
@@ -146,8 +149,8 @@ def print_metrics_table(metrics: Dict[str, float]):
     logger.info(f"{'Indicateur':<12} {'Accuracy':<10} {'Precision':<10} {'Recall':<10} {'F1':<10}")
     logger.info("-"*80)
 
-    # Lignes par indicateur
-    for name in ['RSI', 'CCI', 'BOL', 'MACD']:
+    # Lignes par indicateur (BOL retiré - non synchronisable)
+    for name in ['RSI', 'CCI', 'MACD']:
         acc = metrics.get(f'{name}_accuracy', 0.0)
         prec = metrics.get(f'{name}_precision', 0.0)
         rec = metrics.get(f'{name}_recall', 0.0)
@@ -167,7 +170,7 @@ def print_metrics_table(metrics: Dict[str, float]):
     # Vote majoritaire
     if 'vote_accuracy' in metrics:
         logger.info("="*80)
-        logger.info("VOTE MAJORITAIRE (Moyenne des 4 prédictions)")
+        logger.info("VOTE MAJORITAIRE (Moyenne des 3 prédictions)")
         logger.info("="*80)
 
         vote_acc = metrics['vote_accuracy']
@@ -178,8 +181,24 @@ def print_metrics_table(metrics: Dict[str, float]):
         logger.info(f"{'VOTE':<12} {vote_acc:<10.3f} {vote_prec:<10.3f} {vote_rec:<10.3f} {vote_f1:<10.3f}")
 
 
+def parse_args():
+    """Parse les arguments CLI."""
+    parser = argparse.ArgumentParser(
+        description='Évaluation du modèle CNN-LSTM sur le test set',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+
+    parser.add_argument('--data', '-d', type=str, required=True,
+                        help='Chemin vers les données préparées (.npz). '
+                             'IMPORTANT: Doit être le même dataset utilisé pour l\'entraînement!')
+
+    return parser.parse_args()
+
+
 def main():
     """Pipeline complet d'évaluation."""
+    # Parser arguments
+    args = parse_args()
 
     # Configurer logging
     logging.basicConfig(
@@ -204,16 +223,12 @@ def main():
     # =========================================================================
     # 1. CHARGER LES DONNÉES
     # =========================================================================
-    logger.info("\n1. Chargement des données BTC + ETH...")
-    train_df, val_df, test_df = load_and_split_btc_eth()
-
-    # =========================================================================
-    # 2. PRÉPARER LES DATASETS
-    # =========================================================================
-    logger.info("\n2. Préparation des datasets...")
-    datasets = prepare_datasets(train_df, val_df, test_df)
-
-    X_test, Y_test = datasets['test']
+    # Charger données préparées (même dataset que l'entraînement)
+    logger.info(f"\n1. Chargement des données préparées: {args.data}")
+    prepared = load_prepared_data(args.data)
+    X_test, Y_test = prepared['test']
+    metadata = prepared['metadata']
+    log_dataset_metadata(metadata, logger)
 
     logger.info(f"  Test: X={X_test.shape}, Y={Y_test.shape}")
 
@@ -237,15 +252,35 @@ def main():
     # =========================================================================
     logger.info(f"\n4. Chargement du modèle depuis {BEST_MODEL_PATH}...")
 
-    model, loss_fn = create_model(device=device)
+    # Charger checkpoint pour récupérer la config du modèle
+    checkpoint = torch.load(BEST_MODEL_PATH, map_location=device)
+
+    # Récupérer config du modèle (ou utiliser défauts si ancien checkpoint)
+    model_config = checkpoint.get('model_config', {})
+
+    # Détecter le nombre de features depuis les données
+    num_features = X_test.shape[2]
+
+    model, loss_fn = create_model(
+        device=device,
+        num_indicators=num_features,
+        cnn_filters=model_config.get('cnn_filters', 64),
+        lstm_hidden_size=model_config.get('lstm_hidden_size', 64),
+        lstm_num_layers=model_config.get('lstm_num_layers', 2),
+        lstm_dropout=model_config.get('lstm_dropout', 0.2),
+        dense_hidden_size=model_config.get('dense_hidden_size', 32),
+        dense_dropout=model_config.get('dense_dropout', 0.3),
+    )
 
     # Charger poids
-    checkpoint = torch.load(BEST_MODEL_PATH, map_location=device)
     model.load_state_dict(checkpoint['model_state_dict'])
 
     logger.info(f"  ✅ Modèle chargé (époque {checkpoint['epoch']})")
     logger.info(f"     Val Loss: {checkpoint['val_loss']:.4f}")
     logger.info(f"     Val Acc: {checkpoint['val_accuracy']:.3f}")
+    if model_config:
+        logger.info(f"     Config: CNN={model_config.get('cnn_filters')}, "
+                   f"LSTM={model_config.get('lstm_hidden_size')}x{model_config.get('lstm_num_layers')}")
 
     # =========================================================================
     # 5. ÉVALUATION

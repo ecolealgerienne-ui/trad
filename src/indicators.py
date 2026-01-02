@@ -8,7 +8,10 @@ Indicateurs implémentés:
 - RSI (Relative Strength Index)
 - CCI (Commodity Channel Index)
 - MACD (Moving Average Convergence Divergence)
-- Bollinger Bands
+
+Note:
+    BOL (Bollinger Bands) a été retiré car impossible à synchroniser
+    avec les autres indicateurs (toujours lag +1).
 """
 
 import numpy as np
@@ -21,8 +24,8 @@ logger = logging.getLogger(__name__)
 # Import constants
 from constants import (
     RSI_PERIOD, CCI_PERIOD, CCI_CONSTANT,
-    BOL_PERIOD, BOL_NUM_STD,
     MACD_FAST, MACD_SLOW, MACD_SIGNAL,
+    BOL_PERIOD, BOL_NUM_STD,  # DEPRECATED - kept for utility functions
     CCI_RAW_MIN, CCI_RAW_MAX,
     INDICATOR_MIN, INDICATOR_MAX,
     MACD_NORM_WINDOW,
@@ -701,18 +704,18 @@ def create_sequences(indicators: np.ndarray,
         Y[i] = labels[i]                          → Label au temps i
 
     Args:
-        indicators: Array (n_samples, n_indicators) - 4 indicateurs normalisés
-        labels: Array (n_samples, n_outputs) - 4 labels binaires (un par indicateur)
+        indicators: Array (n_samples, n_indicators) - 3 indicateurs normalisés (RSI, CCI, MACD)
+        labels: Array (n_samples, n_outputs) - 3 labels binaires (un par indicateur)
         sequence_length: Longueur des séquences (défaut: 12)
 
     Returns:
-        X: Array (n_sequences, sequence_length, n_indicators) - Shape (N, 12, 4)
-        Y: Array (n_sequences, n_outputs) - Shape (N, 4)
+        X: Array (n_sequences, sequence_length, n_indicators) - Shape (N, 12, 3+)
+        Y: Array (n_sequences, n_outputs) - Shape (N, 3)
 
     Example:
         >>> X, Y = create_sequences(indicators, labels, sequence_length=12)
-        >>> print(X.shape)  # (N, 12, 4)
-        >>> print(Y.shape)  # (N, 4)
+        >>> print(X.shape)  # (N, 12, 3) ou (N, 12, 4) avec step_index
+        >>> print(Y.shape)  # (N, 3)
     """
     n_samples = len(indicators)
     n_indicators = indicators.shape[1]
@@ -739,23 +742,89 @@ def create_sequences(indicators: np.ndarray,
 # PIPELINE COMPLET
 # =============================================================================
 
-def calculate_all_indicators_for_model(df: pd.DataFrame) -> np.ndarray:
+def _calculate_indicators_with_ta(df: pd.DataFrame) -> np.ndarray:
     """
-    Calcule les 4 indicateurs normalisés pour le modèle IA.
+    Calcule les 3 indicateurs avec la bibliothèque 'ta' (Technical Analysis).
+
+    Plus optimisée et testée que les calculs manuels.
+
+    Note: BOL retiré car impossible à synchroniser (toujours lag +1).
+    """
+    from indicators_ta import (
+        calculate_rsi_ta,
+        calculate_cci_ta,
+        calculate_macd_ta
+    )
+
+    # 1. RSI (déjà 0-100)
+    rsi = calculate_rsi_ta(df['close'], window=RSI_PERIOD)
+    logger.info(f"  ✓ RSI({RSI_PERIOD}) calculé [ta lib]")
+
+    # 2. CCI normalisé (-200/+200 → 0-100)
+    cci_raw = calculate_cci_ta(df['high'], df['low'], df['close'],
+                               window=CCI_PERIOD, constant=CCI_CONSTANT)
+    cci_norm = normalize_cci(cci_raw)
+    logger.info(f"  ✓ CCI({CCI_PERIOD}) calculé et normalisé [ta lib]")
+
+    # 3. MACD Histogram normalisé
+    macd_data = calculate_macd_ta(df['close'],
+                                  window_fast=MACD_FAST,
+                                  window_slow=MACD_SLOW,
+                                  window_sign=MACD_SIGNAL)
+    macd_hist_norm = normalize_macd_histogram(macd_data['diff'])  # diff = histogram
+    logger.info(f"  ✓ MACD({MACD_FAST}/{MACD_SLOW}/{MACD_SIGNAL}) histogram normalisé [ta lib]")
+
+    # Combiner en array (n_samples, 3)
+    indicators = np.column_stack([rsi, cci_norm, macd_hist_norm])
+
+    # Gérer les NaN (warm-up des indicateurs)
+    indicators_df = pd.DataFrame(indicators, columns=['RSI', 'CCI', 'MACD'])
+    indicators_df = indicators_df.ffill().fillna(50.0)
+    indicators = indicators_df.values
+
+    n_nan_before = np.sum(np.isnan(np.column_stack([rsi, cci_norm, macd_hist_norm])))
+    if n_nan_before > 0:
+        logger.info(f"  ℹ️ {n_nan_before} NaN gérés (warm-up des indicateurs)")
+
+    logger.info(f"Indicateurs combinés: shape={indicators.shape}")
+
+    return indicators
+
+
+def calculate_all_indicators_for_model(df: pd.DataFrame, use_ta_lib: bool = True) -> np.ndarray:
+    """
+    Calcule les 3 indicateurs normalisés pour le modèle IA.
 
     Indicateurs (tous normalisés 0-100):
         1. RSI(14)           → Déjà 0-100
         2. CCI(20)           → -200/+200 → 0-100
-        3. Bollinger %B(20)  → 0-100
-        4. MACD Histogram    → Normalisé dynamiquement → 0-100
+        3. MACD Histogram    → Normalisé dynamiquement → 0-100
+
+    Note: BOL retiré car impossible à synchroniser (toujours lag +1).
 
     Args:
         df: DataFrame avec colonnes ['open', 'high', 'low', 'close']
+        use_ta_lib: Si True, utilise la bibliothèque 'ta' (recommandé)
 
     Returns:
-        Array (n_samples, 4) avec les 4 indicateurs normalisés
+        Array (n_samples, 3) avec les 3 indicateurs normalisés
     """
-    logger.info("Calcul des 4 indicateurs pour le modèle IA...")
+    # Essayer d'utiliser la bibliothèque ta (plus optimisée)
+    if use_ta_lib:
+        try:
+            from indicators_ta import (
+                calculate_rsi_ta,
+                calculate_cci_ta,
+                calculate_macd_ta,
+                TA_AVAILABLE
+            )
+            if TA_AVAILABLE:
+                logger.info("Calcul des 3 indicateurs avec bibliothèque TA...")
+                return _calculate_indicators_with_ta(df)
+        except ImportError:
+            logger.warning("Module indicators_ta non disponible, fallback sur calcul manuel")
+
+    logger.info("Calcul des 3 indicateurs (méthode manuelle)...")
 
     # 1. RSI (déjà 0-100)
     rsi = calculate_rsi(df['close'], period=RSI_PERIOD)
@@ -767,13 +836,7 @@ def calculate_all_indicators_for_model(df: pd.DataFrame) -> np.ndarray:
     cci_norm = normalize_cci(cci_raw)
     logger.info(f"  ✓ CCI({CCI_PERIOD}) calculé et normalisé")
 
-    # 3. Bollinger %B
-    bol_percentb = calculate_bollinger_percent_b(df['close'],
-                                                  period=BOL_PERIOD,
-                                                  num_std=BOL_NUM_STD)
-    logger.info(f"  ✓ Bollinger %B({BOL_PERIOD}, {BOL_NUM_STD}σ) calculé")
-
-    # 4. MACD Histogram normalisé
+    # 3. MACD Histogram normalisé
     macd_data = calculate_macd(df['close'],
                                fast_period=MACD_FAST,
                                slow_period=MACD_SLOW,
@@ -781,16 +844,16 @@ def calculate_all_indicators_for_model(df: pd.DataFrame) -> np.ndarray:
     macd_hist_norm = normalize_macd_histogram(macd_data['histogram'])
     logger.info(f"  ✓ MACD({MACD_FAST}/{MACD_SLOW}/{MACD_SIGNAL}) histogram normalisé")
 
-    # Combiner en array (n_samples, 4)
-    indicators = np.column_stack([rsi, cci_norm, bol_percentb, macd_hist_norm])
+    # Combiner en array (n_samples, 3)
+    indicators = np.column_stack([rsi, cci_norm, macd_hist_norm])
 
     # Gérer les NaN (warm-up des indicateurs)
     # Stratégie: Forward-fill puis remplacer les NaN restants par 50 (valeur neutre)
-    indicators_df = pd.DataFrame(indicators, columns=['RSI', 'CCI', 'BOL', 'MACD'])
+    indicators_df = pd.DataFrame(indicators, columns=['RSI', 'CCI', 'MACD'])
     indicators_df = indicators_df.ffill().fillna(50.0)
     indicators = indicators_df.values
 
-    n_nan_before = np.sum(np.isnan(np.column_stack([rsi, cci_norm, bol_percentb, macd_hist_norm])))
+    n_nan_before = np.sum(np.isnan(np.column_stack([rsi, cci_norm, macd_hist_norm])))
     if n_nan_before > 0:
         logger.info(f"  ℹ️ {n_nan_before} NaN gérés (warm-up des indicateurs)")
 
@@ -801,26 +864,28 @@ def calculate_all_indicators_for_model(df: pd.DataFrame) -> np.ndarray:
 
 def generate_all_labels(indicators: np.ndarray, filter_type: str = LABEL_FILTER_TYPE) -> np.ndarray:
     """
-    Génère les labels pour les 4 indicateurs avec le filtre choisi.
+    Génère les labels pour les 3 indicateurs avec le filtre choisi.
 
     Process:
-        1. Pour chaque indicateur (RSI, CCI, BOL, MACD)
+        1. Pour chaque indicateur (RSI, CCI, MACD)
         2. Appliquer filtre parfait (Decycler ou Kalman forward-backward)
         3. Générer labels binaires (pente haussière = 1, baissière = 0)
 
+    Note: BOL retiré car impossible à synchroniser (toujours lag +1).
+
     Args:
-        indicators: Array (n_samples, 4) - Les 4 indicateurs normalisés
+        indicators: Array (n_samples, 3) - Les 3 indicateurs normalisés
         filter_type: Type de filtre ('decycler' ou 'kalman')
 
     Returns:
-        Array (n_samples, 4) - Les 4 labels binaires
+        Array (n_samples, 3) - Les 3 labels binaires
     """
     logger.info(f"Génération des labels avec filtre {filter_type.upper()}...")
 
     n_samples = indicators.shape[0]
     labels = np.zeros((n_samples, NUM_INDICATORS), dtype=int)
 
-    indicator_names = ['RSI', 'CCI', 'BOL', 'MACD']
+    indicator_names = ['RSI', 'CCI', 'MACD']
 
     for i in range(NUM_INDICATORS):
         # Appliquer le filtre choisi
@@ -849,10 +914,12 @@ def prepare_datasets(train_df: pd.DataFrame,
     Pipeline COMPLET: des DataFrames raw aux datasets prêts pour l'entraînement.
 
     Process:
-        1. Calculer les 4 indicateurs normalisés (RSI, CCI, BOL, MACD)
-        2. Générer les 4 labels avec le filtre choisi (Decycler ou Kalman)
+        1. Calculer les 3 indicateurs normalisés (RSI, CCI, MACD)
+        2. Générer les 3 labels avec le filtre choisi (Decycler ou Kalman)
         3. Créer séquences de 12 timesteps
         4. Retourner X, Y pour train/val/test
+
+    Note: BOL retiré car impossible à synchroniser (toujours lag +1).
 
     Args:
         train_df: DataFrame train (avec colonnes OHLC)
@@ -867,14 +934,14 @@ def prepare_datasets(train_df: pd.DataFrame,
             'test': (X_test, Y_test)
 
         Où:
-            X shape: (n_sequences, 12, 4) - 12 timesteps × 4 indicateurs
-            Y shape: (n_sequences, 4) - 4 labels binaires
+            X shape: (n_sequences, 12, 3) - 12 timesteps × 3 indicateurs
+            Y shape: (n_sequences, 3) - 3 labels binaires
 
     Example:
         >>> datasets = prepare_datasets(train_df, val_df, test_df, filter_type='kalman')
         >>> X_train, Y_train = datasets['train']
-        >>> print(X_train.shape)  # (N_train, 12, 4)
-        >>> print(Y_train.shape)  # (N_train, 4)
+        >>> print(X_train.shape)  # (N_train, 12, 3)
+        >>> print(Y_train.shape)  # (N_train, 3)
     """
     logger.info("="*80)
     logger.info(f"PRÉPARATION COMPLÈTE DES DATASETS (Filtre: {filter_type.upper()})")
@@ -955,7 +1022,7 @@ if __name__ == '__main__':
 
     # Stats labels
     logger.info(f"\n📈 DISTRIBUTION LABELS (Train):")
-    for i, name in enumerate(['RSI', 'CCI', 'BOL', 'MACD']):
+    for i, name in enumerate(['RSI', 'CCI', 'MACD']):
         buy_count = np.sum(Y_train[:, i])
         buy_pct = buy_count / len(Y_train) * 100
         logger.info(f"  {name}: {buy_count:,} BUY ({buy_pct:.1f}%), "

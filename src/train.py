@@ -35,9 +35,10 @@ from constants import (
     MODELS_DIR,
     CHECKPOINTS_DIR
 )
-from data_utils import load_and_split_btc_eth
 from indicators import prepare_datasets
 from model import create_model, compute_metrics
+from prepare_data import load_prepared_data
+from utils import log_dataset_metadata
 
 
 class IndicatorDataset(Dataset):
@@ -232,7 +233,8 @@ def train_model(
     device: str,
     num_epochs: int = NUM_EPOCHS,
     patience: int = EARLY_STOPPING_PATIENCE,
-    save_path: str = BEST_MODEL_PATH
+    save_path: str = BEST_MODEL_PATH,
+    model_config: Dict = None
 ) -> Dict:
     """
     Boucle d'entraînement complète avec early stopping.
@@ -307,6 +309,7 @@ def train_model(
                 'optimizer_state_dict': optimizer.state_dict(),
                 'val_loss': val_metrics['loss'],
                 'val_accuracy': val_metrics['avg_accuracy'],
+                'model_config': model_config,
             }, save_path)
 
             logger.info(f"  ✅ Meilleur modèle sauvegardé (val_loss: {val_metrics['loss']:.4f})")
@@ -342,14 +345,30 @@ def parse_args():
     parser.add_argument('--patience', type=int, default=EARLY_STOPPING_PATIENCE,
                         help='Patience pour early stopping')
 
+    # Hyperparamètres du modèle
+    parser.add_argument('--cnn-filters', type=int, default=64,
+                        help='Nombre de filtres CNN')
+    parser.add_argument('--lstm-hidden', type=int, default=64,
+                        help='Taille hidden LSTM')
+    parser.add_argument('--lstm-layers', type=int, default=2,
+                        help='Nombre de couches LSTM')
+    parser.add_argument('--lstm-dropout', type=float, default=0.2,
+                        help='Dropout LSTM (entre couches)')
+    parser.add_argument('--dense-hidden', type=int, default=32,
+                        help='Taille couche dense partagée')
+    parser.add_argument('--dense-dropout', type=float, default=0.3,
+                        help='Dropout après dense')
+
     # Chemins
     parser.add_argument('--save-path', type=str, default=BEST_MODEL_PATH,
                         help='Chemin pour sauvegarder le meilleur modèle')
 
-    # Génération de labels
-    parser.add_argument('--filter', type=str, default='decycler',
-                        choices=['decycler', 'kalman'],
-                        help='Type de filtre pour générer les labels (decycler ou kalman)')
+    # Données préparées
+    parser.add_argument('--data', '-d', type=str, default=None,
+                        help='Chemin vers les données préparées (.npz). Si non spécifié, prépare les données à la volée.')
+
+    # Note: --filter supprimé car --data est maintenant requis
+    # Le filtre est défini lors de la préparation des données avec prepare_data_30min.py
 
     # Autres
     parser.add_argument('--seed', type=int, default=RANDOM_SEED,
@@ -389,29 +408,43 @@ def main():
     logger.info(f"\nDevice: {device}")
 
     # Afficher hyperparamètres
-    logger.info(f"\n⚙️ Hyperparamètres:")
+    logger.info(f"\n⚙️ Hyperparamètres d'entraînement:")
     logger.info(f"  Batch size: {args.batch_size}")
     logger.info(f"  Learning rate: {args.learning_rate}")
     logger.info(f"  Max epochs: {args.epochs}")
     logger.info(f"  Early stopping patience: {args.patience}")
-    logger.info(f"  Filter type: {args.filter}")
     logger.info(f"  Random seed: {args.seed}")
+
+    logger.info(f"\n🏗️ Architecture du modèle:")
+    logger.info(f"  CNN filters: {args.cnn_filters}")
+    logger.info(f"  LSTM hidden: {args.lstm_hidden}")
+    logger.info(f"  LSTM layers: {args.lstm_layers}")
+    logger.info(f"  LSTM dropout: {args.lstm_dropout}")
+    logger.info(f"  Dense hidden: {args.dense_hidden}")
+    logger.info(f"  Dense dropout: {args.dense_dropout}")
 
     # =========================================================================
     # 1. CHARGER LES DONNÉES
     # =========================================================================
-    logger.info("\n1. Chargement des données BTC + ETH...")
-    train_df, val_df, test_df = load_and_split_btc_eth()
-
-    # =========================================================================
-    # 2. PRÉPARER LES DATASETS
-    # =========================================================================
-    logger.info(f"\n2. Préparation des datasets (indicateurs + labels avec filtre {args.filter.upper()})...")
-    datasets = prepare_datasets(train_df, val_df, test_df, filter_type=args.filter)
-
-    X_train, Y_train = datasets['train']
-    X_val, Y_val = datasets['val']
-    X_test, Y_test = datasets['test']
+    if args.data:
+        # Charger données préparées (rapide)
+        logger.info(f"\n1. Chargement des données préparées: {args.data}")
+        prepared = load_prepared_data(args.data)
+        X_train, Y_train = prepared['train']
+        X_val, Y_val = prepared['val']
+        X_test, Y_test = prepared['test']
+        metadata = prepared['metadata']
+        log_dataset_metadata(metadata, logger)
+    else:
+        # Données préparées requises (ancienne méthode avait du data leakage)
+        logger.error("❌ Argument --data requis!")
+        logger.error("")
+        logger.error("Préparez d'abord les données avec:")
+        logger.error("  python src/prepare_data_30min.py --assets BTC ETH --include-30min-features")
+        logger.error("")
+        logger.error("Puis entraînez avec:")
+        logger.error("  python src/train.py --data data/prepared/dataset_btc_eth_5min_30min_labels30min_kalman.npz")
+        raise SystemExit(1)
 
     logger.info(f"\n📊 Datasets:")
     logger.info(f"  Train: X={X_train.shape}, Y={Y_train.shape}")
@@ -419,9 +452,9 @@ def main():
     logger.info(f"  Test:  X={X_test.shape}, Y={Y_test.shape}")
 
     # =========================================================================
-    # 3. CRÉER DATALOADERS
+    # 2. CRÉER DATALOADERS
     # =========================================================================
-    logger.info("\n3. Création des DataLoaders...")
+    logger.info("\n2. Création des DataLoaders...")
 
     train_dataset = IndicatorDataset(X_train, Y_train)
     val_dataset = IndicatorDataset(X_val, Y_val)
@@ -430,34 +463,56 @@ def main():
         train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
-        num_workers=0,  # 0 pour éviter problèmes multiprocessing
-        pin_memory=True if device == 'cuda' else False
+        num_workers=4,  # Chargement parallèle des données
+        pin_memory=True if device == 'cuda' else False,
+        persistent_workers=True if device == 'cuda' else False
     )
 
     val_loader = DataLoader(
         val_dataset,
         batch_size=args.batch_size,
         shuffle=False,
-        num_workers=0,
-        pin_memory=True if device == 'cuda' else False
+        num_workers=4,
+        pin_memory=True if device == 'cuda' else False,
+        persistent_workers=True if device == 'cuda' else False
     )
 
     logger.info(f"  Train batches: {len(train_loader)}")
     logger.info(f"  Val batches: {len(val_loader)}")
 
     # =========================================================================
-    # 4. CRÉER MODÈLE
+    # 3. CRÉER MODÈLE
     # =========================================================================
-    logger.info("\n4. Création du modèle...")
-    model, loss_fn = create_model(device=device)
+    logger.info("\n3. Création du modèle...")
+    num_features = X_train.shape[2]  # Nombre de features en entrée
+    model, loss_fn = create_model(
+        device=device,
+        num_indicators=num_features,
+        cnn_filters=args.cnn_filters,
+        lstm_hidden_size=args.lstm_hidden,
+        lstm_num_layers=args.lstm_layers,
+        lstm_dropout=args.lstm_dropout,
+        dense_hidden_size=args.dense_hidden,
+        dense_dropout=args.dense_dropout
+    )
 
     # Optimizer
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
 
     # =========================================================================
-    # 5. ENTRAÎNEMENT
+    # 4. ENTRAÎNEMENT
     # =========================================================================
-    logger.info(f"\n5. Entraînement ({args.epochs} époques max)...")
+    logger.info(f"\n4. Entraînement ({args.epochs} époques max)...")
+
+    # Config du modèle pour sauvegarde
+    model_config = {
+        'cnn_filters': args.cnn_filters,
+        'lstm_hidden_size': args.lstm_hidden,
+        'lstm_num_layers': args.lstm_layers,
+        'lstm_dropout': args.lstm_dropout,
+        'dense_hidden_size': args.dense_hidden,
+        'dense_dropout': args.dense_dropout,
+    }
 
     history = train_model(
         train_loader=train_loader,
@@ -468,13 +523,14 @@ def main():
         device=device,
         num_epochs=args.epochs,
         patience=args.patience,
-        save_path=args.save_path
+        save_path=args.save_path,
+        model_config=model_config
     )
 
     # =========================================================================
-    # 6. SAUVEGARDER HISTORIQUE
+    # 5. SAUVEGARDER HISTORIQUE
     # =========================================================================
-    logger.info("\n6. Sauvegarde de l'historique...")
+    logger.info("\n5. Sauvegarde de l'historique...")
 
     history_path = Path(MODELS_DIR) / 'training_history.json'
     history_path.parent.mkdir(parents=True, exist_ok=True)
