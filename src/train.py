@@ -445,16 +445,18 @@ def main():
         train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
-        num_workers=0,  # 0 pour éviter problèmes multiprocessing
-        pin_memory=True if device == 'cuda' else False
+        num_workers=4,  # Chargement parallèle des données
+        pin_memory=True if device == 'cuda' else False,
+        persistent_workers=True if device == 'cuda' else False
     )
 
     val_loader = DataLoader(
         val_dataset,
         batch_size=args.batch_size,
         shuffle=False,
-        num_workers=0,
-        pin_memory=True if device == 'cuda' else False
+        num_workers=4,
+        pin_memory=True if device == 'cuda' else False,
+        persistent_workers=True if device == 'cuda' else False
     )
 
     logger.info(f"  Train batches: {len(train_loader)}")
