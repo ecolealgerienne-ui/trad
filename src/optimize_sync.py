@@ -110,11 +110,24 @@ def calculate_slope_labels(signal: np.ndarray) -> np.ndarray:
     """
     Calcule les labels binaires a partir de la pente du signal.
 
-    Label[t] = 1 si signal[t] > signal[t-1] (pente positive)
-    Label[t] = 0 si signal[t] <= signal[t-1] (pente negative ou nulle)
+    Label[t] = 1 si signal[t-1] > signal[t-2] (pente positive)
+    Label[t] = 0 si signal[t-1] <= signal[t-2] (pente negative ou nulle)
+
+    IMPORTANT: On compare t-1 vs t-2 car a l'instant t, la bougie t
+    n'est pas encore fermee. On utilise donc les 2 dernieres bougies
+    fermees pour determiner la direction.
+
+    Le trade est execute a Open[t+1].
     """
     labels = np.zeros(len(signal), dtype=int)
-    labels[1:] = (np.diff(signal) > 0).astype(int)
+
+    # A partir de t=2 (besoin de t-1 et t-2)
+    for t in range(2, len(signal)):
+        if signal[t-1] > signal[t-2]:
+            labels[t] = 1  # Pente haussiere
+        else:
+            labels[t] = 0  # Pente baissiere
+
     return labels
 
 
