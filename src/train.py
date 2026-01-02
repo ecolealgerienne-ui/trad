@@ -38,6 +38,7 @@ from constants import (
 from data_utils import load_and_split_btc_eth
 from indicators import prepare_datasets
 from model import create_model, compute_metrics
+from prepare_data import load_prepared_data
 
 
 class IndicatorDataset(Dataset):
@@ -346,10 +347,14 @@ def parse_args():
     parser.add_argument('--save-path', type=str, default=BEST_MODEL_PATH,
                         help='Chemin pour sauvegarder le meilleur modèle')
 
-    # Génération de labels
+    # Données préparées
+    parser.add_argument('--data', '-d', type=str, default=None,
+                        help='Chemin vers les données préparées (.npz). Si non spécifié, prépare les données à la volée.')
+
+    # Génération de labels (utilisé seulement si --data non spécifié)
     parser.add_argument('--filter', type=str, default='decycler',
                         choices=['decycler', 'kalman'],
-                        help='Type de filtre pour générer les labels (decycler ou kalman)')
+                        help='Type de filtre pour générer les labels (ignoré si --data spécifié)')
 
     # Autres
     parser.add_argument('--seed', type=int, default=RANDOM_SEED,
@@ -400,18 +405,28 @@ def main():
     # =========================================================================
     # 1. CHARGER LES DONNÉES
     # =========================================================================
-    logger.info("\n1. Chargement des données BTC + ETH...")
-    train_df, val_df, test_df = load_and_split_btc_eth()
+    if args.data:
+        # Charger données préparées (rapide)
+        logger.info(f"\n1. Chargement des données préparées: {args.data}")
+        prepared = load_prepared_data(args.data)
+        X_train, Y_train = prepared['train']
+        X_val, Y_val = prepared['val']
+        X_test, Y_test = prepared['test']
+        metadata = prepared['metadata']
+        logger.info(f"  Timeframe: {metadata['timeframe']}m")
+        logger.info(f"  Filtre: {metadata['filter_type']}")
+        logger.info(f"  Créé: {metadata['created_at']}")
+    else:
+        # Préparer données à la volée (lent)
+        logger.info("\n1. Chargement des données BTC + ETH...")
+        train_df, val_df, test_df = load_and_split_btc_eth()
 
-    # =========================================================================
-    # 2. PRÉPARER LES DATASETS
-    # =========================================================================
-    logger.info(f"\n2. Préparation des datasets (indicateurs + labels avec filtre {args.filter.upper()})...")
-    datasets = prepare_datasets(train_df, val_df, test_df, filter_type=args.filter)
+        logger.info(f"\n2. Préparation des datasets (indicateurs + labels avec filtre {args.filter.upper()})...")
+        datasets = prepare_datasets(train_df, val_df, test_df, filter_type=args.filter)
 
-    X_train, Y_train = datasets['train']
-    X_val, Y_val = datasets['val']
-    X_test, Y_test = datasets['test']
+        X_train, Y_train = datasets['train']
+        X_val, Y_val = datasets['val']
+        X_test, Y_test = datasets['test']
 
     logger.info(f"\n📊 Datasets:")
     logger.info(f"  Train: X={X_train.shape}, Y={Y_train.shape}")
@@ -419,9 +434,9 @@ def main():
     logger.info(f"  Test:  X={X_test.shape}, Y={Y_test.shape}")
 
     # =========================================================================
-    # 3. CRÉER DATALOADERS
+    # 2. CRÉER DATALOADERS
     # =========================================================================
-    logger.info("\n3. Création des DataLoaders...")
+    logger.info("\n2. Création des DataLoaders...")
 
     train_dataset = IndicatorDataset(X_train, Y_train)
     val_dataset = IndicatorDataset(X_val, Y_val)
@@ -446,18 +461,18 @@ def main():
     logger.info(f"  Val batches: {len(val_loader)}")
 
     # =========================================================================
-    # 4. CRÉER MODÈLE
+    # 3. CRÉER MODÈLE
     # =========================================================================
-    logger.info("\n4. Création du modèle...")
+    logger.info("\n3. Création du modèle...")
     model, loss_fn = create_model(device=device)
 
     # Optimizer
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
 
     # =========================================================================
-    # 5. ENTRAÎNEMENT
+    # 4. ENTRAÎNEMENT
     # =========================================================================
-    logger.info(f"\n5. Entraînement ({args.epochs} époques max)...")
+    logger.info(f"\n4. Entraînement ({args.epochs} époques max)...")
 
     history = train_model(
         train_loader=train_loader,
@@ -472,9 +487,9 @@ def main():
     )
 
     # =========================================================================
-    # 6. SAUVEGARDER HISTORIQUE
+    # 5. SAUVEGARDER HISTORIQUE
     # =========================================================================
-    logger.info("\n6. Sauvegarde de l'historique...")
+    logger.info("\n5. Sauvegarde de l'historique...")
 
     history_path = Path(MODELS_DIR) / 'training_history.json'
     history_path.parent.mkdir(parents=True, exist_ok=True)

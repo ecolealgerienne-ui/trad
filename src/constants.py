@@ -158,8 +158,22 @@ DATA_DIR = '../data_trad'  # Dossier des données réelles
 RAW_DATA_DIR = '../data_trad'
 PROCESSED_DATA_DIR = 'data/processed'
 
-BTC_DATA_FILE = '../data_trad/BTCUSD_all_5m.csv'
-ETH_DATA_FILE = '../data_trad/ETHUSD_all_5m.csv'
+# Fichiers de données brutes par timeframe
+BTC_DATA_FILE_1M = '../data_trad/BTCUSD_all_1m.csv'
+ETH_DATA_FILE_1M = '../data_trad/ETHUSD_all_1m.csv'
+BTC_DATA_FILE_5M = '../data_trad/BTCUSD_all_5m.csv'
+ETH_DATA_FILE_5M = '../data_trad/ETHUSD_all_5m.csv'
+
+# Timeframe par défaut (1 ou 5)
+DEFAULT_TIMEFRAME = 5  # Minutes
+
+# Aliases pour compatibilité (utilisent le timeframe par défaut)
+BTC_DATA_FILE = BTC_DATA_FILE_5M
+ETH_DATA_FILE = ETH_DATA_FILE_5M
+
+# Fichiers de données préparées (numpy)
+PREPARED_DATA_DIR = 'data/prepared'
+PREPARED_DATA_FILE = 'data/prepared/dataset.npz'
 
 # Modèles
 MODELS_DIR = 'models'
