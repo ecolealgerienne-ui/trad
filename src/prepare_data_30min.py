@@ -247,6 +247,35 @@ def prepare_single_asset_30min(df_5min: pd.DataFrame,
         logger.info(f"     → Features: {indicators_combined.shape} (5min seulement)")
 
     # =========================================================================
+    # 7b. Ajouter Step Index (position dans la fenêtre 30min)
+    # =========================================================================
+    # Le step_index indique la position de la bougie 5min dans sa période 30min:
+    #   - Minute 00 → step 1
+    #   - Minute 05 → step 2
+    #   - Minute 10 → step 3
+    #   - Minute 15 → step 4
+    #   - Minute 20 → step 5
+    #   - Minute 25 → step 6
+    #
+    # Cela donne au modèle une "horloge interne" pour savoir où il en est
+    # dans la construction de la bougie 30min.
+    logger.info(f"\n  ⏱️ Ajout du Step Index (position dans fenêtre 30min)...")
+
+    # Calculer le step_index (1-6) basé sur les minutes
+    minutes = index_5min.minute
+    step_index = (minutes % 30) // 5 + 1  # Résultat: 1, 2, 3, 4, 5, 6
+
+    # Normaliser entre 0 et 1 pour cohérence avec les autres features
+    step_index_normalized = (step_index - 1) / 5.0  # Résultat: 0.0, 0.2, 0.4, 0.6, 0.8, 1.0
+
+    # Ajouter comme colonne supplémentaire
+    step_index_col = step_index_normalized.values.reshape(-1, 1)
+    indicators_combined = np.hstack([indicators_combined, step_index_col])
+
+    logger.info(f"     → Step index ajouté (normalisé 0-1)")
+    logger.info(f"     → Features finales: {indicators_combined.shape}")
+
+    # =========================================================================
     # 8. Vérification finale des dimensions
     # =========================================================================
     assert len(indicators_combined) == len(labels_aligned), \
@@ -343,7 +372,14 @@ def prepare_and_save_30min(filter_type: str = LABEL_FILTER_TYPE,
     logger.info(f"   Test:  X={X_test.shape}, Y={Y_test.shape}")
 
     n_features = X_train.shape[2]
-    logger.info(f"\n📈 Features: {n_features} ({'5min + 30min' if n_features == 8 else '5min seulement'})")
+    # Features: 4 (5min) + 4 (30min optionnel) + 1 (step_index) = 5 ou 9
+    if n_features == 9:
+        feature_desc = "5min(4) + 30min(4) + step_index(1)"
+    elif n_features == 5:
+        feature_desc = "5min(4) + step_index(1)"
+    else:
+        feature_desc = f"{n_features} features"
+    logger.info(f"\n📈 Features: {n_features} ({feature_desc})")
 
     # =========================================================================
     # 5. Sauvegarder
@@ -361,6 +397,9 @@ def prepare_and_save_30min(filter_type: str = LABEL_FILTER_TYPE,
         'label_timeframe': '30min',
         'filter_type': filter_type,
         'n_features': n_features,
+        'feature_description': feature_desc,
+        'includes_step_index': True,
+        'step_index_info': 'Position dans fenêtre 30min (1-6), normalisé 0-1',
         'train_size': len(X_train),
         'val_size': len(X_val),
         'test_size': len(X_test),
