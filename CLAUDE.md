@@ -578,6 +578,19 @@ Cela capture les tendances court/moyen/long terme simultanement.
 
 ---
 
+## Evolution Future: Architecture "Clock-Injected"
+
+Une architecture hybride combinant 5min + 30min avec un "Step Index" est specifiee pour atteindre 85-90% d'accuracy.
+
+**Voir**: [docs/SPEC_CLOCK_INJECTED.md](docs/SPEC_CLOCK_INJECTED.md)
+
+**Resume:**
+- **7 features**: 5min(3) + 30min(3) + Step Index(1)
+- **Step Index**: Position dans la fenetre 30min (0.17 → 1.00)
+- **Avantage**: Le modele apprend a compenser le retard des indicateurs 30min
+
+---
+
 **Cree par**: Claude Code
 **Derniere MAJ**: 2026-01-02
 **Version**: 3.0 (3 indicateurs synchronises, BOL retire)
