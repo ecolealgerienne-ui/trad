@@ -261,24 +261,33 @@ Options:
 
 ## Points Critiques
 
-### 1. Split Temporel STRICT
+### 1. Split Temporel (Test=fin, Val=echantillonne)
 
 ```python
-# data_utils.py - JAMAIS de shuffle avant split!
-train = data[0:70%]      # Passe (~13 mois)
-val   = data[70%:85%]    # Present (~2.8 mois)
-test  = data[85%:100%]   # Futur (~2.8 mois) - TOUJOURS a la fin!
+# data_utils.py - Strategie optimisee pour re-entrainement mensuel
+
+# 1. TEST = toujours a la fin (donnees les plus recentes)
+test = data[-15%:]
+
+# 2. VAL = echantillonne aleatoirement du reste (meilleure representativite)
+val = remaining.sample(15%)
+
+# 3. TRAIN = le reste
+train = remaining - val
 ```
+
+**Avantages:**
+- Test = donnees futures (simulation realiste)
+- Val echantillonne de partout → pas d'overfit a une periode specifique
+- Ideal pour re-entrainement mensuel
 
 **Durees avec donnees 5min (~160k bougies par asset):**
 
-| Split | Ratio | Bougies | Duree |
-|-------|-------|---------|-------|
-| Train | 70% | ~112,000 | ~13 mois |
-| Val | 15% | ~24,000 | ~2.8 mois |
-| Test | 15% | ~24,000 | ~2.8 mois |
-
-**Important**: Test = donnees les plus recentes. Ideal pour re-entrainement mensuel.
+| Split | Ratio | Bougies | Duree | Source |
+|-------|-------|---------|-------|--------|
+| Train | 70% | ~112,000 | ~13 mois | Echantillonne |
+| Val | 15% | ~24,000 | ~2.8 mois | Echantillonne de partout |
+| Test | 15% | ~24,000 | ~2.8 mois | FIN du dataset |
 
 ### 2. Calcul Indicateurs PAR ASSET
 

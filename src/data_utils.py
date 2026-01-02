@@ -113,10 +113,15 @@ def trim_edges(df, trim_start=TRIM_EDGES, trim_end=TRIM_EDGES):
 def temporal_split(data, train_ratio=TRAIN_SPLIT, val_ratio=VAL_SPLIT, test_ratio=TEST_SPLIT,
                    shuffle_train=True, random_seed=RANDOM_SEED):
     """
-    Split temporel STRICT sans data leakage.
+    Split temporel: Test à la fin, Val échantillonné de partout.
 
-    ⚠️ CRITIQUE : Cette fonction fait un split TEMPOREL, pas un shuffle global!
-    Train = passé, Val = présent, Test = futur
+    Stratégie:
+    - TEST = toujours les données les plus récentes (fin du dataset)
+    - VAL = échantillonné aléatoirement du reste (meilleure représentativité)
+    - TRAIN = le reste
+
+    Avantage: Val ne surfit pas à une période spécifique, meilleur pour
+    un re-entraînement mensuel.
 
     Args:
         data : DataFrame de séries temporelles (ordre chronologique)
@@ -127,13 +132,7 @@ def temporal_split(data, train_ratio=TRAIN_SPLIT, val_ratio=VAL_SPLIT, test_rati
         random_seed : Seed pour reproductibilité
 
     Returns:
-        train, val, test : DataFrames splittés temporellement
-
-    Exemple:
-        >>> train, val, test = temporal_split(all_data)
-        >>> # Train : bougies 0-140k (shuffled)
-        >>> # Val   : bougies 140k-170k (chronologique)
-        >>> # Test  : bougies 170k-200k (chronologique)
+        train, val, test : DataFrames splittés
     """
     # Vérifier ratios
     total_ratio = train_ratio + val_ratio + test_ratio
@@ -144,26 +143,32 @@ def temporal_split(data, train_ratio=TRAIN_SPLIT, val_ratio=VAL_SPLIT, test_rati
     if n_total == 0:
         raise ValueError("Dataset vide")
 
-    # Calculer indices de split
-    n_train = int(n_total * train_ratio)
+    # 1. TEST = toujours à la fin (données les plus récentes)
+    n_test = int(n_total * test_ratio)
+    test_data = data.iloc[-n_test:].copy()
+    remaining = data.iloc[:-n_test].copy()
+
+    # 2. VAL = échantillonné aléatoirement du reste
     n_val = int(n_total * val_ratio)
+    val_data = remaining.sample(n=n_val, random_state=random_seed)
+    val_indices = val_data.index
 
-    # Split TEMPOREL (ordre chronologique préservé)
-    train_data = data.iloc[:n_train].copy()
-    val_data = data.iloc[n_train:n_train+n_val].copy()
-    test_data = data.iloc[n_train+n_val:].copy()
+    # 3. TRAIN = le reste (après avoir retiré val)
+    train_data = remaining.drop(val_indices).copy()
 
-    logger.info(f"📊 Split temporel (SANS shuffle global - évite data leakage):")
-    logger.info(f"  Train: {len(train_data):,} bougies ({train_ratio:.0%}) - indices [0:{n_train}]")
-    logger.info(f"  Val:   {len(val_data):,} bougies ({val_ratio:.0%}) - indices [{n_train}:{n_train+n_val}]")
-    logger.info(f"  Test:  {len(test_data):,} bougies ({test_ratio:.0%}) - indices [{n_train+n_val}:{n_total}]")
+    logger.info(f"📊 Split temporel (Test=fin, Val=échantillonné):")
+    logger.info(f"  Train: {len(train_data):,} bougies ({len(train_data)/n_total:.0%})")
+    logger.info(f"  Val:   {len(val_data):,} bougies ({val_ratio:.0%}) - échantillonné de partout")
+    logger.info(f"  Test:  {len(test_data):,} bougies ({test_ratio:.0%}) - FIN du dataset (plus récent)")
 
-    # Shuffle train APRÈS split (évite biais d'ordre)
+    # Shuffle train (mélange les batches)
     if shuffle_train:
         train_data = train_data.sample(frac=1, random_state=random_seed).reset_index(drop=True)
-        logger.info(f"  ✅ Train shuffled (mélange batches, pas de leakage)")
-    else:
-        logger.info(f"  ℹ️ Train NON shuffled (ordre chronologique préservé)")
+        logger.info(f"  ✅ Train shuffled")
+
+    # Reset index pour val et test
+    val_data = val_data.reset_index(drop=True)
+    test_data = test_data.reset_index(drop=True)
 
     # Vérifier cohérence
     assert len(train_data) + len(val_data) + len(test_data) == n_total, \
