@@ -190,9 +190,26 @@ def calculate_indicator_labels(df: pd.DataFrame,
     return calculate_slope_labels(filtered)
 
 
-def to_gpu_tensor(labels: np.ndarray, start_idx: int = 50) -> torch.Tensor:
-    """Convertit un array numpy en tensor GPU (cache-friendly)."""
-    return torch.tensor(labels[start_idx:], device=DEVICE, dtype=torch.int32)
+def to_gpu_tensor(data: np.ndarray, start_idx: int = 50, dtype=torch.float32) -> torch.Tensor:
+    """Convertit un array numpy en tensor GPU."""
+    return torch.tensor(data[start_idx:], device=DEVICE, dtype=dtype)
+
+
+def calculate_slope_labels_gpu(signal_gpu: torch.Tensor) -> torch.Tensor:
+    """
+    Calcule les labels binaires sur GPU.
+
+    Label[t] = 1 si signal[t-1] > signal[t-2]
+    """
+    # Créer labels avec même taille
+    labels = torch.zeros(len(signal_gpu), device=DEVICE, dtype=torch.int32)
+
+    # Comparer t-1 vs t-2 (vectorisé sur GPU)
+    # Pour t >= 2: labels[t] = signal[t-1] > signal[t-2]
+    if len(signal_gpu) > 2:
+        labels[2:] = (signal_gpu[1:-1] > signal_gpu[:-2]).int()
+
+    return labels
 
 
 def calculate_concordance(labels1: np.ndarray, labels2: np.ndarray,
@@ -588,38 +605,45 @@ def main():
     # =========================================================================
     # 1. CHARGER DONNEES + KALMAN CLOSE (CPU)
     # =========================================================================
-    logger.info("\n1. Chargement des donnees et Kalman(Close)...")
+    logger.info("\n1. Chargement des donnees et Kalman(Close) [CPU]...")
 
     dfs = {}
-    ref_labels_dict = {}
+    ref_filtered_dict = {}  # Valeurs Kalman (pas labels!)
 
     for asset in all_assets:
         df = load_asset_data(asset)
         dfs[asset] = df
-        ref_labels_dict[asset] = calculate_reference_labels(df['close'].values)
-        buy_pct = ref_labels_dict[asset].mean() * 100
+        # Kalman sur Close -> valeurs filtrées
+        ref_filtered_dict[asset] = kalman_filter(
+            df['close'].values,
+            KALMAN_PROCESS_VAR,
+            KALMAN_MEASURE_VAR
+        )
         role = "OPT" if asset in args.assets else "VAL"
-        logger.info(f"     [{role}] {asset}: {buy_pct:.1f}% UP / {100-buy_pct:.1f}% DOWN")
+        logger.info(f"     [{role}] {asset}: Kalman OK")
 
     # =========================================================================
-    # 2. PRE-CALCULER TOUS LES KALMAN INDICATEURS (CPU - lent)
+    # 2. KALMAN POUR TOUS LES INDICATEURS (CPU - lent)
     # =========================================================================
-    logger.info("\n2. Pre-calcul Kalman pour TOUS les indicateurs (CPU, lent)...")
+    logger.info("\n2. Kalman pour TOUS les indicateurs [CPU, lent]...")
 
-    # Structure: ind_labels_dict[indicator][params_key][asset] = labels
-    ind_labels_dict = {}
+    # Structure: ind_filtered_dict[indicator][params_key][asset] = valeurs filtrées
+    ind_filtered_dict = {}
 
     for indicator in args.indicators:
-        ind_labels_dict[indicator] = {}
+        ind_filtered_dict[indicator] = {}
         combinations = all_param_combinations[indicator]
 
         for params in combinations:
             params_key = str(params)
-            ind_labels_dict[indicator][params_key] = {}
+            ind_filtered_dict[indicator][params_key] = {}
 
             for asset in all_assets:
-                labels = calculate_indicator_labels(dfs[asset], indicator, params)
-                ind_labels_dict[indicator][params_key][asset] = labels
+                # Calculer valeurs indicateur
+                values = calculate_indicator_values(dfs[asset], indicator, params)
+                # Appliquer Kalman
+                filtered = kalman_filter(values, KALMAN_PROCESS_VAR, KALMAN_MEASURE_VAR)
+                ind_filtered_dict[indicator][params_key][asset] = filtered
 
             # Log progression
             if indicator == 'MACD':
@@ -629,26 +653,27 @@ def main():
             logger.info(f"     {indicator} {params_str} - {len(all_assets)} assets OK")
 
     # =========================================================================
-    # 3. TRANSFERT VERS GPU (tout en une fois)
+    # 3. TRANSFERT VERS GPU + CALCUL LABELS (GPU)
     # =========================================================================
-    logger.info(f"\n3. Transfert de TOUS les labels vers {DEVICE}...")
+    logger.info(f"\n3. Transfert vers {DEVICE} + calcul labels [GPU]...")
 
-    # Ref labels GPU
+    # Ref: valeurs -> GPU -> labels GPU
     ref_labels_gpu_dict = {}
     for asset in all_assets:
-        ref_labels_gpu_dict[asset] = to_gpu_tensor(ref_labels_dict[asset])
+        values_gpu = to_gpu_tensor(ref_filtered_dict[asset])
+        ref_labels_gpu_dict[asset] = calculate_slope_labels_gpu(values_gpu)
 
-    # Indicator labels GPU
+    # Indicateurs: valeurs -> GPU -> labels GPU
     ind_labels_gpu_dict = {}
     for indicator in args.indicators:
         ind_labels_gpu_dict[indicator] = {}
-        for params_key in ind_labels_dict[indicator]:
+        for params_key in ind_filtered_dict[indicator]:
             ind_labels_gpu_dict[indicator][params_key] = {}
             for asset in all_assets:
-                labels = ind_labels_dict[indicator][params_key][asset]
-                ind_labels_gpu_dict[indicator][params_key][asset] = to_gpu_tensor(labels)
+                values_gpu = to_gpu_tensor(ind_filtered_dict[indicator][params_key][asset])
+                ind_labels_gpu_dict[indicator][params_key][asset] = calculate_slope_labels_gpu(values_gpu)
 
-    logger.info(f"  -> Tous les labels transferes sur {DEVICE}")
+    logger.info(f"  -> Tous les labels calcules sur {DEVICE}")
 
     # =========================================================================
     # 4. OPTIMISER CHAQUE INDICATEUR (GPU - parallele)
