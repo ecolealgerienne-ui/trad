@@ -35,7 +35,6 @@ from constants import (
     MODELS_DIR,
     CHECKPOINTS_DIR
 )
-from data_utils import load_and_split_btc_eth
 from indicators import prepare_datasets
 from model import create_model, compute_metrics
 from prepare_data import load_prepared_data
@@ -368,10 +367,8 @@ def parse_args():
     parser.add_argument('--data', '-d', type=str, default=None,
                         help='Chemin vers les données préparées (.npz). Si non spécifié, prépare les données à la volée.')
 
-    # Génération de labels (utilisé seulement si --data non spécifié)
-    parser.add_argument('--filter', type=str, default='decycler',
-                        choices=['decycler', 'kalman'],
-                        help='Type de filtre pour générer les labels (ignoré si --data spécifié)')
+    # Note: --filter supprimé car --data est maintenant requis
+    # Le filtre est défini lors de la préparation des données avec prepare_data_30min.py
 
     # Autres
     parser.add_argument('--seed', type=int, default=RANDOM_SEED,
@@ -416,7 +413,6 @@ def main():
     logger.info(f"  Learning rate: {args.learning_rate}")
     logger.info(f"  Max epochs: {args.epochs}")
     logger.info(f"  Early stopping patience: {args.patience}")
-    logger.info(f"  Filter type: {args.filter}")
     logger.info(f"  Random seed: {args.seed}")
 
     logger.info(f"\n🏗️ Architecture du modèle:")
@@ -440,16 +436,15 @@ def main():
         metadata = prepared['metadata']
         log_dataset_metadata(metadata, logger)
     else:
-        # Préparer données à la volée (lent)
-        logger.info("\n1. Chargement des données BTC + ETH...")
-        train_df, val_df, test_df = load_and_split_btc_eth()
-
-        logger.info(f"\n2. Préparation des datasets (indicateurs + labels avec filtre {args.filter.upper()})...")
-        datasets = prepare_datasets(train_df, val_df, test_df, filter_type=args.filter)
-
-        X_train, Y_train = datasets['train']
-        X_val, Y_val = datasets['val']
-        X_test, Y_test = datasets['test']
+        # Données préparées requises (ancienne méthode avait du data leakage)
+        logger.error("❌ Argument --data requis!")
+        logger.error("")
+        logger.error("Préparez d'abord les données avec:")
+        logger.error("  python src/prepare_data_30min.py --assets BTC ETH --include-30min-features")
+        logger.error("")
+        logger.error("Puis entraînez avec:")
+        logger.error("  python src/train.py --data data/prepared/dataset_btc_eth_5min_30min_labels30min_kalman.npz")
+        raise SystemExit(1)
 
     logger.info(f"\n📊 Datasets:")
     logger.info(f"  Train: X={X_train.shape}, Y={Y_train.shape}")
