@@ -182,32 +182,55 @@ def calculate_indicator_labels(df: pd.DataFrame,
     return calculate_slope_labels(filtered)
 
 
-def calculate_concordance(labels1: np.ndarray, labels2: np.ndarray) -> float:
-    """Calcule le taux de concordance (% de labels identiques) - GPU accelere."""
+def to_gpu_tensor(labels: np.ndarray, start_idx: int = 50) -> torch.Tensor:
+    """Convertit un array numpy en tensor GPU (cache-friendly)."""
+    return torch.tensor(labels[start_idx:], device=DEVICE, dtype=torch.int32)
+
+
+def calculate_concordance(labels1: np.ndarray, labels2: np.ndarray,
+                          l1_gpu: Optional[torch.Tensor] = None,
+                          l2_gpu: Optional[torch.Tensor] = None) -> float:
+    """
+    Calcule le taux de concordance (% de labels identiques) - GPU accelere.
+
+    Si l1_gpu/l2_gpu sont fournis, évite la conversion CPU→GPU.
+    """
     start_idx = 50
 
-    # Convertir en tensors GPU
-    l1 = torch.tensor(labels1[start_idx:], device=DEVICE, dtype=torch.int32)
-    l2 = torch.tensor(labels2[start_idx:], device=DEVICE, dtype=torch.int32)
+    # Utiliser tensors pré-chargés si disponibles
+    if l1_gpu is None:
+        l1_gpu = torch.tensor(labels1[start_idx:], device=DEVICE, dtype=torch.int32)
+    if l2_gpu is None:
+        l2_gpu = torch.tensor(labels2[start_idx:], device=DEVICE, dtype=torch.int32)
 
     # Calcul GPU
-    concordance = (l1 == l2).float().mean().item()
+    concordance = (l1_gpu == l2_gpu).float().mean().item()
     return concordance
 
 
-def calculate_lag(labels1: np.ndarray, labels2: np.ndarray, max_lag: int = 10) -> int:
+def calculate_lag(labels1: np.ndarray, labels2: np.ndarray, max_lag: int = 10,
+                  l1_gpu: Optional[torch.Tensor] = None,
+                  l2_gpu: Optional[torch.Tensor] = None) -> int:
     """
     Calcule le lag optimal entre deux series de labels - GPU accelere.
 
     Retourne:
         lag negatif = labels1 en avance sur labels2
         lag positif = labels1 en retard sur labels2
+
+    Si l1_gpu/l2_gpu sont fournis, évite la conversion CPU→GPU.
     """
     start_idx = 50
 
-    # Convertir en tensors GPU
-    l1 = torch.tensor(labels1[start_idx:], device=DEVICE, dtype=torch.float32)
-    l2 = torch.tensor(labels2[start_idx:], device=DEVICE, dtype=torch.float32)
+    # Utiliser tensors pré-chargés si disponibles
+    if l1_gpu is None:
+        l1 = torch.tensor(labels1[start_idx:], device=DEVICE, dtype=torch.float32)
+    else:
+        l1 = l1_gpu.float()
+    if l2_gpu is None:
+        l2 = torch.tensor(labels2[start_idx:], device=DEVICE, dtype=torch.float32)
+    else:
+        l2 = l2_gpu.float()
 
     # Centrer les series
     l1 = l1 - l1.mean()
@@ -237,7 +260,9 @@ def calculate_lag(labels1: np.ndarray, labels2: np.ndarray, max_lag: int = 10) -
     return best_lag
 
 
-def calculate_pivot_accuracy(labels_ind: np.ndarray, labels_ref: np.ndarray) -> float:
+def calculate_pivot_accuracy(labels_ind: np.ndarray, labels_ref: np.ndarray,
+                              l_ind_gpu: Optional[torch.Tensor] = None,
+                              l_ref_gpu: Optional[torch.Tensor] = None) -> float:
     """
     Calcule le % de match sur les PIVOTS (changements de direction) - GPU accelere.
 
@@ -248,12 +273,20 @@ def calculate_pivot_accuracy(labels_ind: np.ndarray, labels_ref: np.ndarray) -> 
     IMPORTANT: np.diff donne l'indice AVANT le changement.
     Si le prix change a l'indice T, diff le marque a T-1.
     On compare donc a pivots_ref + 1 (premiere bougie nouvelle direction).
+
+    Si l_ind_gpu/l_ref_gpu sont fournis, évite la conversion CPU→GPU.
     """
     start_idx = 50
 
-    # Convertir en tensors GPU
-    l_ind = torch.tensor(labels_ind[start_idx:], device=DEVICE, dtype=torch.int32)
-    l_ref = torch.tensor(labels_ref[start_idx:], device=DEVICE, dtype=torch.int32)
+    # Utiliser tensors pré-chargés si disponibles
+    if l_ind_gpu is None:
+        l_ind = torch.tensor(labels_ind[start_idx:], device=DEVICE, dtype=torch.int32)
+    else:
+        l_ind = l_ind_gpu
+    if l_ref_gpu is None:
+        l_ref = torch.tensor(labels_ref[start_idx:], device=DEVICE, dtype=torch.int32)
+    else:
+        l_ref = l_ref_gpu
 
     # Detecter les pivots dans la reference (Close)
     diff_ref = torch.diff(l_ref)
@@ -307,8 +340,13 @@ def calculate_composite_score(concordance: float,
 def evaluate_params(df: pd.DataFrame,
                     ref_labels: np.ndarray,
                     indicator: str,
-                    params: Dict) -> SyncResult:
-    """Evalue un jeu de parametres pour un indicateur."""
+                    params: Dict,
+                    ref_labels_gpu: Optional[torch.Tensor] = None) -> SyncResult:
+    """
+    Evalue un jeu de parametres pour un indicateur.
+
+    Si ref_labels_gpu est fourni, évite les transferts CPU→GPU répétés.
+    """
 
     # Calculer les labels pour cet indicateur
     try:
@@ -325,10 +363,16 @@ def evaluate_params(df: pd.DataFrame,
             n_samples=0
         )
 
-    # Calculer les 3 metriques
-    concordance = calculate_concordance(ind_labels, ref_labels)
-    anticipation = calculate_lag(ind_labels, ref_labels)
-    pivot_acc = calculate_pivot_accuracy(ind_labels, ref_labels)
+    # Pré-charger ind_labels sur GPU une fois pour les 3 métriques
+    ind_labels_gpu = to_gpu_tensor(ind_labels)
+
+    # Calculer les 3 metriques avec tensors GPU pré-chargés
+    concordance = calculate_concordance(ind_labels, ref_labels,
+                                        l1_gpu=ind_labels_gpu, l2_gpu=ref_labels_gpu)
+    anticipation = calculate_lag(ind_labels, ref_labels,
+                                 l1_gpu=ind_labels_gpu, l2_gpu=ref_labels_gpu)
+    pivot_acc = calculate_pivot_accuracy(ind_labels, ref_labels,
+                                         l_ind_gpu=ind_labels_gpu, l_ref_gpu=ref_labels_gpu)
     score = calculate_composite_score(concordance, anticipation, pivot_acc)
 
     return SyncResult(
@@ -344,9 +388,16 @@ def evaluate_params(df: pd.DataFrame,
 
 def optimize_indicator(dfs: Dict[str, pd.DataFrame],
                        ref_labels_dict: Dict[str, np.ndarray],
+                       ref_labels_gpu_dict: Dict[str, torch.Tensor],
                        indicator: str) -> List[SyncResult]:
     """
     Optimise les parametres d'un indicateur sur plusieurs assets.
+
+    Args:
+        dfs: DataFrames par asset
+        ref_labels_dict: Labels numpy par asset (pour compatibilité)
+        ref_labels_gpu_dict: Labels pré-chargés sur GPU par asset
+        indicator: Nom de l'indicateur
 
     Retourne la liste de tous les resultats tries par score.
     """
@@ -373,7 +424,9 @@ def optimize_indicator(dfs: Dict[str, pd.DataFrame],
 
         for asset, df in dfs.items():
             ref_labels = ref_labels_dict[asset]
-            result = evaluate_params(df, ref_labels, indicator, params)
+            ref_labels_gpu = ref_labels_gpu_dict[asset]
+            result = evaluate_params(df, ref_labels, indicator, params,
+                                     ref_labels_gpu=ref_labels_gpu)
             scores_per_asset.append(result)
 
         # Moyenne des scores sur tous les assets
@@ -421,11 +474,16 @@ def validate_on_assets(optimal_params: Dict[str, Dict],
     # Charger les assets de validation
     val_dfs = {}
     val_ref_labels = {}
+    val_ref_labels_gpu = {}  # Pré-chargé sur GPU
 
     for asset in val_assets:
         df = load_asset_data(asset)
         val_dfs[asset] = df
         val_ref_labels[asset] = calculate_reference_labels(df['close'].values)
+        # Pré-charger sur GPU
+        val_ref_labels_gpu[asset] = to_gpu_tensor(val_ref_labels[asset])
+
+    logger.info(f"  -> {len(val_assets)} assets validation pre-charges sur {DEVICE}")
 
     # Evaluer chaque indicateur avec ses parametres optimaux
     validation_scores = {}
@@ -434,7 +492,9 @@ def validate_on_assets(optimal_params: Dict[str, Dict],
         scores = []
         for asset, df in val_dfs.items():
             ref_labels = val_ref_labels[asset]
-            result = evaluate_params(df, ref_labels, indicator, params)
+            ref_labels_gpu = val_ref_labels_gpu[asset]
+            result = evaluate_params(df, ref_labels, indicator, params,
+                                     ref_labels_gpu=ref_labels_gpu)
             scores.append(result.composite_score)
             logger.info(f"  {indicator} sur {asset}: "
                        f"Conc={result.concordance:.3f}, "
@@ -506,15 +566,21 @@ def main():
 
     dfs = {}
     ref_labels_dict = {}
+    ref_labels_gpu_dict = {}  # Pré-chargé sur GPU une seule fois
 
     for asset in args.assets:
         df = load_asset_data(asset)
         dfs[asset] = df
         ref_labels_dict[asset] = calculate_reference_labels(df['close'].values)
 
+        # Pré-charger sur GPU immédiatement après le calcul Kalman
+        ref_labels_gpu_dict[asset] = to_gpu_tensor(ref_labels_dict[asset])
+
         # Stats des labels
         buy_pct = ref_labels_dict[asset].mean() * 100
         logger.info(f"     Labels {asset}: {buy_pct:.1f}% UP / {100-buy_pct:.1f}% DOWN")
+
+    logger.info(f"  -> {len(args.assets)} assets pre-charges sur {DEVICE}")
 
     # =========================================================================
     # 2. OPTIMISER CHAQUE INDICATEUR
@@ -525,7 +591,7 @@ def main():
     best_results = {}
 
     for indicator in args.indicators:
-        results = optimize_indicator(dfs, ref_labels_dict, indicator)
+        results = optimize_indicator(dfs, ref_labels_dict, ref_labels_gpu_dict, indicator)
 
         # Garder le meilleur
         best = results[0]
