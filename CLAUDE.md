@@ -2,7 +2,41 @@
 
 **Date**: 2026-01-02
 **Statut**: Pipeline complet implemente
-**Version**: 2.1
+**Version**: 3.0
+
+---
+
+## DECOUVERTE IMPORTANTE - Retrait de BOL (Bollinger Bands)
+
+### Probleme identifie
+
+L'indicateur **BOL (Bollinger Bands %B)** a ete **retire** du modele car il est **impossible a synchroniser** avec la reference Kalman(Close).
+
+### Analyse de synchronisation
+
+| Indicateur | Periode testee | Lag optimal | Concordance | Status |
+|------------|---------------|-------------|-------------|--------|
+| RSI | 14 | **0** | 82% | ✅ Synchronise |
+| CCI | 20 | **0** | 74% | ✅ Synchronise |
+| MACD | 10/26/9 | **0** | 70% | ✅ Synchronise |
+| BOL | 5-50 (toutes) | **+1** | ~65% | ❌ Non synchronisable |
+
+### Pourquoi BOL ne peut pas etre synchronise?
+
+1. **Nature de l'indicateur**: BOL %B mesure la position du prix par rapport aux bandes
+2. **Calcul des bandes**: Utilise une moyenne mobile + ecart-type (retard inherent)
+3. **Toutes les periodes testees** (5, 10, 15, 20, 25, 30, 40, 50) donnent Lag +1
+4. **Pollution des gradients**: Un indicateur avec Lag +1 envoie des signaux contradictoires
+
+### Impact sur le modele
+
+- **Avant**: 4 indicateurs (RSI, CCI, BOL, MACD) → 4 sorties
+- **Apres**: 3 indicateurs (RSI, CCI, MACD) → 3 sorties
+- **Benefice**: Gradients plus propres, meilleure convergence
+
+### Conclusion
+
+BOL est structurellement incompatible avec notre approche de synchronisation. Les 3 indicateurs restants (RSI, CCI, MACD) sont tous synchronises (Lag 0) et offrent une base solide pour la prediction.
 
 ---
 
@@ -91,20 +125,22 @@ cd ~/projects/trad
 pip install -r requirements.txt
 ```
 
-### 2. Preparer les Donnees (une seule fois)
+### 2. Preparer les Donnees (Workflow 5min/30min - RECOMMANDE)
 
 ```bash
-# Option recommandee: combiner 1min + 5min
-python src/prepare_data.py --timeframe all --filter kalman
-
-# Ou avec 5min seulement
-python src/prepare_data.py --timeframe 5 --filter kalman
+# COMMANDE PRINCIPALE: 5 assets, features 5min+30min, labels 30min
+python src/prepare_data_30min.py --filter kalman --include-30min-features --assets BTC ETH BNB ADA LTC
 ```
 
-### 3. Entrainement (rapide avec donnees preparees)
+**Architecture 5min/30min:**
+- **Features**: Indicateurs 5min (haute resolution) + Indicateurs 30min + Step Index
+- **Labels**: Pente des indicateurs 30min (moins de bruit, meilleure predictibilite)
+- **Step Index**: Position dans la fenetre 30min (0.0 a 1.0)
+
+### 3. Entrainement
 
 ```bash
-python src/train.py --data data/prepared/dataset_all_kalman.npz --epochs 50
+python src/train.py --data data/prepared/dataset_btc_eth_bnb_ada_ltc_5min_30min_labels30min_kalman.npz --epochs 50
 ```
 
 ### 4. Evaluation
@@ -117,29 +153,33 @@ python src/evaluate.py
 
 ## Workflow Recommande
 
-### Separation Preparation / Entrainement
-
-Pour gagner du temps lors des tests de differentes configurations:
+### Workflow 5min/30min (PRINCIPAL)
 
 ```bash
-# 1. Preparer les donnees UNE FOIS (lent ~2-3 min)
-python src/prepare_data.py --timeframe all --filter kalman
+# 1. Preparer les donnees UNE FOIS avec tous les assets
+python src/prepare_data_30min.py --filter kalman --include-30min-features --assets BTC ETH BNB ADA LTC
 
 # 2. Entrainer PLUSIEURS FOIS (rapide ~10s de chargement)
-python src/train.py --data data/prepared/dataset_all_kalman.npz --epochs 50
-python src/train.py --data data/prepared/dataset_all_kalman.npz --lr 0.0001
-python src/train.py --data data/prepared/dataset_all_kalman.npz --batch-size 64
+python src/train.py --data data/prepared/dataset_btc_eth_bnb_ada_ltc_5min_30min_labels30min_kalman.npz --epochs 50
+python src/train.py --data data/prepared/dataset_btc_eth_bnb_ada_ltc_5min_30min_labels30min_kalman.npz --lr 0.0001
 ```
 
-### Options de Timeframe
+### Options de prepare_data_30min.py
 
-| Option | Description | Train | Val/Test |
-|--------|-------------|-------|----------|
-| `--timeframe 5` | 5 minutes seulement | 5min | 5min |
-| `--timeframe 1` | 1 minute seulement | 1min | 1min |
-| `--timeframe all` | **Recommande** - Combine les deux | 1min + 5min | 5min only |
+| Option | Description |
+|--------|-------------|
+| `--filter kalman` | Filtre Kalman pour labels (recommande) |
+| `--include-30min-features` | Ajoute indicateurs 30min en features (7 features total) |
+| `--assets BTC ETH ...` | Liste des assets a inclure |
 
-L'option `all` augmente les donnees d'entrainement (~3x) tout en evaluant sur le timeframe cible (5min).
+### Comparaison des architectures
+
+| Mode | Features | Labels | Total Features |
+|------|----------|--------|----------------|
+| Sans `--include-30min-features` | 5min(3) + step_index(1) | 30min | 4 |
+| Avec `--include-30min-features` | 5min(3) + 30min(3) + step_index(1) | 30min | 7 |
+
+**Recommandation**: Utiliser `--include-30min-features` pour plus de contexte.
 
 ---
 
@@ -225,55 +265,69 @@ trad/
 
 ## Donnees Disponibles
 
-### Fichiers CSV
+### Fichiers CSV (5 assets)
 
 ```
-../data_trad/
-|-- BTCUSD_all_1m.csv    # ~16 MB, bougies 1 minute
-|-- BTCUSD_all_5m.csv    # ~9 MB, bougies 5 minutes
-|-- ETHUSD_all_1m.csv    # ~15 MB, bougies 1 minute
-`-- ETHUSD_all_5m.csv    # ~8 MB, bougies 5 minutes
+data_trad/
+|-- BTCUSD_all_5m.csv    # Bitcoin
+|-- ETHUSD_all_5m.csv    # Ethereum
+|-- BNBUSD_all_5m.csv    # Binance Coin
+|-- ADAUSD_all_5m.csv    # Cardano
+`-- LTCUSD_all_5m.csv    # Litecoin
 ```
 
 ### Configuration dans constants.py
 
 ```python
-BTC_DATA_FILE_1M = '../data_trad/BTCUSD_all_1m.csv'
-ETH_DATA_FILE_1M = '../data_trad/ETHUSD_all_1m.csv'
-BTC_DATA_FILE_5M = '../data_trad/BTCUSD_all_5m.csv'
-ETH_DATA_FILE_5M = '../data_trad/ETHUSD_all_5m.csv'
+# Assets disponibles pour le workflow 5min/30min
+AVAILABLE_ASSETS_5M = {
+    'BTC': 'data_trad/BTCUSD_all_5m.csv',
+    'ETH': 'data_trad/ETHUSD_all_5m.csv',
+    'BNB': 'data_trad/BNBUSD_all_5m.csv',
+    'ADA': 'data_trad/ADAUSD_all_5m.csv',
+    'LTC': 'data_trad/LTCUSD_all_5m.csv',
+}
+
+# Assets par defaut (peut etre etendu)
+DEFAULT_ASSETS = ['BTC', 'ETH']
 ```
+
+**Note**: Pour utiliser tous les assets, specifier explicitement: `--assets BTC ETH BNB ADA LTC`
 
 ---
 
-## Pipeline de Preparation des Donnees
+## Pipeline de Preparation des Donnees (30min)
 
-### Commande
+### Commande principale
 
 ```bash
-python src/prepare_data.py --timeframe all --filter kalman
+python src/prepare_data_30min.py --filter kalman --include-30min-features --assets BTC ETH BNB ADA LTC
 ```
 
 ### Processus
 
-1. **Chargement**: BTC + ETH (1min et 5min)
+1. **Chargement**: Donnees 5min pour chaque asset
 2. **Trim edges**: 100 bougies debut + 100 fin
-3. **Split temporel**: 70% train / 15% val / 15% test
-4. **Calcul indicateurs**: RSI, CCI, MACD (normalises 0-100) - BOL retire
-5. **Generation labels**: Filtre Kalman/Decycler (non-causal)
-6. **Creation sequences**: 12 timesteps
-7. **Sauvegarde**: `.npz` compresse
+3. **Resample**: 5min → 30min
+4. **Calcul indicateurs 5min**: RSI, CCI, MACD (features)
+5. **Calcul indicateurs 30min**: RSI, CCI, MACD (features optionnelles + labels)
+6. **Generation labels**: Pente des indicateurs 30min (filtre Kalman)
+7. **Alignement**: Forward-fill des labels 30min sur timestamps 5min
+8. **Ajout Step Index**: Position dans la fenetre 30min (0.0-1.0)
+9. **Split temporel**: 70% train / 15% val / 15% test
+10. **Creation sequences**: 12 timesteps
+11. **Sauvegarde**: `.npz` compresse
 
 ### Options CLI
 
 ```bash
-python src/prepare_data.py --help
+python src/prepare_data_30min.py --help
 
 Options:
-  --timeframe {1,5,all}   Timeframe (defaut: 5)
+  --assets BTC ETH ...    Assets a inclure (defaut: BTC ETH)
   --filter {decycler,kalman}  Filtre pour labels (defaut: decycler)
-  --output PATH           Chemin de sortie
-  --list                  Liste les datasets disponibles
+  --include-30min-features    Ajouter indicateurs 30min (+3 features)
+  --output PATH           Chemin de sortie (defaut: auto)
 ```
 
 ---
