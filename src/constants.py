@@ -153,9 +153,9 @@ TRADING_DAYS_PER_YEAR = 365  # Crypto trade 24/7
 # CONSTANTES CHEMINS
 # =============================================================================
 
-# Dossier racine des données brutes (relatif au dossier src/)
-# IMPORTANT: Ce chemin est utilisé par tous les scripts de données
-DATA_TRAD_DIR = '../data_trad'
+# Dossier racine des données brutes (relatif à la racine du projet)
+# IMPORTANT: Exécuter les scripts depuis la racine: python src/script.py
+DATA_TRAD_DIR = 'data_trad'
 
 # Alias pour compatibilité
 DATA_DIR = DATA_TRAD_DIR
