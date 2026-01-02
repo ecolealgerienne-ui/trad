@@ -19,11 +19,11 @@ statsmodels>=0.13.0  # HP Filter, LOESS, etc.
 # Machine Learning (pour phase future)
 scikit-learn>=1.0.0
 
-# Deep Learning - TensorFlow (avec GPU)
-tensorflow>=2.10.0
-# OU PyTorch (décommenter si préféré):
-# torch>=1.12.0
-# torchvision>=0.13.0
+# Deep Learning - PyTorch (utilisé pour le modèle CNN-LSTM)
+torch>=2.0.0
+torchvision>=0.15.0
+# OU TensorFlow (commenté):
+# tensorflow>=2.10.0
 
 # Jupyter
 jupyter>=1.0.0
