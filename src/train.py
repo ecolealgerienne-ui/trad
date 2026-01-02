@@ -39,6 +39,7 @@ from data_utils import load_and_split_btc_eth
 from indicators import prepare_datasets
 from model import create_model, compute_metrics
 from prepare_data import load_prepared_data
+from utils import log_dataset_metadata
 
 
 class IndicatorDataset(Dataset):
@@ -437,14 +438,7 @@ def main():
         X_val, Y_val = prepared['val']
         X_test, Y_test = prepared['test']
         metadata = prepared['metadata']
-        # Support ancien et nouveau format de metadata
-        if 'timeframe' in metadata:
-            logger.info(f"  Timeframe: {metadata['timeframe']}m")
-        else:
-            logger.info(f"  Features: {metadata.get('feature_timeframe', 'unknown')}")
-            logger.info(f"  Labels: {metadata.get('label_timeframe', 'unknown')}")
-        logger.info(f"  Filtre: {metadata['filter_type']}")
-        logger.info(f"  Créé: {metadata['created_at']}")
+        log_dataset_metadata(metadata, logger)
     else:
         # Préparer données à la volée (lent)
         logger.info("\n1. Chargement des données BTC + ETH...")

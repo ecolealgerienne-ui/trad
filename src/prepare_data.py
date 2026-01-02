@@ -34,6 +34,7 @@ from constants import (
     DECYCLER_CUTOFF, KALMAN_PROCESS_VAR, KALMAN_MEASURE_VAR
 )
 from data_utils import load_crypto_data, trim_edges
+from utils import log_dataset_metadata
 from indicators import (
     prepare_datasets,
     calculate_all_indicators_for_model,
@@ -488,20 +489,7 @@ def load_prepared_data(path: str = None) -> dict:
     logger.info(f"     Train: {data['X_train'].shape}")
     logger.info(f"     Val:   {data['X_val'].shape}")
     logger.info(f"     Test:  {data['X_test'].shape}")
-
-    # Support ancien format (timeframe) et nouveau format (feature_timeframe/label_timeframe)
-    if 'timeframe' in metadata:
-        tf = metadata['timeframe']
-        tf_str = f"{tf}m" if tf != 'all' else "all (1m+5m train, 5m val/test)"
-        logger.info(f"     Timeframe: {tf_str}")
-    else:
-        # Nouveau format avec labels 30min
-        feat_tf = metadata.get('feature_timeframe', 'unknown')
-        label_tf = metadata.get('label_timeframe', 'unknown')
-        logger.info(f"     Features: {feat_tf}")
-        logger.info(f"     Labels: {label_tf}")
-
-    logger.info(f"     Filtre: {metadata['filter_type']}")
+    log_dataset_metadata(metadata, logger)
 
     return result
 

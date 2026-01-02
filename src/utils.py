@@ -458,3 +458,35 @@ def get_column_stats(df: pd.DataFrame, col: str) -> dict:
         'q75': series.quantile(0.75),
         'null_count': df[col].isnull().sum()
     }
+
+
+def log_dataset_metadata(metadata: dict, logger_instance=None) -> None:
+    """
+    Affiche les métadonnées d'un dataset de manière uniforme.
+
+    Supporte les deux formats:
+        - Ancien: timeframe (5min, all, etc.)
+        - Nouveau: feature_timeframe + label_timeframe (pour labels 30min)
+
+    Args:
+        metadata: Dictionnaire de métadonnées du dataset
+        logger_instance: Logger à utiliser (défaut: logger du module)
+    """
+    log = logger_instance or logger
+
+    # Support ancien format (timeframe) et nouveau format (feature_timeframe/label_timeframe)
+    if 'timeframe' in metadata:
+        tf = metadata['timeframe']
+        tf_str = f"{tf}m" if tf != 'all' else "all (1m+5m train, 5m val/test)"
+        log.info(f"     Timeframe: {tf_str}")
+    else:
+        # Nouveau format avec labels 30min
+        feat_tf = metadata.get('feature_timeframe', 'unknown')
+        label_tf = metadata.get('label_timeframe', 'unknown')
+        log.info(f"     Features: {feat_tf}")
+        log.info(f"     Labels: {label_tf}")
+
+    log.info(f"     Filtre: {metadata.get('filter_type', 'unknown')}")
+
+    if 'created_at' in metadata:
+        log.info(f"     Créé: {metadata['created_at']}")
