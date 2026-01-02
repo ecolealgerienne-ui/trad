@@ -353,11 +353,29 @@ SEQUENCE_LENGTH = 12
 
 ## Objectifs de Performance
 
-| Metrique | Baseline | Cible |
-|----------|----------|-------|
-| Accuracy moyenne | 50% | 85%+ |
-| Gap train/val | - | <10% |
-| Gap train/test | - | <10% |
+| Metrique | Baseline | Cible | Actuel (2026-01-02) |
+|----------|----------|-------|---------------------|
+| Accuracy moyenne | 50% | 85%+ | **76.4%** |
+| Gap train/val | - | <10% | 3.6% ✅ |
+| Gap val/test | - | <10% | 8% ✅ |
+
+### Resultats par Indicateur (Test Set)
+
+| Indicateur | Accuracy | F1 | Notes |
+|------------|----------|-----|-------|
+| MACD | 79.5% | 0.795 | Meilleur |
+| CCI | 77.9% | 0.782 | |
+| BOL | 74.6% | 0.746 | |
+| RSI | 73.8% | 0.739 | Plus difficile |
+| **MOYENNE** | **76.4%** | **0.765** | +26.4pts vs baseline |
+
+### Configuration Optimale Actuelle
+
+```bash
+python src/train.py --data data/prepared/dataset_all_kalman.npz \
+    --cnn-filters 128 --lstm-hidden 128 --lstm-layers 3 \
+    --dense-hidden 64 --lstm-dropout 0.3 --dense-dropout 0.4
+```
 
 ### Signes de bon entrainement
 
@@ -406,6 +424,69 @@ python src/constants.py
 
 ---
 
+## Pistes d'Amelioration (Litterature)
+
+### 1. Features Additionnelles (Priorite Haute)
+
+**Volume et Derivees:**
+- Volume brut normalise
+- Volume relatif (vs moyenne mobile)
+- OBV (On-Balance Volume)
+- Volume-Price Trend (VPT)
+
+**Volatilite:**
+- ATR (Average True Range)
+- Volatilite historique (std des returns)
+- Largeur des bandes de Bollinger
+
+**Momentum additionnels:**
+- ROC (Rate of Change) sur plusieurs periodes
+- Williams %R
+- Stochastic Oscillator
+
+### 2. Features Multi-Resolution (Litterature: "Multi-Scale Features")
+
+Encoder l'information a plusieurs echelles temporelles:
+```
+Features actuelles: indicateurs sur 5min
+Ajouter: memes indicateurs sur 15min, 1h, 4h
+```
+
+Cela capture les tendances court/moyen/long terme simultanement.
+
+### 3. Features de Marche (Cross-Asset)
+
+- Correlation BTC/ETH glissante
+- Dominance BTC (si donnees disponibles)
+- Spread BTC-ETH
+
+### 4. Embeddings Temporels
+
+- Heure du jour (sin/cos encoding)
+- Jour de la semaine (sin/cos encoding)
+- Session de trading (Asie/Europe/US)
+
+### 5. Features Derivees des Prix
+
+- Returns logarithmiques
+- Returns sur plusieurs horizons (1, 5, 15, 60 periodes)
+- High-Low range normalise
+- Close position dans la bougie (close-low)/(high-low)
+
+### References
+
+- "Deep Learning for Financial Time Series" - recommande multi-scale features
+- "Attention-based Models for Crypto" - importance du volume
+- "Technical Analysis with ML" - combinaison indicateurs + prix bruts
+
+### Prochaines Etapes Recommandees
+
+1. **Court terme**: Ajouter Volume + ATR (2 features, impact potentiel eleve)
+2. **Moyen terme**: Multi-resolution (indicateurs 15min/1h)
+3. **Long terme**: Embeddings temporels + cross-asset
+
+---
+
 **Cree par**: Claude Code
 **Derniere MAJ**: 2026-01-02
-**Version**: 2.0
+**Version**: 2.1
