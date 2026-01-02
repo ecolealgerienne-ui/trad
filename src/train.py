@@ -346,6 +346,11 @@ def parse_args():
     parser.add_argument('--save-path', type=str, default=BEST_MODEL_PATH,
                         help='Chemin pour sauvegarder le meilleur modèle')
 
+    # Génération de labels
+    parser.add_argument('--filter', type=str, default='decycler',
+                        choices=['decycler', 'kalman'],
+                        help='Type de filtre pour générer les labels (decycler ou kalman)')
+
     # Autres
     parser.add_argument('--seed', type=int, default=RANDOM_SEED,
                         help='Random seed pour reproductibilité')
@@ -389,6 +394,7 @@ def main():
     logger.info(f"  Learning rate: {args.learning_rate}")
     logger.info(f"  Max epochs: {args.epochs}")
     logger.info(f"  Early stopping patience: {args.patience}")
+    logger.info(f"  Filter type: {args.filter}")
     logger.info(f"  Random seed: {args.seed}")
 
     # =========================================================================
@@ -400,8 +406,8 @@ def main():
     # =========================================================================
     # 2. PRÉPARER LES DATASETS
     # =========================================================================
-    logger.info("\n2. Préparation des datasets (indicateurs + labels)...")
-    datasets = prepare_datasets(train_df, val_df, test_df)
+    logger.info(f"\n2. Préparation des datasets (indicateurs + labels avec filtre {args.filter.upper()})...")
+    datasets = prepare_datasets(train_df, val_df, test_df, filter_type=args.filter)
 
     X_train, Y_train = datasets['train']
     X_val, Y_val = datasets['val']

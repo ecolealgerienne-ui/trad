@@ -74,6 +74,9 @@ DECYCLER_CUTOFF = 0.1  # Fréquence de coupure
 KALMAN_PROCESS_VAR = 0.01  # Variance du processus (Q)
 KALMAN_MEASURE_VAR = 0.1  # Variance de mesure (R)
 
+# Choix du filtre pour génération labels
+LABEL_FILTER_TYPE = 'decycler'  # 'decycler' ou 'kalman'
+
 # =============================================================================
 # CONSTANTES MODÈLE CNN-LSTM
 # =============================================================================

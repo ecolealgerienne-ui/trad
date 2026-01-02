@@ -74,6 +74,27 @@ python src/train.py --patience 20  # Plus de tolérance
 
 ---
 
+## 🔬 Type de Filtre pour Labels
+
+```bash
+# Filtre par défaut (Decycler)
+python src/train.py
+
+# Forcer filtre Decycler
+python src/train.py --filter decycler
+
+# Utiliser filtre Kalman (meilleure qualité)
+python src/train.py --filter kalman
+```
+
+**Comparaison des filtres** :
+- **Decycler** : Filtre de Ehlers, rapide, ~67% accuracy
+- **Kalman** : Kalman smoothing, meilleure qualité, ~85% accuracy
+
+**Recommandation** : Utiliser `--filter kalman` pour de meilleurs résultats.
+
+---
+
 ## 💻 Device (CPU/GPU)
 
 ```bash
@@ -132,7 +153,8 @@ python src/train.py \
     --batch-size 64 \
     --lr 0.001 \
     --epochs 100 \
-    --patience 10
+    --patience 10 \
+    --filter kalman
 ```
 
 ### Entraînement Long (GPU puissant)
@@ -142,7 +164,8 @@ python src/train.py \
     --batch-size 128 \
     --lr 0.001 \
     --epochs 200 \
-    --patience 15
+    --patience 15 \
+    --filter kalman
 ```
 
 ### Fine-tuning avec Learning Rate Bas

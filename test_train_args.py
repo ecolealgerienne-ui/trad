@@ -29,6 +29,11 @@ def parse_args():
     parser.add_argument('--save-path', type=str, default='models/best_model.pth',
                         help='Chemin pour sauvegarder le meilleur modèle')
 
+    # Génération de labels
+    parser.add_argument('--filter', type=str, default='decycler',
+                        choices=['decycler', 'kalman'],
+                        help='Type de filtre pour générer les labels (decycler ou kalman)')
+
     # Autres
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed pour reproductibilité')
@@ -49,6 +54,7 @@ if __name__ == '__main__':
     print(f"  Learning rate: {args.learning_rate}")
     print(f"  Max epochs: {args.epochs}")
     print(f"  Early stopping patience: {args.patience}")
+    print(f"  Filter type: {args.filter}")
     print(f"  Random seed: {args.seed}")
     print(f"  Device: {args.device}")
     print(f"  Save path: {args.save_path}")

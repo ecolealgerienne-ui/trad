@@ -27,6 +27,8 @@ from constants import (
     INDICATOR_MIN, INDICATOR_MAX,
     MACD_NORM_WINDOW,
     DECYCLER_CUTOFF,
+    KALMAN_PROCESS_VAR, KALMAN_MEASURE_VAR,
+    LABEL_FILTER_TYPE,
     SEQUENCE_LENGTH,
     NUM_INDICATORS
 )
@@ -598,6 +600,56 @@ def apply_decycler_perfect(signal: np.ndarray, cutoff: float = DECYCLER_CUTOFF) 
     return perfect
 
 
+def apply_kalman_perfect(signal: np.ndarray,
+                        process_var: float = KALMAN_PROCESS_VAR,
+                        measure_var: float = KALMAN_MEASURE_VAR) -> np.ndarray:
+    """
+    Applique le filtre de Kalman en mode PARFAIT (smoothing forward-backward).
+
+    ⚠️ ATTENTION : Cette version est NON-CAUSALE (utilise le futur)!
+    Elle sert UNIQUEMENT pour générer les labels (vérité terrain).
+
+    Le smoothing de Kalman utilise toutes les observations (passé + futur)
+    pour obtenir la meilleure estimation possible du signal.
+
+    Args:
+        signal: Signal d'entrée (indicateur ou prix)
+        process_var: Variance du processus (Q) - Contrôle le lissage
+                     Plus petit = plus lisse
+        measure_var: Variance de mesure (R) - Contrôle le bruit
+                     Plus grand = plus de lissage
+
+    Returns:
+        Signal filtré parfait (sans lag temporel)
+
+    Example:
+        >>> filtered = apply_kalman_perfect(rsi_values)
+        >>> # filtered suit la tendance sans lag
+    """
+    try:
+        from pykalman import KalmanFilter
+    except ImportError:
+        logger.error("pykalman non installé. Utilisez: pip install pykalman")
+        raise
+
+    # Configurer le filtre de Kalman
+    kf = KalmanFilter(
+        transition_matrices=[1],
+        observation_matrices=[1],
+        initial_state_mean=signal[0],
+        initial_state_covariance=1,
+        observation_covariance=measure_var,
+        transition_covariance=process_var
+    )
+
+    # Smoothing (forward-backward) - utilise toutes les observations
+    state_means, _ = kf.smooth(signal)
+
+    logger.debug(f"Kalman parfait appliqué (Q={process_var}, R={measure_var})")
+
+    return state_means.flatten()
+
+
 # =============================================================================
 # LABEL GENERATION (Pente du filtre parfait)
 # =============================================================================
@@ -747,22 +799,23 @@ def calculate_all_indicators_for_model(df: pd.DataFrame) -> np.ndarray:
     return indicators
 
 
-def generate_all_labels(indicators: np.ndarray) -> np.ndarray:
+def generate_all_labels(indicators: np.ndarray, filter_type: str = LABEL_FILTER_TYPE) -> np.ndarray:
     """
-    Génère les labels pour les 4 indicateurs avec Decycler parfait.
+    Génère les labels pour les 4 indicateurs avec le filtre choisi.
 
     Process:
         1. Pour chaque indicateur (RSI, CCI, BOL, MACD)
-        2. Appliquer Decycler parfait (forward-backward)
+        2. Appliquer filtre parfait (Decycler ou Kalman forward-backward)
         3. Générer labels binaires (pente haussière = 1, baissière = 0)
 
     Args:
         indicators: Array (n_samples, 4) - Les 4 indicateurs normalisés
+        filter_type: Type de filtre ('decycler' ou 'kalman')
 
     Returns:
         Array (n_samples, 4) - Les 4 labels binaires
     """
-    logger.info("Génération des labels avec Decycler parfait...")
+    logger.info(f"Génération des labels avec filtre {filter_type.upper()}...")
 
     n_samples = indicators.shape[0]
     labels = np.zeros((n_samples, NUM_INDICATORS), dtype=int)
@@ -770,8 +823,13 @@ def generate_all_labels(indicators: np.ndarray) -> np.ndarray:
     indicator_names = ['RSI', 'CCI', 'BOL', 'MACD']
 
     for i in range(NUM_INDICATORS):
-        # Appliquer Decycler parfait
-        filtered = apply_decycler_perfect(indicators[:, i])
+        # Appliquer le filtre choisi
+        if filter_type.lower() == 'kalman':
+            filtered = apply_kalman_perfect(indicators[:, i])
+        elif filter_type.lower() == 'decycler':
+            filtered = apply_decycler_perfect(indicators[:, i])
+        else:
+            raise ValueError(f"Filter type '{filter_type}' inconnu. Utilisez 'kalman' ou 'decycler'.")
 
         # Générer labels
         labels[:, i] = generate_labels(filtered)
@@ -785,13 +843,14 @@ def generate_all_labels(indicators: np.ndarray) -> np.ndarray:
 
 def prepare_datasets(train_df: pd.DataFrame,
                     val_df: pd.DataFrame,
-                    test_df: pd.DataFrame) -> Dict[str, Tuple[np.ndarray, np.ndarray]]:
+                    test_df: pd.DataFrame,
+                    filter_type: str = LABEL_FILTER_TYPE) -> Dict[str, Tuple[np.ndarray, np.ndarray]]:
     """
     Pipeline COMPLET: des DataFrames raw aux datasets prêts pour l'entraînement.
 
     Process:
         1. Calculer les 4 indicateurs normalisés (RSI, CCI, BOL, MACD)
-        2. Générer les 4 labels avec Decycler parfait
+        2. Générer les 4 labels avec le filtre choisi (Decycler ou Kalman)
         3. Créer séquences de 12 timesteps
         4. Retourner X, Y pour train/val/test
 
@@ -799,6 +858,7 @@ def prepare_datasets(train_df: pd.DataFrame,
         train_df: DataFrame train (avec colonnes OHLC)
         val_df: DataFrame validation
         test_df: DataFrame test
+        filter_type: Type de filtre pour labels ('decycler' ou 'kalman')
 
     Returns:
         Dictionnaire avec:
@@ -811,13 +871,13 @@ def prepare_datasets(train_df: pd.DataFrame,
             Y shape: (n_sequences, 4) - 4 labels binaires
 
     Example:
-        >>> datasets = prepare_datasets(train_df, val_df, test_df)
+        >>> datasets = prepare_datasets(train_df, val_df, test_df, filter_type='kalman')
         >>> X_train, Y_train = datasets['train']
         >>> print(X_train.shape)  # (N_train, 12, 4)
         >>> print(Y_train.shape)  # (N_train, 4)
     """
     logger.info("="*80)
-    logger.info("PRÉPARATION COMPLÈTE DES DATASETS")
+    logger.info(f"PRÉPARATION COMPLÈTE DES DATASETS (Filtre: {filter_type.upper()})")
     logger.info("="*80)
 
     results = {}
@@ -828,8 +888,8 @@ def prepare_datasets(train_df: pd.DataFrame,
         # 1. Calculer indicateurs
         indicators = calculate_all_indicators_for_model(df)
 
-        # 2. Générer labels
-        labels = generate_all_labels(indicators)
+        # 2. Générer labels avec le filtre choisi
+        labels = generate_all_labels(indicators, filter_type=filter_type)
 
         # 3. Créer séquences
         X, Y = create_sequences(indicators, labels, sequence_length=SEQUENCE_LENGTH)
