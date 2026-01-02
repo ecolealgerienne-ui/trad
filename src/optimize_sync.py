@@ -147,11 +147,13 @@ def calculate_reference_labels(close: np.ndarray,
 
 def calculate_indicator_labels(df: pd.DataFrame,
                                indicator: str,
-                               params: Dict,
-                               process_var: float = KALMAN_PROCESS_VAR,
-                               measure_var: float = KALMAN_MEASURE_VAR) -> np.ndarray:
+                               params: Dict) -> np.ndarray:
     """
     Calcule les labels pour un indicateur avec des parametres donnes.
+
+    NOTE: Pas de filtre Kalman sur l'indicateur - on compare la pente BRUTE
+    de l'indicateur avec la pente lissee du Close. Cela permet de detecter
+    si l'indicateur anticipe le mouvement du prix.
     """
     if indicator == 'RSI':
         values = calculate_rsi(df['close'], period=params['period'])
@@ -175,11 +177,9 @@ def calculate_indicator_labels(df: pd.DataFrame,
     else:
         raise ValueError(f"Indicateur inconnu: {indicator}")
 
-    # Filtrer avec Kalman et calculer les labels
-    # Gerer les NaN
+    # Gerer les NaN et calculer les labels directement (sans Kalman)
     values = pd.Series(values).ffill().fillna(50).values
-    filtered = kalman_filter(values, process_var, measure_var)
-    return calculate_slope_labels(filtered)
+    return calculate_slope_labels(values)
 
 
 def to_gpu_tensor(labels: np.ndarray, start_idx: int = 50) -> torch.Tensor:
