@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 from constants import (
     RSI_PERIOD, CCI_PERIOD, CCI_CONSTANT,
     MACD_FAST, MACD_SLOW, MACD_SIGNAL,
+    BOL_PERIOD, BOL_NUM_STD,  # DEPRECATED - kept for utility functions
     CCI_RAW_MIN, CCI_RAW_MAX,
     INDICATOR_MIN, INDICATOR_MAX,
     MACD_NORM_WINDOW,
