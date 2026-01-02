@@ -27,10 +27,10 @@ ETH_CANDLES = 100000  # Nombre de bougies ETH à charger
 # =============================================================================
 
 # RSI (Relative Strength Index)
-RSI_PERIOD = 14  # Période standard du RSI
+RSI_PERIOD = 5  # Période agressive pour capturer les mouvements rapides
 
 # CCI (Commodity Channel Index)
-CCI_PERIOD = 20  # Période du CCI
+CCI_PERIOD = 7  # Période agressive pour réactivité
 CCI_CONSTANT = 0.015  # Constante de scaling du CCI
 
 # Bollinger Bands
@@ -38,8 +38,8 @@ BOL_PERIOD = 20  # Période de la moyenne mobile
 BOL_NUM_STD = 2  # Nombre d'écarts-types pour les bandes
 
 # MACD (Moving Average Convergence Divergence)
-MACD_FAST = 12  # Période EMA rapide
-MACD_SLOW = 26  # Période EMA lente
+MACD_FAST = 5  # Période EMA rapide (agressive)
+MACD_SLOW = 13  # Période EMA lente (agressive)
 MACD_SIGNAL = 9  # Période de la ligne de signal
 
 # =============================================================================
