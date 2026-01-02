@@ -16,6 +16,42 @@ L'utilisateur possede les donnees reelles et un GPU. Claude doit:
 
 ---
 
+## IMPORTANT - Privilegier GPU
+
+**Tous les scripts doivent utiliser le GPU quand c'est possible.**
+
+### Regles de developpement:
+
+1. **PyTorch pour les calculs**: Utiliser `torch.Tensor` sur GPU plutot que `numpy` pour les operations vectorisees
+2. **Argument --device**: Ajouter `--device {auto,cuda,cpu}` a tous les scripts
+3. **Auto-detection**: Par defaut, utiliser CUDA si disponible
+4. **Kalman sur CPU**: Exception - pykalman ne supporte pas GPU, garder sur CPU
+5. **Metriques sur GPU**: Concordance, correlation, comparaisons → GPU
+
+### Pattern standard:
+
+```python
+import torch
+
+# Global device
+DEVICE = torch.device('cpu')
+
+def main():
+    global DEVICE
+    if args.device == 'auto':
+        DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    else:
+        DEVICE = torch.device(args.device)
+
+# Conversion numpy → GPU tensor
+tensor = torch.tensor(numpy_array, device=DEVICE, dtype=torch.float32)
+
+# Calcul GPU
+result = (tensor1 == tensor2).float().mean().item()
+```
+
+---
+
 ## Vue d'Ensemble
 
 Ce projet implemente un systeme de prediction de tendance crypto utilisant un modele CNN-LSTM multi-output pour predire la **pente (direction)** de 4 indicateurs techniques.
