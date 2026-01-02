@@ -5,9 +5,11 @@ Ce script trouve les parametres optimaux pour chaque indicateur
 afin de synchroniser leurs signaux avec la direction du Close.
 
 Metriques utilisees:
-1. Concordance: % de labels identiques entre indicateur et close
-2. Anticipation: lag temporel (negatif = indicateur en avance = mieux)
-3. Hamming: distance de Hamming normalisee (plus bas = mieux)
+1. Concordance (30%): % de labels identiques entre indicateur et close
+2. Anticipation (40%): lag temporel (negatif = indicateur en avance = mieux)
+3. Pivot Accuracy (30%): % de match sur les points de retournement
+
+Score = 0.3*Concordance + 0.4*Anticipation + 0.3*PivotAccuracy
 
 Usage:
     python src/optimize_sync.py --assets BTC ETH BNB --val-assets ADA LTC
@@ -74,10 +76,10 @@ class SyncResult:
     """Resultat de synchronisation pour un jeu de parametres."""
     indicator: str
     params: Dict
-    concordance: float      # % de labels identiques
-    anticipation: float     # Lag (negatif = en avance)
-    hamming_norm: float     # Distance Hamming normalisee
-    composite_score: float  # Score composite
+    concordance: float       # % de labels identiques (stabilite)
+    anticipation: float      # Lag (negatif = en avance = mieux)
+    pivot_accuracy: float    # % de match sur les pivots (pertinence)
+    composite_score: float   # Score composite 30/40/30
     n_samples: int
 
 
@@ -206,34 +208,67 @@ def calculate_lag(labels1: np.ndarray, labels2: np.ndarray, max_lag: int = 10) -
     return best_lag
 
 
-def calculate_hamming_distance(labels1: np.ndarray, labels2: np.ndarray) -> float:
-    """Calcule la distance de Hamming normalisee."""
+def calculate_pivot_accuracy(labels_ind: np.ndarray, labels_ref: np.ndarray) -> float:
+    """
+    Calcule le % de match sur les PIVOTS (changements de direction).
+
+    Les pivots sont les points ou on gagne/perd de l'argent.
+    Un indicateur avec 95% de concordance globale mais qui rate les pivots
+    est moins utile qu'un indicateur a 80% qui capte les retournements.
+
+    IMPORTANT: np.diff donne l'indice AVANT le changement.
+    Si le prix change a l'indice T, diff le marque a T-1.
+    On compare donc a pivots_ref + 1 (premiere bougie nouvelle direction).
+    """
     start_idx = 50
-    l1 = labels1[start_idx:]
-    l2 = labels2[start_idx:]
-    return np.mean(l1 != l2)
+    l_ind = labels_ind[start_idx:]
+    l_ref = labels_ref[start_idx:]
+
+    # Detecter les pivots dans la reference (Close)
+    # np.diff != 0 indique un changement de direction
+    pivot_indices = np.where(np.diff(l_ref) != 0)[0]
+
+    if len(pivot_indices) == 0:
+        return 0.5  # Pas de pivot = score neutre
+
+    # Comparer a l'indice + 1 (premiere bougie de la nouvelle direction)
+    # C'est a cet instant que l'ordre est execute a Open(t+1)
+    valid_pivots = pivot_indices[pivot_indices + 1 < len(l_ref)]
+
+    if len(valid_pivots) == 0:
+        return 0.5
+
+    # Accuracy sur les pivots
+    matches = l_ind[valid_pivots + 1] == l_ref[valid_pivots + 1]
+    return np.mean(matches)
 
 
 def calculate_composite_score(concordance: float,
                               anticipation: int,
-                              hamming: float,
-                              w_concordance: float = 0.5,
-                              w_anticipation: float = 0.3,
-                              w_hamming: float = 0.2) -> float:
+                              pivot_accuracy: float,
+                              w_concordance: float = 0.3,
+                              w_anticipation: float = 0.4,
+                              w_pivot: float = 0.3) -> float:
     """
-    Calcule le score composite.
+    Calcule le score composite (30/40/30).
 
-    - concordance: plus haut = mieux (0-1)
-    - anticipation: plus negatif = mieux (indicateur en avance)
-    - hamming: plus bas = mieux (0-1)
+    - concordance (30%): Stabilite - l'indicateur ne devient pas "fou"
+    - anticipation (40%): Vitesse - privilegie les indicateurs qui sentent le mouvement
+    - pivot_accuracy (30%): Pertinence - match sur les points de retournement
+
+    Un indicateur ideal:
+    - Est en avance sur le Close (anticipation negative)
+    - Match bien sur les pivots (la ou on gagne l'argent)
+    - Reste stable entre les pivots (pas de bruit)
     """
     # Normaliser anticipation: -10 -> 1.0, 0 -> 0.5, +10 -> 0.0
+    # On veut que les indicateurs en avance (lag negatif) aient un meilleur score
     anticipation_score = max(0, min(1, 0.5 - anticipation / 20))
 
     score = (
         w_concordance * concordance +
         w_anticipation * anticipation_score +
-        w_hamming * (1 - hamming)
+        w_pivot * pivot_accuracy
     )
     return score
 
@@ -254,23 +289,23 @@ def evaluate_params(df: pd.DataFrame,
             params=params,
             concordance=0.0,
             anticipation=0,
-            hamming_norm=1.0,
+            pivot_accuracy=0.0,
             composite_score=0.0,
             n_samples=0
         )
 
-    # Calculer les metriques
+    # Calculer les 3 metriques
     concordance = calculate_concordance(ind_labels, ref_labels)
     anticipation = calculate_lag(ind_labels, ref_labels)
-    hamming = calculate_hamming_distance(ind_labels, ref_labels)
-    score = calculate_composite_score(concordance, anticipation, hamming)
+    pivot_acc = calculate_pivot_accuracy(ind_labels, ref_labels)
+    score = calculate_composite_score(concordance, anticipation, pivot_acc)
 
     return SyncResult(
         indicator=indicator,
         params=params,
         concordance=concordance,
         anticipation=anticipation,
-        hamming_norm=hamming,
+        pivot_accuracy=pivot_acc,
         composite_score=score,
         n_samples=len(df)
     )
@@ -313,7 +348,7 @@ def optimize_indicator(dfs: Dict[str, pd.DataFrame],
         # Moyenne des scores sur tous les assets
         avg_concordance = np.mean([r.concordance for r in scores_per_asset])
         avg_anticipation = np.mean([r.anticipation for r in scores_per_asset])
-        avg_hamming = np.mean([r.hamming_norm for r in scores_per_asset])
+        avg_pivot_acc = np.mean([r.pivot_accuracy for r in scores_per_asset])
         avg_score = np.mean([r.composite_score for r in scores_per_asset])
         total_samples = sum([r.n_samples for r in scores_per_asset])
 
@@ -322,7 +357,7 @@ def optimize_indicator(dfs: Dict[str, pd.DataFrame],
             params=params,
             concordance=avg_concordance,
             anticipation=avg_anticipation,
-            hamming_norm=avg_hamming,
+            pivot_accuracy=avg_pivot_acc,
             composite_score=avg_score,
             n_samples=total_samples
         )
@@ -334,7 +369,7 @@ def optimize_indicator(dfs: Dict[str, pd.DataFrame],
         else:
             params_str = f"period={params['period']}"
         logger.info(f"  {params_str:20s} | Conc: {avg_concordance:.3f} | "
-                   f"Lag: {avg_anticipation:+3.0f} | Hamm: {avg_hamming:.3f} | "
+                   f"Lag: {avg_anticipation:+3.0f} | Pivot: {avg_pivot_acc:.3f} | "
                    f"Score: {avg_score:.3f}")
 
     # Trier par score decroissant
@@ -373,6 +408,7 @@ def validate_on_assets(optimal_params: Dict[str, Dict],
             logger.info(f"  {indicator} sur {asset}: "
                        f"Conc={result.concordance:.3f}, "
                        f"Lag={result.anticipation:+d}, "
+                       f"Pivot={result.pivot_accuracy:.3f}, "
                        f"Score={result.composite_score:.3f}")
 
         validation_scores[indicator] = np.mean(scores)
@@ -453,15 +489,15 @@ def main():
             'params': best.params,
             'concordance': best.concordance,
             'anticipation': best.anticipation,
-            'hamming_norm': best.hamming_norm,
+            'pivot_accuracy': best.pivot_accuracy,
             'composite_score': best.composite_score
         }
 
         logger.info(f"\n  MEILLEUR {indicator}: {best.params}")
-        logger.info(f"    Concordance: {best.concordance:.3f}")
-        logger.info(f"    Anticipation: {best.anticipation:+d} steps")
-        logger.info(f"    Hamming: {best.hamming_norm:.3f}")
-        logger.info(f"    Score: {best.composite_score:.3f}")
+        logger.info(f"    Concordance:    {best.concordance:.3f} (30%)")
+        logger.info(f"    Anticipation:   {best.anticipation:+d} steps (40%)")
+        logger.info(f"    Pivot Accuracy: {best.pivot_accuracy:.3f} (30%)")
+        logger.info(f"    Score Total:    {best.composite_score:.3f}")
 
     # =========================================================================
     # 3. VALIDATION CROISEE
