@@ -24,6 +24,7 @@ from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
 import json
 from datetime import datetime
+import torch
 
 # Configuration logging
 logging.basicConfig(
@@ -31,6 +32,9 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Device global (sera configure dans main)
+DEVICE = torch.device('cpu')
 
 # Imports locaux
 from constants import (
@@ -179,51 +183,63 @@ def calculate_indicator_labels(df: pd.DataFrame,
 
 
 def calculate_concordance(labels1: np.ndarray, labels2: np.ndarray) -> float:
-    """Calcule le taux de concordance (% de labels identiques)."""
-    # Ignorer les premiers elements (warm-up)
+    """Calcule le taux de concordance (% de labels identiques) - GPU accelere."""
     start_idx = 50
-    l1 = labels1[start_idx:]
-    l2 = labels2[start_idx:]
-    return np.mean(l1 == l2)
+
+    # Convertir en tensors GPU
+    l1 = torch.tensor(labels1[start_idx:], device=DEVICE, dtype=torch.int32)
+    l2 = torch.tensor(labels2[start_idx:], device=DEVICE, dtype=torch.int32)
+
+    # Calcul GPU
+    concordance = (l1 == l2).float().mean().item()
+    return concordance
 
 
 def calculate_lag(labels1: np.ndarray, labels2: np.ndarray, max_lag: int = 10) -> int:
     """
-    Calcule le lag optimal entre deux series de labels.
+    Calcule le lag optimal entre deux series de labels - GPU accelere.
 
     Retourne:
         lag negatif = labels1 en avance sur labels2
         lag positif = labels1 en retard sur labels2
     """
     start_idx = 50
-    l1 = labels1[start_idx:].astype(float)
-    l2 = labels2[start_idx:].astype(float)
+
+    # Convertir en tensors GPU
+    l1 = torch.tensor(labels1[start_idx:], device=DEVICE, dtype=torch.float32)
+    l2 = torch.tensor(labels2[start_idx:], device=DEVICE, dtype=torch.float32)
 
     # Centrer les series
     l1 = l1 - l1.mean()
     l2 = l2 - l2.mean()
 
     best_lag = 0
-    best_corr = -1
+    best_corr = -1.0
 
     for lag in range(-max_lag, max_lag + 1):
         if lag < 0:
-            corr = np.corrcoef(l1[-lag:], l2[:lag])[0, 1]
+            a, b = l1[-lag:], l2[:lag]
         elif lag > 0:
-            corr = np.corrcoef(l1[:-lag], l2[lag:])[0, 1]
+            a, b = l1[:-lag], l2[lag:]
         else:
-            corr = np.corrcoef(l1, l2)[0, 1]
+            a, b = l1, l2
 
-        if not np.isnan(corr) and corr > best_corr:
-            best_corr = corr
-            best_lag = lag
+        # Correlation sur GPU
+        if len(a) > 1:
+            cov = ((a - a.mean()) * (b - b.mean())).mean()
+            std_a, std_b = a.std(), b.std()
+            if std_a > 0 and std_b > 0:
+                corr = (cov / (std_a * std_b)).item()
+                if not np.isnan(corr) and corr > best_corr:
+                    best_corr = corr
+                    best_lag = lag
 
     return best_lag
 
 
 def calculate_pivot_accuracy(labels_ind: np.ndarray, labels_ref: np.ndarray) -> float:
     """
-    Calcule le % de match sur les PIVOTS (changements de direction).
+    Calcule le % de match sur les PIVOTS (changements de direction) - GPU accelere.
 
     Les pivots sont les points ou on gagne/perd de l'argent.
     Un indicateur avec 95% de concordance globale mais qui rate les pivots
@@ -234,26 +250,28 @@ def calculate_pivot_accuracy(labels_ind: np.ndarray, labels_ref: np.ndarray) -> 
     On compare donc a pivots_ref + 1 (premiere bougie nouvelle direction).
     """
     start_idx = 50
-    l_ind = labels_ind[start_idx:]
-    l_ref = labels_ref[start_idx:]
+
+    # Convertir en tensors GPU
+    l_ind = torch.tensor(labels_ind[start_idx:], device=DEVICE, dtype=torch.int32)
+    l_ref = torch.tensor(labels_ref[start_idx:], device=DEVICE, dtype=torch.int32)
 
     # Detecter les pivots dans la reference (Close)
-    # np.diff != 0 indique un changement de direction
-    pivot_indices = np.where(np.diff(l_ref) != 0)[0]
+    diff_ref = torch.diff(l_ref)
+    pivot_indices = torch.where(diff_ref != 0)[0]
 
     if len(pivot_indices) == 0:
         return 0.5  # Pas de pivot = score neutre
 
     # Comparer a l'indice + 1 (premiere bougie de la nouvelle direction)
-    # C'est a cet instant que l'ordre est execute a Open(t+1)
-    valid_pivots = pivot_indices[pivot_indices + 1 < len(l_ref)]
+    valid_mask = (pivot_indices + 1) < len(l_ref)
+    valid_pivots = pivot_indices[valid_mask]
 
     if len(valid_pivots) == 0:
         return 0.5
 
-    # Accuracy sur les pivots
+    # Accuracy sur les pivots (GPU)
     matches = l_ind[valid_pivots + 1] == l_ref[valid_pivots + 1]
-    return np.mean(matches)
+    return matches.float().mean().item()
 
 
 def calculate_composite_score(concordance: float,
@@ -453,16 +471,30 @@ def parse_args():
                         choices=['RSI', 'CCI', 'BOL', 'MACD'],
                         help='Indicateurs a optimiser')
 
+    parser.add_argument('--device', '-D', type=str,
+                        default='auto',
+                        choices=['auto', 'cuda', 'cpu'],
+                        help='Device pour les calculs (auto=cuda si disponible)')
+
     return parser.parse_args()
 
 
 def main():
     """Pipeline principal d'optimisation."""
+    global DEVICE
+
     args = parse_args()
+
+    # Configurer le device (GPU/CPU)
+    if args.device == 'auto':
+        DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    else:
+        DEVICE = torch.device(args.device)
 
     logger.info("="*80)
     logger.info("OPTIMISATION DE LA SYNCHRONISATION DES INDICATEURS")
     logger.info("="*80)
+    logger.info(f"Device:              {DEVICE}")
     logger.info(f"Assets optimisation: {args.assets}")
     logger.info(f"Assets validation:   {args.val_assets}")
     logger.info(f"Indicateurs:         {args.indicators}")
