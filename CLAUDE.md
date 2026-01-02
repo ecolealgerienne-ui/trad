@@ -249,7 +249,7 @@ python src/train.py --help
 
 Options:
   --data PATH             Donnees preparees (.npz)
-  --batch-size N          Taille batch (defaut: 32)
+  --batch-size N          Taille batch (defaut: 128)
   --lr FLOAT              Learning rate (defaut: 0.001)
   --epochs N              Nombre epoques (defaut: 100)
   --patience N            Early stopping (defaut: 10)
@@ -265,12 +265,36 @@ Options:
 
 ```python
 # data_utils.py - JAMAIS de shuffle avant split!
-train = data[0:70%]      # Passe
-val   = data[70%:85%]    # Present
-test  = data[85%:100%]   # Futur
+train = data[0:70%]      # Passe (~13 mois)
+val   = data[70%:85%]    # Present (~2.8 mois)
+test  = data[85%:100%]   # Futur (~2.8 mois) - TOUJOURS a la fin!
 ```
 
-### 2. Periodes Agressives des Indicateurs
+**Durees avec donnees 5min (~160k bougies par asset):**
+
+| Split | Ratio | Bougies | Duree |
+|-------|-------|---------|-------|
+| Train | 70% | ~112,000 | ~13 mois |
+| Val | 15% | ~24,000 | ~2.8 mois |
+| Test | 15% | ~24,000 | ~2.8 mois |
+
+**Important**: Test = donnees les plus recentes. Ideal pour re-entrainement mensuel.
+
+### 2. Calcul Indicateurs PAR ASSET
+
+```python
+# prepare_data.py - Evite la pollution entre assets!
+# CORRECT: Calculer par asset, puis merger
+X_btc, Y_btc = prepare_single_asset(btc_data, filter_type)
+X_eth, Y_eth = prepare_single_asset(eth_data, filter_type)
+X_train = np.concatenate([X_btc, X_eth])
+
+# INCORRECT: Merger puis calculer (pollue les indicateurs!)
+# all_data = pd.concat([btc, eth])  # NON!
+# indicators = calculate(all_data)   # RSI de fin BTC pollue debut ETH
+```
+
+### 3. Periodes Agressives des Indicateurs
 
 ```python
 # constants.py - Periodes courtes pour eviter overfitting
@@ -307,7 +331,7 @@ DENSE_HIDDEN_SIZE = 32
 DENSE_DROPOUT = 0.3
 
 # Entrainement
-BATCH_SIZE = 32
+BATCH_SIZE = 128          # Augmente pour utiliser GPU >80%
 LEARNING_RATE = 0.001
 NUM_EPOCHS = 100
 EARLY_STOPPING_PATIENCE = 10
