@@ -489,8 +489,10 @@ def main():
     # 3. CRÉER MODÈLE
     # =========================================================================
     logger.info("\n3. Création du modèle...")
+    num_features = X_train.shape[2]  # Nombre de features en entrée
     model, loss_fn = create_model(
         device=device,
+        num_indicators=num_features,
         cnn_filters=args.cnn_filters,
         lstm_hidden_size=args.lstm_hidden,
         lstm_num_layers=args.lstm_layers,

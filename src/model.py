@@ -297,6 +297,7 @@ class MultiOutputBCELoss(nn.Module):
 
 def create_model(
     device: str = 'cpu',
+    num_indicators: int = NUM_INDICATORS,
     cnn_filters: int = CNN_FILTERS,
     lstm_hidden_size: int = LSTM_HIDDEN_SIZE,
     lstm_num_layers: int = LSTM_NUM_LAYERS,
@@ -309,6 +310,7 @@ def create_model(
 
     Args:
         device: Device ('cpu' ou 'cuda')
+        num_indicators: Nombre de features en entrée (défaut: 4)
         cnn_filters: Nombre de filtres CNN
         lstm_hidden_size: Taille hidden LSTM
         lstm_num_layers: Nombre de couches LSTM
@@ -320,6 +322,7 @@ def create_model(
         (model, loss_fn)
     """
     model = MultiOutputCNNLSTM(
+        num_indicators=num_indicators,
         cnn_filters=cnn_filters,
         lstm_hidden_size=lstm_hidden_size,
         lstm_num_layers=lstm_num_layers,

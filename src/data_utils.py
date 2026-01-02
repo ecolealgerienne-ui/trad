@@ -42,10 +42,12 @@ def load_crypto_data(filepath, n_candles=None, asset_name='CRYPTO'):
     logger.info(f"📂 Chargement {asset_name} : {filepath}")
 
     # Charger CSV (essayer différents séparateurs)
-    try:
-        df = pd.read_csv(filepath, sep=';')  # Format : Date;Open;High;Low;Close
-    except:
-        df = pd.read_csv(filepath)  # Format standard avec virgule
+    # D'abord essayer avec virgule (format standard)
+    df = pd.read_csv(filepath)
+
+    # Si le fichier utilise des point-virgules, on aura une seule colonne
+    if len(df.columns) == 1 and ';' in df.columns[0]:
+        df = pd.read_csv(filepath, sep=';')
 
     # Normaliser les noms de colonnes (majuscules → minuscules)
     df.columns = df.columns.str.lower()

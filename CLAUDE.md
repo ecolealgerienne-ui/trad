@@ -2,7 +2,17 @@
 
 **Date**: 2026-01-02
 **Statut**: Pipeline complet implemente
-**Version**: 2.0
+**Version**: 2.1
+
+---
+
+## IMPORTANT - Regles pour Claude
+
+**NE PAS EXECUTER les scripts d'entrainement/evaluation.**
+L'utilisateur possede les donnees reelles et un GPU. Claude doit:
+1. Fournir les scripts et commandes a executer
+2. Expliquer les modifications du code
+3. Laisser l'utilisateur lancer les tests lui-meme
 
 ---
 
