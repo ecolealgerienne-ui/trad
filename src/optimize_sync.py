@@ -463,36 +463,28 @@ def optimize_indicator(dfs: Dict[str, pd.DataFrame],
 
 
 def validate_on_assets(optimal_params: Dict[str, Dict],
-                       val_assets: List[str]) -> Dict[str, float]:
+                       val_assets: List[str],
+                       dfs: Dict[str, pd.DataFrame],
+                       ref_labels_dict: Dict[str, np.ndarray],
+                       ref_labels_gpu_dict: Dict[str, torch.Tensor]) -> Dict[str, float]:
     """
     Valide les parametres optimaux sur des assets non vus.
+
+    Utilise les donnees deja chargees et pre-transferees sur GPU.
     """
     logger.info(f"\n{'='*60}")
     logger.info(f"Validation sur: {val_assets}")
     logger.info(f"{'='*60}")
-
-    # Charger les assets de validation
-    val_dfs = {}
-    val_ref_labels = {}
-    val_ref_labels_gpu = {}  # Pré-chargé sur GPU
-
-    for asset in val_assets:
-        df = load_asset_data(asset)
-        val_dfs[asset] = df
-        val_ref_labels[asset] = calculate_reference_labels(df['close'].values)
-        # Pré-charger sur GPU
-        val_ref_labels_gpu[asset] = to_gpu_tensor(val_ref_labels[asset])
-
-    logger.info(f"  -> {len(val_assets)} assets validation pre-charges sur {DEVICE}")
 
     # Evaluer chaque indicateur avec ses parametres optimaux
     validation_scores = {}
 
     for indicator, params in optimal_params.items():
         scores = []
-        for asset, df in val_dfs.items():
-            ref_labels = val_ref_labels[asset]
-            ref_labels_gpu = val_ref_labels_gpu[asset]
+        for asset in val_assets:
+            df = dfs[asset]
+            ref_labels = ref_labels_dict[asset]
+            ref_labels_gpu = ref_labels_gpu_dict[asset]
             result = evaluate_params(df, ref_labels, indicator, params,
                                      ref_labels_gpu=ref_labels_gpu)
             scores.append(result.composite_score)
@@ -560,32 +552,40 @@ def main():
     logger.info(f"Indicateurs:         {args.indicators}")
 
     # =========================================================================
-    # 1. CHARGER LES DONNEES
+    # 1. CHARGER TOUTES LES DONNEES ET CALCULER KALMAN (CPU)
     # =========================================================================
-    logger.info("\n1. Chargement des donnees...")
+    logger.info("\n1. Chargement des donnees et calcul Kalman (CPU)...")
+    logger.info("   (Cette etape est lente car Kalman ne supporte pas GPU)")
 
+    all_assets = list(set(args.assets + args.val_assets))
     dfs = {}
     ref_labels_dict = {}
-    ref_labels_gpu_dict = {}  # Pré-chargé sur GPU une seule fois
 
-    for asset in args.assets:
+    for asset in all_assets:
         df = load_asset_data(asset)
         dfs[asset] = df
         ref_labels_dict[asset] = calculate_reference_labels(df['close'].values)
 
-        # Pré-charger sur GPU immédiatement après le calcul Kalman
-        ref_labels_gpu_dict[asset] = to_gpu_tensor(ref_labels_dict[asset])
-
         # Stats des labels
         buy_pct = ref_labels_dict[asset].mean() * 100
-        logger.info(f"     Labels {asset}: {buy_pct:.1f}% UP / {100-buy_pct:.1f}% DOWN")
-
-    logger.info(f"  -> {len(args.assets)} assets pre-charges sur {DEVICE}")
+        role = "OPT" if asset in args.assets else "VAL"
+        logger.info(f"     [{role}] {asset}: {buy_pct:.1f}% UP / {100-buy_pct:.1f}% DOWN")
 
     # =========================================================================
-    # 2. OPTIMISER CHAQUE INDICATEUR
+    # 2. TRANSFERT VERS GPU (une seule fois pour tous les assets)
     # =========================================================================
-    logger.info("\n2. Optimisation des parametres...")
+    logger.info(f"\n2. Transfert des {len(all_assets)} assets vers {DEVICE}...")
+
+    ref_labels_gpu_dict = {}
+    for asset in all_assets:
+        ref_labels_gpu_dict[asset] = to_gpu_tensor(ref_labels_dict[asset])
+
+    logger.info(f"  -> {len(all_assets)} assets pre-charges sur {DEVICE}")
+
+    # =========================================================================
+    # 3. OPTIMISER CHAQUE INDICATEUR (GPU)
+    # =========================================================================
+    logger.info("\n3. Optimisation des parametres (GPU)...")
 
     optimal_params = {}
     best_results = {}
@@ -611,10 +611,13 @@ def main():
         logger.info(f"    Score Total:    {best.composite_score:.3f}")
 
     # =========================================================================
-    # 3. VALIDATION CROISEE
+    # 4. VALIDATION CROISEE (GPU - donnees deja chargees)
     # =========================================================================
     if args.val_assets:
-        validation_scores = validate_on_assets(optimal_params, args.val_assets)
+        validation_scores = validate_on_assets(
+            optimal_params, args.val_assets,
+            dfs, ref_labels_dict, ref_labels_gpu_dict
+        )
 
         logger.info("\n" + "="*60)
         logger.info("RESUME VALIDATION")
@@ -627,7 +630,7 @@ def main():
                        f"Gap={gap:+.3f} [{status}]")
 
     # =========================================================================
-    # 4. RESUME FINAL
+    # 5. RESUME FINAL
     # =========================================================================
     logger.info("\n" + "="*80)
     logger.info("PARAMETRES OPTIMAUX")
@@ -646,7 +649,7 @@ def main():
             print(f"MACD_SLOW = {params['slow']}")
 
     # =========================================================================
-    # 5. SAUVEGARDER RESULTATS
+    # 6. SAUVEGARDER RESULTATS
     # =========================================================================
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
