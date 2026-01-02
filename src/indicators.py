@@ -739,7 +739,62 @@ def create_sequences(indicators: np.ndarray,
 # PIPELINE COMPLET
 # =============================================================================
 
-def calculate_all_indicators_for_model(df: pd.DataFrame) -> np.ndarray:
+def _calculate_indicators_with_ta(df: pd.DataFrame) -> np.ndarray:
+    """
+    Calcule les indicateurs avec la bibliothèque 'ta' (Technical Analysis).
+
+    Plus optimisée et testée que les calculs manuels.
+    """
+    from indicators_ta import (
+        calculate_rsi_ta,
+        calculate_cci_ta,
+        calculate_bollinger_bands_ta,
+        calculate_macd_ta
+    )
+
+    # 1. RSI (déjà 0-100)
+    rsi = calculate_rsi_ta(df['close'], window=RSI_PERIOD)
+    logger.info(f"  ✓ RSI({RSI_PERIOD}) calculé [ta lib]")
+
+    # 2. CCI normalisé (-200/+200 → 0-100)
+    cci_raw = calculate_cci_ta(df['high'], df['low'], df['close'],
+                               window=CCI_PERIOD, constant=CCI_CONSTANT)
+    cci_norm = normalize_cci(cci_raw)
+    logger.info(f"  ✓ CCI({CCI_PERIOD}) calculé et normalisé [ta lib]")
+
+    # 3. Bollinger %B (pband est déjà 0-1, on convertit en 0-100)
+    bb_data = calculate_bollinger_bands_ta(df['close'],
+                                           window=BOL_PERIOD,
+                                           window_dev=BOL_NUM_STD)
+    bol_percentb = bb_data['pband'] * 100  # pband est 0-1
+    logger.info(f"  ✓ Bollinger %B({BOL_PERIOD}, {BOL_NUM_STD}σ) calculé [ta lib]")
+
+    # 4. MACD Histogram normalisé
+    macd_data = calculate_macd_ta(df['close'],
+                                  window_fast=MACD_FAST,
+                                  window_slow=MACD_SLOW,
+                                  window_sign=MACD_SIGNAL)
+    macd_hist_norm = normalize_macd_histogram(macd_data['diff'])  # diff = histogram
+    logger.info(f"  ✓ MACD({MACD_FAST}/{MACD_SLOW}/{MACD_SIGNAL}) histogram normalisé [ta lib]")
+
+    # Combiner en array (n_samples, 4)
+    indicators = np.column_stack([rsi, cci_norm, bol_percentb, macd_hist_norm])
+
+    # Gérer les NaN (warm-up des indicateurs)
+    indicators_df = pd.DataFrame(indicators, columns=['RSI', 'CCI', 'BOL', 'MACD'])
+    indicators_df = indicators_df.ffill().fillna(50.0)
+    indicators = indicators_df.values
+
+    n_nan_before = np.sum(np.isnan(np.column_stack([rsi, cci_norm, bol_percentb, macd_hist_norm])))
+    if n_nan_before > 0:
+        logger.info(f"  ℹ️ {n_nan_before} NaN gérés (warm-up des indicateurs)")
+
+    logger.info(f"Indicateurs combinés: shape={indicators.shape}")
+
+    return indicators
+
+
+def calculate_all_indicators_for_model(df: pd.DataFrame, use_ta_lib: bool = True) -> np.ndarray:
     """
     Calcule les 4 indicateurs normalisés pour le modèle IA.
 
@@ -751,11 +806,28 @@ def calculate_all_indicators_for_model(df: pd.DataFrame) -> np.ndarray:
 
     Args:
         df: DataFrame avec colonnes ['open', 'high', 'low', 'close']
+        use_ta_lib: Si True, utilise la bibliothèque 'ta' (recommandé)
 
     Returns:
         Array (n_samples, 4) avec les 4 indicateurs normalisés
     """
-    logger.info("Calcul des 4 indicateurs pour le modèle IA...")
+    # Essayer d'utiliser la bibliothèque ta (plus optimisée)
+    if use_ta_lib:
+        try:
+            from indicators_ta import (
+                calculate_rsi_ta,
+                calculate_cci_ta,
+                calculate_bollinger_bands_ta,
+                calculate_macd_ta,
+                TA_AVAILABLE
+            )
+            if TA_AVAILABLE:
+                logger.info("Calcul des 4 indicateurs avec bibliothèque TA...")
+                return _calculate_indicators_with_ta(df)
+        except ImportError:
+            logger.warning("Module indicators_ta non disponible, fallback sur calcul manuel")
+
+    logger.info("Calcul des 4 indicateurs (méthode manuelle)...")
 
     # 1. RSI (déjà 0-100)
     rsi = calculate_rsi(df['close'], period=RSI_PERIOD)
