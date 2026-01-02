@@ -343,6 +343,20 @@ def parse_args():
     parser.add_argument('--patience', type=int, default=EARLY_STOPPING_PATIENCE,
                         help='Patience pour early stopping')
 
+    # Hyperparamètres du modèle
+    parser.add_argument('--cnn-filters', type=int, default=64,
+                        help='Nombre de filtres CNN')
+    parser.add_argument('--lstm-hidden', type=int, default=64,
+                        help='Taille hidden LSTM')
+    parser.add_argument('--lstm-layers', type=int, default=2,
+                        help='Nombre de couches LSTM')
+    parser.add_argument('--lstm-dropout', type=float, default=0.2,
+                        help='Dropout LSTM (entre couches)')
+    parser.add_argument('--dense-hidden', type=int, default=32,
+                        help='Taille couche dense partagée')
+    parser.add_argument('--dense-dropout', type=float, default=0.3,
+                        help='Dropout après dense')
+
     # Chemins
     parser.add_argument('--save-path', type=str, default=BEST_MODEL_PATH,
                         help='Chemin pour sauvegarder le meilleur modèle')
@@ -394,13 +408,21 @@ def main():
     logger.info(f"\nDevice: {device}")
 
     # Afficher hyperparamètres
-    logger.info(f"\n⚙️ Hyperparamètres:")
+    logger.info(f"\n⚙️ Hyperparamètres d'entraînement:")
     logger.info(f"  Batch size: {args.batch_size}")
     logger.info(f"  Learning rate: {args.learning_rate}")
     logger.info(f"  Max epochs: {args.epochs}")
     logger.info(f"  Early stopping patience: {args.patience}")
     logger.info(f"  Filter type: {args.filter}")
     logger.info(f"  Random seed: {args.seed}")
+
+    logger.info(f"\n🏗️ Architecture du modèle:")
+    logger.info(f"  CNN filters: {args.cnn_filters}")
+    logger.info(f"  LSTM hidden: {args.lstm_hidden}")
+    logger.info(f"  LSTM layers: {args.lstm_layers}")
+    logger.info(f"  LSTM dropout: {args.lstm_dropout}")
+    logger.info(f"  Dense hidden: {args.dense_hidden}")
+    logger.info(f"  Dense dropout: {args.dense_dropout}")
 
     # =========================================================================
     # 1. CHARGER LES DONNÉES
@@ -466,7 +488,15 @@ def main():
     # 3. CRÉER MODÈLE
     # =========================================================================
     logger.info("\n3. Création du modèle...")
-    model, loss_fn = create_model(device=device)
+    model, loss_fn = create_model(
+        device=device,
+        cnn_filters=args.cnn_filters,
+        lstm_hidden_size=args.lstm_hidden,
+        lstm_num_layers=args.lstm_layers,
+        lstm_dropout=args.lstm_dropout,
+        dense_hidden_size=args.dense_hidden,
+        dense_dropout=args.dense_dropout
+    )
 
     # Optimizer
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)

@@ -295,17 +295,38 @@ class MultiOutputBCELoss(nn.Module):
         return weighted_loss
 
 
-def create_model(device: str = 'cpu') -> Tuple[MultiOutputCNNLSTM, MultiOutputBCELoss]:
+def create_model(
+    device: str = 'cpu',
+    cnn_filters: int = CNN_FILTERS,
+    lstm_hidden_size: int = LSTM_HIDDEN_SIZE,
+    lstm_num_layers: int = LSTM_NUM_LAYERS,
+    lstm_dropout: float = LSTM_DROPOUT,
+    dense_hidden_size: int = DENSE_HIDDEN_SIZE,
+    dense_dropout: float = DENSE_DROPOUT
+) -> Tuple[MultiOutputCNNLSTM, MultiOutputBCELoss]:
     """
     Factory function pour créer le modèle et la loss.
 
     Args:
         device: Device ('cpu' ou 'cuda')
+        cnn_filters: Nombre de filtres CNN
+        lstm_hidden_size: Taille hidden LSTM
+        lstm_num_layers: Nombre de couches LSTM
+        lstm_dropout: Dropout LSTM
+        dense_hidden_size: Taille couche dense
+        dense_dropout: Dropout dense
 
     Returns:
         (model, loss_fn)
     """
-    model = MultiOutputCNNLSTM()
+    model = MultiOutputCNNLSTM(
+        cnn_filters=cnn_filters,
+        lstm_hidden_size=lstm_hidden_size,
+        lstm_num_layers=lstm_num_layers,
+        lstm_dropout=lstm_dropout,
+        dense_hidden_size=dense_hidden_size,
+        dense_dropout=dense_dropout
+    )
     loss_fn = MultiOutputBCELoss()
 
     # Déplacer sur device
