@@ -145,15 +145,11 @@ def calculate_reference_labels(close: np.ndarray,
     return calculate_slope_labels(filtered_close)
 
 
-def calculate_indicator_labels(df: pd.DataFrame,
-                               indicator: str,
-                               params: Dict) -> np.ndarray:
+def calculate_indicator_values(df: pd.DataFrame,
+                                indicator: str,
+                                params: Dict) -> np.ndarray:
     """
-    Calcule les labels pour un indicateur avec des parametres donnes.
-
-    NOTE: Pas de filtre Kalman sur l'indicateur - on compare la pente BRUTE
-    de l'indicateur avec la pente lissee du Close. Cela permet de detecter
-    si l'indicateur anticipe le mouvement du prix.
+    Calcule les valeurs brutes d'un indicateur (sans Kalman).
     """
     if indicator == 'RSI':
         values = calculate_rsi(df['close'], period=params['period'])
@@ -164,7 +160,6 @@ def calculate_indicator_labels(df: pd.DataFrame,
 
     elif indicator == 'BOL':
         bb = calculate_bollinger_bands(df['close'], period=params['period'])
-        # %B = position du prix dans les bandes
         percent_b = (df['close'].values - bb['lower']) / (bb['upper'] - bb['lower'])
         values = np.clip(percent_b * 100, 0, 100)
 
@@ -177,9 +172,22 @@ def calculate_indicator_labels(df: pd.DataFrame,
     else:
         raise ValueError(f"Indicateur inconnu: {indicator}")
 
-    # Gerer les NaN et calculer les labels directement (sans Kalman)
+    # Gerer les NaN
     values = pd.Series(values).ffill().fillna(50).values
-    return calculate_slope_labels(values)
+    return values
+
+
+def calculate_indicator_labels(df: pd.DataFrame,
+                               indicator: str,
+                               params: Dict,
+                               process_var: float = KALMAN_PROCESS_VAR,
+                               measure_var: float = KALMAN_MEASURE_VAR) -> np.ndarray:
+    """
+    Calcule les labels pour un indicateur: Kalman + slope.
+    """
+    values = calculate_indicator_values(df, indicator, params)
+    filtered = kalman_filter(values, process_var, measure_var)
+    return calculate_slope_labels(filtered)
 
 
 def to_gpu_tensor(labels: np.ndarray, start_idx: int = 50) -> torch.Tensor:
@@ -531,6 +539,23 @@ def parse_args():
     return parser.parse_args()
 
 
+def generate_all_param_combinations(indicators: List[str]) -> Dict[str, List[Dict]]:
+    """Génère toutes les combinaisons de paramètres pour chaque indicateur."""
+    all_combinations = {}
+    for indicator in indicators:
+        param_grid = PARAM_GRIDS[indicator]
+        if indicator == 'MACD':
+            combinations = []
+            for fast in param_grid['fast']:
+                for slow in param_grid['slow']:
+                    if fast < slow:
+                        combinations.append({'fast': fast, 'slow': slow})
+            all_combinations[indicator] = combinations
+        else:
+            all_combinations[indicator] = [{'period': p} for p in param_grid['period']]
+    return all_combinations
+
+
 def main():
     """Pipeline principal d'optimisation."""
     global DEVICE
@@ -551,13 +576,20 @@ def main():
     logger.info(f"Assets validation:   {args.val_assets}")
     logger.info(f"Indicateurs:         {args.indicators}")
 
-    # =========================================================================
-    # 1. CHARGER TOUTES LES DONNEES ET CALCULER KALMAN (CPU)
-    # =========================================================================
-    logger.info("\n1. Chargement des donnees et calcul Kalman (CPU)...")
-    logger.info("   (Cette etape est lente car Kalman ne supporte pas GPU)")
-
     all_assets = list(set(args.assets + args.val_assets))
+    all_param_combinations = generate_all_param_combinations(args.indicators)
+
+    # Compter le nombre total de Kalman à calculer
+    total_kalman = len(all_assets)  # Close
+    for indicator, combinations in all_param_combinations.items():
+        total_kalman += len(combinations) * len(all_assets)
+    logger.info(f"Total Kalman a calculer: {total_kalman}")
+
+    # =========================================================================
+    # 1. CHARGER DONNEES + KALMAN CLOSE (CPU)
+    # =========================================================================
+    logger.info("\n1. Chargement des donnees et Kalman(Close)...")
+
     dfs = {}
     ref_labels_dict = {}
 
@@ -565,36 +597,158 @@ def main():
         df = load_asset_data(asset)
         dfs[asset] = df
         ref_labels_dict[asset] = calculate_reference_labels(df['close'].values)
-
-        # Stats des labels
         buy_pct = ref_labels_dict[asset].mean() * 100
         role = "OPT" if asset in args.assets else "VAL"
         logger.info(f"     [{role}] {asset}: {buy_pct:.1f}% UP / {100-buy_pct:.1f}% DOWN")
 
     # =========================================================================
-    # 2. TRANSFERT VERS GPU (une seule fois pour tous les assets)
+    # 2. PRE-CALCULER TOUS LES KALMAN INDICATEURS (CPU - lent)
     # =========================================================================
-    logger.info(f"\n2. Transfert des {len(all_assets)} assets vers {DEVICE}...")
+    logger.info("\n2. Pre-calcul Kalman pour TOUS les indicateurs (CPU, lent)...")
 
+    # Structure: ind_labels_dict[indicator][params_key][asset] = labels
+    ind_labels_dict = {}
+
+    for indicator in args.indicators:
+        ind_labels_dict[indicator] = {}
+        combinations = all_param_combinations[indicator]
+
+        for params in combinations:
+            params_key = str(params)
+            ind_labels_dict[indicator][params_key] = {}
+
+            for asset in all_assets:
+                labels = calculate_indicator_labels(dfs[asset], indicator, params)
+                ind_labels_dict[indicator][params_key][asset] = labels
+
+            # Log progression
+            if indicator == 'MACD':
+                params_str = f"fast={params['fast']}, slow={params['slow']}"
+            else:
+                params_str = f"period={params['period']}"
+            logger.info(f"     {indicator} {params_str} - {len(all_assets)} assets OK")
+
+    # =========================================================================
+    # 3. TRANSFERT VERS GPU (tout en une fois)
+    # =========================================================================
+    logger.info(f"\n3. Transfert de TOUS les labels vers {DEVICE}...")
+
+    # Ref labels GPU
     ref_labels_gpu_dict = {}
     for asset in all_assets:
         ref_labels_gpu_dict[asset] = to_gpu_tensor(ref_labels_dict[asset])
 
-    logger.info(f"  -> {len(all_assets)} assets pre-charges sur {DEVICE}")
+    # Indicator labels GPU
+    ind_labels_gpu_dict = {}
+    for indicator in args.indicators:
+        ind_labels_gpu_dict[indicator] = {}
+        for params_key in ind_labels_dict[indicator]:
+            ind_labels_gpu_dict[indicator][params_key] = {}
+            for asset in all_assets:
+                labels = ind_labels_dict[indicator][params_key][asset]
+                ind_labels_gpu_dict[indicator][params_key][asset] = to_gpu_tensor(labels)
+
+    logger.info(f"  -> Tous les labels transferes sur {DEVICE}")
 
     # =========================================================================
-    # 3. OPTIMISER CHAQUE INDICATEUR (GPU)
+    # 4. OPTIMISER CHAQUE INDICATEUR (GPU - parallele)
     # =========================================================================
-    logger.info("\n3. Optimisation des parametres (GPU)...")
+    logger.info("\n4. Optimisation des parametres (GPU, tout pre-charge)...")
 
     optimal_params = {}
     best_results = {}
 
     for indicator in args.indicators:
-        results = optimize_indicator(dfs, ref_labels_dict, ref_labels_gpu_dict, indicator)
+        logger.info(f"\n{'='*60}")
+        logger.info(f"Optimisation {indicator}")
+        logger.info(f"{'='*60}")
 
-        # Garder le meilleur
-        best = results[0]
+        all_results = []
+        combinations = all_param_combinations[indicator]
+
+        for params in combinations:
+            params_key = str(params)
+            scores_per_asset = []
+
+            # Calculer metriques sur assets d'optimisation (GPU)
+            for asset in args.assets:
+                ind_gpu = ind_labels_gpu_dict[indicator][params_key][asset]
+                ref_gpu = ref_labels_gpu_dict[asset]
+
+                # Metriques GPU (tensors deja sur GPU)
+                concordance = (ind_gpu == ref_gpu).float().mean().item()
+
+                # Lag (GPU)
+                l1 = ind_gpu.float() - ind_gpu.float().mean()
+                l2 = ref_gpu.float() - ref_gpu.float().mean()
+                best_lag, best_corr = 0, -1.0
+                for lag in range(-10, 11):
+                    if lag < 0:
+                        a, b = l1[-lag:], l2[:lag]
+                    elif lag > 0:
+                        a, b = l1[:-lag], l2[lag:]
+                    else:
+                        a, b = l1, l2
+                    if len(a) > 1:
+                        cov = ((a - a.mean()) * (b - b.mean())).mean()
+                        std_a, std_b = a.std(), b.std()
+                        if std_a > 0 and std_b > 0:
+                            corr = (cov / (std_a * std_b)).item()
+                            if not np.isnan(corr) and corr > best_corr:
+                                best_corr, best_lag = corr, lag
+
+                # Pivot accuracy (GPU)
+                diff_ref = torch.diff(ref_gpu)
+                pivot_indices = torch.where(diff_ref != 0)[0]
+                if len(pivot_indices) > 0:
+                    valid_pivots = pivot_indices[(pivot_indices + 1) < len(ref_gpu)]
+                    if len(valid_pivots) > 0:
+                        matches = ind_gpu[valid_pivots + 1] == ref_gpu[valid_pivots + 1]
+                        pivot_acc = matches.float().mean().item()
+                    else:
+                        pivot_acc = 0.5
+                else:
+                    pivot_acc = 0.5
+
+                # Score composite
+                anticipation_score = max(0, min(1, 0.5 - best_lag / 20))
+                score = 0.3 * concordance + 0.4 * anticipation_score + 0.3 * pivot_acc
+
+                scores_per_asset.append({
+                    'concordance': concordance,
+                    'anticipation': best_lag,
+                    'pivot_accuracy': pivot_acc,
+                    'score': score
+                })
+
+            # Moyenne sur les assets
+            avg_concordance = np.mean([s['concordance'] for s in scores_per_asset])
+            avg_anticipation = np.mean([s['anticipation'] for s in scores_per_asset])
+            avg_pivot_acc = np.mean([s['pivot_accuracy'] for s in scores_per_asset])
+            avg_score = np.mean([s['score'] for s in scores_per_asset])
+
+            all_results.append(SyncResult(
+                indicator=indicator,
+                params=params,
+                concordance=avg_concordance,
+                anticipation=avg_anticipation,
+                pivot_accuracy=avg_pivot_acc,
+                composite_score=avg_score,
+                n_samples=0
+            ))
+
+            # Log
+            if indicator == 'MACD':
+                params_str = f"fast={params['fast']}, slow={params['slow']}"
+            else:
+                params_str = f"period={params['period']}"
+            logger.info(f"  {params_str:20s} | Conc: {avg_concordance:.3f} | "
+                       f"Lag: {avg_anticipation:+3.0f} | Pivot: {avg_pivot_acc:.3f} | "
+                       f"Score: {avg_score:.3f}")
+
+        # Trier et garder le meilleur
+        all_results.sort(key=lambda x: x.composite_score, reverse=True)
+        best = all_results[0]
         optimal_params[indicator] = best.params
         best_results[indicator] = {
             'params': best.params,
@@ -606,18 +760,74 @@ def main():
 
         logger.info(f"\n  MEILLEUR {indicator}: {best.params}")
         logger.info(f"    Concordance:    {best.concordance:.3f} (30%)")
-        logger.info(f"    Anticipation:   {best.anticipation:+d} steps (40%)")
+        logger.info(f"    Anticipation:   {best.anticipation:+.0f} steps (40%)")
         logger.info(f"    Pivot Accuracy: {best.pivot_accuracy:.3f} (30%)")
         logger.info(f"    Score Total:    {best.composite_score:.3f}")
 
     # =========================================================================
-    # 4. VALIDATION CROISEE (GPU - donnees deja chargees)
+    # 5. VALIDATION CROISEE (GPU - donnees deja chargees)
     # =========================================================================
+    validation_scores = {}
     if args.val_assets:
-        validation_scores = validate_on_assets(
-            optimal_params, args.val_assets,
-            dfs, ref_labels_dict, ref_labels_gpu_dict
-        )
+        logger.info(f"\n{'='*60}")
+        logger.info(f"Validation sur: {args.val_assets}")
+        logger.info(f"{'='*60}")
+
+        for indicator, params in optimal_params.items():
+            params_key = str(params)
+            scores = []
+
+            for asset in args.val_assets:
+                ind_gpu = ind_labels_gpu_dict[indicator][params_key][asset]
+                ref_gpu = ref_labels_gpu_dict[asset]
+
+                # Memes calculs GPU que pour optimisation
+                concordance = (ind_gpu == ref_gpu).float().mean().item()
+
+                # Lag
+                l1 = ind_gpu.float() - ind_gpu.float().mean()
+                l2 = ref_gpu.float() - ref_gpu.float().mean()
+                best_lag = 0
+                best_corr = -1.0
+                for lag in range(-10, 11):
+                    if lag < 0:
+                        a, b = l1[-lag:], l2[:lag]
+                    elif lag > 0:
+                        a, b = l1[:-lag], l2[lag:]
+                    else:
+                        a, b = l1, l2
+                    if len(a) > 1:
+                        cov = ((a - a.mean()) * (b - b.mean())).mean()
+                        std_a, std_b = a.std(), b.std()
+                        if std_a > 0 and std_b > 0:
+                            corr = (cov / (std_a * std_b)).item()
+                            if not np.isnan(corr) and corr > best_corr:
+                                best_corr, best_lag = corr, lag
+
+                # Pivot accuracy
+                diff_ref = torch.diff(ref_gpu)
+                pivot_indices = torch.where(diff_ref != 0)[0]
+                if len(pivot_indices) > 0:
+                    valid_pivots = pivot_indices[(pivot_indices + 1) < len(ref_gpu)]
+                    if len(valid_pivots) > 0:
+                        matches = ind_gpu[valid_pivots + 1] == ref_gpu[valid_pivots + 1]
+                        pivot_acc = matches.float().mean().item()
+                    else:
+                        pivot_acc = 0.5
+                else:
+                    pivot_acc = 0.5
+
+                anticipation_score = max(0, min(1, 0.5 - best_lag / 20))
+                score = 0.3 * concordance + 0.4 * anticipation_score + 0.3 * pivot_acc
+                scores.append(score)
+
+                logger.info(f"  {indicator} sur {asset}: "
+                           f"Conc={concordance:.3f}, "
+                           f"Lag={best_lag:+d}, "
+                           f"Pivot={pivot_acc:.3f}, "
+                           f"Score={score:.3f}")
+
+            validation_scores[indicator] = np.mean(scores)
 
         logger.info("\n" + "="*60)
         logger.info("RESUME VALIDATION")
@@ -630,7 +840,7 @@ def main():
                        f"Gap={gap:+.3f} [{status}]")
 
     # =========================================================================
-    # 5. RESUME FINAL
+    # 6. RESUME FINAL
     # =========================================================================
     logger.info("\n" + "="*80)
     logger.info("PARAMETRES OPTIMAUX")
@@ -649,7 +859,7 @@ def main():
             print(f"MACD_SLOW = {params['slow']}")
 
     # =========================================================================
-    # 6. SAUVEGARDER RESULTATS
+    # 7. SAUVEGARDER RESULTATS
     # =========================================================================
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
