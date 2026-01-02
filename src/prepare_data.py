@@ -1,13 +1,13 @@
 """
-Script de préparation des données.
+Script de préparation des données - 5min seulement.
 
 Prépare les datasets (X, Y) et les sauvegarde en format numpy (.npz).
 Permet de gagner du temps en évitant de recalculer les données à chaque entraînement.
 
+Indicateurs: RSI, CCI, MACD (3 indicateurs, BOL retiré car non synchronisable)
+
 Usage:
-    python src/prepare_data.py --timeframe 5 --filter kalman
-    python src/prepare_data.py --timeframe 1 --filter decycler
-    python src/prepare_data.py --timeframe all --filter kalman  # Combine 1min + 5min!
+    python src/prepare_data.py --filter kalman --assets BTC ETH BNB ADA LTC
 """
 
 import numpy as np
@@ -21,9 +21,7 @@ logger = logging.getLogger(__name__)
 
 # Import modules locaux
 from constants import (
-    BTC_DATA_FILE_1M, ETH_DATA_FILE_1M,
-    BTC_DATA_FILE_5M, ETH_DATA_FILE_5M,
-    BTC_CANDLES, ETH_CANDLES,
+    AVAILABLE_ASSETS_5M, DEFAULT_ASSETS,
     TRIM_EDGES,
     TRAIN_SPLIT, VAL_SPLIT, TEST_SPLIT,
     PREPARED_DATA_DIR, PREPARED_DATA_FILE,
@@ -35,7 +33,6 @@ from constants import (
 from data_utils import load_crypto_data, trim_edges, split_sequences_chronological
 from utils import log_dataset_metadata
 from indicators import (
-    prepare_datasets,
     calculate_all_indicators_for_model,
     generate_all_labels,
     create_sequences
@@ -84,311 +81,160 @@ def prepare_single_asset(df, filter_type: str, asset_name: str = "Asset") -> tup
 split_sequences = split_sequences_chronological
 
 
-def prepare_and_save(timeframe: str = '5',
-                     filter_type: str = LABEL_FILTER_TYPE,
-                     output_path: str = None,
-                     btc_candles: int = None,
-                     eth_candles: int = None) -> str:
+def prepare_and_save(filter_type: str = LABEL_FILTER_TYPE,
+                     assets: list = None,
+                     output_path: str = None) -> str:
     """
-    Prépare les données et les sauvegarde en format numpy.
+    Prépare les données 5min et les sauvegarde en format numpy.
 
     Args:
-        timeframe: '1', '5', ou 'all' (combine 1min + 5min)
         filter_type: 'decycler' ou 'kalman'
+        assets: Liste des assets à utiliser (défaut: DEFAULT_ASSETS)
         output_path: Chemin de sortie (défaut: auto-généré)
-        btc_candles: Nombre de bougies BTC par timeframe (défaut: toutes)
-        eth_candles: Nombre de bougies ETH par timeframe (défaut: toutes)
 
     Returns:
         Chemin du fichier sauvegardé
     """
+    # Utiliser les assets par défaut si non spécifiés
+    if assets is None:
+        assets = DEFAULT_ASSETS
+
+    # Valider les assets demandés
+    invalid_assets = [a for a in assets if a not in AVAILABLE_ASSETS_5M]
+    if invalid_assets:
+        raise ValueError(f"Assets invalides: {invalid_assets}. "
+                        f"Disponibles: {list(AVAILABLE_ASSETS_5M.keys())}")
+
     logger.info("="*80)
-    logger.info("PRÉPARATION DES DONNÉES")
+    logger.info("PRÉPARATION DES DONNÉES - 5min")
     logger.info("="*80)
+    logger.info(f"📊 Timeframe: 5 minutes")
+    logger.info(f"💰 Assets: {', '.join(assets)}")
+    logger.info(f"🔧 Filtre: {filter_type}")
+    logger.info(f"📈 Indicateurs: RSI, CCI, MACD (3 indicateurs)")
 
-    timeframe = str(timeframe)  # Convertir en string
-    total_btc = 0
-    total_eth = 0
+    # =========================================================================
+    # 1. Charger données pour chaque asset
+    # =========================================================================
+    logger.info(f"\n1. Chargement données 5min...")
 
-    # Charger selon le timeframe
-    if timeframe in ['1', '5']:
-        # Un seul timeframe
-        if timeframe == '1':
-            btc_file = BTC_DATA_FILE_1M
-            eth_file = ETH_DATA_FILE_1M
-            logger.info(f"📊 Timeframe: 1 minute")
-        else:
-            btc_file = BTC_DATA_FILE_5M
-            eth_file = ETH_DATA_FILE_5M
-            logger.info(f"📊 Timeframe: 5 minutes")
+    asset_data = {}
+    total_candles = 0
+    for asset_name in assets:
+        file_path = AVAILABLE_ASSETS_5M[asset_name]
+        df = load_crypto_data(file_path, asset_name=asset_name)
+        df_trimmed = trim_edges(df, trim_start=TRIM_EDGES, trim_end=TRIM_EDGES)
+        asset_data[asset_name] = df_trimmed
+        total_candles += len(df_trimmed)
+        logger.info(f"   {asset_name}: {len(df_trimmed):,} bougies")
 
-        logger.info(f"   → Indicateurs calculés PAR ASSET sur données CONTIGUËS")
-        logger.info(f"   → Split appliqué aux SÉQUENCES (pas aux données brutes)")
+    # =========================================================================
+    # 2. Calculer indicateurs + labels pour chaque asset
+    # =========================================================================
+    logger.info(f"\n2. Calcul indicateurs et labels par asset...")
 
-        btc = load_crypto_data(btc_file, n_candles=btc_candles, asset_name='BTC')
-        eth = load_crypto_data(eth_file, n_candles=eth_candles, asset_name='ETH')
+    prepared_assets = {}
+    for asset_name, df in asset_data.items():
+        X, Y = prepare_single_asset(df, filter_type, asset_name)
+        prepared_assets[asset_name] = (X, Y)
 
-        btc_trimmed = trim_edges(btc, trim_start=TRIM_EDGES, trim_end=TRIM_EDGES)
-        eth_trimmed = trim_edges(eth, trim_start=TRIM_EDGES, trim_end=TRIM_EDGES)
+    # =========================================================================
+    # 3. Split chronologique avec GAP pour chaque asset
+    # =========================================================================
+    logger.info(f"\n3. Split chronologique avec GAP...")
 
-        total_btc = len(btc)
-        total_eth = len(eth)
-
-        logger.info(f"🔧 Filtre pour labels: {filter_type}")
-
-        # =====================================================================
-        # CALCUL INDICATEURS SUR DONNÉES CONTIGUËS (AVANT SPLIT!)
-        # =====================================================================
-        logger.info(f"\n📈 Calcul des indicateurs sur données CONTIGUËS...")
-
-        X_btc, Y_btc = prepare_single_asset(btc_trimmed, filter_type, "BTC")
-        X_eth, Y_eth = prepare_single_asset(eth_trimmed, filter_type, "ETH")
-
-        # =====================================================================
-        # SPLIT CHRONOLOGIQUE AVEC GAP (évite data leakage)
-        # =====================================================================
-        logger.info(f"\n📊 Split chronologique avec GAP (évite leakage)...")
-
-        (X_btc_train, Y_btc_train), (X_btc_val, Y_btc_val), (X_btc_test, Y_btc_test) = \
-            split_sequences(X_btc, Y_btc)
-        (X_eth_train, Y_eth_train), (X_eth_val, Y_eth_val), (X_eth_test, Y_eth_test) = \
-            split_sequences(X_eth, Y_eth)
-
-        logger.info(f"  BTC: Train={len(X_btc_train)}, Val={len(X_btc_val)}, Test={len(X_btc_test)}")
-        logger.info(f"  ETH: Train={len(X_eth_train)}, Val={len(X_eth_val)}, Test={len(X_eth_test)}")
-
-        # Concaténer les assets
-        X_train = np.concatenate([X_btc_train, X_eth_train], axis=0)
-        Y_train = np.concatenate([Y_btc_train, Y_eth_train], axis=0)
-        X_val = np.concatenate([X_btc_val, X_eth_val], axis=0)
-        Y_val = np.concatenate([Y_btc_val, Y_eth_val], axis=0)
-        X_test = np.concatenate([X_btc_test, X_eth_test], axis=0)
-        Y_test = np.concatenate([Y_btc_test, Y_eth_test], axis=0)
-
-        # Aller directement à la sauvegarde
-        logger.info(f"\n📊 Shapes des datasets:")
-        logger.info(f"  Train: X={X_train.shape}, Y={Y_train.shape}")
-        logger.info(f"  Val:   X={X_val.shape}, Y={Y_val.shape}")
-        logger.info(f"  Test:  X={X_test.shape}, Y={Y_test.shape}")
-
-        # Créer le répertoire de sortie
-        if output_path is None:
-            output_path = f"data/prepared/dataset_{timeframe}m_{filter_type}.npz"
-
-        output_dir = Path(output_path).parent
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        # Métadonnées
-        metadata = {
-            'created_at': datetime.now().isoformat(),
-            'timeframe': timeframe,
-            'filter_type': filter_type,
-            'btc_candles': total_btc,
-            'eth_candles': total_eth,
-            'total_candles': len(btc_trimmed) + len(eth_trimmed),
-            'train_size': len(X_train),
-            'val_size': len(X_val),
-            'test_size': len(X_test),
-            'sequence_length': SEQUENCE_LENGTH,
-            'num_indicators': NUM_INDICATORS,
-            'indicator_params': {
-                'rsi_period': RSI_PERIOD,
-                'cci_period': CCI_PERIOD,
-                'macd_fast': MACD_FAST,
-                'macd_slow': MACD_SLOW,
-                'macd_signal': MACD_SIGNAL
-            },
-            'filter_params': {
-                'decycler_cutoff': DECYCLER_CUTOFF,
-                'kalman_process_var': KALMAN_PROCESS_VAR,
-                'kalman_measure_var': KALMAN_MEASURE_VAR
-            },
-            'splits': {
-                'train': TRAIN_SPLIT,
-                'val': VAL_SPLIT,
-                'test': TEST_SPLIT
-            },
-            'split_strategy': 'chronological_with_gap',
-            'gap_size': SEQUENCE_LENGTH
+    split_data = {}
+    for asset_name, (X, Y) in prepared_assets.items():
+        (X_train_a, Y_train_a), (X_val_a, Y_val_a), (X_test_a, Y_test_a) = \
+            split_sequences(X, Y)
+        split_data[asset_name] = {
+            'train': (X_train_a, Y_train_a),
+            'val': (X_val_a, Y_val_a),
+            'test': (X_test_a, Y_test_a)
         }
+        logger.info(f"   {asset_name}: Train={len(X_train_a)}, Val={len(X_val_a)}, Test={len(X_test_a)}")
 
-        # Sauvegarder
-        np.savez_compressed(
-            output_path,
-            X_train=X_train,
-            Y_train=Y_train,
-            X_val=X_val,
-            Y_val=Y_val,
-            X_test=X_test,
-            Y_test=Y_test,
-            metadata=json.dumps(metadata)
-        )
+    # Concaténer tous les assets
+    X_train = np.concatenate([split_data[a]['train'][0] for a in assets], axis=0)
+    Y_train = np.concatenate([split_data[a]['train'][1] for a in assets], axis=0)
+    X_val = np.concatenate([split_data[a]['val'][0] for a in assets], axis=0)
+    Y_val = np.concatenate([split_data[a]['val'][1] for a in assets], axis=0)
+    X_test = np.concatenate([split_data[a]['test'][0] for a in assets], axis=0)
+    Y_test = np.concatenate([split_data[a]['test'][1] for a in assets], axis=0)
 
-        logger.info(f"\n✅ Données sauvegardées: {output_path}")
-        logger.info(f"   Taille: {Path(output_path).stat().st_size / 1024 / 1024:.1f} MB")
+    # =========================================================================
+    # 4. Afficher stats finales
+    # =========================================================================
+    logger.info(f"\n📊 Shapes des datasets:")
+    logger.info(f"   Train: X={X_train.shape}, Y={Y_train.shape}")
+    logger.info(f"   Val:   X={X_val.shape}, Y={Y_val.shape}")
+    logger.info(f"   Test:  X={X_test.shape}, Y={Y_test.shape}")
 
-        # Sauvegarder métadonnées
-        metadata_path = str(output_path).replace('.npz', '_metadata.json')
-        with open(metadata_path, 'w') as f:
-            json.dump(metadata, f, indent=2)
-        logger.info(f"   Métadonnées: {metadata_path}")
+    # =========================================================================
+    # 5. Sauvegarder
+    # =========================================================================
+    if output_path is None:
+        assets_str = '_'.join(assets).lower()
+        output_path = f"data/prepared/dataset_{assets_str}_5min_{filter_type}.npz"
 
-        return output_path
+    output_dir = Path(output_path).parent
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    elif timeframe == 'all':
-        # Train = 1min + 5min, Val/Test = 5min seulement
-        logger.info(f"📊 Timeframe: ALL (1min + 5min pour TRAIN, 5min pour VAL/TEST)")
-        logger.info(f"   → Plus de données train = meilleure généralisation!")
-        logger.info(f"   → Val/Test sur 5min = évaluation réaliste!")
-        logger.info(f"   → Indicateurs calculés PAR ASSET (pas de pollution entre assets)")
+    # Métadonnées
+    metadata = {
+        'created_at': datetime.now().isoformat(),
+        'assets': assets,
+        'n_assets': len(assets),
+        'timeframe': '5min',
+        'filter_type': filter_type,
+        'total_candles': total_candles,
+        'train_size': len(X_train),
+        'val_size': len(X_val),
+        'test_size': len(X_test),
+        'sequence_length': SEQUENCE_LENGTH,
+        'num_indicators': NUM_INDICATORS,
+        'indicator_params': {
+            'rsi_period': RSI_PERIOD,
+            'cci_period': CCI_PERIOD,
+            'macd_fast': MACD_FAST,
+            'macd_slow': MACD_SLOW,
+            'macd_signal': MACD_SIGNAL
+        },
+        'filter_params': {
+            'decycler_cutoff': DECYCLER_CUTOFF,
+            'kalman_process_var': KALMAN_PROCESS_VAR,
+            'kalman_measure_var': KALMAN_MEASURE_VAR
+        },
+        'splits': {
+            'train': TRAIN_SPLIT,
+            'val': VAL_SPLIT,
+            'test': TEST_SPLIT
+        },
+        'split_strategy': 'chronological_with_gap',
+        'gap_size': SEQUENCE_LENGTH
+    }
 
-        # Charger 1min (pour train)
-        logger.info(f"\n🔹 Chargement données 1 minute (train)...")
-        btc_1m = load_crypto_data(BTC_DATA_FILE_1M, n_candles=btc_candles, asset_name='BTC-1m')
-        eth_1m = load_crypto_data(ETH_DATA_FILE_1M, n_candles=eth_candles, asset_name='ETH-1m')
+    np.savez_compressed(
+        output_path,
+        X_train=X_train,
+        Y_train=Y_train,
+        X_val=X_val,
+        Y_val=Y_val,
+        X_test=X_test,
+        Y_test=Y_test,
+        metadata=json.dumps(metadata)
+    )
 
-        btc_1m_trimmed = trim_edges(btc_1m, trim_start=TRIM_EDGES, trim_end=TRIM_EDGES)
-        eth_1m_trimmed = trim_edges(eth_1m, trim_start=TRIM_EDGES, trim_end=TRIM_EDGES)
+    logger.info(f"\n✅ Données sauvegardées: {output_path}")
+    logger.info(f"   Taille: {Path(output_path).stat().st_size / 1024 / 1024:.1f} MB")
 
-        # Charger 5min (pour train + val + test)
-        logger.info(f"\n🔹 Chargement données 5 minutes (train + val + test)...")
-        btc_5m = load_crypto_data(BTC_DATA_FILE_5M, n_candles=btc_candles, asset_name='BTC-5m')
-        eth_5m = load_crypto_data(ETH_DATA_FILE_5M, n_candles=eth_candles, asset_name='ETH-5m')
+    # Sauvegarder métadonnées
+    metadata_path = str(output_path).replace('.npz', '_metadata.json')
+    with open(metadata_path, 'w') as f:
+        json.dump(metadata, f, indent=2)
+    logger.info(f"   Métadonnées: {metadata_path}")
 
-        btc_5m_trimmed = trim_edges(btc_5m, trim_start=TRIM_EDGES, trim_end=TRIM_EDGES)
-        eth_5m_trimmed = trim_edges(eth_5m, trim_start=TRIM_EDGES, trim_end=TRIM_EDGES)
-
-        total_btc = len(btc_1m) + len(btc_5m)
-        total_eth = len(eth_1m) + len(eth_5m)
-
-        logger.info(f"\n📈 Données chargées:")
-        logger.info(f"   1min: BTC={len(btc_1m_trimmed):,} + ETH={len(eth_1m_trimmed):,}")
-        logger.info(f"   5min: BTC={len(btc_5m_trimmed):,} + ETH={len(eth_5m_trimmed):,}")
-
-        logger.info(f"\n🔧 Filtre pour labels: {filter_type}")
-
-        # =====================================================================
-        # CALCUL INDICATEURS SUR DONNÉES CONTIGUËS (AVANT SPLIT!)
-        # =====================================================================
-        logger.info(f"\n📈 Calcul des indicateurs sur données CONTIGUËS...")
-
-        # 1min - tout pour le train
-        logger.info(f"\n🏋️ Données 1min (tout pour train):")
-        X_btc_1m, Y_btc_1m = prepare_single_asset(btc_1m_trimmed, filter_type, "BTC-1m")
-        X_eth_1m, Y_eth_1m = prepare_single_asset(eth_1m_trimmed, filter_type, "ETH-1m")
-
-        # 5min - sera splitté
-        logger.info(f"\n📊 Données 5min (sera splitté):")
-        X_btc_5m, Y_btc_5m = prepare_single_asset(btc_5m_trimmed, filter_type, "BTC-5m")
-        X_eth_5m, Y_eth_5m = prepare_single_asset(eth_5m_trimmed, filter_type, "ETH-5m")
-
-        # =====================================================================
-        # SPLIT CHRONOLOGIQUE 5min AVEC GAP (évite data leakage)
-        # =====================================================================
-        logger.info(f"\n📊 Split chronologique 5min avec GAP (évite leakage)...")
-
-        (X_btc_5m_train, Y_btc_5m_train), (X_btc_5m_val, Y_btc_5m_val), (X_btc_5m_test, Y_btc_5m_test) = \
-            split_sequences(X_btc_5m, Y_btc_5m)
-        (X_eth_5m_train, Y_eth_5m_train), (X_eth_5m_val, Y_eth_5m_val), (X_eth_5m_test, Y_eth_5m_test) = \
-            split_sequences(X_eth_5m, Y_eth_5m)
-
-        logger.info(f"  BTC-5m: Train={len(X_btc_5m_train)}, Val={len(X_btc_5m_val)}, Test={len(X_btc_5m_test)}")
-        logger.info(f"  ETH-5m: Train={len(X_eth_5m_train)}, Val={len(X_eth_5m_val)}, Test={len(X_eth_5m_test)}")
-
-        # Combiner: Train = 1min + 5min_train
-        X_train = np.concatenate([X_btc_1m, X_eth_1m, X_btc_5m_train, X_eth_5m_train], axis=0)
-        Y_train = np.concatenate([Y_btc_1m, Y_eth_1m, Y_btc_5m_train, Y_eth_5m_train], axis=0)
-
-        # Val = 5min_val seulement
-        X_val = np.concatenate([X_btc_5m_val, X_eth_5m_val], axis=0)
-        Y_val = np.concatenate([Y_btc_5m_val, Y_eth_5m_val], axis=0)
-
-        # Test = 5min_test seulement
-        X_test = np.concatenate([X_btc_5m_test, X_eth_5m_test], axis=0)
-        Y_test = np.concatenate([Y_btc_5m_test, Y_eth_5m_test], axis=0)
-
-        # Aller directement à la sauvegarde
-        logger.info(f"\n📊 Shapes des datasets:")
-        logger.info(f"  Train: X={X_train.shape}, Y={Y_train.shape}")
-        logger.info(f"  Val:   X={X_val.shape}, Y={Y_val.shape}")
-        logger.info(f"  Test:  X={X_test.shape}, Y={Y_test.shape}")
-
-        # Créer le répertoire de sortie
-        if output_path is None:
-            output_path = f"data/prepared/dataset_all_{filter_type}.npz"
-
-        output_dir = Path(output_path).parent
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        # Métadonnées
-        total_1m = len(btc_1m_trimmed) + len(eth_1m_trimmed)
-        total_5m = len(btc_5m_trimmed) + len(eth_5m_trimmed)
-        train_5m_seqs = len(X_btc_5m_train) + len(X_eth_5m_train)
-        train_1m_seqs = len(X_btc_1m) + len(X_eth_1m)
-
-        metadata = {
-            'created_at': datetime.now().isoformat(),
-            'timeframe': 'all',
-            'filter_type': filter_type,
-            'btc_candles': total_btc,
-            'eth_candles': total_eth,
-            'total_candles': total_1m + total_5m,
-            'train_size': len(X_train),
-            'val_size': len(X_val),
-            'test_size': len(X_test),
-            'train_composition': {
-                '1min_sequences': train_1m_seqs,
-                '5min_sequences': train_5m_seqs
-            },
-            'split_strategy': 'chronological_with_gap',
-            'gap_size': SEQUENCE_LENGTH,
-            'val_test_source': '5min_only',
-            'sequence_length': SEQUENCE_LENGTH,
-            'num_indicators': NUM_INDICATORS,
-            'indicator_params': {
-                'rsi_period': RSI_PERIOD,
-                'cci_period': CCI_PERIOD,
-                'macd_fast': MACD_FAST,
-                'macd_slow': MACD_SLOW,
-                'macd_signal': MACD_SIGNAL
-            },
-            'filter_params': {
-                'decycler_cutoff': DECYCLER_CUTOFF,
-                'kalman_process_var': KALMAN_PROCESS_VAR,
-                'kalman_measure_var': KALMAN_MEASURE_VAR
-            },
-            'splits': {
-                'train': TRAIN_SPLIT,
-                'val': VAL_SPLIT,
-                'test': TEST_SPLIT
-            }
-        }
-
-        # Sauvegarder
-        np.savez_compressed(
-            output_path,
-            X_train=X_train,
-            Y_train=Y_train,
-            X_val=X_val,
-            Y_val=Y_val,
-            X_test=X_test,
-            Y_test=Y_test,
-            metadata=json.dumps(metadata)
-        )
-
-        logger.info(f"\n✅ Données sauvegardées: {output_path}")
-        logger.info(f"   Taille: {Path(output_path).stat().st_size / 1024 / 1024:.1f} MB")
-
-        # Sauvegarder métadonnées
-        metadata_path = str(output_path).replace('.npz', '_metadata.json')
-        with open(metadata_path, 'w') as f:
-            json.dump(metadata, f, indent=2)
-        logger.info(f"   Métadonnées: {metadata_path}")
-
-        return output_path
-
-    else:
-        raise ValueError(f"Timeframe invalide: {timeframe}. Utilisez '1', '5', ou 'all'.")
+    return output_path
 
 
 def load_prepared_data(path: str = None) -> dict:
@@ -480,29 +326,34 @@ def list_prepared_datasets():
 
 def main():
     """Point d'entrée CLI."""
+    available_assets = list(AVAILABLE_ASSETS_5M.keys())
+
     parser = argparse.ArgumentParser(
-        description="Prépare et sauvegarde les datasets pour l'entraînement",
+        description="Prépare et sauvegarde les datasets 5min pour l'entraînement",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
+        epilog=f"""
 Exemples:
-  python src/prepare_data.py --timeframe 5 --filter kalman
-  python src/prepare_data.py --timeframe 1 --filter decycler
-  python src/prepare_data.py --timeframe all --filter kalman  # 1min+5min combinés!
+  # Avec tous les assets
+  python src/prepare_data.py --filter kalman --assets BTC ETH BNB ADA LTC
+
+  # Avec BTC et ETH seulement (défaut)
+  python src/prepare_data.py --filter kalman
+
+  # Lister les datasets disponibles
   python src/prepare_data.py --list
+
+Assets disponibles: {', '.join(available_assets)}
         """
     )
 
-    parser.add_argument('--timeframe', '-t', type=str, default='5',
-                        choices=['1', '5', 'all'],
-                        help='Timeframe: 1, 5, ou all (1min+5min train, 5min val/test)')
+    parser.add_argument('--assets', '-a', type=str, nargs='+',
+                        default=DEFAULT_ASSETS,
+                        choices=available_assets,
+                        help=f'Assets à inclure (défaut: {DEFAULT_ASSETS})')
     parser.add_argument('--filter', '-f', type=str, default=LABEL_FILTER_TYPE,
                         choices=['decycler', 'kalman'], help='Filtre pour les labels')
     parser.add_argument('--output', '-o', type=str, default=None,
                         help='Chemin de sortie (défaut: auto-généré)')
-    parser.add_argument('--btc-candles', type=int, default=None,
-                        help='Nombre de bougies BTC (défaut: toutes)')
-    parser.add_argument('--eth-candles', type=int, default=None,
-                        help='Nombre de bougies ETH (défaut: toutes)')
     parser.add_argument('--list', '-l', action='store_true',
                         help='Liste les datasets préparés disponibles')
 
@@ -520,11 +371,9 @@ Exemples:
 
     # Préparer et sauvegarder
     output_path = prepare_and_save(
-        timeframe=args.timeframe,
         filter_type=args.filter,
-        output_path=args.output,
-        btc_candles=args.btc_candles,
-        eth_candles=args.eth_candles
+        assets=args.assets,
+        output_path=args.output
     )
 
     print(f"\n🎉 Terminé! Dataset prêt: {output_path}")

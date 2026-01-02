@@ -125,22 +125,22 @@ cd ~/projects/trad
 pip install -r requirements.txt
 ```
 
-### 2. Preparer les Donnees (Workflow 5min/30min - RECOMMANDE)
+### 2. Preparer les Donnees (5min)
 
 ```bash
-# COMMANDE PRINCIPALE: 5 assets, features 5min+30min, labels 30min
-python src/prepare_data_30min.py --filter kalman --include-30min-features --assets BTC ETH BNB ADA LTC
+# COMMANDE PRINCIPALE: 5 assets, donnees 5min
+python src/prepare_data.py --filter kalman --assets BTC ETH BNB ADA LTC
 ```
 
-**Architecture 5min/30min:**
-- **Features**: Indicateurs 5min (haute resolution) + Indicateurs 30min + Step Index
-- **Labels**: Pente des indicateurs 30min (moins de bruit, meilleure predictibilite)
-- **Step Index**: Position dans la fenetre 30min (0.0 a 1.0)
+**Architecture:**
+- **Features**: 3 indicateurs (RSI, CCI, MACD) normalises 0-100
+- **Labels**: Pente des indicateurs (filtre Kalman)
+- **Sequences**: 12 timesteps
 
 ### 3. Entrainement
 
 ```bash
-python src/train.py --data data/prepared/dataset_btc_eth_bnb_ada_ltc_5min_30min_labels30min_kalman.npz --epochs 50
+python src/train.py --data data/prepared/dataset_btc_eth_bnb_ada_ltc_5min_kalman.npz --epochs 50
 ```
 
 ### 4. Evaluation
@@ -153,33 +153,24 @@ python src/evaluate.py
 
 ## Workflow Recommande
 
-### Workflow 5min/30min (PRINCIPAL)
+### Workflow 5min
 
 ```bash
 # 1. Preparer les donnees UNE FOIS avec tous les assets
-python src/prepare_data_30min.py --filter kalman --include-30min-features --assets BTC ETH BNB ADA LTC
+python src/prepare_data.py --filter kalman --assets BTC ETH BNB ADA LTC
 
 # 2. Entrainer PLUSIEURS FOIS (rapide ~10s de chargement)
-python src/train.py --data data/prepared/dataset_btc_eth_bnb_ada_ltc_5min_30min_labels30min_kalman.npz --epochs 50
-python src/train.py --data data/prepared/dataset_btc_eth_bnb_ada_ltc_5min_30min_labels30min_kalman.npz --lr 0.0001
+python src/train.py --data data/prepared/dataset_btc_eth_bnb_ada_ltc_5min_kalman.npz --epochs 50
+python src/train.py --data data/prepared/dataset_btc_eth_bnb_ada_ltc_5min_kalman.npz --lr 0.0001
 ```
 
-### Options de prepare_data_30min.py
+### Options de prepare_data.py
 
 | Option | Description |
 |--------|-------------|
 | `--filter kalman` | Filtre Kalman pour labels (recommande) |
-| `--include-30min-features` | Ajoute indicateurs 30min en features (7 features total) |
 | `--assets BTC ETH ...` | Liste des assets a inclure |
-
-### Comparaison des architectures
-
-| Mode | Features | Labels | Total Features |
-|------|----------|--------|----------------|
-| Sans `--include-30min-features` | 5min(3) + step_index(1) | 30min | 4 |
-| Avec `--include-30min-features` | 5min(3) + 30min(3) + step_index(1) | 30min | 7 |
-
-**Recommandation**: Utiliser `--include-30min-features` pour plus de contexte.
+| `--list` | Liste les datasets disponibles |
 
 ---
 
@@ -296,38 +287,34 @@ DEFAULT_ASSETS = ['BTC', 'ETH']
 
 ---
 
-## Pipeline de Preparation des Donnees (30min)
+## Pipeline de Preparation des Donnees (5min)
 
 ### Commande principale
 
 ```bash
-python src/prepare_data_30min.py --filter kalman --include-30min-features --assets BTC ETH BNB ADA LTC
+python src/prepare_data.py --filter kalman --assets BTC ETH BNB ADA LTC
 ```
 
 ### Processus
 
 1. **Chargement**: Donnees 5min pour chaque asset
 2. **Trim edges**: 100 bougies debut + 100 fin
-3. **Resample**: 5min → 30min
-4. **Calcul indicateurs 5min**: RSI, CCI, MACD (features)
-5. **Calcul indicateurs 30min**: RSI, CCI, MACD (features optionnelles + labels)
-6. **Generation labels**: Pente des indicateurs 30min (filtre Kalman)
-7. **Alignement**: Forward-fill des labels 30min sur timestamps 5min
-8. **Ajout Step Index**: Position dans la fenetre 30min (0.0-1.0)
-9. **Split temporel**: 70% train / 15% val / 15% test
-10. **Creation sequences**: 12 timesteps
-11. **Sauvegarde**: `.npz` compresse
+3. **Calcul indicateurs**: RSI, CCI, MACD (normalises 0-100)
+4. **Generation labels**: Pente des indicateurs (filtre Kalman)
+5. **Split temporel**: 70% train / 15% val / 15% test (avec GAP)
+6. **Creation sequences**: 12 timesteps
+7. **Sauvegarde**: `.npz` compresse
 
 ### Options CLI
 
 ```bash
-python src/prepare_data_30min.py --help
+python src/prepare_data.py --help
 
 Options:
   --assets BTC ETH ...    Assets a inclure (defaut: BTC ETH)
   --filter {decycler,kalman}  Filtre pour labels (defaut: decycler)
-  --include-30min-features    Ajouter indicateurs 30min (+3 features)
   --output PATH           Chemin de sortie (defaut: auto)
+  --list                  Liste les datasets disponibles
 ```
 
 ---
