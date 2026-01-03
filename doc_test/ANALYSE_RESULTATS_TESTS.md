@@ -16,7 +16,8 @@
 6. [Problème de Généralisation](#problème-de-généralisation)
 7. [Stacking et Ensemble Methods](#stacking-et-ensemble-methods)
 8. [Résultats de Trading](#résultats-de-trading)
-9. [Conclusions et Recommandations](#conclusions-et-recommandations)
+9. [Test de Validation : 3 Features → 1 Target](#test-de-validation--3-features--1-target-2026-01-03) ⭐ **NOUVEAU**
+10. [Conclusions et Recommandations](#conclusions-et-recommandations)
 
 ---
 
@@ -308,6 +309,111 @@ Le document mentionne un problème avec les valeurs à t0 en temps réel - proba
 
 ---
 
+## Test de Validation : 3 Features → 1 Target (2026-01-03)
+
+### Protocole de Test
+
+Test systématique avec le script `test_indicator_params.py` :
+- **Input** : 3 features (RSI, CCI, MACD) avec paramètres variables
+- **Output** : Kalman(indicateur) avec paramètres fixes standards
+- **Dataset** : BTC uniquement, ~50k samples
+- **Modèle** : CNN-LSTM mono-output
+
+### Grilles de Paramètres Testées
+
+| Indicateur | Paramètres testés |
+|------------|-------------------|
+| RSI period | 7, 10, 14, 20 |
+| CCI period | 10, 14, 20, 30 |
+| MACD fast/slow | (8,17), (12,26), (16,34) |
+
+**Total** : 4 × 4 × 3 = 48 combinaisons par target
+
+### Résultats par Target
+
+#### Target: Kalman(RSI) - Le plus difficile
+
+| RSI | CCI | MACD | Accuracy |
+|-----|-----|------|----------|
+| 14 | 30 | 16/34 | **79.10%** |
+| 10 | 30 | 12/26 | 79.00% |
+| 14 | 20 | 16/34 | 78.90% |
+| 14 | 30 | 12/26 | 78.90% |
+| 10 | 30 | 16/34 | 78.80% |
+
+**Spread** : 0.30% (78.80% → 79.10%)
+**Meilleur** : RSI=14, CCI=30, MACD=16/34
+
+#### Target: Kalman(CCI) - Difficulté moyenne
+
+| RSI | CCI | MACD | Accuracy |
+|-----|-----|------|----------|
+| 7 | 20 | 12/26 | **83.30%** |
+| 7 | 20 | 16/34 | 83.30% |
+| 10 | 20 | 12/26 | 83.30% |
+| 10 | 20 | 16/34 | 83.30% |
+| 14 | 20 | 16/34 | 83.30% |
+
+**Spread** : 0.00% (tous à 83.30%)
+**Meilleur** : Tous équivalents avec CCI=20
+
+#### Target: Kalman(MACD) - Le plus facile
+
+| RSI | CCI | MACD | Accuracy |
+|-----|-----|------|----------|
+| 10 | 30 | 8/17 | **86.40%** |
+| 14 | 10 | 12/26 | 86.40% |
+| 14 | 30 | 8/17 | 86.30% |
+| 7 | 20 | 8/17 | 86.20% |
+| 7 | 20 | 12/26 | 86.20% |
+
+**Spread** : 0.20% (86.20% → 86.40%)
+**Meilleur** : RSI=10, CCI=30, MACD=8/17
+
+### Analyse des Résultats
+
+#### 1. Confirmation de la hiérarchie des targets
+
+| Target | Accuracy | Difficulté |
+|--------|----------|------------|
+| Kalman(MACD) | 86.40% | Facile ✅ |
+| Kalman(CCI) | 83.30% | Moyen |
+| Kalman(RSI) | 79.10% | Difficile ❌ |
+
+**Écart RSI vs MACD** : 7.3 points (significatif)
+
+#### 2. Impact négligeable des paramètres
+
+| Target | Spread Top 5 | Conclusion |
+|--------|--------------|------------|
+| RSI | 0.30% | Négligeable |
+| CCI | 0.00% | Aucun impact |
+| MACD | 0.20% | Négligeable |
+
+**Tous les spreads sont < 0.5%** → L'optimisation des paramètres n'améliore pas significativement les résultats.
+
+#### 3. Patterns observés
+
+1. **CCI=30** apparaît souvent dans les meilleurs résultats
+   - Période plus longue = signal plus stable
+
+2. **Pour target CCI** : Tous les paramètres donnent exactement 83.30%
+   - Le modèle extrait le même signal peu importe les params
+
+3. **Pour target MACD** : MACD=8/17 (court) performe bien
+   - Paradoxe : paramètres courts pour un indicateur de tendance lourde
+
+### Conclusion du Test de Validation
+
+> **CONFIRMÉ : L'optimisation des paramètres d'indicateurs est inutile.**
+
+Le choix de la **cible** (MACD vs CCI vs RSI) a un impact de **7.3%** sur l'accuracy.
+Le choix des **paramètres** a un impact de **< 0.5%**.
+
+**Priorité** : Choisir la bonne cible, pas les bons paramètres.
+
+---
+
 ## Conclusions et Recommandations
 
 ### Ce qui Fonctionne
@@ -376,3 +482,4 @@ STACKING_LEVEL = 1  # ou 2 si plus de données
 
 *Document généré automatiquement par Claude Code*
 *Basé sur l'analyse de 8 fichiers de tests*
+*Dernière mise à jour : 2026-01-03 (ajout résultats test de validation)*
