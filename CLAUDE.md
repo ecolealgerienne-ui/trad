@@ -770,10 +770,11 @@ Liste organisee des experiences et optimisations a tester pour atteindre 90%+.
 
 | # | Experience | Hypothese | Commande/Implementation | Statut |
 |---|------------|-----------|-------------------------|--------|
-| 1.1 | **Training par indicateur** | Un modele specialise par indicateur (RSI, CCI, MACD) pourrait mieux apprendre les patterns specifiques | Modifier `train.py` pour `--indicator rsi` | A tester |
+| 1.1 | **Training par indicateur** | Un modele specialise par indicateur (RSI, CCI, MACD) pourrait mieux apprendre les patterns specifiques | `python src/train.py --indicator rsi` | **Teste** - Gain negligeable |
 | 1.2 | **Fusion de canaux** | Separer branche 5min et branche 30min dans le LSTM | Modifier `model.py` (voir Roadmap Levier 2) | A tester |
 | 1.3 | **Learning Rate Decay** | LR=0.001 → 0.0001 progressif pour affiner les poids | `--lr-decay step --lr-step 10` | A tester |
 | 1.4 | **Plus de patience** | Early stopping a 20 epoques au lieu de 10 | `--patience 20 --epochs 100` | A tester |
+| 1.5 | **Multi-View Learning** | Optimiser les features (CCI, MACD) pour synchroniser avec la cible (RSI) | `python src/optimize_sync_per_target.py --target rsi` | A tester |
 
 ### Priorite 2: Features et Donnees
 
@@ -813,7 +814,30 @@ Liste organisee des experiences et optimisations a tester pour atteindre 90%+.
 |------|------------|----------|-------|----------|
 | 2026-01-03 | Position Index | 83.4% | +0.1% | Abandonne |
 | 2026-01-03 | Clock-Injected 7 feat | 85.1% | +1.8% | **Adopte** |
-| - | - | - | - | - |
+| 2026-01-03 | Single-output RSI | 83.6% | +0.6% vs multi | Pas de gain significatif |
+| 2026-01-03 | Single-output CCI | 85.6% | = vs multi | Pas de gain significatif |
+| 2026-01-03 | Single-output MACD | 86.8% | = vs multi | Pas de gain significatif |
+
+### Analyse Single-Output (2026-01-03)
+
+**Resultats detailles:**
+
+| Indicateur | Train Acc | Val Acc | Test Acc | Gap Train/Val | Gap Val/Test |
+|------------|-----------|---------|----------|---------------|--------------|
+| RSI | ~88% | ~84% | 83.6% | ~4% | ~0% |
+| CCI | ~89% | ~86% | 85.6% | ~3% | ~0% |
+| MACD | 90.4% | 86.4% | 86.8% | **4%** | -0.4% |
+
+**Conclusion:**
+- Le training single-output **n'apporte pas d'amelioration** significative
+- Gap train/val de ~4% = leger overfitting acceptable
+- Gap val/test proche de 0% = bonne generalisation
+- Early stopping efficace (arret epoque 4-14)
+
+**Pistes pour reduire le gap train/val:**
+- Data augmentation (bruit gaussien σ=0.01-0.02)
+- Dropout augmente (0.3 → 0.4)
+- Label smoothing (0.1)
 
 ---
 
