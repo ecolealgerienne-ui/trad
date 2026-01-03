@@ -221,11 +221,14 @@ def prepare_single_asset_30min(df_5min: pd.DataFrame,
     # SOLUTION: shift(-1) pour que labels[10:00] = pente(09:30 → 10:00)
     #   Ainsi les 5min de 10:00-10:25 prédisent la pente qui vient de clore.
     #
+    # NOTE: On utilise slicing au lieu de np.roll pour éviter le wrap-around
+    #   np.roll ramènerait le premier élément à la fin (donnée invalide)
+    #
     logger.info(f"\n  🔄 Correction du décalage labels (shift -1)...")
-    labels_30min_shifted = np.roll(labels_30min, -1, axis=0)
-    # La dernière ligne devient invalide (contient la première), on la garde quand même
-    # car elle sera coupée lors du trim ou ne sera pas utilisée
+    labels_30min_shifted = labels_30min[1:]  # Décaler: index 0 reçoit valeur de index 1
+    index_30min = index_30min[:-1]           # Enlever le dernier timestamp (plus de label)
     logger.info(f"     → Labels décalés de -1 période 30min")
+    logger.info(f"     → Shape après shift: {labels_30min_shifted.shape}")
 
     # =========================================================================
     # 7. Aligner labels 30min sur timestamps 5min (FORWARD-FILL)
