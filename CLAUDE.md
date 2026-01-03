@@ -762,6 +762,80 @@ C'est un **signal avance** du changement de tendance.
 
 ---
 
+## Methodologie d'Optimisation des Indicateurs
+
+### Principe: Concordance Pure (Prediction Focus)
+
+L'optimisation des parametres d'indicateurs est basee sur la **concordance** avec la reference, pas sur les pivots ou l'anticipation.
+
+**Pourquoi?**
+- L'objectif du modele ML est de **PREDIRE** (maximiser accuracy train/val)
+- Les pivots et l'anticipation sont pour le **TRADING** (apres le modele)
+- Des features concordantes = signal coherent pour le modele
+
+### Scoring
+
+```python
+Score = Concordance   # si Lag == 0 (synchronise)
+Score = 0             # si Lag != 0 (desynchronise, disqualifie)
+```
+
+Un indicateur desynchronise (Lag != 0) envoie des signaux contradictoires au modele → il est elimine.
+
+### Grilles de Parametres
+
+Chaque indicateur est teste avec **±60% (3 pas de 20%)** autour de sa valeur par defaut:
+
+| Indicateur | Defaut | Grille testee |
+|------------|--------|---------------|
+| RSI period | 14 | [22, 17, 14, 11, 6] |
+| CCI period | 20 | [32, 24, 20, 16, 8] |
+| MACD fast | 10 | [16, 12, 10, 8, 4] |
+| MACD slow | 26 | [42, 31, 26, 21, 10] |
+
+Plage de lag testee: **-3 a +2** (suffisant pour detecter la synchronisation)
+
+### Pipeline en 2 Etapes
+
+**Etape 1: Optimisation sur Close**
+
+Trouver les parametres optimaux pour synchroniser chaque indicateur avec Kalman(Close):
+
+```bash
+python src/optimize_sync.py --assets BTC ETH BNB --val-assets ADA LTC
+```
+
+Resultat: Nouveaux parametres par defaut pour `constants.py`
+
+**Etape 2: Optimisation Multi-View (per-target)**
+
+Pour chaque indicateur cible, optimiser les autres indicateurs pour synchroniser avec lui:
+
+```bash
+# Pour predire RSI: optimiser CCI et MACD pour coller a Kalman(RSI)
+python src/optimize_sync_per_target.py --target rsi --assets BTC ETH BNB
+
+# Pour predire CCI: optimiser RSI et MACD pour coller a Kalman(CCI)
+python src/optimize_sync_per_target.py --target cci --assets BTC ETH BNB
+
+# Pour predire MACD: optimiser RSI et CCI pour coller a Kalman(MACD)
+python src/optimize_sync_per_target.py --target macd --assets BTC ETH BNB
+```
+
+### Avantage du Multi-View Learning
+
+Chaque indicateur cible a ses propres parametres optimaux pour les features:
+
+```
+Modele RSI:  CCI(16), MACD(4/42)   → optimises pour RSI
+Modele CCI:  RSI(17), MACD(8/31)   → optimises pour CCI
+Modele MACD: RSI(11), CCI(24)      → optimises pour MACD
+```
+
+Cela donne au modele des **vues multiples** coherentes sur le meme signal cible.
+
+---
+
 ## Backlog: Experiences a Tester
 
 Liste organisee des experiences et optimisations a tester pour atteindre 90%+.
