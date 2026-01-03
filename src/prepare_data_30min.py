@@ -218,7 +218,7 @@ def prepare_single_asset_30min(df_5min: pd.DataFrame,
     # On supprime quelques périodes 30min pour éviter ces artifacts.
     # IMPORTANT: On doit aussi trimmer les 5min pour garder l'alignement des timestamps.
     #
-    KALMAN_TRIM = 10  # 10 périodes 30min = 5 heures de chaque côté
+    KALMAN_TRIM = 0  # TEMPORAIRE: Désactivé pour debug (était 10)
     KALMAN_TRIM_5MIN = KALMAN_TRIM * 6  # 10 périodes 30min = 60 bougies 5min
 
     logger.info(f"\n  ✂️ Trim post-Kalman: {KALMAN_TRIM} périodes 30min ({KALMAN_TRIM_5MIN} bougies 5min) de chaque côté...")
@@ -288,8 +288,10 @@ def prepare_single_asset_30min(df_5min: pd.DataFrame,
         # En live trading, l'indicateur 30min à 09:30 n'est disponible qu'à 10:00
         # (quand la bougie 09:30-09:59 se ferme).
         #
-        index_30min_shifted = index_30min + pd.Timedelta('30min')
-        logger.info(f"     → Index 30min décalé de +30min (causal)")
+        # TEST: Désactiver le shift pour voir si c'est le problème
+        # index_30min_shifted = index_30min + pd.Timedelta('30min')
+        index_30min_shifted = index_30min  # TEMPORAIRE: pas de shift
+        logger.info(f"     → Index 30min SANS shift (debug)")
 
         indicators_30min_aligned = align_30min_to_5min(indicators_30min, index_30min_shifted, index_5min)
 
