@@ -26,18 +26,19 @@ ETH_CANDLES = 100000  # Nombre de bougies ETH à charger
 # CONSTANTES INDICATEURS TECHNIQUES
 # =============================================================================
 # Paramètres optimisés pour synchronisation (lag 0 avec Kalman(Close))
+# Score = Concordance (Lag=0 requis)
 # Voir results/sync_optimization.json pour détails
 
 # RSI (Relative Strength Index)
-RSI_PERIOD = 14  # Synchronisé: Lag 0, Concordance 82%
+RSI_PERIOD = 22  # Synchronisé: Lag 0, Concordance 85.3%
 
 # CCI (Commodity Channel Index)
-CCI_PERIOD = 20  # Synchronisé: Lag 0, Concordance 74%
+CCI_PERIOD = 32  # Synchronisé: Lag 0, Concordance 77.9%
 CCI_CONSTANT = 0.015  # Constante de scaling du CCI
 
 # MACD (Moving Average Convergence Divergence)
-MACD_FAST = 10  # Synchronisé: Lag 0, Concordance 70%
-MACD_SLOW = 26  # Période EMA lente
+MACD_FAST = 8   # Synchronisé: Lag 0, Concordance 71.8%
+MACD_SLOW = 42  # Période EMA lente
 MACD_SIGNAL = 9  # Période de la ligne de signal
 
 # NOTE: BOL (Bollinger Bands) retiré car impossible à synchroniser (toujours lag +1)

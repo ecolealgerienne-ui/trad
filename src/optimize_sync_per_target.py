@@ -64,18 +64,18 @@ from indicators import (
 # Grilles avec pas de ~20%, limite ±60% (3 pas) autour du defaut
 PARAM_GRIDS = {
     'RSI': {
-        # Defaut 14: ±60% → [6, 22], 3 pas de 20%
-        'period': [22, 17, 14, 11, 6]
+        # Defaut 22: ±60% → [9, 35], 3 pas de 20%
+        'period': [35, 26, 22, 18, 9]
     },
     'CCI': {
-        # Defaut 20: ±60% → [8, 32], 3 pas de 20%
-        'period': [32, 24, 20, 16, 8]
+        # Defaut 32: ±60% → [13, 51], 3 pas de 20%
+        'period': [51, 38, 32, 26, 13]
     },
     'MACD': {
-        # Defaut fast=10: ±60% → [4, 16]
-        'fast': [16, 12, 10, 8, 4],
-        # Defaut slow=26: ±60% → [10, 42]
-        'slow': [42, 31, 26, 21, 10],
+        # Defaut fast=8: ±60% → [3, 13]
+        'fast': [13, 10, 8, 6, 3],
+        # Defaut slow=42: ±60% → [17, 67]
+        'slow': [67, 50, 42, 34, 17],
     }
 }
 
@@ -427,6 +427,7 @@ def main():
             # Marquer si desynchronise
             sync_status = "✓" if avg_anticipation == 0 else "✗"
             logger.info(f"  {params_str:20s} | Conc: {avg_concordance:.3f} | "
+                       f"Pivot: {avg_pivot_acc:.3f} | "
                        f"Lag: {avg_anticipation:+3.0f} {sync_status} | "
                        f"Score: {avg_score:.3f}")
 
@@ -443,8 +444,9 @@ def main():
         }
 
         logger.info(f"\n  MEILLEUR {indicator} pour {target}: {best.params}")
-        logger.info(f"    Concordance: {best.concordance:.1%}")
-        logger.info(f"    Lag:         {best.anticipation:+.0f} (0 = synchronise)")
+        logger.info(f"    Concordance:    {best.concordance:.1%}")
+        logger.info(f"    Pivot Accuracy: {best.pivot_accuracy:.1%}")
+        logger.info(f"    Lag:            {best.anticipation:+.0f} (0 = synchronise)")
 
     # =========================================================================
     # 6. RESUME FINAL
@@ -460,12 +462,14 @@ def main():
     print(f"# Features optimisees:")
     for indicator, params in optimal_params.items():
         conc = best_results[indicator]['concordance']
+        pivot = best_results[indicator]['pivot_accuracy']
+        delta = conc - pivot  # Difference globale vs pivots
         if indicator == 'RSI':
-            print(f"#   RSI_PERIOD_{target} = {params['period']:3d}  (Concordance: {conc:.1%})")
+            print(f"#   RSI_PERIOD_{target} = {params['period']:3d}  (Conc: {conc:.1%}, Pivot: {pivot:.1%}, Delta: {delta:+.1%})")
         elif indicator == 'CCI':
-            print(f"#   CCI_PERIOD_{target} = {params['period']:3d}  (Concordance: {conc:.1%})")
+            print(f"#   CCI_PERIOD_{target} = {params['period']:3d}  (Conc: {conc:.1%}, Pivot: {pivot:.1%}, Delta: {delta:+.1%})")
         elif indicator == 'MACD':
-            print(f"#   MACD_FAST_{target} = {params['fast']:3d}  (Concordance: {conc:.1%})")
+            print(f"#   MACD_FAST_{target} = {params['fast']:3d}  (Conc: {conc:.1%}, Pivot: {pivot:.1%}, Delta: {delta:+.1%})")
             print(f"#   MACD_SLOW_{target} = {params['slow']:3d}")
 
     # =========================================================================

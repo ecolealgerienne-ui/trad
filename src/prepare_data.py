@@ -283,8 +283,25 @@ def load_prepared_data(path: str = None) -> dict:
 
     data = np.load(path, allow_pickle=True)
 
-    # Parser les métadonnées
-    metadata = json.loads(str(data['metadata']))
+    # Parser les métadonnées (dans npz ou fichier JSON séparé)
+    if 'metadata' in data.files:
+        metadata = json.loads(str(data['metadata']))
+    else:
+        # Fallback: chercher le fichier JSON à côté
+        metadata_path = Path(str(path).replace('.npz', '_metadata.json'))
+        if metadata_path.exists():
+            with open(metadata_path) as f:
+                metadata = json.load(f)
+            logger.info(f"  ℹ️ Metadata chargé depuis: {metadata_path}")
+        else:
+            # Metadata minimal par défaut
+            metadata = {
+                'n_features': data['X_train'].shape[2],
+                'train_size': len(data['X_train']),
+                'val_size': len(data['X_val']),
+                'test_size': len(data['X_test']),
+            }
+            logger.warning(f"  ⚠️ Pas de metadata trouvé, utilisation de valeurs par défaut")
 
     result = {
         'train': (data['X_train'], data['Y_train']),

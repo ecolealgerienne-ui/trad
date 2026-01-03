@@ -235,16 +235,17 @@ Les indicateurs utilisent des periodes **optimisees pour la synchronisation** av
 
 ```python
 # src/constants.py - Periodes synchronisees (Lag 0)
+# Score = Concordance (Lag=0 requis)
 
 # RSI - Synchronise avec Kalman(Close)
-RSI_PERIOD = 14         # Lag 0, Concordance 82%
+RSI_PERIOD = 22         # Lag 0, Concordance 85.3%
 
 # CCI - Synchronise avec Kalman(Close)
-CCI_PERIOD = 20         # Lag 0, Concordance 74%
+CCI_PERIOD = 32         # Lag 0, Concordance 77.9%
 
 # MACD - Synchronise avec Kalman(Close)
-MACD_FAST = 10          # Lag 0, Concordance 70%
-MACD_SLOW = 26
+MACD_FAST = 8           # Lag 0, Concordance 71.8%
+MACD_SLOW = 42
 MACD_SIGNAL = 9
 
 # BOL (Bollinger Bands) - RETIRE
@@ -449,10 +450,10 @@ X_train = np.concatenate([X_btc, X_eth])
 
 ```python
 # constants.py - Periodes optimisees pour Lag 0
-RSI_PERIOD = 14     # Synchronise
-CCI_PERIOD = 20     # Synchronise
-MACD_FAST = 10      # Synchronise
-MACD_SLOW = 26
+RSI_PERIOD = 22     # Concordance 85.3%
+CCI_PERIOD = 32     # Concordance 77.9%
+MACD_FAST = 8       # Concordance 71.8%
+MACD_SLOW = 42
 # BOL retire (impossible a synchroniser)
 ```
 
@@ -788,10 +789,10 @@ Chaque indicateur est teste avec **±60% (3 pas de 20%)** autour de sa valeur pa
 
 | Indicateur | Defaut | Grille testee |
 |------------|--------|---------------|
-| RSI period | 14 | [22, 17, 14, 11, 6] |
-| CCI period | 20 | [32, 24, 20, 16, 8] |
-| MACD fast | 10 | [16, 12, 10, 8, 4] |
-| MACD slow | 26 | [42, 31, 26, 21, 10] |
+| RSI period | 22 | [35, 26, 22, 18, 9] |
+| CCI period | 32 | [51, 38, 32, 26, 13] |
+| MACD fast | 8 | [13, 10, 8, 6, 3] |
+| MACD slow | 42 | [67, 50, 42, 34, 17] |
 
 Plage de lag testee: **-3 a +2** (suffisant pour detecter la synchronisation)
 
@@ -807,32 +808,50 @@ python src/optimize_sync.py --assets BTC ETH BNB --val-assets ADA LTC
 
 Resultat: Nouveaux parametres par defaut pour `constants.py`
 
-**Etape 2: Optimisation Multi-View (per-target)**
+**Etape 2: Multi-View Learning - ABANDONNE**
 
-Pour chaque indicateur cible, optimiser les autres indicateurs pour synchroniser avec lui:
+L'approche Multi-View a ete testee et abandonnee. Voir section "Resultats des Experiences" pour details.
 
-```bash
-# Pour predire RSI: optimiser CCI et MACD pour coller a Kalman(RSI)
-python src/optimize_sync_per_target.py --target rsi --assets BTC ETH BNB
+### Multi-View Learning: Analyse Post-Mortem
 
-# Pour predire CCI: optimiser RSI et MACD pour coller a Kalman(CCI)
-python src/optimize_sync_per_target.py --target cci --assets BTC ETH BNB
+**Hypothese initiale:**
+Synchroniser les features (CCI, MACD) avec la cible (ex: RSI) devrait reduire les signaux contradictoires et ameliorer la prediction.
 
-# Pour predire MACD: optimiser RSI et CCI pour coller a Kalman(MACD)
-python src/optimize_sync_per_target.py --target macd --assets BTC ETH BNB
+**Parametres testes (2026-01-03):**
+
+| Cible | RSI | CCI | MACD |
+|-------|-----|-----|------|
+| RSI | 22 (defaut) | 51 | 13/67 |
+| CCI | 18 | 32 (defaut) | 10/67 |
+| MACD | 18 | 26 | 8/42 (defaut) |
+
+**Resultats:**
+
+| Indicateur | Baseline 5min | Multi-View 5min | Delta |
+|------------|---------------|-----------------|-------|
+| MACD | 86.9% | 86.2% | **-0.7%** |
+
+**Conclusion: Multi-View n'ameliore pas la prediction.**
+
+**Pourquoi ca n'a pas fonctionne:**
+
+1. **Synchronisation ≠ Predictibilite**: Des features synchronisees avec la cible sont plus **correlees** avec elle, donc apportent **moins d'information nouvelle**. Pour predire, on veut des features **complementaires**, pas des features qui "copient" la cible.
+
+2. **Redondance vs Diversite**: Le modele ML beneficie de features qui capturent des aspects **differents** du marche. En synchronisant RSI et CCI avec MACD, on perd cette diversite.
+
+3. **Optimisation sur le mauvais critere**: L'optimisation maximisait la **concordance de direction**, mais le modele a besoin de features qui apportent de l'**information predictive**, pas juste de la coherence.
+
+**Decision: Revenir aux parametres par defaut (optimises pour Close)**
+
+```python
+# constants.py - Parametres FINAUX
+RSI_PERIOD = 22    # Optimise pour Kalman(Close)
+CCI_PERIOD = 32    # Optimise pour Kalman(Close)
+MACD_FAST = 8      # Optimise pour Kalman(Close)
+MACD_SLOW = 42     # Optimise pour Kalman(Close)
 ```
 
-### Avantage du Multi-View Learning
-
-Chaque indicateur cible a ses propres parametres optimaux pour les features:
-
-```
-Modele RSI:  CCI(16), MACD(4/42)   → optimises pour RSI
-Modele CCI:  RSI(17), MACD(8/31)   → optimises pour CCI
-Modele MACD: RSI(11), CCI(24)      → optimises pour MACD
-```
-
-Cela donne au modele des **vues multiples** coherentes sur le meme signal cible.
+Ces parametres restent les meilleurs car ils sont optimises pour suivre la tendance du prix (Close), ce qui est l'objectif final du trading.
 
 ---
 
@@ -848,7 +867,7 @@ Liste organisee des experiences et optimisations a tester pour atteindre 90%+.
 | 1.2 | **Fusion de canaux** | Separer branche 5min et branche 30min dans le LSTM | Modifier `model.py` (voir Roadmap Levier 2) | A tester |
 | 1.3 | **Learning Rate Decay** | LR=0.001 → 0.0001 progressif pour affiner les poids | `--lr-decay step --lr-step 10` | A tester |
 | 1.4 | **Plus de patience** | Early stopping a 20 epoques au lieu de 10 | `--patience 20 --epochs 100` | A tester |
-| 1.5 | **Multi-View Learning** | Optimiser les features (CCI, MACD) pour synchroniser avec la cible (RSI) | `python src/optimize_sync_per_target.py --target rsi` | A tester |
+| 1.5 | **Multi-View Learning** | Optimiser les features (CCI, MACD) pour synchroniser avec la cible (RSI) | `python src/optimize_sync_per_target.py --target rsi` | **Teste** - MACD -0.7%, Abandonne |
 
 ### Priorite 2: Features et Donnees
 
@@ -891,6 +910,7 @@ Liste organisee des experiences et optimisations a tester pour atteindre 90%+.
 | 2026-01-03 | Single-output RSI | 83.6% | +0.6% vs multi | Pas de gain significatif |
 | 2026-01-03 | Single-output CCI | 85.6% | = vs multi | Pas de gain significatif |
 | 2026-01-03 | Single-output MACD | 86.8% | = vs multi | Pas de gain significatif |
+| 2026-01-03 | Multi-View MACD 5min | 86.2% | **-0.7%** | **Abandonne** - synchronisation reduit diversite |
 
 ### Analyse Single-Output (2026-01-03)
 

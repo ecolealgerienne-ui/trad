@@ -24,6 +24,7 @@ from constants import (
 from model import create_model, compute_metrics
 from train import IndicatorDataset
 from prepare_data import load_prepared_data
+from data_utils import normalize_labels_for_single_output
 from utils import log_dataset_metadata
 
 
@@ -279,8 +280,7 @@ def main():
 
     # Filtrer les labels si mode single-output
     if single_indicator:
-        logger.info(f"  🔍 Filtrage labels pour {indicator_name} (index {indicator_idx})...")
-        Y_test = Y_test[:, indicator_idx:indicator_idx+1]  # Garder shape (n, 1)
+        Y_test = normalize_labels_for_single_output(Y_test, indicator_idx, indicator_name)
 
     logger.info(f"  Test: X={X_test.shape}, Y={Y_test.shape}")
 
