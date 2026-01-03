@@ -216,13 +216,25 @@ def prepare_single_asset_30min(df_5min: pd.DataFrame,
     # =========================================================================
     # Le filtre Kalman forward-backward a des effets de bord au début et à la fin.
     # On supprime quelques périodes 30min pour éviter ces artifacts.
+    # IMPORTANT: On doit aussi trimmer les 5min pour garder l'alignement des timestamps.
     #
     KALMAN_TRIM = 10  # 10 périodes 30min = 5 heures de chaque côté
-    logger.info(f"\n  ✂️ Trim post-Kalman: {KALMAN_TRIM} périodes 30min de chaque côté...")
+    KALMAN_TRIM_5MIN = KALMAN_TRIM * 6  # 10 périodes 30min = 60 bougies 5min
+
+    logger.info(f"\n  ✂️ Trim post-Kalman: {KALMAN_TRIM} périodes 30min ({KALMAN_TRIM_5MIN} bougies 5min) de chaque côté...")
+
+    # Trim 30min
     labels_30min = labels_30min[KALMAN_TRIM:-KALMAN_TRIM]
     indicators_30min = indicators_30min[KALMAN_TRIM:-KALMAN_TRIM]
     index_30min = index_30min[KALMAN_TRIM:-KALMAN_TRIM]
-    logger.info(f"     → Shape après trim: labels={labels_30min.shape}, indicators={indicators_30min.shape}")
+
+    # Trim 5min pour garder l'alignement des timestamps
+    indicators_5min = indicators_5min[KALMAN_TRIM_5MIN:-KALMAN_TRIM_5MIN]
+    index_5min = index_5min[KALMAN_TRIM_5MIN:-KALMAN_TRIM_5MIN]
+
+    logger.info(f"     → 30min après trim: labels={labels_30min.shape}, indicators={indicators_30min.shape}")
+    logger.info(f"     → 5min après trim: indicators={indicators_5min.shape}")
+    logger.info(f"     → Plage: {index_5min[0]} → {index_5min[-1]}")
 
     # =========================================================================
     # 6. CORRECTION: Shift des labels pour synchronisation
