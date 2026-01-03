@@ -207,14 +207,16 @@ def verify_alignment(asset: str = 'BTC', n_samples: int = 20):
         print(f"⚠️ Distribution Steps non uniforme: {step_counts}")
 
     # 3. Vérifier que les indicateurs 30min sont constants par période
-    n_check = min(1000, len(index_5min))
+    # Trouver tous les indices où step_index == 1 (début de période 30min)
+    step1_indices = np.where(step_index == 1)[0]
+    n_check = min(100, len(step1_indices))  # Vérifier les 100 premières périodes
     periods_ok = 0
     periods_total = 0
 
-    for i in range(0, n_check - 6, 6):
-        if step_index[i] == 1:
+    for idx in step1_indices[:n_check]:
+        if idx + 6 <= len(indicators_30min_aligned):
             # Vérifier que les 6 valeurs 30min sont identiques
-            rsi_30min_period = indicators_30min_aligned[i:i+6, 0]
+            rsi_30min_period = indicators_30min_aligned[idx:idx+6, 0]
             if np.allclose(rsi_30min_period, rsi_30min_period[0], rtol=1e-5):
                 periods_ok += 1
             periods_total += 1
@@ -228,9 +230,9 @@ def verify_alignment(asset: str = 'BTC', n_samples: int = 20):
     labels_ok = 0
     labels_total = 0
 
-    for i in range(0, n_check - 6, 6):
-        if step_index[i] == 1:
-            labels_period = labels_aligned[i:i+6, 0]
+    for idx in step1_indices[:n_check]:
+        if idx + 6 <= len(labels_aligned):
+            labels_period = labels_aligned[idx:idx+6, 0]
             if np.all(labels_period == labels_period[0]):
                 labels_ok += 1
             labels_total += 1
