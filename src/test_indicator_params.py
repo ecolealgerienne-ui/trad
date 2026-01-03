@@ -39,14 +39,14 @@ from filters import kalman_filter
 # CONFIGURATION DU TEST
 # =============================================================================
 
-# Parametres norme et decrements de 20%
-RSI_PARAMS = [14, 11, 9, 7]      # norme=14, -20% chaque fois
-CCI_PARAMS = [20, 16, 13, 10]    # norme=20, -20% chaque fois
-MACD_PARAMS = [               # (fast, slow) - norme=12/26
-    (12, 26),
-    (10, 21),
-    (8, 17),
-    (6, 13),
+# Parametres: plage elargie pour voir l'impact
+RSI_PARAMS = [5, 7, 10, 14, 20, 30]     # Large plage
+CCI_PARAMS = [5, 10, 14, 20, 30, 40]    # Large plage
+MACD_PARAMS = [                          # (fast, slow)
+    (5, 10),      # Ultra court
+    (8, 17),      # Court
+    (12, 26),     # Standard
+    (20, 40),     # Long
 ]
 
 # Limite de donnees
