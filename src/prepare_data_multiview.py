@@ -378,15 +378,175 @@ def prepare_and_save_multiview_30min(target: str,
     return str(output_path)
 
 
+def prepare_single_asset_multiview_5min(df_5min: pd.DataFrame,
+                                         target: str,
+                                         asset_name: str = "Asset"):
+    """
+    Prépare les données pour un asset avec params Multi-View (5min seulement).
+
+    Args:
+        df_5min: DataFrame 5min avec OHLCV
+        target: 'RSI', 'CCI' ou 'MACD'
+        asset_name: Nom pour les logs
+
+    Returns:
+        (X, Y) avec X shape=(n_seq, 12, 3), Y shape=(n_seq,)
+    """
+    target_upper = target.upper()
+    target_idx = {'RSI': 0, 'CCI': 1, 'MACD': 2}[target_upper]
+    params = TARGET_PARAMS[target_upper]
+
+    logger.info(f"\n{'='*60}")
+    logger.info(f"📈 {asset_name}: Multi-View 5min pour {target_upper}")
+    logger.info(f"{'='*60}")
+    logger.info(f"  Params: RSI({params['RSI']['period']}), "
+                f"CCI({params['CCI']['period']}), "
+                f"MACD({params['MACD']['fast']}/{params['MACD']['slow']})")
+
+    # 1. Calculer indicateurs 5min avec params Multi-View
+    logger.info(f"  📊 Calcul indicateurs 5min (Multi-View)...")
+    indicators_5min = calculate_indicators_multiview(df_5min, target_upper)
+    logger.info(f"     → Shape: {indicators_5min.shape}")
+
+    # 2. Générer label UNIQUE pour la cible (depuis 5min)
+    logger.info(f"  🏷️ Génération label {target_upper} (depuis 5min)...")
+    labels = generate_single_label(indicators_5min, target_idx)
+
+    buy_pct = labels.sum() / len(labels) * 100
+    logger.info(f"     → {target_upper}: {buy_pct:.1f}% BUY")
+
+    # 3. Créer séquences
+    labels_2d = labels.reshape(-1, 1)
+    X, Y = create_sequences(indicators_5min, labels_2d, sequence_length=SEQUENCE_LENGTH)
+    Y = Y.flatten()
+
+    logger.info(f"  ✅ X={X.shape}, Y={Y.shape}")
+
+    return X, Y
+
+
+def prepare_and_save_multiview_5min(target: str,
+                                     assets: list = None,
+                                     output_path: str = None) -> str:
+    """
+    Prépare et sauvegarde le dataset Multi-View avec labels 5min.
+    """
+    if assets is None:
+        assets = DEFAULT_ASSETS
+
+    target_upper = target.upper()
+    params = TARGET_PARAMS[target_upper]
+
+    logger.info("="*80)
+    logger.info(f"PRÉPARATION MULTI-VIEW 5MIN - Cible: {target_upper}")
+    logger.info("="*80)
+    logger.info(f"💰 Assets: {', '.join(assets)}")
+    logger.info(f"🎯 Cible: {target_upper}")
+
+    # 1. Charger données
+    logger.info(f"\n1. Chargement données...")
+    asset_data = {}
+    for asset_name in assets:
+        file_path = AVAILABLE_ASSETS_5M[asset_name]
+        df = load_crypto_data(file_path, asset_name=asset_name)
+        df_trimmed = trim_edges(df, trim_start=TRIM_EDGES, trim_end=TRIM_EDGES)
+        asset_data[asset_name] = df_trimmed
+
+    # 2. Préparer par asset
+    logger.info(f"\n2. Préparation Multi-View par asset...")
+    prepared_assets = {}
+    for asset_name, df in asset_data.items():
+        X, Y = prepare_single_asset_multiview_5min(df, target_upper, asset_name)
+        prepared_assets[asset_name] = (X, Y)
+
+    # 3. Split chronologique
+    logger.info(f"\n3. Split chronologique...")
+    train_X, train_Y = [], []
+    val_X, val_Y = [], []
+    test_X, test_Y = [], []
+
+    for asset_name, (X, Y) in prepared_assets.items():
+        Y_2d = Y.reshape(-1, 1)
+        (Xtr, Ytr), (Xv, Yv), (Xte, Yte) = split_sequences(X, Y_2d)
+
+        train_X.append(Xtr)
+        train_Y.append(Ytr.flatten())
+        val_X.append(Xv)
+        val_Y.append(Yv.flatten())
+        test_X.append(Xte)
+        test_Y.append(Yte.flatten())
+
+        logger.info(f"   {asset_name}: train={len(Xtr)}, val={len(Xv)}, test={len(Xte)}")
+
+    # 4. Merger
+    X_train = np.concatenate(train_X)
+    Y_train = np.concatenate(train_Y)
+    X_val = np.concatenate(val_X)
+    Y_val = np.concatenate(val_Y)
+    X_test = np.concatenate(test_X)
+    Y_test = np.concatenate(test_Y)
+
+    logger.info(f"\n4. Datasets finaux:")
+    logger.info(f"   Train: X={X_train.shape}, Y={Y_train.shape}")
+    logger.info(f"   Val:   X={X_val.shape}, Y={Y_val.shape}")
+    logger.info(f"   Test:  X={X_test.shape}, Y={Y_test.shape}")
+
+    # 5. Sauvegarder
+    if output_path is None:
+        assets_str = '_'.join([a.lower() for a in assets])
+        output_path = f"data/prepared/dataset_{assets_str}_multiview5min_{target.lower()}.npz"
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    metadata = {
+        'timestamp': datetime.now().isoformat(),
+        'target': target_upper,
+        'timeframe': '5min',
+        'assets': assets,
+        'n_assets': len(assets),
+        'params': {k: v for k, v in params.items()},
+        'n_features': X_train.shape[2],
+        'feature_desc': '5min(3) = 3 features Multi-View',
+        'label_desc': f'Pente Kalman({target_upper}) 5min',
+        'train_size': len(X_train),
+        'val_size': len(X_val),
+        'test_size': len(X_test),
+        'sequence_length': SEQUENCE_LENGTH,
+        'multiview': True,
+    }
+
+    np.savez_compressed(
+        output_path,
+        X_train=X_train, Y_train=Y_train,
+        X_val=X_val, Y_val=Y_val,
+        X_test=X_test, Y_test=Y_test,
+        metadata=json.dumps(metadata)
+    )
+
+    metadata_path = str(output_path).replace('.npz', '_metadata.json')
+    with open(metadata_path, 'w') as f:
+        json.dump(metadata, f, indent=2)
+
+    logger.info(f"\n✅ Sauvegardé: {output_path}")
+    logger.info(f"✅ Metadata: {metadata_path}")
+
+    return str(output_path)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
-        description='Préparation données Multi-View Learning avec labels 30min',
+        description='Préparation données Multi-View Learning',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
     parser.add_argument('--target', '-t', type=str, required=True,
                         choices=['rsi', 'cci', 'macd'],
                         help='Indicateur cible')
+
+    parser.add_argument('--timeframe', '-tf', type=str, default='5min',
+                        choices=['5min', '30min'],
+                        help='Timeframe des labels (5min ou 30min)')
 
     parser.add_argument('--assets', '-a', nargs='+',
                         default=['BTC', 'ETH', 'BNB', 'ADA', 'LTC'],
@@ -406,11 +566,18 @@ def main():
 
     args = parse_args()
 
-    output_path = prepare_and_save_multiview_30min(
-        target=args.target,
-        assets=args.assets,
-        output_path=args.output
-    )
+    if args.timeframe == '5min':
+        output_path = prepare_and_save_multiview_5min(
+            target=args.target,
+            assets=args.assets,
+            output_path=args.output
+        )
+    else:
+        output_path = prepare_and_save_multiview_30min(
+            target=args.target,
+            assets=args.assets,
+            output_path=args.output
+        )
 
     print(f"\n📁 Dataset prêt: {output_path}")
     print(f"\nPour entraîner:")
