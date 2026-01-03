@@ -18,7 +18,11 @@ from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
-from constants import BATCH_SIZE, BEST_MODEL_PATH
+from constants import (
+    BATCH_SIZE, BEST_MODEL_PATH,
+    CNN_FILTERS, LSTM_HIDDEN_SIZE, LSTM_NUM_LAYERS,
+    LSTM_DROPOUT, DENSE_HIDDEN_SIZE, DENSE_DROPOUT
+)
 from model import create_model
 from train import IndicatorDataset
 from prepare_data import load_prepared_data
@@ -183,6 +187,20 @@ def main():
     parser.add_argument('--step-col', type=int, default=6,
                         help='Index de la colonne Step Index (défaut: 6)')
 
+    # Architecture parameters (doit correspondre au modèle entraîné)
+    parser.add_argument('--cnn-filters', type=int, default=CNN_FILTERS,
+                        help=f'Nombre de filtres CNN (défaut: {CNN_FILTERS})')
+    parser.add_argument('--lstm-hidden', type=int, default=LSTM_HIDDEN_SIZE,
+                        help=f'Taille cachée LSTM (défaut: {LSTM_HIDDEN_SIZE})')
+    parser.add_argument('--lstm-layers', type=int, default=LSTM_NUM_LAYERS,
+                        help=f'Nombre de couches LSTM (défaut: {LSTM_NUM_LAYERS})')
+    parser.add_argument('--lstm-dropout', type=float, default=LSTM_DROPOUT,
+                        help=f'Dropout LSTM (défaut: {LSTM_DROPOUT})')
+    parser.add_argument('--dense-hidden', type=int, default=DENSE_HIDDEN_SIZE,
+                        help=f'Taille couche dense (défaut: {DENSE_HIDDEN_SIZE})')
+    parser.add_argument('--dense-dropout', type=float, default=DENSE_DROPOUT,
+                        help=f'Dropout dense (défaut: {DENSE_DROPOUT})')
+
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format='%(message)s')
@@ -214,9 +232,19 @@ def main():
     print(f"\n📂 Chargement modèle: {BEST_MODEL_PATH}")
     checkpoint = torch.load(BEST_MODEL_PATH, map_location=device)
 
-    model, _ = create_model(device=device, num_indicators=num_features)
+    model, _ = create_model(
+        device=device,
+        num_indicators=num_features,
+        cnn_filters=args.cnn_filters,
+        lstm_hidden_size=args.lstm_hidden,
+        lstm_num_layers=args.lstm_layers,
+        lstm_dropout=args.lstm_dropout,
+        dense_hidden_size=args.dense_hidden,
+        dense_dropout=args.dense_dropout
+    )
     model.load_state_dict(checkpoint['model_state_dict'])
     print(f"   Époque: {checkpoint['epoch']}")
+    print(f"   Architecture: CNN={args.cnn_filters}, LSTM={args.lstm_hidden}x{args.lstm_layers}, Dense={args.dense_hidden}")
 
     # Analyser
     print("\n🔍 Analyse des erreurs...")
