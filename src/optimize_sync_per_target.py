@@ -171,14 +171,15 @@ def calculate_composite_score(concordance: float,
                               w_concordance: float = 0.3,
                               w_anticipation: float = 0.4,
                               w_pivot: float = 0.3) -> float:
-    """Calcule le score composite (30/40/30)."""
-    anticipation_score = max(0, min(1, 0.5 - anticipation / 20))
-    score = (
-        w_concordance * concordance +
-        w_anticipation * anticipation_score +
-        w_pivot * pivot_accuracy
-    )
-    return score
+    """
+    Score pour PREDICTION (pas trading).
+
+    Score = Concordance si Lag == 0
+    Score = 0 si Lag != 0 (desynchronise = inutilisable)
+    """
+    if anticipation != 0:
+        return 0.0  # Desynchronise, disqualifie
+    return concordance
 
 
 def parse_args():
@@ -422,8 +423,11 @@ def main():
                 params_str = f"fast={params['fast']}, slow={params['slow']}"
             else:
                 params_str = f"period={params['period']}"
+
+            # Marquer si desynchronise
+            sync_status = "✓" if avg_anticipation == 0 else "✗"
             logger.info(f"  {params_str:20s} | Conc: {avg_concordance:.3f} | "
-                       f"Lag: {avg_anticipation:+3.0f} | Pivot: {avg_pivot_acc:.3f} | "
+                       f"Lag: {avg_anticipation:+3.0f} {sync_status} | "
                        f"Score: {avg_score:.3f}")
 
         # Meilleur
@@ -439,10 +443,8 @@ def main():
         }
 
         logger.info(f"\n  MEILLEUR {indicator} pour {target}: {best.params}")
-        logger.info(f"    Concordance:    {best.concordance:.3f}")
-        logger.info(f"    Anticipation:   {best.anticipation:+.0f}")
-        logger.info(f"    Pivot Accuracy: {best.pivot_accuracy:.3f}")
-        logger.info(f"    Score:          {best.composite_score:.3f}")
+        logger.info(f"    Concordance: {best.concordance:.1%}")
+        logger.info(f"    Lag:         {best.anticipation:+.0f} (0 = synchronise)")
 
     # =========================================================================
     # 6. RESUME FINAL
@@ -453,15 +455,18 @@ def main():
 
     print(f"\n# Parametres optimises pour predire {target}:\n")
     print(f"# Cible: {target} avec params {target_params}")
+    print(f"# Score = Concordance (Lag=0 requis)")
+    print(f"#")
     print(f"# Features optimisees:")
     for indicator, params in optimal_params.items():
+        conc = best_results[indicator]['concordance']
         if indicator == 'RSI':
-            print(f"#   RSI_PERIOD_{target} = {params['period']}")
+            print(f"#   RSI_PERIOD_{target} = {params['period']:3d}  (Concordance: {conc:.1%})")
         elif indicator == 'CCI':
-            print(f"#   CCI_PERIOD_{target} = {params['period']}")
+            print(f"#   CCI_PERIOD_{target} = {params['period']:3d}  (Concordance: {conc:.1%})")
         elif indicator == 'MACD':
-            print(f"#   MACD_FAST_{target} = {params['fast']}")
-            print(f"#   MACD_SLOW_{target} = {params['slow']}")
+            print(f"#   MACD_FAST_{target} = {params['fast']:3d}  (Concordance: {conc:.1%})")
+            print(f"#   MACD_SLOW_{target} = {params['slow']:3d}")
 
     # =========================================================================
     # 7. SAUVEGARDER
