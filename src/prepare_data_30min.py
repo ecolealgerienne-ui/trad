@@ -226,7 +226,7 @@ def prepare_single_asset_30min(df_5min: pd.DataFrame,
     #
     logger.info(f"\n  🔄 Correction du décalage labels (shift -1)...")
     labels_30min_shifted = labels_30min[1:]  # Décaler: index 0 reçoit valeur de index 1
-    index_30min = index_30min[:-1]           # Enlever le dernier timestamp (plus de label)
+    index_30min_for_labels = index_30min[:-1]  # Index raccourci pour labels uniquement
     logger.info(f"     → Labels décalés de -1 période 30min")
     logger.info(f"     → Shape après shift: {labels_30min_shifted.shape}")
 
@@ -234,7 +234,7 @@ def prepare_single_asset_30min(df_5min: pd.DataFrame,
     # 7. Aligner labels 30min sur timestamps 5min (FORWARD-FILL)
     # =========================================================================
     logger.info(f"\n  🔄 Alignement labels 30min → 5min (forward-fill)...")
-    labels_aligned = align_30min_to_5min(labels_30min_shifted, index_30min, index_5min)
+    labels_aligned = align_30min_to_5min(labels_30min_shifted, index_30min_for_labels, index_5min)
     logger.info(f"     → Shape après alignement: {labels_aligned.shape}")
 
     # Vérifier la synchronisation
