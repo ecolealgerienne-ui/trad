@@ -341,32 +341,33 @@ def prepare_and_save_multiview_30min(target: str,
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    np.savez_compressed(
-        output_path,
-        X_train=X_train, Y_train=Y_train,
-        X_val=X_val, Y_val=Y_val,
-        X_test=X_test, Y_test=Y_test
-    )
-
-    # Metadata
+    # Metadata (doit être inclus dans le .npz pour load_prepared_data)
     metadata = {
         'timestamp': datetime.now().isoformat(),
         'target': target_upper,
         'assets': assets,
+        'n_assets': len(assets),
         'params': {k: v for k, v in params.items()},
         'n_features': X_train.shape[2],
         'feature_desc': '5min(3) + 30min(3) + step_index(1) = 7 features Multi-View',
         'label_desc': f'Pente Kalman({target_upper}) 30min',
-        'shapes': {
-            'X_train': list(X_train.shape),
-            'Y_train': list(Y_train.shape),
-            'X_val': list(X_val.shape),
-            'Y_val': list(Y_val.shape),
-            'X_test': list(X_test.shape),
-            'Y_test': list(Y_test.shape),
-        }
+        'train_size': len(X_train),
+        'val_size': len(X_val),
+        'test_size': len(X_test),
+        'sequence_length': SEQUENCE_LENGTH,
+        'multiview': True,
     }
 
+    # Sauvegarder avec metadata dans le .npz
+    np.savez_compressed(
+        output_path,
+        X_train=X_train, Y_train=Y_train,
+        X_val=X_val, Y_val=Y_val,
+        X_test=X_test, Y_test=Y_test,
+        metadata=json.dumps(metadata)  # Inclus dans le npz!
+    )
+
+    # Aussi sauvegarder en JSON pour référence
     metadata_path = str(output_path).replace('.npz', '_metadata.json')
     with open(metadata_path, 'w') as f:
         json.dump(metadata, f, indent=2)
