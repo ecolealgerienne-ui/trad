@@ -133,14 +133,14 @@ class MultiOutputCNNLSTM(nn.Module):
         self.dense_dropout = nn.Dropout(dense_dropout)
 
         # =====================================================================
-        # Têtes de Sortie Indépendantes (3 outputs)
+        # Têtes de Sortie Indépendantes (num_outputs)
         # =====================================================================
         # Chaque tête prédit la pente d'un indicateur (0 ou 1)
-        # Note: BOL retiré car non synchronisable
+        # Dynamique selon num_outputs (1 pour single-indicator, 3 pour multi)
 
-        self.head_rsi = nn.Linear(dense_hidden_size, 1)
-        self.head_cci = nn.Linear(dense_hidden_size, 1)
-        self.head_macd = nn.Linear(dense_hidden_size, 1)
+        self.output_heads = nn.ModuleList([
+            nn.Linear(dense_hidden_size, 1) for _ in range(num_outputs)
+        ])
 
         logger.info("✅ Modèle CNN-LSTM créé:")
         logger.info(f"  Input: ({sequence_length}, {num_indicators})")
@@ -194,16 +194,14 @@ class MultiOutputCNNLSTM(nn.Module):
         x = self.dense_dropout(x)
 
         # =====================================================================
-        # Têtes de Sortie (3 outputs indépendants)
+        # Têtes de Sortie (num_outputs indépendants)
         # =====================================================================
         # Chaque tête produit une logit → Sigmoid → probabilité
 
-        out_rsi = torch.sigmoid(self.head_rsi(x))    # (batch, 1)
-        out_cci = torch.sigmoid(self.head_cci(x))    # (batch, 1)
-        out_macd = torch.sigmoid(self.head_macd(x))  # (batch, 1)
+        head_outputs = [torch.sigmoid(head(x)) for head in self.output_heads]
 
-        # Concaténer les 3 sorties
-        outputs = torch.cat([out_rsi, out_cci, out_macd], dim=1)  # (batch, 3)
+        # Concaténer les sorties: (batch, num_outputs)
+        outputs = torch.cat(head_outputs, dim=1)
 
         return outputs
 
@@ -242,27 +240,36 @@ class MultiOutputBCELoss(nn.Module):
     Calcule la BCE pour chaque output et fait la moyenne pondérée.
 
     Args:
-        weights: Poids pour chaque output [RSI, CCI, MACD] (défaut: égaux)
+        num_outputs: Nombre de sorties (1 pour single-indicator, 3 pour multi)
+        weights: Poids pour chaque output (défaut: égaux)
     """
 
     def __init__(
         self,
-        weights: Tuple[float, float, float] = (
-            LOSS_WEIGHT_RSI,
-            LOSS_WEIGHT_CCI,
-            LOSS_WEIGHT_MACD
-        )
+        num_outputs: int = 3,
+        weights: Tuple[float, ...] = None
     ):
         super(MultiOutputBCELoss, self).__init__()
 
+        # Poids par défaut selon le nombre d'outputs
+        if weights is None:
+            if num_outputs == 3:
+                weights = (LOSS_WEIGHT_RSI, LOSS_WEIGHT_CCI, LOSS_WEIGHT_MACD)
+            else:
+                weights = tuple([1.0] * num_outputs)
+
         # Convertir en tensor
-        self.weights = torch.tensor(weights, dtype=torch.float32)
+        self.weights = torch.tensor(weights[:num_outputs], dtype=torch.float32)
+        self.num_outputs = num_outputs
 
         # BCE sans reduction (on veut calculer séparément pour chaque output)
         self.bce = nn.BCELoss(reduction='none')
 
-        logger.info(f"✅ Loss multi-output créée:")
-        logger.info(f"  Poids: RSI={weights[0]}, CCI={weights[1]}, MACD={weights[2]}")
+        if num_outputs == 3:
+            logger.info(f"✅ Loss multi-output créée:")
+            logger.info(f"  Poids: RSI={weights[0]}, CCI={weights[1]}, MACD={weights[2]}")
+        else:
+            logger.info(f"✅ Loss single-output créée (poids={weights[0]})")
 
     def forward(
         self,
@@ -270,11 +277,11 @@ class MultiOutputBCELoss(nn.Module):
         targets: torch.Tensor
     ) -> torch.Tensor:
         """
-        Calcule la loss BCE moyenne pondérée sur les 3 outputs.
+        Calcule la loss BCE moyenne pondérée sur les outputs.
 
         Args:
-            predictions: Prédictions (batch, 3)
-            targets: Labels (batch, 3)
+            predictions: Prédictions (batch, num_outputs)
+            targets: Labels (batch, num_outputs)
 
         Returns:
             Loss scalaire (moyenne pondérée)
@@ -283,10 +290,10 @@ class MultiOutputBCELoss(nn.Module):
         if self.weights.device != predictions.device:
             self.weights = self.weights.to(predictions.device)
 
-        # BCE pour chaque output: (batch, 3)
+        # BCE pour chaque output: (batch, num_outputs)
         bce_per_output = self.bce(predictions, targets.float())
 
-        # Moyenne sur batch: (3,)
+        # Moyenne sur batch: (num_outputs,)
         bce_mean = bce_per_output.mean(dim=0)
 
         # Pondération: scalaire
@@ -298,6 +305,7 @@ class MultiOutputBCELoss(nn.Module):
 def create_model(
     device: str = 'cpu',
     num_indicators: int = NUM_INDICATORS,
+    num_outputs: int = NUM_OUTPUTS,
     cnn_filters: int = CNN_FILTERS,
     lstm_hidden_size: int = LSTM_HIDDEN_SIZE,
     lstm_num_layers: int = LSTM_NUM_LAYERS,
@@ -311,6 +319,7 @@ def create_model(
     Args:
         device: Device ('cpu' ou 'cuda')
         num_indicators: Nombre de features en entrée (défaut: 3)
+        num_outputs: Nombre de sorties/indicateurs à prédire (défaut: 3)
         cnn_filters: Nombre de filtres CNN
         lstm_hidden_size: Taille hidden LSTM
         lstm_num_layers: Nombre de couches LSTM
@@ -323,6 +332,7 @@ def create_model(
     """
     model = MultiOutputCNNLSTM(
         num_indicators=num_indicators,
+        num_outputs=num_outputs,
         cnn_filters=cnn_filters,
         lstm_hidden_size=lstm_hidden_size,
         lstm_num_layers=lstm_num_layers,
@@ -330,7 +340,7 @@ def create_model(
         dense_hidden_size=dense_hidden_size,
         dense_dropout=dense_dropout
     )
-    loss_fn = MultiOutputBCELoss()
+    loss_fn = MultiOutputBCELoss(num_outputs=num_outputs)
 
     # Déplacer sur device
     model = model.to(device)
@@ -351,15 +361,17 @@ def create_model(
 def compute_metrics(
     predictions: torch.Tensor,
     targets: torch.Tensor,
-    threshold: float = 0.5
+    threshold: float = 0.5,
+    indicator_names: list = None
 ) -> Dict[str, float]:
     """
     Calcule les métriques de classification pour multi-output.
 
     Args:
-        predictions: Probabilités (batch, 3)
-        targets: Labels (batch, 3)
+        predictions: Probabilités (batch, num_outputs)
+        targets: Labels (batch, num_outputs)
         threshold: Seuil de décision
+        indicator_names: Liste des noms d'indicateurs (auto-détecté si None)
 
     Returns:
         Dictionnaire avec métriques par output + moyennes
@@ -370,9 +382,22 @@ def compute_metrics(
 
     metrics = {}
 
-    indicator_names = ['RSI', 'CCI', 'MACD']
+    # Détecter le nombre d'outputs
+    num_outputs = predictions.shape[1]
+
+    # Noms par défaut selon le nombre d'outputs
+    if indicator_names is None:
+        if num_outputs == 3:
+            indicator_names = ['RSI', 'CCI', 'MACD']
+        elif num_outputs == 1:
+            indicator_names = ['INDICATOR']  # Sera remplacé par le vrai nom dans l'affichage
+        else:
+            indicator_names = [f'OUT_{i}' for i in range(num_outputs)]
 
     for i, name in enumerate(indicator_names):
+        if i >= num_outputs:
+            break
+
         # Extraire prédictions et targets pour cet indicateur
         pred = preds_binary[:, i]
         target = targets_float[:, i]
@@ -400,11 +425,12 @@ def compute_metrics(
         metrics[f'{name}_recall'] = recall
         metrics[f'{name}_f1'] = f1
 
-    # Moyennes
-    metrics['avg_accuracy'] = sum(metrics[f'{n}_accuracy'] for n in indicator_names) / 3
-    metrics['avg_precision'] = sum(metrics[f'{n}_precision'] for n in indicator_names) / 3
-    metrics['avg_recall'] = sum(metrics[f'{n}_recall'] for n in indicator_names) / 3
-    metrics['avg_f1'] = sum(metrics[f'{n}_f1'] for n in indicator_names) / 3
+    # Moyennes (sur les indicateurs actifs)
+    active_names = indicator_names[:num_outputs]
+    metrics['avg_accuracy'] = sum(metrics[f'{n}_accuracy'] for n in active_names) / len(active_names)
+    metrics['avg_precision'] = sum(metrics[f'{n}_precision'] for n in active_names) / len(active_names)
+    metrics['avg_recall'] = sum(metrics[f'{n}_recall'] for n in active_names) / len(active_names)
+    metrics['avg_f1'] = sum(metrics[f'{n}_f1'] for n in active_names) / len(active_names)
 
     return metrics
 

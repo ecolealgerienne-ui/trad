@@ -126,8 +126,8 @@ def align_30min_to_5min(data_30min: np.ndarray,
     n_nan = df_aligned.isna().sum().sum()
     if n_nan > 0:
         logger.warning(f"  ⚠️ {n_nan} NaN après alignement (début avant première bougie 30min)")
-        # Supprimer les lignes avec NaN
-        df_aligned = df_aligned.dropna()
+        # Utiliser bfill pour remplir les NaN au début avec la première valeur valide
+        df_aligned = df_aligned.bfill()
 
     return df_aligned.values
 
@@ -212,9 +212,37 @@ def prepare_single_asset_30min(df_5min: pd.DataFrame,
         logger.info(f"     {name}: {buy_pct:.1f}% BUY")
 
     # =========================================================================
+    # 5b. Trim post-Kalman - DÉSACTIVÉ
+    # =========================================================================
+    # NOTE: Le trim des bords après Kalman est désactivé pour éviter les risques
+    # d'introduire des bugs d'alignement. Les effets de bord du filtre Kalman
+    # sont minimes sur un grand dataset (~160k bougies).
+    #
+    # Si besoin de réactiver plus tard:
+    #   KALMAN_TRIM = 10  # périodes 30min
+    #   KALMAN_TRIM_5MIN = KALMAN_TRIM * 6
+    #   labels_30min = labels_30min[KALMAN_TRIM:-KALMAN_TRIM]
+    #   indicators_30min = indicators_30min[KALMAN_TRIM:-KALMAN_TRIM]
+    #   index_30min = index_30min[KALMAN_TRIM:-KALMAN_TRIM]
+    #   indicators_5min = indicators_5min[KALMAN_TRIM_5MIN:-KALMAN_TRIM_5MIN]
+    #   index_5min = index_5min[KALMAN_TRIM_5MIN:-KALMAN_TRIM_5MIN]
+    #
+    logger.info(f"\n  ⏭️ Trim post-Kalman: DÉSACTIVÉ (pas de risque d'alignement)")
+
+    # =========================================================================
     # 6. Aligner labels 30min sur timestamps 5min (FORWARD-FILL)
     # =========================================================================
+    # NOTE: On garde Label[t] = pente(t-2 → t-1) SANS shift.
+    #
+    # Stratégie de trading:
+    #   - À 10:00-10:25, on prédit la pente(9:00 → 9:30) = "passé lointain"
+    #   - L'intérêt est la STABILITÉ des prédictions sur les 6 steps
+    #   - Un changement d'avis = signal de retournement
+    #
+    # Voir section "Stratégie de Trading" dans CLAUDE.md
+    #
     logger.info(f"\n  🔄 Alignement labels 30min → 5min (forward-fill)...")
+    logger.info(f"     → Labels: pente(t-2 → t-1) sans shift")
     labels_aligned = align_30min_to_5min(labels_30min, index_30min, index_5min)
     logger.info(f"     → Shape après alignement: {labels_aligned.shape}")
 
@@ -230,11 +258,26 @@ def prepare_single_asset_30min(df_5min: pd.DataFrame,
         logger.info(f"     ⚠️ Coupé {start_idx} premières lignes 5min (avant première bougie 30min)")
 
     # =========================================================================
-    # 7. (Optionnel) Aligner indicateurs 30min sur 5min pour features
+    # 8. (Optionnel) Aligner indicateurs 30min sur 5min pour features
     # =========================================================================
     if include_30min_features:
         logger.info(f"\n  🔄 Alignement indicateurs 30min → 5min (features)...")
-        indicators_30min_aligned = align_30min_to_5min(indicators_30min, index_30min, index_5min)
+
+        # Alignement direct des features 30min sur 5min.
+        #
+        # NOTE: On n'applique PAS de shift +30min sur les features.
+        # La bougie 30min indexée à 10:00 contient les données 10:00-10:29.
+        # À 10:05, on utilise la bougie 10:00 qui est EN COURS (pas encore clôturée).
+        #
+        # C'est acceptable car:
+        #   1. On prédit la pente PASSÉE (t-2 → t-1), pas le futur
+        #   2. Le modèle utilise les features pour CONFIRMER une tendance passée
+        #   3. Les features "fraîches" aident à détecter les retournements
+        #
+        index_30min_shifted = index_30min  # Pas de shift
+        logger.info(f"     → Index 30min aligné directement (pas de shift)")
+
+        indicators_30min_aligned = align_30min_to_5min(indicators_30min, index_30min_shifted, index_5min)
 
         # Vérifier les dimensions
         if len(indicators_30min_aligned) != len(indicators_5min):
@@ -249,7 +292,7 @@ def prepare_single_asset_30min(df_5min: pd.DataFrame,
         logger.info(f"     → Features: {indicators_combined.shape} (5min seulement)")
 
     # =========================================================================
-    # 7b. Ajouter Step Index (position dans la fenêtre 30min)
+    # 8b. Ajouter Step Index (position dans la fenêtre 30min)
     # =========================================================================
     # Le step_index indique la position de la bougie 5min dans sa période 30min:
     #   - Minute 00 → step 1
@@ -278,7 +321,7 @@ def prepare_single_asset_30min(df_5min: pd.DataFrame,
     logger.info(f"     → Features finales: {indicators_combined.shape}")
 
     # =========================================================================
-    # 8. Vérification finale des dimensions
+    # 9. Vérification finale des dimensions
     # =========================================================================
     assert len(indicators_combined) == len(labels_aligned), \
         f"Mismatch: indicators={len(indicators_combined)}, labels={len(labels_aligned)}"
@@ -286,7 +329,7 @@ def prepare_single_asset_30min(df_5min: pd.DataFrame,
     logger.info(f"\n  ✅ Données alignées: {len(indicators_combined)} samples")
 
     # =========================================================================
-    # 9. Créer séquences
+    # 10. Créer séquences
     # =========================================================================
     logger.info(f"\n  📦 Création séquences (length={SEQUENCE_LENGTH})...")
     X, Y = create_sequences(indicators_combined, labels_aligned, sequence_length=SEQUENCE_LENGTH)

@@ -39,7 +39,8 @@ from indicators import (
 )
 
 
-def prepare_single_asset(df, filter_type: str, asset_name: str = "Asset") -> tuple:
+def prepare_single_asset(df, filter_type: str, asset_name: str = "Asset",
+                         add_position_index: bool = False) -> tuple:
     """
     Calcule indicateurs + labels + séquences pour UN SEUL asset.
 
@@ -53,9 +54,10 @@ def prepare_single_asset(df, filter_type: str, asset_name: str = "Asset") -> tup
         df: DataFrame avec OHLC pour un seul asset
         filter_type: 'kalman' ou 'decycler'
         asset_name: Nom pour les logs
+        add_position_index: Si True, ajoute Position Index (1/12 → 12/12)
 
     Returns:
-        (X, Y) où X shape=(n_sequences, 12, 3), Y shape=(n_sequences, 3)
+        (X, Y) où X shape=(n_sequences, 12, 3 ou 4), Y shape=(n_sequences, 3)
     """
     logger.info(f"  📈 {asset_name}: Calcul indicateurs ({len(df):,} bougies)...")
 
@@ -65,8 +67,8 @@ def prepare_single_asset(df, filter_type: str, asset_name: str = "Asset") -> tup
     # 2. Générer labels avec filtre
     labels = generate_all_labels(indicators, filter_type=filter_type)
 
-    # 3. Créer séquences de 12 timesteps
-    X, Y = create_sequences(indicators, labels)
+    # 3. Créer séquences de 12 timesteps (avec ou sans Position Index)
+    X, Y = create_sequences(indicators, labels, add_position_index=add_position_index)
 
     logger.info(f"     → X={X.shape}, Y={Y.shape}")
 
@@ -83,7 +85,8 @@ split_sequences = split_sequences_chronological
 
 def prepare_and_save(filter_type: str = LABEL_FILTER_TYPE,
                      assets: list = None,
-                     output_path: str = None) -> str:
+                     output_path: str = None,
+                     add_position_index: bool = False) -> str:
     """
     Prépare les données 5min et les sauvegarde en format numpy.
 
@@ -91,6 +94,7 @@ def prepare_and_save(filter_type: str = LABEL_FILTER_TYPE,
         filter_type: 'decycler' ou 'kalman'
         assets: Liste des assets à utiliser (défaut: DEFAULT_ASSETS)
         output_path: Chemin de sortie (défaut: auto-généré)
+        add_position_index: Si True, ajoute Position Index (4 features au lieu de 3)
 
     Returns:
         Chemin du fichier sauvegardé
@@ -105,13 +109,15 @@ def prepare_and_save(filter_type: str = LABEL_FILTER_TYPE,
         raise ValueError(f"Assets invalides: {invalid_assets}. "
                         f"Disponibles: {list(AVAILABLE_ASSETS_5M.keys())}")
 
+    n_features = 4 if add_position_index else 3
+
     logger.info("="*80)
     logger.info("PRÉPARATION DES DONNÉES - 5min")
     logger.info("="*80)
     logger.info(f"📊 Timeframe: 5 minutes")
     logger.info(f"💰 Assets: {', '.join(assets)}")
     logger.info(f"🔧 Filtre: {filter_type}")
-    logger.info(f"📈 Indicateurs: RSI, CCI, MACD (3 indicateurs)")
+    logger.info(f"📈 Features: {n_features} ({'RSI, CCI, MACD + Position Index' if add_position_index else 'RSI, CCI, MACD'})")
 
     # =========================================================================
     # 1. Charger données pour chaque asset
@@ -135,7 +141,8 @@ def prepare_and_save(filter_type: str = LABEL_FILTER_TYPE,
 
     prepared_assets = {}
     for asset_name, df in asset_data.items():
-        X, Y = prepare_single_asset(df, filter_type, asset_name)
+        X, Y = prepare_single_asset(df, filter_type, asset_name,
+                                    add_position_index=add_position_index)
         prepared_assets[asset_name] = (X, Y)
 
     # =========================================================================
@@ -175,7 +182,8 @@ def prepare_and_save(filter_type: str = LABEL_FILTER_TYPE,
     # =========================================================================
     if output_path is None:
         assets_str = '_'.join(assets).lower()
-        output_path = f"data/prepared/dataset_{assets_str}_5min_{filter_type}.npz"
+        pos_suffix = '_posidx' if add_position_index else ''
+        output_path = f"data/prepared/dataset_{assets_str}_5min_{filter_type}{pos_suffix}.npz"
 
     output_dir = Path(output_path).parent
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -193,6 +201,9 @@ def prepare_and_save(filter_type: str = LABEL_FILTER_TYPE,
         'test_size': len(X_test),
         'sequence_length': SEQUENCE_LENGTH,
         'num_indicators': NUM_INDICATORS,
+        'num_features': n_features,
+        'add_position_index': add_position_index,
+        'feature_description': 'RSI, CCI, MACD, Position Index (1/12→1.0)' if add_position_index else 'RSI, CCI, MACD',
         'indicator_params': {
             'rsi_period': RSI_PERIOD,
             'cci_period': CCI_PERIOD,
@@ -333,8 +344,11 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=f"""
 Exemples:
-  # Avec tous les assets
+  # Avec tous les assets (3 features: RSI, CCI, MACD)
   python src/prepare_data.py --filter kalman --assets BTC ETH BNB ADA LTC
+
+  # Avec Position Index (4 features: RSI, CCI, MACD, PosIdx)
+  python src/prepare_data.py --filter kalman --assets BTC ETH BNB ADA LTC --position-index
 
   # Avec BTC et ETH seulement (défaut)
   python src/prepare_data.py --filter kalman
@@ -343,6 +357,11 @@ Exemples:
   python src/prepare_data.py --list
 
 Assets disponibles: {', '.join(available_assets)}
+
+Position Index:
+  Ajoute une colonne indiquant la position dans la séquence (1/12 → 12/12).
+  Permet au modèle de pondérer différemment les données selon leur position.
+  Hypothèse: les dernières valeurs sont plus importantes pour la prédiction.
         """
     )
 
@@ -352,6 +371,8 @@ Assets disponibles: {', '.join(available_assets)}
                         help=f'Assets à inclure (défaut: {DEFAULT_ASSETS})')
     parser.add_argument('--filter', '-f', type=str, default=LABEL_FILTER_TYPE,
                         choices=['decycler', 'kalman'], help='Filtre pour les labels')
+    parser.add_argument('--position-index', '-p', action='store_true',
+                        help='Ajoute Position Index (4 features: RSI, CCI, MACD, PosIdx)')
     parser.add_argument('--output', '-o', type=str, default=None,
                         help='Chemin de sortie (défaut: auto-généré)')
     parser.add_argument('--list', '-l', action='store_true',
@@ -373,7 +394,8 @@ Assets disponibles: {', '.join(available_assets)}
     output_path = prepare_and_save(
         filter_type=args.filter,
         assets=args.assets,
-        output_path=args.output
+        output_path=args.output,
+        add_position_index=args.position_index
     )
 
     print(f"\n🎉 Terminé! Dataset prêt: {output_path}")
