@@ -58,21 +58,26 @@ from indicators import (
 # GRILLES DE PARAMETRES A TESTER
 # =============================================================================
 
+# Grilles avec pas de ~20%, limite ±60% (3 pas) autour du defaut
 PARAM_GRIDS = {
     'RSI': {
-        'period': [14, 12, 10, 8, 7, 6, 5, 4, 3]
+        # Defaut 14: ±60% → [6, 22], 3 pas de 20%
+        'period': [22, 17, 14, 11, 6]
     },
     'CCI': {
-        'period': [20, 15, 12, 10, 8, 7, 6, 5]
-    },
-    'BOL': {
-        'period': [20, 15, 12, 10, 8, 6]
+        # Defaut 20: ±60% → [8, 32], 3 pas de 20%
+        'period': [32, 24, 20, 16, 8]
     },
     'MACD': {
-        'fast': [12, 10, 8, 6, 5, 4, 3],
-        'slow': [26, 20, 16, 13, 10, 8],
+        # Defaut fast=10: ±60% → [4, 16]
+        'fast': [16, 12, 10, 8, 4],
+        # Defaut slow=26: ±60% → [10, 42]
+        'slow': [42, 31, 26, 21, 10],
     }
 }
+
+# Plage de lag reduite: 3 pas arriere, 2 pas avant
+LAG_RANGE = (-3, 3)  # range(-3, 3) = [-3, -2, -1, 0, 1, 2]
 
 
 @dataclass
@@ -354,27 +359,14 @@ def calculate_composite_score(concordance: float,
                               w_anticipation: float = 0.4,
                               w_pivot: float = 0.3) -> float:
     """
-    Calcule le score composite (30/40/30).
+    Score pour PREDICTION (pas trading).
 
-    - concordance (30%): Stabilite - l'indicateur ne devient pas "fou"
-    - anticipation (40%): Vitesse - privilegie les indicateurs qui sentent le mouvement
-    - pivot_accuracy (30%): Pertinence - match sur les points de retournement
-
-    Un indicateur ideal:
-    - Est en avance sur le Close (anticipation negative)
-    - Match bien sur les pivots (la ou on gagne l'argent)
-    - Reste stable entre les pivots (pas de bruit)
+    Score = Concordance si Lag == 0
+    Score = 0 si Lag != 0 (desynchronise = inutilisable)
     """
-    # Normaliser anticipation: -10 -> 1.0, 0 -> 0.5, +10 -> 0.0
-    # On veut que les indicateurs en avance (lag negatif) aient un meilleur score
-    anticipation_score = max(0, min(1, 0.5 - anticipation / 20))
-
-    score = (
-        w_concordance * concordance +
-        w_anticipation * anticipation_score +
-        w_pivot * pivot_accuracy
-    )
-    return score
+    if anticipation != 0:
+        return 0.0  # Desynchronise, disqualifie
+    return concordance
 
 
 def evaluate_params(df: pd.DataFrame,
@@ -559,9 +551,9 @@ def parse_args():
                         help='Fichier de sortie pour les resultats')
 
     parser.add_argument('--indicators', '-i', nargs='+',
-                        default=['RSI', 'CCI', 'BOL', 'MACD'],
-                        choices=['RSI', 'CCI', 'BOL', 'MACD'],
-                        help='Indicateurs a optimiser')
+                        default=['RSI', 'CCI', 'MACD'],
+                        choices=['RSI', 'CCI', 'MACD'],
+                        help='Indicateurs a optimiser (BOL retire car non synchronisable)')
 
     parser.add_argument('--device', '-D', type=str,
                         default='auto',
@@ -730,7 +722,7 @@ def main():
                 l1 = ind_gpu.float() - ind_gpu.float().mean()
                 l2 = ref_gpu.float() - ref_gpu.float().mean()
                 best_lag, best_corr = 0, -1.0
-                for lag in range(-10, 11):
+                for lag in range(LAG_RANGE[0], LAG_RANGE[1]):
                     if lag < 0:
                         a, b = l1[-lag:], l2[:lag]
                     elif lag > 0:
@@ -790,8 +782,11 @@ def main():
                 params_str = f"fast={params['fast']}, slow={params['slow']}"
             else:
                 params_str = f"period={params['period']}"
+
+            # Marquer si desynchronise
+            sync_status = "✓" if avg_anticipation == 0 else "✗"
             logger.info(f"  {params_str:20s} | Conc: {avg_concordance:.3f} | "
-                       f"Lag: {avg_anticipation:+3.0f} | Pivot: {avg_pivot_acc:.3f} | "
+                       f"Lag: {avg_anticipation:+3.0f} {sync_status} | "
                        f"Score: {avg_score:.3f}")
 
         # Trier et garder le meilleur
@@ -807,10 +802,8 @@ def main():
         }
 
         logger.info(f"\n  MEILLEUR {indicator}: {best.params}")
-        logger.info(f"    Concordance:    {best.concordance:.3f} (30%)")
-        logger.info(f"    Anticipation:   {best.anticipation:+.0f} steps (40%)")
-        logger.info(f"    Pivot Accuracy: {best.pivot_accuracy:.3f} (30%)")
-        logger.info(f"    Score Total:    {best.composite_score:.3f}")
+        logger.info(f"    Concordance: {best.concordance:.1%}")
+        logger.info(f"    Lag:         {best.anticipation:+.0f} (0 = synchronise)")
 
     # =========================================================================
     # 5. VALIDATION CROISEE (GPU - donnees deja chargees)
@@ -837,7 +830,7 @@ def main():
                 l2 = ref_gpu.float() - ref_gpu.float().mean()
                 best_lag = 0
                 best_corr = -1.0
-                for lag in range(-10, 11):
+                for lag in range(LAG_RANGE[0], LAG_RANGE[1]):
                     if lag < 0:
                         a, b = l1[-lag:], l2[:lag]
                     elif lag > 0:
@@ -894,17 +887,17 @@ def main():
     logger.info("PARAMETRES OPTIMAUX")
     logger.info("="*80)
 
-    print("\n# Copier dans constants.py:\n")
+    print("\n# Copier dans constants.py:")
+    print("# Score = Concordance (Lag=0 requis)\n")
     for indicator, params in optimal_params.items():
+        conc = best_results[indicator]['concordance']
         if indicator == 'RSI':
-            print(f"RSI_PERIOD = {params['period']}")
+            print(f"RSI_PERIOD = {params['period']:3d}  # Concordance: {conc:.1%}")
         elif indicator == 'CCI':
-            print(f"CCI_PERIOD = {params['period']}")
-        elif indicator == 'BOL':
-            print(f"BOL_PERIOD = {params['period']}")
+            print(f"CCI_PERIOD = {params['period']:3d}  # Concordance: {conc:.1%}")
         elif indicator == 'MACD':
-            print(f"MACD_FAST = {params['fast']}")
-            print(f"MACD_SLOW = {params['slow']}")
+            print(f"MACD_FAST = {params['fast']:3d}   # Concordance: {conc:.1%}")
+            print(f"MACD_SLOW = {params['slow']:3d}")
 
     # =========================================================================
     # 7. SAUVEGARDER RESULTATS
