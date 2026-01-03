@@ -16,8 +16,9 @@
 6. [Problème de Généralisation](#problème-de-généralisation)
 7. [Stacking et Ensemble Methods](#stacking-et-ensemble-methods)
 8. [Résultats de Trading](#résultats-de-trading)
-9. [Test de Validation : 3 Features → 1 Target](#test-de-validation--3-features--1-target-2026-01-03) ⭐ **NOUVEAU**
-10. [Conclusions et Recommandations](#conclusions-et-recommandations)
+9. [Test de Validation : 3 Features → 1 Target](#test-de-validation--3-features--1-target-2026-01-03)
+10. [Test Octave : 1 Feature → CLOSE](#test-octave--1-feature--close-2026-01-03) ⭐ **NOUVEAU**
+11. [Conclusions et Recommandations](#conclusions-et-recommandations)
 
 ---
 
@@ -414,6 +415,54 @@ Le choix des **paramètres** a un impact de **< 0.5%**.
 
 ---
 
+## Test Octave : 1 Feature → CLOSE (2026-01-03)
+
+### Protocole de Test
+
+Nouveau test avec filtre Octave et architecture mono-feature :
+- **Input** : 1 seul indicateur (RSI, CCI, ou MACD)
+- **Output** : Direction Octave(CLOSE, 0.20) = `filtered[t-1] > filtered[t-2]`
+- **Dataset** : BTC, ETH, BNB, ADA, LTC (5 assets)
+- **Modèle** : CNN-LSTM mono-output
+- **Script** : `prepare_data_octave.py`
+
+### Résultats Octave (1 feature → CLOSE)
+
+| Indicateur | Accuracy | Precision | Recall | F1 | Gap Train/Test |
+|------------|----------|-----------|--------|-----|----------------|
+| RSI(14) | **78.5%** | 0.775 | 0.809 | 0.792 | **0.1%** ✅ |
+| CCI(20) | *en attente* | - | - | - | - |
+| MACD(12/26) | *en attente* | - | - | - | - |
+
+### Comparaison Kalman vs Octave
+
+| Configuration | Filtre | Features | Target | Accuracy | Gap |
+|---------------|--------|----------|--------|----------|-----|
+| 3 feat → Kalman(RSI) | Kalman | RSI+CCI+MACD | RSI | 79.1% | ~2% |
+| 1 feat → Octave(CLOSE) | Octave 0.20 | RSI seul | CLOSE | 78.5% | **0.1%** |
+
+### Analyse Préliminaire
+
+1. **Accuracy similaire** : 78.5% (Octave) vs 79.1% (Kalman) = -0.6%
+   - Perte minime malgré 3x moins de features
+
+2. **Généralisation excellente** : Gap de seulement 0.1% avec Octave
+   - Kalman avait ~2% de gap
+   - Confirme les documents : Octave généralise mieux
+
+3. **Architecture simplifiée** :
+   - 1 feature au lieu de 3
+   - Modèle plus léger
+   - Moins de risque d'overfitting
+
+### Conclusion Préliminaire
+
+> **Octave(CLOSE) avec 1 feature obtient une accuracy comparable à Kalman avec 3 features, mais avec une bien meilleure généralisation.**
+
+*Résultats CCI et MACD à venir pour compléter la comparaison.*
+
+---
+
 ## Conclusions et Recommandations
 
 ### Ce qui Fonctionne
@@ -482,4 +531,4 @@ STACKING_LEVEL = 1  # ou 2 si plus de données
 
 *Document généré automatiquement par Claude Code*
 *Basé sur l'analyse de 8 fichiers de tests*
-*Dernière mise à jour : 2026-01-03 (ajout résultats test de validation)*
+*Dernière mise à jour : 2026-01-03 (ajout résultats Octave RSI→CLOSE: 78.5%)*
