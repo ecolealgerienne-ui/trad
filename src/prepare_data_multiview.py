@@ -247,9 +247,7 @@ def prepare_single_asset_multiview_30min(df_5min: pd.DataFrame,
     # Reshape labels pour create_sequences (attend 2D)
     labels_2d = labels_aligned.reshape(-1, 1)
     X, Y = create_sequences(indicators_combined, labels_2d, sequence_length=SEQUENCE_LENGTH)
-
-    # Flatten Y
-    Y = Y.flatten()
+    # Garder Y en 2D (n, 1) pour compatibilité avec train.py
 
     logger.info(f"  ✅ X={X.shape}, Y={Y.shape}")
 
@@ -308,21 +306,21 @@ def prepare_and_save_multiview_30min(target: str,
     test_X, test_Y = [], []
 
     for asset_name, (X, Y) in prepared_assets.items():
-        Y_2d = Y.reshape(-1, 1)
-        (Xtr, Ytr), (Xv, Yv), (Xte, Yte) = split_sequences(X, Y_2d)
+        # Y est déjà (n, 1) depuis prepare_single_asset
+        (Xtr, Ytr), (Xv, Yv), (Xte, Yte) = split_sequences(X, Y)
 
         train_X.append(Xtr)
-        train_Y.append(Ytr.flatten())
+        train_Y.append(Ytr)  # Garder 2D (n, 1)
         val_X.append(Xv)
-        val_Y.append(Yv.flatten())
+        val_Y.append(Yv)
         test_X.append(Xte)
-        test_Y.append(Yte.flatten())
+        test_Y.append(Yte)
 
         logger.info(f"   {asset_name}: train={len(Xtr)}, val={len(Xv)}, test={len(Xte)}")
 
     # 4. Merger
     X_train = np.concatenate(train_X)
-    Y_train = np.concatenate(train_Y)
+    Y_train = np.concatenate(train_Y)  # Shape (n_total, 1)
     X_val = np.concatenate(val_X)
     Y_val = np.concatenate(val_Y)
     X_test = np.concatenate(test_X)
@@ -418,7 +416,7 @@ def prepare_single_asset_multiview_5min(df_5min: pd.DataFrame,
     # 3. Créer séquences
     labels_2d = labels.reshape(-1, 1)
     X, Y = create_sequences(indicators_5min, labels_2d, sequence_length=SEQUENCE_LENGTH)
-    Y = Y.flatten()
+    # Garder Y en 2D (n, 1) pour compatibilité avec train.py
 
     logger.info(f"  ✅ X={X.shape}, Y={Y.shape}")
 
@@ -466,21 +464,21 @@ def prepare_and_save_multiview_5min(target: str,
     test_X, test_Y = [], []
 
     for asset_name, (X, Y) in prepared_assets.items():
-        Y_2d = Y.reshape(-1, 1)
-        (Xtr, Ytr), (Xv, Yv), (Xte, Yte) = split_sequences(X, Y_2d)
+        # Y est déjà (n, 1) depuis prepare_single_asset
+        (Xtr, Ytr), (Xv, Yv), (Xte, Yte) = split_sequences(X, Y)
 
         train_X.append(Xtr)
-        train_Y.append(Ytr.flatten())
+        train_Y.append(Ytr)  # Garder 2D (n, 1)
         val_X.append(Xv)
-        val_Y.append(Yv.flatten())
+        val_Y.append(Yv)
         test_X.append(Xte)
-        test_Y.append(Yte.flatten())
+        test_Y.append(Yte)
 
         logger.info(f"   {asset_name}: train={len(Xtr)}, val={len(Xv)}, test={len(Xte)}")
 
     # 4. Merger
     X_train = np.concatenate(train_X)
-    Y_train = np.concatenate(train_Y)
+    Y_train = np.concatenate(train_Y)  # Shape (n_total, 1)
     X_val = np.concatenate(val_X)
     Y_val = np.concatenate(val_Y)
     X_test = np.concatenate(test_X)
