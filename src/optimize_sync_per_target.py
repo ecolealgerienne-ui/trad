@@ -61,18 +61,22 @@ from indicators import (
 # GRILLES DE PARAMETRES A TESTER
 # =============================================================================
 
+# Grilles avec pas de ~20% pour optimisation rapide
 PARAM_GRIDS = {
     'RSI': {
-        'period': [21, 18, 14, 12, 10, 8, 7, 6, 5, 4, 3]
+        'period': [21, 17, 14, 11, 9, 7, 6, 5]  # ~20% step
     },
     'CCI': {
-        'period': [30, 25, 20, 15, 12, 10, 8, 7, 6, 5]
+        'period': [30, 24, 20, 16, 13, 10, 8, 6]  # ~20% step
     },
     'MACD': {
-        'fast': [12, 10, 8, 6, 5, 4, 3],
-        'slow': [26, 20, 16, 13, 10, 8],
+        'fast': [12, 10, 8, 6, 5, 4],  # ~20% step
+        'slow': [26, 21, 17, 14, 11, 9],  # ~20% step
     }
 }
+
+# Plage de lag reduite: 3 pas arriere, 2 pas avant
+LAG_RANGE = (-3, 3)  # range(-3, 3) = [-3, -2, -1, 0, 1, 2]
 
 # Parametres par defaut pour l'indicateur cible
 DEFAULT_PARAMS = {
@@ -357,7 +361,7 @@ def main():
                 l1 = ind_gpu.float() - ind_gpu.float().mean()
                 l2 = ref_gpu.float() - ref_gpu.float().mean()
                 best_lag, best_corr = 0, -1.0
-                for lag in range(-10, 11):
+                for lag in range(LAG_RANGE[0], LAG_RANGE[1]):
                     if lag < 0:
                         a, b = l1[-lag:], l2[:lag]
                     elif lag > 0:
