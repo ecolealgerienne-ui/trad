@@ -126,8 +126,8 @@ def align_30min_to_5min(data_30min: np.ndarray,
     n_nan = df_aligned.isna().sum().sum()
     if n_nan > 0:
         logger.warning(f"  ⚠️ {n_nan} NaN après alignement (début avant première bougie 30min)")
-        # Supprimer les lignes avec NaN
-        df_aligned = df_aligned.dropna()
+        # Utiliser bfill pour remplir les NaN au début avec la première valeur valide
+        df_aligned = df_aligned.bfill()
 
     return df_aligned.values
 
