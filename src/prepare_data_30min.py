@@ -253,7 +253,20 @@ def prepare_single_asset_30min(df_5min: pd.DataFrame,
     # =========================================================================
     if include_30min_features:
         logger.info(f"\n  🔄 Alignement indicateurs 30min → 5min (features)...")
-        indicators_30min_aligned = align_30min_to_5min(indicators_30min, index_30min, index_5min)
+
+        # CORRECTION: Décaler l'index de 30min pour que l'indicateur soit "disponible"
+        # seulement après la clôture de la bougie 30min.
+        #
+        # AVANT: À 5min 10:00, on utilisait 30min de 10:00 (données 10:00-10:29 = FUTUR)
+        # APRÈS: À 5min 10:00, on utilise 30min de 09:30 (dernière bougie complète)
+        #
+        # En live trading, l'indicateur 30min à 09:30 n'est disponible qu'à 10:00
+        # (quand la bougie 09:30-09:59 se ferme).
+        #
+        index_30min_shifted = index_30min + pd.Timedelta('30min')
+        logger.info(f"     → Index 30min décalé de +30min (causal)")
+
+        indicators_30min_aligned = align_30min_to_5min(indicators_30min, index_30min_shifted, index_5min)
 
         # Vérifier les dimensions
         if len(indicators_30min_aligned) != len(indicators_5min):
