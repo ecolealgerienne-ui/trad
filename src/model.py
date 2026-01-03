@@ -133,14 +133,14 @@ class MultiOutputCNNLSTM(nn.Module):
         self.dense_dropout = nn.Dropout(dense_dropout)
 
         # =====================================================================
-        # Têtes de Sortie Indépendantes (3 outputs)
+        # Têtes de Sortie Indépendantes (num_outputs)
         # =====================================================================
         # Chaque tête prédit la pente d'un indicateur (0 ou 1)
-        # Note: BOL retiré car non synchronisable
+        # Dynamique selon num_outputs (1 pour single-indicator, 3 pour multi)
 
-        self.head_rsi = nn.Linear(dense_hidden_size, 1)
-        self.head_cci = nn.Linear(dense_hidden_size, 1)
-        self.head_macd = nn.Linear(dense_hidden_size, 1)
+        self.output_heads = nn.ModuleList([
+            nn.Linear(dense_hidden_size, 1) for _ in range(num_outputs)
+        ])
 
         logger.info("✅ Modèle CNN-LSTM créé:")
         logger.info(f"  Input: ({sequence_length}, {num_indicators})")
@@ -194,16 +194,14 @@ class MultiOutputCNNLSTM(nn.Module):
         x = self.dense_dropout(x)
 
         # =====================================================================
-        # Têtes de Sortie (3 outputs indépendants)
+        # Têtes de Sortie (num_outputs indépendants)
         # =====================================================================
         # Chaque tête produit une logit → Sigmoid → probabilité
 
-        out_rsi = torch.sigmoid(self.head_rsi(x))    # (batch, 1)
-        out_cci = torch.sigmoid(self.head_cci(x))    # (batch, 1)
-        out_macd = torch.sigmoid(self.head_macd(x))  # (batch, 1)
+        head_outputs = [torch.sigmoid(head(x)) for head in self.output_heads]
 
-        # Concaténer les 3 sorties
-        outputs = torch.cat([out_rsi, out_cci, out_macd], dim=1)  # (batch, 3)
+        # Concaténer les sorties: (batch, num_outputs)
+        outputs = torch.cat(head_outputs, dim=1)
 
         return outputs
 

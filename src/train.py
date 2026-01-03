@@ -515,6 +515,7 @@ def main():
     # =========================================================================
     logger.info("\n3. Création du modèle...")
     num_features = X_train.shape[2]  # Nombre de features en entrée
+    logger.info(f"  num_features={num_features}, num_outputs={num_outputs}")
     model, loss_fn = create_model(
         device=device,
         num_indicators=num_features,
