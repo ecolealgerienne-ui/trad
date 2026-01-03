@@ -1,8 +1,8 @@
 # Modele CNN-LSTM Multi-Output - Guide Complet
 
-**Date**: 2026-01-02
-**Statut**: Pipeline complet implemente
-**Version**: 3.0
+**Date**: 2026-01-03
+**Statut**: Pipeline complet implemente - Objectif 85% ATTEINT
+**Version**: 4.0
 
 ---
 
@@ -37,6 +37,59 @@ L'indicateur **BOL (Bollinger Bands %B)** a ete **retire** du modele car il est 
 ### Conclusion
 
 BOL est structurellement incompatible avec notre approche de synchronisation. Les 3 indicateurs restants (RSI, CCI, MACD) sont tous synchronises (Lag 0) et offrent une base solide pour la prediction.
+
+---
+
+## RESULTAT MAJEUR - Architecture Clock-Injected (85.1%)
+
+### Comparaison des Approches (2026-01-03)
+
+| Approche | RSI | CCI | MACD | **MOYENNE** | Delta |
+|----------|-----|-----|------|-------------|-------|
+| Baseline 5min (3 feat) | 79.4% | 83.7% | 86.9% | **83.3%** | - |
+| Position Index (4 feat) | 79.4% | 83.7% | 87.0% | **83.4%** | +0.1% |
+| **Clock-Injected (7 feat)** | **83.0%** | **85.6%** | **86.8%** | **85.1%** | **+1.8%** |
+
+### Analyse des Gains
+
+**RSI = Grand Gagnant (+3.6%)**
+- En tant qu'oscillateur de vitesse pure, le RSI 5min est tres nerveux
+- L'injection des indicateurs 30min sert de "Laisse de Securite"
+- Le modele a appris a ignorer les surachats/surventes 5min si le RSI 30min ne confirme pas encore le pivot
+
+**MACD (Stable a 86.8%)**
+- Deja un indicateur de tendance "lourd"
+- L'ajout de sa version 30min n'apporte pas d'information radicalement nouvelle
+- Reste le pilier de stabilite du modele
+
+**Position Index vs Step Index**
+- Position Index (constant): +0.1% → **ECHEC** (LSTM encode deja l'ordre)
+- Step Index (variable selon timestamp): +1.8% → **SUCCES** (information nouvelle)
+
+### Commandes Clock-Injected
+
+```bash
+# Preparer (7 features)
+python src/prepare_data_30min.py --filter kalman --assets BTC ETH BNB ADA LTC --include-30min-features
+
+# Entrainer
+python src/train.py --data data/prepared/dataset_btc_eth_bnb_ada_ltc_5min_30min_labels30min_kalman.npz --epochs 50
+
+# Evaluer
+python src/evaluate.py --data data/prepared/dataset_btc_eth_bnb_ada_ltc_5min_30min_labels30min_kalman.npz
+```
+
+### Structure des 7 Features
+
+```
+| RSI_5min | CCI_5min | MACD_5min | RSI_30min | CCI_30min | MACD_30min | StepIdx |
+|  0-100   |  0-100   |   0-100   |   0-100   |   0-100   |   0-100    |   0-1   |
+| reactif  | reactif  |  reactif  |  stable   |  stable   |   stable   | horloge |
+```
+
+Le **Step Index** (0.0 → 1.0) indique la position dans la fenetre 30min:
+- Step 1 (0.0): Debut de bougie 30min → plus de poids sur 5min
+- Step 6 (1.0): Fin de bougie 30min → confirmation fiable
 
 ---
 
@@ -443,27 +496,30 @@ SEQUENCE_LENGTH = 12
 
 ## Objectifs de Performance
 
-| Metrique | Baseline | Cible | Actuel (2026-01-02) |
+| Metrique | Baseline | Cible | Actuel (2026-01-03) |
 |----------|----------|-------|---------------------|
-| Accuracy moyenne | 50% | 85%+ | **83.3%** ✅ |
-| Gap train/val | - | <10% | 1.6% ✅ |
-| Gap val/test | - | <10% | -0.7% ✅ |
+| Accuracy moyenne | 50% | 85%+ | **85.1%** ✅ ATTEINT |
+| Gap train/val | - | <10% | 3.6% ✅ |
+| Gap val/test | - | <10% | 0.9% ✅ |
+| Prochain objectif | - | **90%** | En cours |
 
-### Resultats par Indicateur (Test Set) - Apres retrait BOL
+### Resultats par Indicateur (Test Set) - Clock-Injected 7 Features
 
-| Indicateur | Accuracy | F1 | Notes |
-|------------|----------|-----|-------|
-| RSI | 79.4% | 0.792 | Lag 0, Conc 82% |
-| CCI | 83.7% | 0.835 | Lag 0, Conc 74% |
-| MACD | **86.9%** | 0.867 | Lag 0, Conc 70% |
-| **MOYENNE** | **83.3%** | **0.831** | Tous synchronises |
+| Indicateur | Accuracy | F1 | Precision | Recall |
+|------------|----------|-----|-----------|--------|
+| RSI | 83.0% | 0.827 | 0.856 | 0.800 |
+| CCI | 85.6% | 0.858 | 0.846 | 0.869 |
+| MACD | **86.8%** | 0.871 | 0.849 | 0.894 |
+| **MOYENNE** | **85.1%** | **0.852** | **0.851** | **0.854** |
 
-Note: BOL retire car toujours Lag +1 (non synchronisable).
-
-### Configuration Optimale Actuelle
+### Configuration Optimale Actuelle (Clock-Injected)
 
 ```bash
-python src/train.py --data data/prepared/dataset_btc_eth_bnb_ada_ltc_5min_kalman.npz --epochs 50
+# Preparation
+python src/prepare_data_30min.py --filter kalman --assets BTC ETH BNB ADA LTC --include-30min-features
+
+# Entrainement
+python src/train.py --data data/prepared/dataset_btc_eth_bnb_ada_ltc_5min_30min_labels30min_kalman.npz --epochs 50
 ```
 
 ### Signes de bon entrainement
@@ -576,44 +632,87 @@ Cela capture les tendances court/moyen/long terme simultanement.
 
 ---
 
-## Roadmap: Le Saut vers 90% (Architecture 7 Features)
+## Roadmap: Le Saut vers 90%
 
-### Situation Actuelle
+### Situation Actuelle (2026-01-03)
 
 | Metrique | Valeur |
 |----------|--------|
-| Test Accuracy | **83.3%** |
-| Gap Val/Test | -0.7% (excellent) |
+| Test Accuracy | **85.1%** ✅ |
+| Gap Val/Test | 0.9% (excellent) |
 | Objectif | **90%** |
 
-Le modele est "pret a mordre". Le gap Val/Test ultra-faible indique une excellente generalisation.
+L'architecture Clock-Injected a franchi le cap des 85%. Le gap Val/Test ultra-faible indique une excellente generalisation.
 
-### L'Injection du "Cerveau Temporel"
+### Leviers Identifies (Analyse Expert)
 
-L'architecture a 7 features (3x5min + 3x30min + Step Index) est la solution:
+#### Levier 1: Optimisation Fine des Hyperparametres
 
-| Feature | Type | Pourquoi? |
-|---------|------|-----------|
-| RSI / CCI / MACD (5min) | Dynamique | Capture reactivite immediate et pivots |
-| RSI / CCI / MACD (30min) | Base Stable | Tendance de fond (bougie fermee via ffill) |
-| Step Index (1-6) | Horloge | Indique position dans la bougie 30min |
+Le modele converge en seulement 5 epoques → il "apprend vite" mais peut-etre de maniere trop superficielle.
 
-### Prochaines Actions
+**Actions recommandees:**
+- **Learning Rate Decay**: Commencer avec LR=0.001, diviser par 10 toutes les 3 epoques
+- **Patience Early Stopping**: Augmenter a 15-20 pour laisser le modele affiner ses poids
+- **Plus d'epoques**: Permettre jusqu'a 50-100 epoques avec LR decay
 
-1. **constants.py**: NUM_INDICATORS = 3 (BOL exclu definitivement)
-2. **prepare_data_30min.py**: Integrer step_index normalise (0.17 → 1.0)
-3. **Entrainement**: Lancer sur 5 assets avec 7 features
+```bash
+# Exemple avec LR plus bas et plus de patience
+python src/train.py --data <dataset> --epochs 100 --lr 0.0005 --patience 20
+```
 
-### Pourquoi ca va marcher?
+#### Levier 2: Architecture "Fusion de Canaux"
 
-L'ajout du Step Index transformera les 83.3% en signal ultra-precis car l'IA saura **quand** faire confiance a la base 30min:
-- Step 1-2: Bougie 30min ancienne → plus de poids sur 5min
-- Step 5-6: Bougie 30min presque complete → confirmation fiable
+Pour franchir les 90%, creer deux branches LSTM separees:
+
+```
+                    Input (12, 7)
+                         |
+          ┌──────────────┴──────────────┐
+          ▼                              ▼
+    ┌─────────────┐              ┌─────────────┐
+    │ Branche     │              │ Branche     │
+    │ Signaux     │              │ Contexte    │
+    │ Rapides     │              │ Lourd       │
+    │ (5min)      │              │ (30min+Step)│
+    └──────┬──────┘              └──────┬──────┘
+           │                            │
+           └──────────┬─────────────────┘
+                      ▼
+               ┌─────────────┐
+               │ Concatenate │
+               │ + Dense     │
+               └──────┬──────┘
+                      ▼
+                 3 Outputs
+```
+
+Cela force le reseau a traiter le contexte 30min comme une "verite de controle".
+
+#### Levier 3: Pivot Filtering (Synchronisation RSI)
+
+Regarder les erreurs de prediction (Faux Positifs):
+- Si elles surviennent souvent sur Steps 1-2 → manque de confiance en debut de cycle
+- Action: Augmenter le poids de Pivot Accuracy a 0.5 pour le RSI dans `optimize_sync.py`
+
+### Volume et ATR
+
+**Note**: Le Volume et l'ATR seront utilises **apres le modele**, dans la strategie de trading, pas comme features du modele.
+
+### Checklist Avant Production
+
+- [x] Accuracy >= 85% sur test set ✅ (85.1%)
+- [x] Gap train/test <= 10% ✅ (0.9%)
+- [x] Indicateurs synchronises (RSI=14, CCI=20, MACD=10/26, Lag 0) ✅
+- [x] Split temporel strict ✅
+- [x] Bibliotheque ta utilisee ✅
+- [ ] Accuracy >= 90% sur test set (en cours)
+- [ ] Backtest sur donnees non vues
+- [ ] Trading strategy definie avec Volume filtering
 
 **Voir spec complete**: [docs/SPEC_CLOCK_INJECTED.md](docs/SPEC_CLOCK_INJECTED.md)
 
 ---
 
 **Cree par**: Claude Code
-**Derniere MAJ**: 2026-01-02
-**Version**: 3.0 (3 indicateurs synchronises, BOL retire, 83.3% accuracy)
+**Derniere MAJ**: 2026-01-03
+**Version**: 4.0 (Clock-Injected 7 features, 85.1% accuracy)
