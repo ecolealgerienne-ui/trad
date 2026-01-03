@@ -134,12 +134,13 @@ def compute_vote_metrics(
     }
 
 
-def print_metrics_table(metrics: Dict[str, float]):
+def print_metrics_table(metrics: Dict[str, float], indicator_names: list = None):
     """
     Affiche un tableau formaté des métriques.
 
     Args:
         metrics: Dictionnaire de métriques
+        indicator_names: Liste des noms d'indicateurs (auto-détecté si None)
     """
     logger.info("\n" + "="*80)
     logger.info("MÉTRIQUES PAR INDICATEUR")
@@ -149,23 +150,38 @@ def print_metrics_table(metrics: Dict[str, float]):
     logger.info(f"{'Indicateur':<12} {'Accuracy':<10} {'Precision':<10} {'Recall':<10} {'F1':<10}")
     logger.info("-"*80)
 
-    # Lignes par indicateur (BOL retiré - non synchronisable)
-    for name in ['RSI', 'CCI', 'MACD']:
+    # Déterminer les indicateurs à afficher
+    if indicator_names is None:
+        # Détecter depuis les métriques disponibles
+        if 'RSI_accuracy' in metrics:
+            indicator_names = ['RSI', 'CCI', 'MACD']
+        elif 'INDICATOR_accuracy' in metrics:
+            indicator_names = ['INDICATOR']
+        else:
+            indicator_names = []
+
+    # Lignes par indicateur
+    for name in indicator_names:
         acc = metrics.get(f'{name}_accuracy', 0.0)
         prec = metrics.get(f'{name}_precision', 0.0)
         rec = metrics.get(f'{name}_recall', 0.0)
         f1 = metrics.get(f'{name}_f1', 0.0)
 
+        # Ne pas afficher si pas de données
+        if acc == 0.0 and prec == 0.0 and rec == 0.0 and f1 == 0.0:
+            continue
+
         logger.info(f"{name:<12} {acc:<10.3f} {prec:<10.3f} {rec:<10.3f} {f1:<10.3f}")
 
-    # Moyennes
-    logger.info("-"*80)
-    avg_acc = metrics.get('avg_accuracy', 0.0)
-    avg_prec = metrics.get('avg_precision', 0.0)
-    avg_rec = metrics.get('avg_recall', 0.0)
-    avg_f1 = metrics.get('avg_f1', 0.0)
+    # Moyennes (seulement si plus d'un indicateur)
+    if len(indicator_names) > 1:
+        logger.info("-"*80)
+        avg_acc = metrics.get('avg_accuracy', 0.0)
+        avg_prec = metrics.get('avg_precision', 0.0)
+        avg_rec = metrics.get('avg_recall', 0.0)
+        avg_f1 = metrics.get('avg_f1', 0.0)
 
-    logger.info(f"{'MOYENNE':<12} {avg_acc:<10.3f} {avg_prec:<10.3f} {avg_rec:<10.3f} {avg_f1:<10.3f}")
+        logger.info(f"{'MOYENNE':<12} {avg_acc:<10.3f} {avg_prec:<10.3f} {avg_rec:<10.3f} {avg_f1:<10.3f}")
 
     # Vote majoritaire
     if 'vote_accuracy' in metrics:
@@ -192,7 +208,16 @@ def parse_args():
                         help='Chemin vers les données préparées (.npz). '
                              'IMPORTANT: Doit être le même dataset utilisé pour l\'entraînement!')
 
+    parser.add_argument('--indicator', '-i', type=str, default='all',
+                        choices=['all', 'rsi', 'cci', 'macd'],
+                        help='Indicateur à évaluer (all=multi-output, rsi/cci/macd=single-output)')
+
     return parser.parse_args()
+
+
+# Mapping indicateur -> index
+INDICATOR_INDEX = {'rsi': 0, 'cci': 1, 'macd': 2}
+INDICATOR_NAMES = ['RSI', 'CCI', 'MACD']
 
 
 def main():
@@ -210,14 +235,36 @@ def main():
     logger.info("ÉVALUATION DU MODÈLE CNN-LSTM")
     logger.info("="*80)
 
+    # Déterminer mode (multi-output ou single-output)
+    single_indicator = args.indicator != 'all'
+    if single_indicator:
+        indicator_idx = INDICATOR_INDEX[args.indicator]
+        indicator_name = INDICATOR_NAMES[indicator_idx]
+        num_outputs = 1
+        logger.info(f"\n🎯 Mode SINGLE-OUTPUT: {indicator_name}")
+    else:
+        indicator_idx = None
+        indicator_name = None
+        num_outputs = 3
+        logger.info(f"\n🎯 Mode MULTI-OUTPUT: RSI, CCI, MACD")
+
     # Device
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     logger.info(f"\nDevice: {device}")
 
+    # Chemin du modèle (inclut l'indicateur si single-output)
+    if single_indicator:
+        model_path = BEST_MODEL_PATH.replace('.pth', f'_{args.indicator}.pth')
+    else:
+        model_path = BEST_MODEL_PATH
+
     # Vérifier que le modèle existe
-    if not Path(BEST_MODEL_PATH).exists():
-        logger.error(f"❌ Modèle non trouvé: {BEST_MODEL_PATH}")
-        logger.error(f"   Entraîner d'abord le modèle: python src/train.py")
+    if not Path(model_path).exists():
+        logger.error(f"❌ Modèle non trouvé: {model_path}")
+        if single_indicator:
+            logger.error(f"   Entraîner d'abord: python src/train.py --data <dataset> --indicator {args.indicator}")
+        else:
+            logger.error(f"   Entraîner d'abord le modèle: python src/train.py --data <dataset>")
         return
 
     # =========================================================================
@@ -229,6 +276,11 @@ def main():
     X_test, Y_test = prepared['test']
     metadata = prepared['metadata']
     log_dataset_metadata(metadata, logger)
+
+    # Filtrer les labels si mode single-output
+    if single_indicator:
+        logger.info(f"  🔍 Filtrage labels pour {indicator_name} (index {indicator_idx})...")
+        Y_test = Y_test[:, indicator_idx:indicator_idx+1]  # Garder shape (n, 1)
 
     logger.info(f"  Test: X={X_test.shape}, Y={Y_test.shape}")
 
@@ -250,10 +302,10 @@ def main():
     # =========================================================================
     # 4. CHARGER LE MODÈLE
     # =========================================================================
-    logger.info(f"\n4. Chargement du modèle depuis {BEST_MODEL_PATH}...")
+    logger.info(f"\n4. Chargement du modèle depuis {model_path}...")
 
     # Charger checkpoint pour récupérer la config du modèle
-    checkpoint = torch.load(BEST_MODEL_PATH, map_location=device)
+    checkpoint = torch.load(model_path, map_location=device)
 
     # Récupérer config du modèle (ou utiliser défauts si ancien checkpoint)
     model_config = checkpoint.get('model_config', {})
@@ -261,9 +313,16 @@ def main():
     # Détecter le nombre de features depuis les données
     num_features = X_test.shape[2]
 
+    # Utiliser num_outputs de la config ou celui déterminé par --indicator
+    saved_num_outputs = model_config.get('num_outputs', 3)
+    if saved_num_outputs != num_outputs:
+        logger.warning(f"  ⚠️ num_outputs mismatch: modèle={saved_num_outputs}, demandé={num_outputs}")
+        num_outputs = saved_num_outputs
+
     model, loss_fn = create_model(
         device=device,
         num_indicators=num_features,
+        num_outputs=num_outputs,
         cnn_filters=model_config.get('cnn_filters', 64),
         lstm_hidden_size=model_config.get('lstm_hidden_size', 64),
         lstm_num_layers=model_config.get('lstm_num_layers', 2),
@@ -278,6 +337,8 @@ def main():
     logger.info(f"  ✅ Modèle chargé (époque {checkpoint['epoch']})")
     logger.info(f"     Val Loss: {checkpoint['val_loss']:.4f}")
     logger.info(f"     Val Acc: {checkpoint['val_accuracy']:.3f}")
+    if single_indicator:
+        logger.info(f"     Indicateur: {indicator_name}")
     if model_config:
         logger.info(f"     Config: CNN={model_config.get('cnn_filters')}, "
                    f"LSTM={model_config.get('lstm_hidden_size')}x{model_config.get('lstm_num_layers')}")
@@ -295,31 +356,34 @@ def main():
     print_metrics_table(metrics)
 
     # =========================================================================
-    # 6. VOTE MAJORITAIRE
+    # 6. VOTE MAJORITAIRE (seulement en mode multi-output)
     # =========================================================================
-    logger.info("\n6. Calcul du vote majoritaire...")
+    if not single_indicator:
+        logger.info("\n6. Calcul du vote majoritaire...")
 
-    # Prédictions complètes
-    model.eval()
-    all_predictions = []
-    all_targets = []
+        # Prédictions complètes
+        model.eval()
+        all_predictions = []
+        all_targets = []
 
-    with torch.no_grad():
-        for X_batch, Y_batch in test_loader:
-            X_batch = X_batch.to(device)
-            outputs = model(X_batch)
-            all_predictions.append(outputs.cpu())
-            all_targets.append(Y_batch.cpu())
+        with torch.no_grad():
+            for X_batch, Y_batch in test_loader:
+                X_batch = X_batch.to(device)
+                outputs = model(X_batch)
+                all_predictions.append(outputs.cpu())
+                all_targets.append(Y_batch.cpu())
 
-    all_predictions = torch.cat(all_predictions, dim=0)
-    all_targets = torch.cat(all_targets, dim=0)
+        all_predictions = torch.cat(all_predictions, dim=0)
+        all_targets = torch.cat(all_targets, dim=0)
 
-    # Métriques vote
-    vote_metrics = compute_vote_metrics(all_predictions, all_targets)
-    metrics.update(vote_metrics)
+        # Métriques vote
+        vote_metrics = compute_vote_metrics(all_predictions, all_targets)
+        metrics.update(vote_metrics)
 
-    # Afficher
-    print_metrics_table(metrics)
+        # Afficher
+        print_metrics_table(metrics)
+    else:
+        logger.info("\n6. Vote majoritaire: N/A (mode single-output)")
 
     # =========================================================================
     # 7. SAUVEGARDER RÉSULTATS
@@ -343,9 +407,14 @@ def main():
 
     logger.info(f"\nRésultats clés:")
     logger.info(f"  Test Loss: {metrics['loss']:.4f}")
-    logger.info(f"  Accuracy moyenne: {metrics['avg_accuracy']:.3f}")
-    logger.info(f"  F1 moyen: {metrics['avg_f1']:.3f}")
-    logger.info(f"  Vote majoritaire accuracy: {metrics['vote_accuracy']:.3f}")
+    if single_indicator:
+        logger.info(f"  Indicateur: {indicator_name}")
+        logger.info(f"  Accuracy: {metrics['avg_accuracy']:.3f}")
+        logger.info(f"  F1: {metrics['avg_f1']:.3f}")
+    else:
+        logger.info(f"  Accuracy moyenne: {metrics['avg_accuracy']:.3f}")
+        logger.info(f"  F1 moyen: {metrics['avg_f1']:.3f}")
+        logger.info(f"  Vote majoritaire accuracy: {metrics['vote_accuracy']:.3f}")
 
     # Comparaison avec baseline (50% = hasard)
     baseline = 0.50

@@ -370,6 +370,11 @@ def parse_args():
     # Note: --filter supprimé car --data est maintenant requis
     # Le filtre est défini lors de la préparation des données avec prepare_data_30min.py
 
+    # Indicateur spécifique (optionnel)
+    parser.add_argument('--indicator', '-i', type=str, default='all',
+                        choices=['all', 'rsi', 'cci', 'macd'],
+                        help='Indicateur à entraîner (all=multi-output, rsi/cci/macd=single-output)')
+
     # Autres
     parser.add_argument('--seed', type=int, default=RANDOM_SEED,
                         help='Random seed pour reproductibilité')
@@ -378,6 +383,11 @@ def parse_args():
                         help='Device à utiliser (auto détecte automatiquement)')
 
     return parser.parse_args()
+
+
+# Mapping indicateur -> index
+INDICATOR_INDEX = {'rsi': 0, 'cci': 1, 'macd': 2}
+INDICATOR_NAMES = ['RSI', 'CCI', 'MACD']
 
 
 def main():
@@ -408,6 +418,19 @@ def main():
     logger.info(f"\nDevice: {device}")
 
     # Afficher hyperparamètres
+    # Déterminer mode (multi-output ou single-output)
+    single_indicator = args.indicator != 'all'
+    if single_indicator:
+        indicator_idx = INDICATOR_INDEX[args.indicator]
+        indicator_name = INDICATOR_NAMES[indicator_idx]
+        num_outputs = 1
+        logger.info(f"\n🎯 Mode SINGLE-OUTPUT: {indicator_name}")
+    else:
+        indicator_idx = None
+        indicator_name = None
+        num_outputs = 3
+        logger.info(f"\n🎯 Mode MULTI-OUTPUT: RSI, CCI, MACD")
+
     logger.info(f"\n⚙️ Hyperparamètres d'entraînement:")
     logger.info(f"  Batch size: {args.batch_size}")
     logger.info(f"  Learning rate: {args.learning_rate}")
@@ -445,6 +468,13 @@ def main():
         logger.error("Puis entraînez avec:")
         logger.error("  python src/train.py --data data/prepared/dataset_btc_eth_5min_30min_labels30min_kalman.npz")
         raise SystemExit(1)
+
+    # Filtrer les labels si mode single-output
+    if single_indicator:
+        logger.info(f"\n  🔍 Filtrage labels pour {indicator_name} (index {indicator_idx})...")
+        Y_train = Y_train[:, indicator_idx:indicator_idx+1]  # Garder shape (n, 1)
+        Y_val = Y_val[:, indicator_idx:indicator_idx+1]
+        Y_test = Y_test[:, indicator_idx:indicator_idx+1]
 
     logger.info(f"\n📊 Datasets:")
     logger.info(f"  Train: X={X_train.shape}, Y={Y_train.shape}")
@@ -488,6 +518,7 @@ def main():
     model, loss_fn = create_model(
         device=device,
         num_indicators=num_features,
+        num_outputs=num_outputs,
         cnn_filters=args.cnn_filters,
         lstm_hidden_size=args.lstm_hidden,
         lstm_num_layers=args.lstm_layers,
@@ -512,7 +543,16 @@ def main():
         'lstm_dropout': args.lstm_dropout,
         'dense_hidden_size': args.dense_hidden,
         'dense_dropout': args.dense_dropout,
+        'num_outputs': num_outputs,
+        'indicator': args.indicator,
     }
+
+    # Chemin de sauvegarde (inclut l'indicateur si single-output)
+    if single_indicator:
+        save_path = args.save_path.replace('.pth', f'_{args.indicator}.pth')
+        logger.info(f"  Modèle sera sauvegardé: {save_path}")
+    else:
+        save_path = args.save_path
 
     history = train_model(
         train_loader=train_loader,
@@ -523,7 +563,7 @@ def main():
         device=device,
         num_epochs=args.epochs,
         patience=args.patience,
-        save_path=args.save_path,
+        save_path=save_path,
         model_config=model_config
     )
 
@@ -549,10 +589,15 @@ def main():
     logger.info(f"\nMeilleur modèle:")
     logger.info(f"  Époque: {history['best_epoch']}")
     logger.info(f"  Val Loss: {history['best_val_loss']:.4f}")
-    logger.info(f"  Sauvegardé: {args.save_path}")
+    logger.info(f"  Sauvegardé: {save_path}")
+    if single_indicator:
+        logger.info(f"  Indicateur: {indicator_name}")
 
     logger.info(f"\nProchaines étapes:")
-    logger.info(f"  - Évaluer sur test set: python src/evaluate.py")
+    if single_indicator:
+        logger.info(f"  - Évaluer: python src/evaluate.py --data <dataset> --indicator {args.indicator}")
+    else:
+        logger.info(f"  - Évaluer sur test set: python src/evaluate.py --data <dataset>")
     logger.info(f"  - Visualiser historique: voir {history_path}")
 
 

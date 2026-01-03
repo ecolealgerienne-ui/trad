@@ -298,6 +298,7 @@ class MultiOutputBCELoss(nn.Module):
 def create_model(
     device: str = 'cpu',
     num_indicators: int = NUM_INDICATORS,
+    num_outputs: int = NUM_OUTPUTS,
     cnn_filters: int = CNN_FILTERS,
     lstm_hidden_size: int = LSTM_HIDDEN_SIZE,
     lstm_num_layers: int = LSTM_NUM_LAYERS,
@@ -311,6 +312,7 @@ def create_model(
     Args:
         device: Device ('cpu' ou 'cuda')
         num_indicators: Nombre de features en entrée (défaut: 3)
+        num_outputs: Nombre de sorties/indicateurs à prédire (défaut: 3)
         cnn_filters: Nombre de filtres CNN
         lstm_hidden_size: Taille hidden LSTM
         lstm_num_layers: Nombre de couches LSTM
@@ -323,6 +325,7 @@ def create_model(
     """
     model = MultiOutputCNNLSTM(
         num_indicators=num_indicators,
+        num_outputs=num_outputs,
         cnn_filters=cnn_filters,
         lstm_hidden_size=lstm_hidden_size,
         lstm_num_layers=lstm_num_layers,
@@ -351,15 +354,17 @@ def create_model(
 def compute_metrics(
     predictions: torch.Tensor,
     targets: torch.Tensor,
-    threshold: float = 0.5
+    threshold: float = 0.5,
+    indicator_names: list = None
 ) -> Dict[str, float]:
     """
     Calcule les métriques de classification pour multi-output.
 
     Args:
-        predictions: Probabilités (batch, 3)
-        targets: Labels (batch, 3)
+        predictions: Probabilités (batch, num_outputs)
+        targets: Labels (batch, num_outputs)
         threshold: Seuil de décision
+        indicator_names: Liste des noms d'indicateurs (auto-détecté si None)
 
     Returns:
         Dictionnaire avec métriques par output + moyennes
@@ -370,9 +375,22 @@ def compute_metrics(
 
     metrics = {}
 
-    indicator_names = ['RSI', 'CCI', 'MACD']
+    # Détecter le nombre d'outputs
+    num_outputs = predictions.shape[1]
+
+    # Noms par défaut selon le nombre d'outputs
+    if indicator_names is None:
+        if num_outputs == 3:
+            indicator_names = ['RSI', 'CCI', 'MACD']
+        elif num_outputs == 1:
+            indicator_names = ['INDICATOR']  # Sera remplacé par le vrai nom dans l'affichage
+        else:
+            indicator_names = [f'OUT_{i}' for i in range(num_outputs)]
 
     for i, name in enumerate(indicator_names):
+        if i >= num_outputs:
+            break
+
         # Extraire prédictions et targets pour cet indicateur
         pred = preds_binary[:, i]
         target = targets_float[:, i]
@@ -400,11 +418,12 @@ def compute_metrics(
         metrics[f'{name}_recall'] = recall
         metrics[f'{name}_f1'] = f1
 
-    # Moyennes
-    metrics['avg_accuracy'] = sum(metrics[f'{n}_accuracy'] for n in indicator_names) / 3
-    metrics['avg_precision'] = sum(metrics[f'{n}_precision'] for n in indicator_names) / 3
-    metrics['avg_recall'] = sum(metrics[f'{n}_recall'] for n in indicator_names) / 3
-    metrics['avg_f1'] = sum(metrics[f'{n}_f1'] for n in indicator_names) / 3
+    # Moyennes (sur les indicateurs actifs)
+    active_names = indicator_names[:num_outputs]
+    metrics['avg_accuracy'] = sum(metrics[f'{n}_accuracy'] for n in active_names) / len(active_names)
+    metrics['avg_precision'] = sum(metrics[f'{n}_precision'] for n in active_names) / len(active_names)
+    metrics['avg_recall'] = sum(metrics[f'{n}_recall'] for n in active_names) / len(active_names)
+    metrics['avg_f1'] = sum(metrics[f'{n}_f1'] for n in active_names) / len(active_names)
 
     return metrics
 
