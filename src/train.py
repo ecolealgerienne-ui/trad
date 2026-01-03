@@ -471,10 +471,18 @@ def main():
 
     # Filtrer les labels si mode single-output
     if single_indicator:
-        logger.info(f"\n  🔍 Filtrage labels pour {indicator_name} (index {indicator_idx})...")
-        Y_train = Y_train[:, indicator_idx:indicator_idx+1]  # Garder shape (n, 1)
-        Y_val = Y_val[:, indicator_idx:indicator_idx+1]
-        Y_test = Y_test[:, indicator_idx:indicator_idx+1]
+        # Vérifier si les labels sont déjà 1D (Multi-View dataset)
+        if Y_train.ndim == 1:
+            logger.info(f"\n  🔍 Labels déjà single-target (Multi-View dataset)")
+            # Reshape pour compatibilité (n,) → (n, 1)
+            Y_train = Y_train.reshape(-1, 1)
+            Y_val = Y_val.reshape(-1, 1)
+            Y_test = Y_test.reshape(-1, 1)
+        else:
+            logger.info(f"\n  🔍 Filtrage labels pour {indicator_name} (index {indicator_idx})...")
+            Y_train = Y_train[:, indicator_idx:indicator_idx+1]  # Garder shape (n, 1)
+            Y_val = Y_val[:, indicator_idx:indicator_idx+1]
+            Y_test = Y_test[:, indicator_idx:indicator_idx+1]
 
     logger.info(f"\n📊 Datasets:")
     logger.info(f"  Train: X={X_train.shape}, Y={Y_train.shape}")
