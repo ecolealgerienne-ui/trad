@@ -212,10 +212,26 @@ def prepare_single_asset_30min(df_5min: pd.DataFrame,
         logger.info(f"     {name}: {buy_pct:.1f}% BUY")
 
     # =========================================================================
-    # 6. Aligner labels 30min sur timestamps 5min (FORWARD-FILL)
+    # 6. CORRECTION: Shift des labels pour synchronisation
+    # =========================================================================
+    # PROBLÈME INITIAL:
+    #   generate_labels() définit Label[t] = pente(t-2 → t-1)
+    #   Donc labels[10:00] = pente(09:00 → 09:30) = 1h de retard!
+    #
+    # SOLUTION: shift(-1) pour que labels[10:00] = pente(09:30 → 10:00)
+    #   Ainsi les 5min de 10:00-10:25 prédisent la pente qui vient de clore.
+    #
+    logger.info(f"\n  🔄 Correction du décalage labels (shift -1)...")
+    labels_30min_shifted = np.roll(labels_30min, -1, axis=0)
+    # La dernière ligne devient invalide (contient la première), on la garde quand même
+    # car elle sera coupée lors du trim ou ne sera pas utilisée
+    logger.info(f"     → Labels décalés de -1 période 30min")
+
+    # =========================================================================
+    # 7. Aligner labels 30min sur timestamps 5min (FORWARD-FILL)
     # =========================================================================
     logger.info(f"\n  🔄 Alignement labels 30min → 5min (forward-fill)...")
-    labels_aligned = align_30min_to_5min(labels_30min, index_30min, index_5min)
+    labels_aligned = align_30min_to_5min(labels_30min_shifted, index_30min, index_5min)
     logger.info(f"     → Shape après alignement: {labels_aligned.shape}")
 
     # Vérifier la synchronisation
@@ -230,7 +246,7 @@ def prepare_single_asset_30min(df_5min: pd.DataFrame,
         logger.info(f"     ⚠️ Coupé {start_idx} premières lignes 5min (avant première bougie 30min)")
 
     # =========================================================================
-    # 7. (Optionnel) Aligner indicateurs 30min sur 5min pour features
+    # 8. (Optionnel) Aligner indicateurs 30min sur 5min pour features
     # =========================================================================
     if include_30min_features:
         logger.info(f"\n  🔄 Alignement indicateurs 30min → 5min (features)...")
@@ -249,7 +265,7 @@ def prepare_single_asset_30min(df_5min: pd.DataFrame,
         logger.info(f"     → Features: {indicators_combined.shape} (5min seulement)")
 
     # =========================================================================
-    # 7b. Ajouter Step Index (position dans la fenêtre 30min)
+    # 8b. Ajouter Step Index (position dans la fenêtre 30min)
     # =========================================================================
     # Le step_index indique la position de la bougie 5min dans sa période 30min:
     #   - Minute 00 → step 1
@@ -278,7 +294,7 @@ def prepare_single_asset_30min(df_5min: pd.DataFrame,
     logger.info(f"     → Features finales: {indicators_combined.shape}")
 
     # =========================================================================
-    # 8. Vérification finale des dimensions
+    # 9. Vérification finale des dimensions
     # =========================================================================
     assert len(indicators_combined) == len(labels_aligned), \
         f"Mismatch: indicators={len(indicators_combined)}, labels={len(labels_aligned)}"
@@ -286,7 +302,7 @@ def prepare_single_asset_30min(df_5min: pd.DataFrame,
     logger.info(f"\n  ✅ Données alignées: {len(indicators_combined)} samples")
 
     # =========================================================================
-    # 9. Créer séquences
+    # 10. Créer séquences
     # =========================================================================
     logger.info(f"\n  📦 Création séquences (length={SEQUENCE_LENGTH})...")
     X, Y = create_sequences(indicators_combined, labels_aligned, sequence_length=SEQUENCE_LENGTH)
