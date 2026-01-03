@@ -431,35 +431,46 @@ Nouveau test avec filtre Octave et architecture mono-feature :
 | Indicateur | Accuracy | Precision | Recall | F1 | Gap Train/Test |
 |------------|----------|-----------|--------|-----|----------------|
 | RSI(14) | **78.5%** | 0.775 | 0.809 | 0.792 | **0.1%** ✅ |
-| CCI(20) | **77.7%** | 0.769 | 0.796 | 0.782 | **0.2%** ✅ |
-| MACD(12/26) | *en attente* | - | - | - | - |
+| CCI(20) | 77.7% | 0.769 | 0.796 | 0.782 | **0.2%** ✅ |
+| MACD(12/26) | 76.2% | 0.757 | 0.777 | 0.767 | **0.3%** ✅ |
 
-### Comparaison Kalman vs Octave
+### Comparaison Kalman(INDICATEUR) vs Octave(CLOSE)
 
-| Configuration | Filtre | Features | Target | Accuracy | Gap |
-|---------------|--------|----------|--------|----------|-----|
-| 3 feat → Kalman(RSI) | Kalman | RSI+CCI+MACD | RSI | 79.1% | ~2% |
-| 1 feat → Octave(CLOSE) | Octave 0.20 | RSI seul | CLOSE | 78.5% | **0.1%** |
+| Target | Filtre | RSI | CCI | MACD | Meilleur |
+|--------|--------|-----|-----|------|----------|
+| Kalman(INDIC) | Kalman | 79.1% | 83.3% | **86.4%** | MACD ✅ |
+| Octave(CLOSE) | Octave 0.20 | **78.5%** | 77.7% | 76.2% | RSI ✅ |
 
-### Analyse Préliminaire
+### Observation Majeure : Hiérarchie INVERSÉE !
 
-1. **Accuracy similaire** : 78.5% (Octave) vs 79.1% (Kalman) = -0.6%
-   - Perte minime malgré 3x moins de features
+| Avec Kalman(INDICATEUR) | Avec Octave(CLOSE) |
+|-------------------------|---------------------|
+| 1. MACD (86.4%) 🥇 | 1. RSI (78.5%) 🥇 |
+| 2. CCI (83.3%) 🥈 | 2. CCI (77.7%) 🥈 |
+| 3. RSI (79.1%) 🥉 | 3. MACD (76.2%) 🥉 |
 
-2. **Généralisation excellente** : Gap de seulement 0.1% avec Octave
+**Interprétation** :
+- Quand on prédit **l'indicateur lui-même** (Kalman) → MACD gagne (auto-corrélation forte)
+- Quand on prédit le **CLOSE** → RSI gagne (meilleure corrélation prix/momentum)
+
+### Analyse Complète
+
+1. **Accuracy moyenne** : 77.5% (Octave) vs 82.9% (Kalman)
+   - Perte de ~5% en changeant la target
+   - Mais prédire CLOSE est plus utile pour le trading !
+
+2. **Généralisation exceptionnelle** : Gap < 0.3% pour tous les indicateurs
    - Kalman avait ~2% de gap
-   - Confirme les documents : Octave généralise mieux
+   - Octave = filtre plus stable, moins d'overfitting
 
-3. **Architecture simplifiée** :
-   - 1 feature au lieu de 3
-   - Modèle plus léger
-   - Moins de risque d'overfitting
+3. **RSI meilleur pour CLOSE** :
+   - RSI = oscillateur de momentum = corrélé aux retournements de prix
+   - MACD = indicateur de tendance = moins réactif aux pivots
 
-### Conclusion Préliminaire
+### Conclusion
 
-> **Octave(CLOSE) avec 1 feature obtient une accuracy comparable à Kalman avec 3 features, mais avec une bien meilleure généralisation.**
-
-*Résultats CCI et MACD à venir pour compléter la comparaison.*
+> **Pour prédire la direction du CLOSE filtré, utiliser RSI comme feature.**
+> **Pour prédire la direction d'un indicateur, utiliser cet indicateur comme target (mais moins utile pour le trading).**
 
 ---
 
