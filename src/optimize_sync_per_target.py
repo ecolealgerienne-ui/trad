@@ -61,17 +61,21 @@ from indicators import (
 # GRILLES DE PARAMETRES A TESTER
 # =============================================================================
 
-# Grilles avec pas de ~20% pour optimisation rapide
+# Grilles avec pas de ~20%, limite ±60% (3 pas) autour du defaut
 PARAM_GRIDS = {
     'RSI': {
-        'period': [21, 17, 14, 11, 9, 7, 6, 5]  # ~20% step
+        # Defaut 14: ±60% → [6, 22], 3 pas de 20%
+        'period': [22, 17, 14, 11, 6]
     },
     'CCI': {
-        'period': [30, 24, 20, 16, 13, 10, 8, 6]  # ~20% step
+        # Defaut 20: ±60% → [8, 32], 3 pas de 20%
+        'period': [32, 24, 20, 16, 8]
     },
     'MACD': {
-        'fast': [12, 10, 8, 6, 5, 4],  # ~20% step
-        'slow': [26, 21, 17, 14, 11, 9],  # ~20% step
+        # Defaut fast=10: ±60% → [4, 16]
+        'fast': [16, 12, 10, 8, 4],
+        # Defaut slow=26: ±60% → [10, 42]
+        'slow': [42, 31, 26, 21, 10],
     }
 }
 
