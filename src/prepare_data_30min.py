@@ -212,6 +212,19 @@ def prepare_single_asset_30min(df_5min: pd.DataFrame,
         logger.info(f"     {name}: {buy_pct:.1f}% BUY")
 
     # =========================================================================
+    # 5b. Trim des bords APRÈS Kalman (effets de bord du filtre)
+    # =========================================================================
+    # Le filtre Kalman forward-backward a des effets de bord au début et à la fin.
+    # On supprime quelques périodes 30min pour éviter ces artifacts.
+    #
+    KALMAN_TRIM = 10  # 10 périodes 30min = 5 heures de chaque côté
+    logger.info(f"\n  ✂️ Trim post-Kalman: {KALMAN_TRIM} périodes 30min de chaque côté...")
+    labels_30min = labels_30min[KALMAN_TRIM:-KALMAN_TRIM]
+    indicators_30min = indicators_30min[KALMAN_TRIM:-KALMAN_TRIM]
+    index_30min = index_30min[KALMAN_TRIM:-KALMAN_TRIM]
+    logger.info(f"     → Shape après trim: labels={labels_30min.shape}, indicators={indicators_30min.shape}")
+
+    # =========================================================================
     # 6. CORRECTION: Shift des labels pour synchronisation
     # =========================================================================
     # PROBLÈME INITIAL:
