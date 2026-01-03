@@ -45,35 +45,23 @@ split_sequences = split_sequences_chronological
 
 
 # =============================================================================
-# PARAMETRES OPTIMISES PAR CIBLE (résultats de optimize_sync_per_target.py)
+# PARAMETRES PAR DEFAUT (optimisés pour CLOSE - Multi-View abandonné)
 # =============================================================================
+# Note: L'approche Multi-View a été testée et abandonnée car la synchronisation
+# des features réduit leur diversité et n'améliore pas la prédiction.
+# Tous les indicateurs utilisent maintenant les paramètres par défaut.
 
-# Pour prédire RSI: paramètres optimisés pour CCI et MACD
-PARAMS_FOR_RSI_TARGET = {
-    'RSI': {'period': RSI_PERIOD},  # Cible = défaut
-    'CCI': {'period': 51},          # Optimisé pour RSI
-    'MACD': {'fast': 13, 'slow': 67},  # Optimisé pour RSI
+DEFAULT_INDICATOR_PARAMS = {
+    'RSI': {'period': RSI_PERIOD},      # 22 - optimisé pour Close
+    'CCI': {'period': CCI_PERIOD},      # 32 - optimisé pour Close
+    'MACD': {'fast': MACD_FAST, 'slow': MACD_SLOW},  # 8/42 - optimisé pour Close
 }
 
-# Pour prédire CCI: paramètres optimisés pour RSI et MACD
-PARAMS_FOR_CCI_TARGET = {
-    'RSI': {'period': 18},          # Optimisé pour CCI
-    'CCI': {'period': CCI_PERIOD},  # Cible = défaut
-    'MACD': {'fast': 10, 'slow': 67},  # Optimisé pour CCI
-}
-
-# Pour prédire MACD: paramètres optimisés pour RSI et CCI
-PARAMS_FOR_MACD_TARGET = {
-    'RSI': {'period': 18},          # Optimisé pour MACD
-    'CCI': {'period': 26},          # Optimisé pour MACD
-    'MACD': {'fast': MACD_FAST, 'slow': MACD_SLOW},  # Cible = défaut
-}
-
-# Mapping target → params
+# Mapping target → params (tous utilisent les mêmes paramètres par défaut)
 TARGET_PARAMS = {
-    'RSI': PARAMS_FOR_RSI_TARGET,
-    'CCI': PARAMS_FOR_CCI_TARGET,
-    'MACD': PARAMS_FOR_MACD_TARGET,
+    'RSI': DEFAULT_INDICATOR_PARAMS,
+    'CCI': DEFAULT_INDICATOR_PARAMS,
+    'MACD': DEFAULT_INDICATOR_PARAMS,
 }
 
 
