@@ -61,18 +61,18 @@ from indicators import (
 # Grilles avec pas de ~20%, limite ±60% (3 pas) autour du defaut
 PARAM_GRIDS = {
     'RSI': {
-        # Defaut 14: ±60% → [6, 22], 3 pas de 20%
-        'period': [22, 17, 14, 11, 6]
+        # Defaut 22: ±60% → [9, 35], 3 pas de 20%
+        'period': [35, 26, 22, 18, 9]
     },
     'CCI': {
-        # Defaut 20: ±60% → [8, 32], 3 pas de 20%
-        'period': [32, 24, 20, 16, 8]
+        # Defaut 32: ±60% → [13, 51], 3 pas de 20%
+        'period': [51, 38, 32, 26, 13]
     },
     'MACD': {
-        # Defaut fast=10: ±60% → [4, 16]
-        'fast': [16, 12, 10, 8, 4],
-        # Defaut slow=26: ±60% → [10, 42]
-        'slow': [42, 31, 26, 21, 10],
+        # Defaut fast=8: ±60% → [3, 13]
+        'fast': [13, 10, 8, 6, 3],
+        # Defaut slow=42: ±60% → [17, 67]
+        'slow': [67, 50, 42, 34, 17],
     }
 }
 

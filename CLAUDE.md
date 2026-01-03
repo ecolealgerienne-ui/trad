@@ -235,16 +235,17 @@ Les indicateurs utilisent des periodes **optimisees pour la synchronisation** av
 
 ```python
 # src/constants.py - Periodes synchronisees (Lag 0)
+# Score = Concordance (Lag=0 requis)
 
 # RSI - Synchronise avec Kalman(Close)
-RSI_PERIOD = 14         # Lag 0, Concordance 82%
+RSI_PERIOD = 22         # Lag 0, Concordance 85.3%
 
 # CCI - Synchronise avec Kalman(Close)
-CCI_PERIOD = 20         # Lag 0, Concordance 74%
+CCI_PERIOD = 32         # Lag 0, Concordance 77.9%
 
 # MACD - Synchronise avec Kalman(Close)
-MACD_FAST = 10          # Lag 0, Concordance 70%
-MACD_SLOW = 26
+MACD_FAST = 8           # Lag 0, Concordance 71.8%
+MACD_SLOW = 42
 MACD_SIGNAL = 9
 
 # BOL (Bollinger Bands) - RETIRE
@@ -449,10 +450,10 @@ X_train = np.concatenate([X_btc, X_eth])
 
 ```python
 # constants.py - Periodes optimisees pour Lag 0
-RSI_PERIOD = 14     # Synchronise
-CCI_PERIOD = 20     # Synchronise
-MACD_FAST = 10      # Synchronise
-MACD_SLOW = 26
+RSI_PERIOD = 22     # Concordance 85.3%
+CCI_PERIOD = 32     # Concordance 77.9%
+MACD_FAST = 8       # Concordance 71.8%
+MACD_SLOW = 42
 # BOL retire (impossible a synchroniser)
 ```
 
@@ -788,10 +789,10 @@ Chaque indicateur est teste avec **±60% (3 pas de 20%)** autour de sa valeur pa
 
 | Indicateur | Defaut | Grille testee |
 |------------|--------|---------------|
-| RSI period | 14 | [22, 17, 14, 11, 6] |
-| CCI period | 20 | [32, 24, 20, 16, 8] |
-| MACD fast | 10 | [16, 12, 10, 8, 4] |
-| MACD slow | 26 | [42, 31, 26, 21, 10] |
+| RSI period | 22 | [35, 26, 22, 18, 9] |
+| CCI period | 32 | [51, 38, 32, 26, 13] |
+| MACD fast | 8 | [13, 10, 8, 6, 3] |
+| MACD slow | 42 | [67, 50, 42, 34, 17] |
 
 Plage de lag testee: **-3 a +2** (suffisant pour detecter la synchronisation)
 
