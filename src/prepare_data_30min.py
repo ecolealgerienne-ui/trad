@@ -218,7 +218,7 @@ def prepare_single_asset_30min(df_5min: pd.DataFrame,
     # On supprime quelques périodes 30min pour éviter ces artifacts.
     # IMPORTANT: On doit aussi trimmer les 5min pour garder l'alignement des timestamps.
     #
-    KALMAN_TRIM = 0  # TEMPORAIRE: Désactivé pour debug (était 10)
+    KALMAN_TRIM = 10  # 10 périodes 30min = 5 heures de chaque côté
     KALMAN_TRIM_5MIN = KALMAN_TRIM * 6  # 10 périodes 30min = 60 bougies 5min
 
     logger.info(f"\n  ✂️ Trim post-Kalman: {KALMAN_TRIM} périodes 30min ({KALMAN_TRIM_5MIN} bougies 5min) de chaque côté...")
@@ -237,29 +237,20 @@ def prepare_single_asset_30min(df_5min: pd.DataFrame,
     logger.info(f"     → Plage: {index_5min[0]} → {index_5min[-1]}")
 
     # =========================================================================
-    # 6. CORRECTION: Shift des labels pour synchronisation
+    # 6. Aligner labels 30min sur timestamps 5min (FORWARD-FILL)
     # =========================================================================
-    # PROBLÈME INITIAL:
-    #   generate_labels() définit Label[t] = pente(t-2 → t-1)
-    #   Donc labels[10:00] = pente(09:00 → 09:30) = 1h de retard!
+    # NOTE: On garde Label[t] = pente(t-2 → t-1) SANS shift.
     #
-    # SOLUTION: shift(-1) pour que labels[10:00] = pente(09:30 → 10:00)
-    #   Ainsi les 5min de 10:00-10:25 prédisent la pente qui vient de clore.
+    # Stratégie de trading:
+    #   - À 10:00-10:25, on prédit la pente(9:00 → 9:30) = "passé lointain"
+    #   - L'intérêt est la STABILITÉ des prédictions sur les 6 steps
+    #   - Un changement d'avis = signal de retournement
     #
-    # NOTE: On utilise slicing au lieu de np.roll pour éviter le wrap-around
-    #   np.roll ramènerait le premier élément à la fin (donnée invalide)
+    # Voir section "Stratégie de Trading" dans CLAUDE.md
     #
-    logger.info(f"\n  🔄 Correction du décalage labels (shift -1)...")
-    labels_30min_shifted = labels_30min[1:]  # Décaler: index 0 reçoit valeur de index 1
-    index_30min_for_labels = index_30min[:-1]  # Index raccourci pour labels uniquement
-    logger.info(f"     → Labels décalés de -1 période 30min")
-    logger.info(f"     → Shape après shift: {labels_30min_shifted.shape}")
-
-    # =========================================================================
-    # 7. Aligner labels 30min sur timestamps 5min (FORWARD-FILL)
-    # =========================================================================
     logger.info(f"\n  🔄 Alignement labels 30min → 5min (forward-fill)...")
-    labels_aligned = align_30min_to_5min(labels_30min_shifted, index_30min_for_labels, index_5min)
+    logger.info(f"     → Labels: pente(t-2 → t-1) sans shift")
+    labels_aligned = align_30min_to_5min(labels_30min, index_30min, index_5min)
     logger.info(f"     → Shape après alignement: {labels_aligned.shape}")
 
     # Vérifier la synchronisation
@@ -279,19 +270,19 @@ def prepare_single_asset_30min(df_5min: pd.DataFrame,
     if include_30min_features:
         logger.info(f"\n  🔄 Alignement indicateurs 30min → 5min (features)...")
 
-        # CORRECTION: Décaler l'index de 30min pour que l'indicateur soit "disponible"
-        # seulement après la clôture de la bougie 30min.
+        # Alignement direct des features 30min sur 5min.
         #
-        # AVANT: À 5min 10:00, on utilisait 30min de 10:00 (données 10:00-10:29 = FUTUR)
-        # APRÈS: À 5min 10:00, on utilise 30min de 09:30 (dernière bougie complète)
+        # NOTE: On n'applique PAS de shift +30min sur les features.
+        # La bougie 30min indexée à 10:00 contient les données 10:00-10:29.
+        # À 10:05, on utilise la bougie 10:00 qui est EN COURS (pas encore clôturée).
         #
-        # En live trading, l'indicateur 30min à 09:30 n'est disponible qu'à 10:00
-        # (quand la bougie 09:30-09:59 se ferme).
+        # C'est acceptable car:
+        #   1. On prédit la pente PASSÉE (t-2 → t-1), pas le futur
+        #   2. Le modèle utilise les features pour CONFIRMER une tendance passée
+        #   3. Les features "fraîches" aident à détecter les retournements
         #
-        # TEST: Désactiver le shift pour voir si c'est le problème
-        # index_30min_shifted = index_30min + pd.Timedelta('30min')
-        index_30min_shifted = index_30min  # TEMPORAIRE: pas de shift
-        logger.info(f"     → Index 30min SANS shift (debug)")
+        index_30min_shifted = index_30min  # Pas de shift
+        logger.info(f"     → Index 30min aligné directement (pas de shift)")
 
         indicators_30min_aligned = align_30min_to_5min(indicators_30min, index_30min_shifted, index_5min)
 

@@ -713,6 +713,55 @@ Regarder les erreurs de prediction (Faux Positifs):
 
 ---
 
+## Strategie de Trading
+
+### Principe Fondamental
+
+Le modele predit la pente **passee** (t-2 → t-1) avec haute accuracy (~85%).
+L'interet n'est pas la prediction elle-meme, mais la **stabilite** des predictions sur les 6 steps.
+
+### Comment ca marche
+
+A chaque periode 30min, le modele fait 6 predictions (Steps 1-6) sur la MEME pente passee:
+
+| Step | Timestamp | Predit | Interpretation |
+|------|-----------|--------|----------------|
+| 1 | 10:00 | pente(9:00→9:30) | Premiere lecture |
+| 2 | 10:05 | pente(9:00→9:30) | Confirmation ? |
+| 3 | 10:10 | pente(9:00→9:30) | Stable ? |
+| 4 | 10:15 | pente(9:00→9:30) | Stable ? |
+| 5 | 10:20 | pente(9:00→9:30) | Stable ? |
+| 6 | 10:25 | pente(9:00→9:30) | Derniere lecture |
+
+**Signal de trading** = Quand le modele **change d'avis** sur la meme pente passee.
+Cela indique que les features recentes (prix actuel) contredisent la tendance passee → retournement probable.
+
+### Regles de Trading
+
+| # | Regle | Raison |
+|---|-------|--------|
+| 1 | **Ne jamais agir a Step 1** (xx:00 ou xx:30) | Premiere lecture, pas de confirmation |
+| 2 | Attendre Step 2+ pour confirmer | Evite les faux signaux |
+| 3 | Changement d'avis = Signal d'action | Le modele voit le retournement dans les features |
+| 4 | Stabilite sur 3+ steps = Confiance haute | Tendance confirmee |
+
+### Exemple Concret
+
+```
+Pente reelle: 9:00→9:30 = UP, puis retournement a 10:15
+
+10:00  Modele: UP   → Attendre (Step 1)
+10:05  Modele: UP   → Confirme, entrer LONG
+10:10  Modele: UP   → Stable, rester
+10:15  Modele: DOWN → ⚠️ Changement! Le modele voit le retournement
+10:20  Modele: DOWN → Confirme, sortir/inverser
+```
+
+Le modele se "trompe" sur la pente passee car ses features actuelles voient deja le retournement.
+C'est un **signal avance** du changement de tendance.
+
+---
+
 ## Backlog: Experiences a Tester
 
 Liste organisee des experiences et optimisations a tester pour atteindre 90%+.
