@@ -108,32 +108,78 @@ def verify_alignment(asset: str = 'BTC', n_samples: int = 20):
     while step_index[mid_idx] != 1 and mid_idx < len(index_5min) - 1:
         mid_idx += 1
 
-    print(f"\n{'='*100}")
-    print("ÉCHANTILLON DE DONNÉES (2 périodes 30min = 12 bougies 5min)")
-    print("="*100)
+    print(f"\n{'='*120}")
+    print("ÉCHANTILLON DE DONNÉES (6 périodes 30min = 3 heures = 36 bougies 5min)")
+    print("="*120)
 
-    print(f"\n{'Timestamp 5min':<22} {'Step':<6} {'RSI_5m':<8} {'RSI_30m':<8} {'Label_RSI':<10} {'30min src':<20}")
-    print("-"*100)
+    print(f"\n{'Timestamp 5min':<22} {'Step':<6} {'RSI_5m':<8} {'CCI_5m':<8} {'RSI_30m':<8} {'CCI_30m':<8} {'Lbl_RSI':<8} {'Lbl_CCI':<8}")
+    print("-"*120)
 
-    for i in range(mid_idx, min(mid_idx + 12, len(index_5min))):
+    for i in range(mid_idx, min(mid_idx + 36, len(index_5min))):
         ts_5min = index_5min[i]
         step = step_index[i]
         rsi_5min = indicators_5min[i, 0]
+        cci_5min = indicators_5min[i, 1]
         rsi_30min = indicators_30min_aligned[i, 0]
-        label_rsi = int(labels_aligned[i, 0])
+        cci_30min = indicators_30min_aligned[i, 1]
+        label_rsi = "UP" if labels_aligned[i, 0] == 1 else "DOWN"
+        label_cci = "UP" if labels_aligned[i, 1] == 1 else "DOWN"
 
-        # Trouver la source 30min du label
-        # Avec shift(-1), le label à l'index i vient de l'index i+1 original
-        # Donc pour ts_5min, on cherche le 30min timestamp correspondant
-        ts_30min_src = pd.Timestamp(ts_5min).floor('30min')
-
-        # Direction du label
-        direction = "↑ UP" if label_rsi == 1 else "↓ DOWN"
-
-        print(f"{str(ts_5min):<22} {step:<6} {rsi_5min:<8.1f} {rsi_30min:<8.1f} {direction:<10} {str(ts_30min_src):<20}")
+        print(f"{str(ts_5min):<22} {step:<6} {rsi_5min:<8.1f} {cci_5min:<8.1f} {rsi_30min:<8.1f} {cci_30min:<8.1f} {label_rsi:<8} {label_cci:<8}")
 
         if step == 6:
-            print("-"*100)
+            print("-"*120)
+
+    # =========================================================================
+    # VÉRIFICATION DIRECTE DES LABELS 30min
+    # =========================================================================
+    print(f"\n{'='*120}")
+    print("VÉRIFICATION DIRECTE: INDICATEURS 30min ET PENTES (après Kalman)")
+    print("="*120)
+    print("\nLogique du shift(-1):")
+    print("  - AVANT: label[10:00] = pente(09:00 → 09:30) = 1h de retard")
+    print("  - APRÈS: label[10:00] = pente(09:30 → 10:00) = synchronisé")
+    print("\nNote: Les labels sont générés depuis les indicateurs FILTRÉS (Kalman),")
+    print("      pas les indicateurs bruts. La concordance n'est pas 100%.")
+
+    print(f"\n{'Timestamp':<20} {'RSI[T]':<10} {'RSI[T-30m]':<12} {'Pente brute':<12} {'Label réel':<12}")
+    print("-"*80)
+
+    # Utiliser index_30min_for_labels pour être cohérent avec le shift
+    start_30 = len(index_30min_for_labels) // 2
+    for j in range(start_30, min(start_30 + 10, len(index_30min_for_labels))):
+        ts_30 = index_30min_for_labels[j]
+
+        # Trouver l'index dans indicators_30min (qui utilise index_30min original)
+        # Après shift: label à index j correspond à la pente qui se termine à ts_30
+        # indicators_30min a le même ordre que index_30min
+
+        # Pour vérifier: on veut RSI[T] et RSI[T-30min]
+        # On trouve l'index de ts_30 dans index_30min
+        idx_in_30min = np.where(index_30min == ts_30)[0]
+        if len(idx_in_30min) == 0:
+            continue
+        idx = idx_in_30min[0]
+
+        if idx > 0:
+            rsi_current = indicators_30min[idx, 0]
+            rsi_prev = indicators_30min[idx - 1, 0]
+            pente = rsi_current - rsi_prev
+            pente_str = f"{pente:+.2f}"
+        else:
+            rsi_current = indicators_30min[idx, 0]
+            rsi_prev = np.nan
+            pente_str = "N/A"
+
+        # Label après shift à l'index j
+        if j < len(labels_30min_shifted):
+            label = "UP" if labels_30min_shifted[j, 0] == 1 else "DOWN"
+        else:
+            label = "N/A"
+
+        print(f"{str(ts_30):<20} {rsi_current:<10.2f} {rsi_prev:<10.2f} {pente_str:<12} {label:<12}")
+
+    print("\nSi pente brute et label sont cohérents (même signe), le shift est correct.")
 
     # =========================================================================
     # VÉRIFICATIONS AUTOMATIQUES
