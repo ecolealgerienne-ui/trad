@@ -242,27 +242,36 @@ class MultiOutputBCELoss(nn.Module):
     Calcule la BCE pour chaque output et fait la moyenne pondérée.
 
     Args:
-        weights: Poids pour chaque output [RSI, CCI, MACD] (défaut: égaux)
+        num_outputs: Nombre de sorties (1 pour single-indicator, 3 pour multi)
+        weights: Poids pour chaque output (défaut: égaux)
     """
 
     def __init__(
         self,
-        weights: Tuple[float, float, float] = (
-            LOSS_WEIGHT_RSI,
-            LOSS_WEIGHT_CCI,
-            LOSS_WEIGHT_MACD
-        )
+        num_outputs: int = 3,
+        weights: Tuple[float, ...] = None
     ):
         super(MultiOutputBCELoss, self).__init__()
 
+        # Poids par défaut selon le nombre d'outputs
+        if weights is None:
+            if num_outputs == 3:
+                weights = (LOSS_WEIGHT_RSI, LOSS_WEIGHT_CCI, LOSS_WEIGHT_MACD)
+            else:
+                weights = tuple([1.0] * num_outputs)
+
         # Convertir en tensor
-        self.weights = torch.tensor(weights, dtype=torch.float32)
+        self.weights = torch.tensor(weights[:num_outputs], dtype=torch.float32)
+        self.num_outputs = num_outputs
 
         # BCE sans reduction (on veut calculer séparément pour chaque output)
         self.bce = nn.BCELoss(reduction='none')
 
-        logger.info(f"✅ Loss multi-output créée:")
-        logger.info(f"  Poids: RSI={weights[0]}, CCI={weights[1]}, MACD={weights[2]}")
+        if num_outputs == 3:
+            logger.info(f"✅ Loss multi-output créée:")
+            logger.info(f"  Poids: RSI={weights[0]}, CCI={weights[1]}, MACD={weights[2]}")
+        else:
+            logger.info(f"✅ Loss single-output créée (poids={weights[0]})")
 
     def forward(
         self,
@@ -270,11 +279,11 @@ class MultiOutputBCELoss(nn.Module):
         targets: torch.Tensor
     ) -> torch.Tensor:
         """
-        Calcule la loss BCE moyenne pondérée sur les 3 outputs.
+        Calcule la loss BCE moyenne pondérée sur les outputs.
 
         Args:
-            predictions: Prédictions (batch, 3)
-            targets: Labels (batch, 3)
+            predictions: Prédictions (batch, num_outputs)
+            targets: Labels (batch, num_outputs)
 
         Returns:
             Loss scalaire (moyenne pondérée)
@@ -283,10 +292,10 @@ class MultiOutputBCELoss(nn.Module):
         if self.weights.device != predictions.device:
             self.weights = self.weights.to(predictions.device)
 
-        # BCE pour chaque output: (batch, 3)
+        # BCE pour chaque output: (batch, num_outputs)
         bce_per_output = self.bce(predictions, targets.float())
 
-        # Moyenne sur batch: (3,)
+        # Moyenne sur batch: (num_outputs,)
         bce_mean = bce_per_output.mean(dim=0)
 
         # Pondération: scalaire
@@ -333,7 +342,7 @@ def create_model(
         dense_hidden_size=dense_hidden_size,
         dense_dropout=dense_dropout
     )
-    loss_fn = MultiOutputBCELoss()
+    loss_fn = MultiOutputBCELoss(num_outputs=num_outputs)
 
     # Déplacer sur device
     model = model.to(device)
