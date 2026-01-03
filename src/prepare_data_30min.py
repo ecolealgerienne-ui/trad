@@ -212,29 +212,22 @@ def prepare_single_asset_30min(df_5min: pd.DataFrame,
         logger.info(f"     {name}: {buy_pct:.1f}% BUY")
 
     # =========================================================================
-    # 5b. Trim des bords APRÈS Kalman (effets de bord du filtre)
+    # 5b. Trim post-Kalman - DÉSACTIVÉ
     # =========================================================================
-    # Le filtre Kalman forward-backward a des effets de bord au début et à la fin.
-    # On supprime quelques périodes 30min pour éviter ces artifacts.
-    # IMPORTANT: On doit aussi trimmer les 5min pour garder l'alignement des timestamps.
+    # NOTE: Le trim des bords après Kalman est désactivé pour éviter les risques
+    # d'introduire des bugs d'alignement. Les effets de bord du filtre Kalman
+    # sont minimes sur un grand dataset (~160k bougies).
     #
-    KALMAN_TRIM = 10  # 10 périodes 30min = 5 heures de chaque côté
-    KALMAN_TRIM_5MIN = KALMAN_TRIM * 6  # 10 périodes 30min = 60 bougies 5min
-
-    logger.info(f"\n  ✂️ Trim post-Kalman: {KALMAN_TRIM} périodes 30min ({KALMAN_TRIM_5MIN} bougies 5min) de chaque côté...")
-
-    # Trim 30min
-    labels_30min = labels_30min[KALMAN_TRIM:-KALMAN_TRIM]
-    indicators_30min = indicators_30min[KALMAN_TRIM:-KALMAN_TRIM]
-    index_30min = index_30min[KALMAN_TRIM:-KALMAN_TRIM]
-
-    # Trim 5min pour garder l'alignement des timestamps
-    indicators_5min = indicators_5min[KALMAN_TRIM_5MIN:-KALMAN_TRIM_5MIN]
-    index_5min = index_5min[KALMAN_TRIM_5MIN:-KALMAN_TRIM_5MIN]
-
-    logger.info(f"     → 30min après trim: labels={labels_30min.shape}, indicators={indicators_30min.shape}")
-    logger.info(f"     → 5min après trim: indicators={indicators_5min.shape}")
-    logger.info(f"     → Plage: {index_5min[0]} → {index_5min[-1]}")
+    # Si besoin de réactiver plus tard:
+    #   KALMAN_TRIM = 10  # périodes 30min
+    #   KALMAN_TRIM_5MIN = KALMAN_TRIM * 6
+    #   labels_30min = labels_30min[KALMAN_TRIM:-KALMAN_TRIM]
+    #   indicators_30min = indicators_30min[KALMAN_TRIM:-KALMAN_TRIM]
+    #   index_30min = index_30min[KALMAN_TRIM:-KALMAN_TRIM]
+    #   indicators_5min = indicators_5min[KALMAN_TRIM_5MIN:-KALMAN_TRIM_5MIN]
+    #   index_5min = index_5min[KALMAN_TRIM_5MIN:-KALMAN_TRIM_5MIN]
+    #
+    logger.info(f"\n  ⏭️ Trim post-Kalman: DÉSACTIVÉ (pas de risque d'alignement)")
 
     # =========================================================================
     # 6. Aligner labels 30min sur timestamps 5min (FORWARD-FILL)
