@@ -713,6 +713,61 @@ Regarder les erreurs de prediction (Faux Positifs):
 
 ---
 
+## Backlog: Experiences a Tester
+
+Liste organisee des experiences et optimisations a tester pour atteindre 90%+.
+
+### Priorite 1: Architecture et Training
+
+| # | Experience | Hypothese | Commande/Implementation | Statut |
+|---|------------|-----------|-------------------------|--------|
+| 1.1 | **Training par indicateur** | Un modele specialise par indicateur (RSI, CCI, MACD) pourrait mieux apprendre les patterns specifiques | Modifier `train.py` pour `--indicator rsi` | A tester |
+| 1.2 | **Fusion de canaux** | Separer branche 5min et branche 30min dans le LSTM | Modifier `model.py` (voir Roadmap Levier 2) | A tester |
+| 1.3 | **Learning Rate Decay** | LR=0.001 → 0.0001 progressif pour affiner les poids | `--lr-decay step --lr-step 10` | A tester |
+| 1.4 | **Plus de patience** | Early stopping a 20 epoques au lieu de 10 | `--patience 20 --epochs 100` | A tester |
+
+### Priorite 2: Features et Donnees
+
+| # | Experience | Hypothese | Commande/Implementation | Statut |
+|---|------------|-----------|-------------------------|--------|
+| 2.1 | **Multi-resolution 1h** | Ajouter indicateurs 1h comme contexte macro | `--include-1h-features` | A tester |
+| 2.2 | **Embeddings temporels** | Heure/jour en sin/cos pour capturer cycles | Ajouter 4 features (sin/cos hour, sin/cos day) | A tester |
+| 2.3 | **Sequence length 24** | Plus de contexte temporel (2h au lieu de 1h) | `--seq-length 24` | A tester |
+
+### Priorite 3: Regularisation et Robustesse
+
+| # | Experience | Hypothese | Commande/Implementation | Statut |
+|---|------------|-----------|-------------------------|--------|
+| 3.1 | **Dropout augmente** | LSTM dropout 0.3 au lieu de 0.2 | Modifier `constants.py` | A tester |
+| 3.2 | **Label smoothing** | Adoucir labels (0.1/0.9 au lieu de 0/1) | Modifier `train.py` loss | A tester |
+| 3.3 | **Data augmentation** | Ajouter bruit gaussien sur features | Modifier `prepare_data_30min.py` | A tester |
+
+### Priorite 4: Analyse et Debug
+
+| # | Experience | Hypothese | Commande/Implementation | Statut |
+|---|------------|-----------|-------------------------|--------|
+| 4.1 | **Verification alignement** | S'assurer que Step 1-6 ont meme accuracy | `python src/analyze_errors.py` | En cours |
+| 4.2 | **Confusion par asset** | Certains assets plus faciles que d'autres? | Ajouter `--by-asset` a evaluate.py | A tester |
+| 4.3 | **Erreurs temporelles** | Les erreurs sont-elles clustered dans le temps? | Ajouter analyse temporelle des erreurs | A tester |
+
+### Comment utiliser ce backlog
+
+1. **Choisir** une experience par priorite
+2. **Implementer** la modification
+3. **Tester** avec le dataset standard
+4. **Documenter** le resultat dans la colonne Statut
+5. **Garder** si gain > 0.5%, sinon revenir en arriere
+
+### Resultats des Experiences
+
+| Date | Experience | Resultat | Delta | Decision |
+|------|------------|----------|-------|----------|
+| 2026-01-03 | Position Index | 83.4% | +0.1% | Abandonne |
+| 2026-01-03 | Clock-Injected 7 feat | 85.1% | +1.8% | **Adopte** |
+| - | - | - | - | - |
+
+---
+
 **Cree par**: Claude Code
 **Derniere MAJ**: 2026-01-03
 **Version**: 4.0 (Clock-Injected 7 features, 85.1% accuracy)
