@@ -35,8 +35,14 @@ from constants import (
     TRIM_EDGES,
     PREPARED_DATA_DIR,
     SEQUENCE_LENGTH,
-    RSI_PERIOD, CCI_PERIOD, MACD_FAST, MACD_SLOW, MACD_SIGNAL,
 )
+
+# Périodes STANDARD des indicateurs (valeurs classiques)
+RSI_PERIOD = 14      # Wilder's original
+CCI_PERIOD = 20      # Lambert's original
+MACD_FAST = 12       # Standard
+MACD_SLOW = 26       # Standard
+MACD_SIGNAL = 9      # Standard
 from data_utils import load_crypto_data, trim_edges, split_sequences_chronological
 from indicators import (
     calculate_rsi, calculate_cci, calculate_macd,
@@ -51,9 +57,10 @@ from indicators import (
 
 OCTAVE_STEP = 0.20  # Paramètre du filtre Octave (0.20 recommandé)
 
-# Paramètres MACD alternatifs
+# Paramètres MACD (différentes vitesses)
 MACD_CONFIGS = {
-    'macd': {'fast': 12, 'slow': 26, 'signal': 9},      # Standard
+    'macd': {'fast': 12, 'slow': 26, 'signal': 9},      # Standard (= macd26)
+    'macd9': {'fast': 4, 'slow': 9, 'signal': 4},       # Très rapide
     'macd13': {'fast': 6, 'slow': 13, 'signal': 4},     # Rapide
     'macd26': {'fast': 12, 'slow': 26, 'signal': 9},    # Standard
     'macd40': {'fast': 18, 'slow': 40, 'signal': 13},   # Lent (recommandé)
