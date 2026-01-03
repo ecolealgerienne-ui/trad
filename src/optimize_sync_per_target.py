@@ -427,6 +427,7 @@ def main():
             # Marquer si desynchronise
             sync_status = "✓" if avg_anticipation == 0 else "✗"
             logger.info(f"  {params_str:20s} | Conc: {avg_concordance:.3f} | "
+                       f"Pivot: {avg_pivot_acc:.3f} | "
                        f"Lag: {avg_anticipation:+3.0f} {sync_status} | "
                        f"Score: {avg_score:.3f}")
 
@@ -443,8 +444,9 @@ def main():
         }
 
         logger.info(f"\n  MEILLEUR {indicator} pour {target}: {best.params}")
-        logger.info(f"    Concordance: {best.concordance:.1%}")
-        logger.info(f"    Lag:         {best.anticipation:+.0f} (0 = synchronise)")
+        logger.info(f"    Concordance:    {best.concordance:.1%}")
+        logger.info(f"    Pivot Accuracy: {best.pivot_accuracy:.1%}")
+        logger.info(f"    Lag:            {best.anticipation:+.0f} (0 = synchronise)")
 
     # =========================================================================
     # 6. RESUME FINAL
@@ -460,12 +462,14 @@ def main():
     print(f"# Features optimisees:")
     for indicator, params in optimal_params.items():
         conc = best_results[indicator]['concordance']
+        pivot = best_results[indicator]['pivot_accuracy']
+        delta = conc - pivot  # Difference globale vs pivots
         if indicator == 'RSI':
-            print(f"#   RSI_PERIOD_{target} = {params['period']:3d}  (Concordance: {conc:.1%})")
+            print(f"#   RSI_PERIOD_{target} = {params['period']:3d}  (Conc: {conc:.1%}, Pivot: {pivot:.1%}, Delta: {delta:+.1%})")
         elif indicator == 'CCI':
-            print(f"#   CCI_PERIOD_{target} = {params['period']:3d}  (Concordance: {conc:.1%})")
+            print(f"#   CCI_PERIOD_{target} = {params['period']:3d}  (Conc: {conc:.1%}, Pivot: {pivot:.1%}, Delta: {delta:+.1%})")
         elif indicator == 'MACD':
-            print(f"#   MACD_FAST_{target} = {params['fast']:3d}  (Concordance: {conc:.1%})")
+            print(f"#   MACD_FAST_{target} = {params['fast']:3d}  (Conc: {conc:.1%}, Pivot: {pivot:.1%}, Delta: {delta:+.1%})")
             print(f"#   MACD_SLOW_{target} = {params['slow']:3d}")
 
     # =========================================================================
