@@ -88,6 +88,10 @@ def prepare_rsi_dataset(df, period, labels, output_path):
     rsi = calculate_rsi(df['close'], period=period)
     rsi = pd.Series(rsi).ffill().fillna(50.0).values
 
+    # Debug: stats des features
+    logger.info(f"  RSI({period}) stats: min={rsi.min():.1f}, max={rsi.max():.1f}, "
+                f"mean={rsi.mean():.1f}, std={rsi.std():.1f}")
+
     # Feature = RSI seul (shape n, 1)
     features = rsi.reshape(-1, 1)
     labels_2d = labels.reshape(-1, 1)
@@ -127,6 +131,10 @@ def prepare_cci_dataset(df, period, labels, output_path):
     cci = normalize_cci(cci_raw)
     cci = pd.Series(cci).ffill().fillna(50.0).values
 
+    # Debug: stats des features
+    logger.info(f"  CCI({period}) stats: min={cci.min():.1f}, max={cci.max():.1f}, "
+                f"mean={cci.mean():.1f}, std={cci.std():.1f}")
+
     features = cci.reshape(-1, 1)
     labels_2d = labels.reshape(-1, 1)
 
@@ -163,6 +171,10 @@ def prepare_macd_dataset(df, fast, slow, labels, output_path):
     macd = normalize_macd_histogram(macd_data['histogram'])
     macd = pd.Series(macd).ffill().fillna(50.0).values
 
+    # Debug: stats des features
+    logger.info(f"  MACD({fast}/{slow}) stats: min={macd.min():.1f}, max={macd.max():.1f}, "
+                f"mean={macd.mean():.1f}, std={macd.std():.1f}")
+
     features = macd.reshape(-1, 1)
     labels_2d = labels.reshape(-1, 1)
 
@@ -194,17 +206,16 @@ def prepare_macd_dataset(df, fast, slow, labels, output_path):
 
 
 def run_training(data_path, model_path):
-    """Lance train.py et recupere la val accuracy."""
+    """Lance train.py et recupere la MEILLEURE val accuracy."""
     cmd = [
         sys.executable, 'src/train.py',
         '--data', str(data_path),
-        '--epochs', '20',
-        '--patience', '5',
+        '--epochs', '30',
+        '--patience', '8',
         '--batch-size', '256',
         '--indicator', 'rsi',  # Force single-output mode (label = Close, pas RSI)
     ]
 
-    # Ajouter chemin model temporaire
     result = subprocess.run(
         cmd,
         capture_output=True,
@@ -212,23 +223,33 @@ def run_training(data_path, model_path):
         cwd=Path(__file__).parent.parent
     )
 
-    # Parser la sortie pour trouver val accuracy
     output = result.stdout + result.stderr
 
-    # Chercher "Val   - Loss: X.XXXX, Acc: 0.XXX"
-    val_acc = None
+    # Debug: afficher si erreur
+    if result.returncode != 0:
+        logger.error(f"Train failed: {result.stderr[:500]}")
+        return None
+
+    # Collecter TOUTES les val accuracies et garder la meilleure
+    val_accuracies = []
     for line in output.split('\n'):
         if 'Val   - Loss:' in line and 'Acc:' in line:
             try:
-                # Extraire accuracy
                 acc_part = line.split('Acc:')[1].split(',')[0].strip()
-                val_acc = float(acc_part)
+                val_accuracies.append(float(acc_part))
             except:
                 pass
 
-    # Chercher aussi "Meilleur modèle: Époque X, Val Loss: X.XXXX"
-    # et la derniere val accuracy
-    best_acc = val_acc
+    if not val_accuracies:
+        logger.error("Aucune accuracy trouvee dans la sortie")
+        logger.error(f"Output (500 chars): {output[:500]}")
+        return None
+
+    # Retourner la MEILLEURE accuracy
+    best_acc = max(val_accuracies)
+    last_acc = val_accuracies[-1]
+
+    logger.info(f"  Epochs: {len(val_accuracies)}, Best: {best_acc:.3f}, Last: {last_acc:.3f}")
 
     return best_acc
 
@@ -305,22 +326,22 @@ def main():
     logger.info("="*60)
 
     logger.info("\n=== RSI ===")
-    logger.info(f"{'Period':<10} {'Accuracy':<10}")
+    logger.info(f"{'Period':<10} {'Accuracy':<12}")
     for period, acc in results['RSI'].items():
-        acc_str = f"{acc:.1%}" if acc else "ERREUR"
-        logger.info(f"{period:<10} {acc_str:<10}")
+        acc_str = f"{acc:.2%}" if acc else "ERREUR"
+        logger.info(f"{period:<10} {acc_str:<12}")
 
     logger.info("\n=== CCI ===")
-    logger.info(f"{'Period':<10} {'Accuracy':<10}")
+    logger.info(f"{'Period':<10} {'Accuracy':<12}")
     for period, acc in results['CCI'].items():
-        acc_str = f"{acc:.1%}" if acc else "ERREUR"
-        logger.info(f"{period:<10} {acc_str:<10}")
+        acc_str = f"{acc:.2%}" if acc else "ERREUR"
+        logger.info(f"{period:<10} {acc_str:<12}")
 
     logger.info("\n=== MACD ===")
-    logger.info(f"{'Fast/Slow':<10} {'Accuracy':<10}")
+    logger.info(f"{'Fast/Slow':<10} {'Accuracy':<12}")
     for (fast, slow), acc in results['MACD'].items():
-        acc_str = f"{acc:.1%}" if acc else "ERREUR"
-        logger.info(f"{fast}/{slow:<7} {acc_str:<10}")
+        acc_str = f"{acc:.2%}" if acc else "ERREUR"
+        logger.info(f"{fast}/{slow:<7} {acc_str:<12}")
 
     # Meilleurs
     logger.info("\n" + "="*60)
@@ -332,7 +353,7 @@ def main():
             valid = {k: v for k, v in res.items() if v is not None}
             if valid:
                 best = max(valid.items(), key=lambda x: x[1])
-                logger.info(f"{ind}: {best[0]} -> {best[1]:.1%}")
+                logger.info(f"{ind}: {best[0]} -> {best[1]:.2%}")
 
 
 if __name__ == '__main__':
