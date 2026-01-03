@@ -431,7 +431,7 @@ Nouveau test avec filtre Octave et architecture mono-feature :
 | Indicateur | Accuracy | Precision | Recall | F1 | Gap Train/Test |
 |------------|----------|-----------|--------|-----|----------------|
 | RSI(14) | **78.5%** | 0.775 | 0.809 | 0.792 | **0.1%** ✅ |
-| CCI(20) | *en attente* | - | - | - | - |
+| CCI(20) | **77.7%** | 0.769 | 0.796 | 0.782 | **0.2%** ✅ |
 | MACD(12/26) | *en attente* | - | - | - | - |
 
 ### Comparaison Kalman vs Octave
