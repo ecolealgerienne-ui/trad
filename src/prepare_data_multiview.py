@@ -1,8 +1,10 @@
 """
-Script de préparation des données Multi-View Learning.
+Script de préparation des données Multi-View Learning avec labels 30min.
 
 Pour chaque indicateur cible (RSI, CCI, MACD), les features sont calculées
 avec des paramètres optimisés pour synchroniser avec cette cible.
+
+Basé sur prepare_data_30min.py mais avec paramètres Multi-View.
 
 Usage:
     python src/prepare_data_multiview.py --target rsi --assets BTC ETH BNB ADA LTC
@@ -24,7 +26,6 @@ logger = logging.getLogger(__name__)
 from constants import (
     AVAILABLE_ASSETS_5M, DEFAULT_ASSETS,
     TRIM_EDGES,
-    PREPARED_DATA_DIR,
     SEQUENCE_LENGTH,
     KALMAN_PROCESS_VAR, KALMAN_MEASURE_VAR,
     RSI_PERIOD, CCI_PERIOD, CCI_CONSTANT,
@@ -37,6 +38,10 @@ from indicators import (
     create_sequences
 )
 from filters import kalman_filter
+from prepare_data_30min import resample_5min_to_30min, align_30min_to_5min
+
+# Alias
+split_sequences = split_sequences_chronological
 
 
 # =============================================================================
@@ -87,7 +92,6 @@ def calculate_indicators_multiview(df: pd.DataFrame, target: str) -> np.ndarray:
 
     # 1. RSI
     rsi = calculate_rsi(df['close'], period=params['RSI']['period'])
-    logger.info(f"    RSI(period={params['RSI']['period']})")
 
     # 2. CCI normalisé
     cci_raw = calculate_cci(
@@ -96,7 +100,6 @@ def calculate_indicators_multiview(df: pd.DataFrame, target: str) -> np.ndarray:
         constant=CCI_CONSTANT
     )
     cci_norm = normalize_cci(cci_raw)
-    logger.info(f"    CCI(period={params['CCI']['period']})")
 
     # 3. MACD histogram normalisé
     macd_data = calculate_macd(
@@ -106,7 +109,6 @@ def calculate_indicators_multiview(df: pd.DataFrame, target: str) -> np.ndarray:
         signal_period=MACD_SIGNAL
     )
     macd_hist_norm = normalize_macd_histogram(macd_data['histogram'])
-    logger.info(f"    MACD(fast={params['MACD']['fast']}, slow={params['MACD']['slow']})")
 
     # Combiner
     indicators = np.column_stack([rsi, cci_norm, macd_hist_norm])
@@ -142,53 +144,128 @@ def generate_single_label(indicators: np.ndarray, target_idx: int) -> np.ndarray
     return labels
 
 
-def prepare_single_asset_multiview(df: pd.DataFrame, target: str,
-                                     asset_name: str = "Asset") -> tuple:
+def prepare_single_asset_multiview_30min(df_5min: pd.DataFrame,
+                                          target: str,
+                                          asset_name: str = "Asset"):
     """
-    Prépare les données pour un asset avec paramètres Multi-View.
+    Prépare les données pour un asset avec params Multi-View et labels 30min.
+
+    Basé sur prepare_single_asset_30min mais avec:
+    - Paramètres optimisés par cible pour les features
+    - Label unique pour la cible
 
     Args:
-        df: DataFrame OHLC
+        df_5min: DataFrame 5min avec OHLCV
         target: 'RSI', 'CCI' ou 'MACD'
         asset_name: Nom pour les logs
 
     Returns:
-        (X, Y) avec X shape=(n_seq, 12, 3), Y shape=(n_seq,)
+        (X, Y) avec X shape=(n_seq, 12, 7), Y shape=(n_seq,)
     """
     target_upper = target.upper()
     target_idx = {'RSI': 0, 'CCI': 1, 'MACD': 2}[target_upper]
+    params = TARGET_PARAMS[target_upper]
 
-    logger.info(f"  📈 {asset_name}: Calcul indicateurs Multi-View pour {target_upper}...")
+    logger.info(f"\n{'='*60}")
+    logger.info(f"📈 {asset_name}: Multi-View pour {target_upper}")
+    logger.info(f"{'='*60}")
+    logger.info(f"  Params: RSI({params['RSI']['period']}), "
+                f"CCI({params['CCI']['period']}), "
+                f"MACD({params['MACD']['fast']}/{params['MACD']['slow']})")
 
-    # 1. Calculer indicateurs avec params optimisés pour cette cible
-    indicators = calculate_indicators_multiview(df, target_upper)
+    # =========================================================================
+    # 1. Préparer les index datetime
+    # =========================================================================
+    df = df_5min.copy()
+    if 'timestamp' in df.columns:
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        df = df.set_index('timestamp')
 
-    # 2. Générer label UNIQUE pour la cible
-    labels = generate_single_label(indicators, target_idx)
+    index_5min = df.index
+    logger.info(f"  Données 5min: {len(df)} bougies")
 
-    # Reshape pour create_sequences (attend 2D pour Y)
-    labels_2d = labels.reshape(-1, 1)
+    # =========================================================================
+    # 2. Resample vers 30min
+    # =========================================================================
+    df_30min = resample_5min_to_30min(df_5min)
+    index_30min = df_30min.index
 
-    # 3. Créer séquences
-    X, Y = create_sequences(indicators, labels_2d, sequence_length=SEQUENCE_LENGTH)
+    # =========================================================================
+    # 3. Calculer indicateurs 5min avec params Multi-View
+    # =========================================================================
+    logger.info(f"  📊 Calcul indicateurs 5min (Multi-View)...")
+    df_5min_with_ts = df.reset_index()
+    indicators_5min = calculate_indicators_multiview(df_5min_with_ts, target_upper)
+    logger.info(f"     → Shape: {indicators_5min.shape}")
 
-    # Y est (n_seq, 1), on le flatten
+    # =========================================================================
+    # 4. Calculer indicateurs 30min avec params Multi-View
+    # =========================================================================
+    logger.info(f"  📊 Calcul indicateurs 30min (Multi-View)...")
+    df_30min_with_ts = df_30min.reset_index()
+    indicators_30min = calculate_indicators_multiview(df_30min_with_ts, target_upper)
+    logger.info(f"     → Shape: {indicators_30min.shape}")
+
+    # =========================================================================
+    # 5. Générer label UNIQUE pour la cible (depuis 30min)
+    # =========================================================================
+    logger.info(f"  🏷️ Génération label {target_upper} (depuis 30min)...")
+    labels_30min = generate_single_label(indicators_30min, target_idx)
+
+    buy_pct = labels_30min.sum() / len(labels_30min) * 100
+    logger.info(f"     → {target_upper}: {buy_pct:.1f}% BUY")
+
+    # =========================================================================
+    # 6. Aligner labels 30min sur 5min (forward-fill)
+    # =========================================================================
+    logger.info(f"  🔄 Alignement labels 30min → 5min...")
+    labels_aligned = align_30min_to_5min(labels_30min, index_30min, index_5min)
+
+    # =========================================================================
+    # 7. Aligner indicateurs 30min sur 5min
+    # =========================================================================
+    logger.info(f"  🔄 Alignement indicateurs 30min → 5min...")
+    indicators_30min_aligned = align_30min_to_5min(indicators_30min, index_30min, index_5min)
+
+    # Concatener: 5min + 30min = 6 features
+    indicators_combined = np.hstack([indicators_5min, indicators_30min_aligned])
+    logger.info(f"     → Features combinées: {indicators_combined.shape}")
+
+    # =========================================================================
+    # 8. Ajouter Step Index
+    # =========================================================================
+    minutes = index_5min.minute
+    step_index = (minutes % 30) // 5 + 1
+    step_index_normalized = (step_index - 1) / 5.0
+    step_index_col = step_index_normalized.values.reshape(-1, 1)
+    indicators_combined = np.hstack([indicators_combined, step_index_col])
+    logger.info(f"     → Features finales: {indicators_combined.shape} (6 + step_index)")
+
+    # =========================================================================
+    # 9. Créer séquences
+    # =========================================================================
+    # Reshape labels pour create_sequences (attend 2D)
+    labels_2d = labels_aligned.reshape(-1, 1)
+    X, Y = create_sequences(indicators_combined, labels_2d, sequence_length=SEQUENCE_LENGTH)
+
+    # Flatten Y
     Y = Y.flatten()
 
-    logger.info(f"     → X={X.shape}, Y={Y.shape}")
+    logger.info(f"  ✅ X={X.shape}, Y={Y.shape}")
 
     return X, Y
 
 
-def prepare_and_save_multiview(target: str, assets: list = None,
-                                 output_path: str = None) -> str:
+def prepare_and_save_multiview_30min(target: str,
+                                       assets: list = None,
+                                       output_path: str = None) -> str:
     """
-    Prépare et sauvegarde le dataset Multi-View pour une cible.
+    Prépare et sauvegarde le dataset Multi-View avec labels 30min.
 
     Args:
         target: 'RSI', 'CCI' ou 'MACD'
         assets: Liste des assets
-        output_path: Chemin de sortie (auto si None)
+        output_path: Chemin de sortie
 
     Returns:
         Chemin du fichier sauvegardé
@@ -200,7 +277,7 @@ def prepare_and_save_multiview(target: str, assets: list = None,
     params = TARGET_PARAMS[target_upper]
 
     logger.info("="*80)
-    logger.info(f"PRÉPARATION MULTI-VIEW - Cible: {target_upper}")
+    logger.info(f"PRÉPARATION MULTI-VIEW 30MIN - Cible: {target_upper}")
     logger.info("="*80)
     logger.info(f"💰 Assets: {', '.join(assets)}")
     logger.info(f"🎯 Cible: {target_upper}")
@@ -218,22 +295,21 @@ def prepare_and_save_multiview(target: str, assets: list = None,
         asset_data[asset_name] = df_trimmed
 
     # 2. Préparer par asset
-    logger.info(f"\n2. Calcul indicateurs et labels Multi-View...")
+    logger.info(f"\n2. Préparation Multi-View par asset...")
     prepared_assets = {}
     for asset_name, df in asset_data.items():
-        X, Y = prepare_single_asset_multiview(df, target_upper, asset_name)
+        X, Y = prepare_single_asset_multiview_30min(df, target_upper, asset_name)
         prepared_assets[asset_name] = (X, Y)
 
     # 3. Split chronologique par asset
-    logger.info(f"\n3. Split chronologique par asset...")
+    logger.info(f"\n3. Split chronologique...")
     train_X, train_Y = [], []
     val_X, val_Y = [], []
     test_X, test_Y = [], []
 
     for asset_name, (X, Y) in prepared_assets.items():
-        # Reshape Y pour split
         Y_2d = Y.reshape(-1, 1)
-        (Xtr, Ytr), (Xv, Yv), (Xte, Yte) = split_sequences_chronological(X, Y_2d)
+        (Xtr, Ytr), (Xv, Yv), (Xte, Yte) = split_sequences(X, Y_2d)
 
         train_X.append(Xtr)
         train_Y.append(Ytr.flatten())
@@ -260,7 +336,7 @@ def prepare_and_save_multiview(target: str, assets: list = None,
     # 5. Sauvegarder
     if output_path is None:
         assets_str = '_'.join([a.lower() for a in assets])
-        output_path = f"{PREPARED_DATA_DIR}/dataset_{assets_str}_multiview_{target.lower()}.npz"
+        output_path = f"data/prepared/dataset_{assets_str}_multiview30min_{target.lower()}.npz"
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -277,7 +353,10 @@ def prepare_and_save_multiview(target: str, assets: list = None,
         'timestamp': datetime.now().isoformat(),
         'target': target_upper,
         'assets': assets,
-        'params': params,
+        'params': {k: v for k, v in params.items()},
+        'n_features': X_train.shape[2],
+        'feature_desc': '5min(3) + 30min(3) + step_index(1) = 7 features Multi-View',
+        'label_desc': f'Pente Kalman({target_upper}) 30min',
         'shapes': {
             'X_train': list(X_train.shape),
             'Y_train': list(Y_train.shape),
@@ -300,7 +379,7 @@ def prepare_and_save_multiview(target: str, assets: list = None,
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description='Préparation données Multi-View Learning',
+        description='Préparation données Multi-View Learning avec labels 30min',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
@@ -313,7 +392,7 @@ def parse_args():
                         help='Assets à utiliser')
 
     parser.add_argument('--output', '-o', type=str, default=None,
-                        help='Chemin de sortie (auto si non spécifié)')
+                        help='Chemin de sortie')
 
     return parser.parse_args()
 
@@ -326,13 +405,15 @@ def main():
 
     args = parse_args()
 
-    output_path = prepare_and_save_multiview(
+    output_path = prepare_and_save_multiview_30min(
         target=args.target,
         assets=args.assets,
         output_path=args.output
     )
 
     print(f"\n📁 Dataset prêt: {output_path}")
+    print(f"\nPour entraîner:")
+    print(f"  python src/train.py --data {output_path}")
 
 
 if __name__ == '__main__':
