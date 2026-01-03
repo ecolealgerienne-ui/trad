@@ -91,7 +91,7 @@ def octave_filter(data: np.ndarray, step: float = OCTAVE_STEP) -> np.ndarray:
 # NORMALISATION OHLC (Option A+)
 # =============================================================================
 
-def normalize_ohlc_returns(df: pd.DataFrame) -> np.ndarray:
+def normalize_ohlc_returns(df: pd.DataFrame, clip_value: float = 0.10) -> np.ndarray:
     """
     Normalise OHLC en returns relatifs au Close précédent.
 
@@ -104,9 +104,10 @@ def normalize_ohlc_returns(df: pd.DataFrame) -> np.ndarray:
 
     Args:
         df: DataFrame avec colonnes open, high, low, close
+        clip_value: Valeur max pour clipper les outliers (défaut: 0.10 = ±10%)
 
     Returns:
-        np.array shape (n, 5) avec les 5 canaux normalisés
+        np.array shape (n, 5) avec les 5 canaux normalisés et clippés
     """
     prev_close = df['close'].shift(1)
 
@@ -131,6 +132,15 @@ def normalize_ohlc_returns(df: pd.DataFrame) -> np.ndarray:
 
     # Remplacer NaN par 0 (première ligne)
     features = np.nan_to_num(features, nan=0.0)
+
+    # Clipper les outliers pour stabiliser le training
+    # Les valeurs extrêmes (>10%) causent des gradients instables
+    n_clipped = np.sum((features < -clip_value) | (features > clip_value))
+    if n_clipped > 0:
+        pct_clipped = n_clipped / features.size * 100
+        logger.info(f"     Clipping: {n_clipped:,} valeurs ({pct_clipped:.2f}%) clippées à ±{clip_value*100:.0f}%")
+
+    features = np.clip(features, -clip_value, clip_value)
 
     return features
 
@@ -216,6 +226,7 @@ def generate_octave_labels(indicator: np.ndarray, step: float = OCTAVE_STEP,
 
 def prepare_single_asset(df: pd.DataFrame, target: str,
                          delta: int = 0,
+                         clip_value: float = 0.10,
                          asset_name: str = "Asset") -> tuple:
     """
     Prépare OHLC normalisé + labels pour UN SEUL asset.
@@ -231,8 +242,8 @@ def prepare_single_asset(df: pd.DataFrame, target: str,
     """
     logger.info(f"  {asset_name}: Préparation ({len(df):,} bougies)...")
 
-    # 1. Normaliser OHLC (5 canaux)
-    features = normalize_ohlc_returns(df)
+    # 1. Normaliser OHLC (5 canaux) avec clipping
+    features = normalize_ohlc_returns(df, clip_value=clip_value)
     logger.info(f"     OHLC normalisé: shape={features.shape}")
     logger.info(f"     O_ret: [{features[:,0].min():.4f}, {features[:,0].max():.4f}]")
     logger.info(f"     C_ret: [{features[:,3].min():.4f}, {features[:,3].max():.4f}]")
@@ -266,7 +277,8 @@ def prepare_and_save(target: str,
                      assets: list = None,
                      delta: int = 0,
                      output_path: str = None,
-                     octave_step: float = OCTAVE_STEP) -> str:
+                     octave_step: float = OCTAVE_STEP,
+                     clip_value: float = 0.10) -> str:
     """
     Prépare les données OHLC normalisées et les sauvegarde.
 
@@ -296,6 +308,7 @@ def prepare_and_save(target: str,
     logger.info("PRÉPARATION DES DONNÉES OHLC NORMALISÉES")
     logger.info("="*80)
     logger.info(f"Input: OHLC (5 canaux: O_ret, H_ret, L_ret, C_ret, Range_ret)")
+    logger.info(f"Clipping: ±{clip_value*100:.0f}%")
     logger.info(f"Target: FL_{target.upper()} (Octave step={octave_step}, delta={delta})")
     logger.info(f"Assets: {', '.join(assets)}")
 
@@ -321,7 +334,7 @@ def prepare_and_save(target: str,
 
     prepared_assets = {}
     for asset_name, df in asset_data.items():
-        X, Y = prepare_single_asset(df, target, delta, asset_name)
+        X, Y = prepare_single_asset(df, target, delta, clip_value, asset_name)
         prepared_assets[asset_name] = (X, Y)
 
     # =========================================================================
@@ -392,6 +405,7 @@ def prepare_and_save(target: str,
         'input_type': 'ohlc_normalized',
         'channels': ['O_ret', 'H_ret', 'L_ret', 'C_ret', 'Range_ret'],
         'normalization': 'returns_vs_prev_close',
+        'clip_value': clip_value,
         'target': target,
         'filter_type': 'octave',
         'octave_step': octave_step,
@@ -480,6 +494,8 @@ Assets disponibles: {', '.join(available_assets)}
                         help=f'Paramètre du filtre Octave (défaut: {OCTAVE_STEP})')
     parser.add_argument('--output', '-o', type=str, default=None,
                         help='Chemin de sortie (défaut: auto-généré)')
+    parser.add_argument('--clip', type=float, default=0.10,
+                        help='Valeur de clipping des outliers (défaut: 0.10 = ±10%%)')
 
     args = parser.parse_args()
 
@@ -495,7 +511,8 @@ Assets disponibles: {', '.join(available_assets)}
         assets=args.assets,
         delta=args.delta,
         output_path=args.output,
-        octave_step=args.octave_step
+        octave_step=args.octave_step,
+        clip_value=args.clip
     )
 
     print(f"\n Terminé! Dataset prêt: {output_path}")
