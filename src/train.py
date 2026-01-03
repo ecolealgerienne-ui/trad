@@ -38,6 +38,7 @@ from constants import (
 from indicators import prepare_datasets
 from model import create_model, compute_metrics
 from prepare_data import load_prepared_data
+from data_utils import normalize_labels_for_single_output
 from utils import log_dataset_metadata
 
 
@@ -471,21 +472,9 @@ def main():
 
     # Filtrer les labels si mode single-output
     if single_indicator:
-        # Cas 1: Multi-View dataset - déjà single-target (n, 1)
-        if Y_train.ndim == 2 and Y_train.shape[1] == 1:
-            logger.info(f"\n  🔍 Labels déjà single-target (Multi-View dataset)")
-        # Cas 2: Labels 1D legacy (n,)
-        elif Y_train.ndim == 1:
-            logger.info(f"\n  🔍 Labels 1D, reshape vers (n, 1)")
-            Y_train = Y_train.reshape(-1, 1)
-            Y_val = Y_val.reshape(-1, 1)
-            Y_test = Y_test.reshape(-1, 1)
-        # Cas 3: Multi-output dataset (n, 3) - filtrer
-        else:
-            logger.info(f"\n  🔍 Filtrage labels pour {indicator_name} (index {indicator_idx})...")
-            Y_train = Y_train[:, indicator_idx:indicator_idx+1]
-            Y_val = Y_val[:, indicator_idx:indicator_idx+1]
-            Y_test = Y_test[:, indicator_idx:indicator_idx+1]
+        Y_train = normalize_labels_for_single_output(Y_train, indicator_idx, indicator_name)
+        Y_val = normalize_labels_for_single_output(Y_val, indicator_idx, indicator_name)
+        Y_test = normalize_labels_for_single_output(Y_test, indicator_idx, indicator_name)
 
     logger.info(f"\n📊 Datasets:")
     logger.info(f"  Train: X={X_train.shape}, Y={Y_train.shape}")

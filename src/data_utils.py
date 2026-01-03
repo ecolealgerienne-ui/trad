@@ -226,6 +226,46 @@ def split_sequences_chronological(X, Y, train_ratio=TRAIN_SPLIT, val_ratio=VAL_S
 
 
 # =============================================================================
+# NORMALISATION DES LABELS
+# =============================================================================
+
+def normalize_labels_for_single_output(Y: np.ndarray, indicator_idx: int = None,
+                                       indicator_name: str = None) -> np.ndarray:
+    """
+    Normalise les labels pour le mode single-output.
+
+    Gère 3 cas:
+        1. Multi-View dataset: Y shape (n, 1) - déjà single-target
+        2. Labels 1D legacy: Y shape (n,) - reshape vers (n, 1)
+        3. Multi-output dataset: Y shape (n, 3) - slice selon indicator_idx
+
+    Args:
+        Y: Labels (1D ou 2D)
+        indicator_idx: Index de l'indicateur (0=RSI, 1=CCI, 2=MACD)
+        indicator_name: Nom pour les logs
+
+    Returns:
+        Labels normalisés shape (n, 1)
+    """
+    # Cas 1: Multi-View dataset - déjà single-target (n, 1)
+    if Y.ndim == 2 and Y.shape[1] == 1:
+        logger.info(f"  🔍 Labels déjà single-target (Multi-View dataset)")
+        return Y
+
+    # Cas 2: Labels 1D legacy (n,)
+    if Y.ndim == 1:
+        logger.info(f"  🔍 Labels 1D, reshape vers (n, 1)")
+        return Y.reshape(-1, 1)
+
+    # Cas 3: Multi-output dataset (n, 3) - filtrer
+    if indicator_idx is None:
+        raise ValueError("indicator_idx requis pour dataset multi-output")
+    name = indicator_name or f"index {indicator_idx}"
+    logger.info(f"  🔍 Filtrage labels pour {name} (index {indicator_idx})...")
+    return Y[:, indicator_idx:indicator_idx+1]
+
+
+# =============================================================================
 # FONCTIONS OBSOLÈTES (supprimées)
 # =============================================================================
 # Les fonctions suivantes ont été supprimées car elles causaient du data leakage:
