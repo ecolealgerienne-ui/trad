@@ -695,7 +695,8 @@ def generate_labels(filtered_indicator: np.ndarray) -> np.ndarray:
 
 def create_sequences(indicators: np.ndarray,
                     labels: np.ndarray,
-                    sequence_length: int = SEQUENCE_LENGTH) -> Tuple[np.ndarray, np.ndarray]:
+                    sequence_length: int = SEQUENCE_LENGTH,
+                    add_position_index: bool = False) -> Tuple[np.ndarray, np.ndarray]:
     """
     Crée des séquences de longueur fixe pour l'entraînement du modèle.
 
@@ -707,15 +708,19 @@ def create_sequences(indicators: np.ndarray,
         indicators: Array (n_samples, n_indicators) - 3 indicateurs normalisés (RSI, CCI, MACD)
         labels: Array (n_samples, n_outputs) - 3 labels binaires (un par indicateur)
         sequence_length: Longueur des séquences (défaut: 12)
+        add_position_index: Si True, ajoute une colonne Position Index (1/12 → 12/12)
+                           Permet au modèle de pondérer différemment selon la position
+                           dans la séquence (les dernières valeurs sont plus importantes)
 
     Returns:
-        X: Array (n_sequences, sequence_length, n_indicators) - Shape (N, 12, 3+)
+        X: Array (n_sequences, sequence_length, n_indicators+1 si position_index)
         Y: Array (n_sequences, n_outputs) - Shape (N, 3)
 
     Example:
         >>> X, Y = create_sequences(indicators, labels, sequence_length=12)
-        >>> print(X.shape)  # (N, 12, 3) ou (N, 12, 4) avec step_index
-        >>> print(Y.shape)  # (N, 3)
+        >>> print(X.shape)  # (N, 12, 3)
+        >>> X, Y = create_sequences(indicators, labels, add_position_index=True)
+        >>> print(X.shape)  # (N, 12, 4) avec position_index
     """
     n_samples = len(indicators)
     n_indicators = indicators.shape[1]
@@ -724,16 +729,33 @@ def create_sequences(indicators: np.ndarray,
     # Nombre de séquences possibles
     n_sequences = n_samples - sequence_length
 
+    # Nombre de features (avec ou sans position_index)
+    n_features = n_indicators + 1 if add_position_index else n_indicators
+
     # Initialiser arrays
-    X = np.zeros((n_sequences, sequence_length, n_indicators))
+    X = np.zeros((n_sequences, sequence_length, n_features))
     Y = np.zeros((n_sequences, n_outputs)) if n_outputs > 1 else np.zeros(n_sequences)
+
+    # Créer le Position Index une seule fois (réutilisé pour chaque séquence)
+    # Valeurs: [1/12, 2/12, ..., 12/12] = [0.083, 0.167, ..., 1.0]
+    if add_position_index:
+        position_index = np.arange(1, sequence_length + 1) / sequence_length
+        logger.info(f"  Position Index activé: {position_index[0]:.3f} → {position_index[-1]:.3f}")
 
     # Créer séquences
     for i in range(n_sequences):
-        X[i] = indicators[i:i+sequence_length]
+        if add_position_index:
+            # Concaténer indicateurs + position_index
+            seq_indicators = indicators[i:i+sequence_length]
+            seq_with_pos = np.column_stack([seq_indicators, position_index])
+            X[i] = seq_with_pos
+        else:
+            X[i] = indicators[i:i+sequence_length]
         Y[i] = labels[i+sequence_length]
 
     logger.info(f"Séquences créées: X={X.shape}, Y={Y.shape}")
+    if add_position_index:
+        logger.info(f"  → Position Index ajouté (feature #{n_features})")
 
     return X, Y
 
