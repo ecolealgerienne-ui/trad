@@ -402,7 +402,9 @@ def generate_predictions(model: nn.Module, X: np.ndarray, device: str, batch_siz
         batch_size: Taille des batches
 
     Returns:
-        Prédictions binaires (n_samples, n_outputs)
+        Probabilités continues [0,1] (n_samples, n_outputs)
+        NOTE: Les probabilités sont sauvegardées brutes, pas binarisées.
+              La binarisation (seuil 0.5) se fait dans la state machine.
     """
     model.eval()
     dataset = IndicatorDataset(X, np.zeros((len(X), 1)))  # Y factice
@@ -414,8 +416,8 @@ def generate_predictions(model: nn.Module, X: np.ndarray, device: str, batch_siz
             X_batch = X_batch.to(device)
             outputs = model(X_batch)
             # Le modèle applique déjà sigmoid dans forward(), outputs sont des probabilités [0,1]
-            preds = (outputs > 0.5).float()
-            all_preds.append(preds.cpu().numpy())
+            # IMPORTANT: Sauvegarder les probabilités brutes, pas binarisées!
+            all_preds.append(outputs.cpu().numpy())
 
     return np.concatenate(all_preds, axis=0)
 

@@ -368,13 +368,15 @@ def run_state_machine(
     assets: List[str] = None,
     transition_only: bool = False,
     min_stability: int = 2,
+    threshold: float = 0.5,
+    min_confidence: float = 0.0,
     verbose: bool = True
 ) -> Tuple[np.ndarray, dict]:
     """
     Exécute la state machine sur les prédictions.
 
     Args:
-        *_pred: Prédictions du modèle (0 ou 1)
+        *_pred: Prédictions du modèle (probabilités [0,1] ou binaires)
         *_octave: Labels Octave (direction)
         *_kalman: Labels Kalman (direction)
         returns: Rendements (c_ret) pour calcul PnL (optionnel)
@@ -384,6 +386,8 @@ def run_state_machine(
         assets: Liste des noms d'assets
         transition_only: Si True, entrer seulement sur CHANGEMENT vers TOTAL
         min_stability: Nombre de périodes de stabilité du signal avant entrée
+        threshold: Seuil de probabilité pour binarisation (défaut: 0.5)
+        min_confidence: Confiance minimale (ex: 0.2 = ignorer si 0.3<p<0.7)
 
     Returns:
         positions: Array des positions (0=FLAT, 1=LONG, -1=SHORT)
@@ -415,6 +419,7 @@ def run_state_machine(
         'blocked_by_partiel': 0,  # Pour mode strict
         'blocked_by_no_transition': 0,  # Pour mode transition-only
         'blocked_by_low_stability': 0,  # Pour mode transition-only
+        'blocked_by_low_confidence': 0,  # Pour filtrage par confiance
         'agreement_counts': {'TOTAL': 0, 'PARTIEL': 0, 'FORT': 0},
         # PnL par état d'entrée
         'pnl_by_entry_state': {'TOTAL': [], 'PARTIEL': []},
@@ -426,6 +431,8 @@ def run_state_machine(
         'strict_mode': strict,
         'transition_only_mode': transition_only,
         'min_stability': min_stability,
+        'threshold': threshold,
+        'min_confidence': min_confidence,
         'fees_rate': fees
     }
 
@@ -435,10 +442,25 @@ def run_state_machine(
     current_entry_asset = None
 
     for i in range(n_samples):
-        # Récupérer les signaux
-        m_pred = int(macd_pred[i])
-        r_pred = int(rsi_pred[i])
-        c_pred = int(cci_pred[i])
+        # Récupérer les probabilités brutes
+        m_prob = float(macd_pred[i])
+        r_prob = float(rsi_pred[i])
+        c_prob = float(cci_pred[i])
+
+        # Calculer la confiance (distance au seuil 0.5)
+        m_conf = abs(m_prob - 0.5)
+        r_conf = abs(r_prob - 0.5)
+        c_conf = abs(c_prob - 0.5)
+
+        # Vérifier si confiance suffisante
+        low_confidence = (m_conf < min_confidence or r_conf < min_confidence or c_conf < min_confidence)
+        if low_confidence:
+            stats['blocked_by_low_confidence'] += 1
+
+        # Binariser avec threshold
+        m_pred = 1 if m_prob >= threshold else 0
+        r_pred = 1 if r_prob >= threshold else 0
+        c_pred = 1 if c_prob >= threshold else 0
 
         # Direction des filtres (basée sur les labels = pente filtrée)
         octave_dir = int(macd_octave[i])  # MACD comme référence principale
@@ -530,10 +552,14 @@ def run_state_machine(
 
         # Vérifier entrée
         if ctx.position == Position.FLAT:
-            new_position = should_enter(
-                m_pred, r_pred, c_pred, octave_dir, kalman_dir, ctx, i,
-                strict=strict, transition_only=transition_only, min_stability=min_stability
-            )
+            # Bloquer entrée si confiance insuffisante
+            if low_confidence and min_confidence > 0:
+                new_position = None
+            else:
+                new_position = should_enter(
+                    m_pred, r_pred, c_pred, octave_dir, kalman_dir, ctx, i,
+                    strict=strict, transition_only=transition_only, min_stability=min_stability
+                )
             if new_position:
                 ctx.position = new_position
                 ctx.current_trade_start = i
@@ -596,6 +622,7 @@ def run_state_machine(
         else:
             mode_str = "NORMAL (déprécié)"
         print(f"\n⚙️ Mode: {mode_str}")
+        print(f"   Threshold: {threshold:.2f}, Min Confidence: {min_confidence:.2f}")
         if fees > 0:
             print(f"   Frais: {fees*100:.2f}% par trade (entrée + sortie)")
 
@@ -627,6 +654,8 @@ def run_state_machine(
         if transition_only:
             print(f"   Bloquées (pas de transition): {stats['blocked_by_no_transition']}")
             print(f"   Bloquées (stabilité < {min_stability}): {stats['blocked_by_low_stability']}")
+        if min_confidence > 0:
+            print(f"   Bloquées (confiance < {min_confidence:.2f}): {stats['blocked_by_low_confidence']}")
 
         print(f"\n📉 Sorties:")
         print(f"   Via TOTAL: {stats['exits_total']}")
@@ -715,6 +744,10 @@ def main():
                         help='Mode Transition-Only: entrer seulement sur CHANGEMENT vers TOTAL')
     parser.add_argument('--min-stability', type=int, default=2,
                         help='Nombre de périodes de stabilité du signal avant entrée')
+    parser.add_argument('--threshold', type=float, default=0.5,
+                        help='Seuil de probabilité pour binarisation (défaut: 0.5)')
+    parser.add_argument('--min-confidence', type=float, default=0.0,
+                        help='Confiance minimale requise (ex: 0.2 = ignorer si 0.3<p<0.7)')
 
     args = parser.parse_args()
 
@@ -822,7 +855,9 @@ def main():
         asset_indices=asset_indices,
         assets=assets,
         transition_only=args.transition_only,
-        min_stability=args.min_stability
+        min_stability=args.min_stability,
+        threshold=args.threshold,
+        min_confidence=args.min_confidence
     )
 
     # Sauvegarder si demandé
