@@ -103,41 +103,68 @@ def load_dataset(npz_path: str) -> dict:
     return result
 
 
-def load_model_predictions(model_path: str, X: np.ndarray) -> np.ndarray:
+def load_model_predictions(model_path: str, X: np.ndarray, batch_size: int = 512) -> np.ndarray:
     """
     Charge un modèle et génère les prédictions.
+
+    Utilise la même logique que evaluate.py pour charger le modèle
+    avec la bonne architecture depuis le checkpoint.
 
     Returns:
         np.array de prédictions (0 ou 1)
     """
     import torch
-    from model import MultiOutputCNNLSTM
+    from model import create_model
 
     logger.info(f"🤖 Chargement modèle: {model_path}")
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # Charger le modèle
+    # Charger checkpoint pour récupérer la config du modèle
     checkpoint = torch.load(model_path, map_location=device)
 
-    # Créer le modèle
-    n_features = X.shape[2]
-    seq_length = X.shape[1]
-    model = MultiOutputCNNLSTM(
-        sequence_length=seq_length,
-        num_indicators=n_features,
-        num_outputs=1  # Single output pour OHLC
-    ).to(device)
+    # Récupérer config du modèle (ou utiliser défauts si ancien checkpoint)
+    model_config = checkpoint.get('model_config', {})
 
+    # Détecter dimensions depuis les données
+    n_features = X.shape[2]
+    num_outputs = model_config.get('num_outputs', 1)
+
+    # Créer le modèle avec la même architecture que l'entraînement
+    model, _ = create_model(
+        device=device,
+        num_indicators=n_features,
+        num_outputs=num_outputs,
+        cnn_filters=model_config.get('cnn_filters', 64),
+        lstm_hidden_size=model_config.get('lstm_hidden_size', 64),
+        lstm_num_layers=model_config.get('lstm_num_layers', 2),
+        lstm_dropout=model_config.get('lstm_dropout', 0.2),
+        dense_hidden_size=model_config.get('dense_hidden_size', 32),
+        dense_dropout=model_config.get('dense_dropout', 0.3),
+    )
+
+    # Charger poids
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
 
-    # Prédictions
-    X_tensor = torch.tensor(X, dtype=torch.float32).to(device)
+    logger.info(f"  ✅ Modèle chargé (époque {checkpoint.get('epoch', '?')})")
+    if model_config:
+        logger.info(f"     Config: CNN={model_config.get('cnn_filters')}, "
+                   f"LSTM={model_config.get('lstm_hidden_size')}x{model_config.get('lstm_num_layers')}")
+
+    # Prédictions par batch (évite OOM sur grands datasets)
+    all_predictions = []
+    n_samples = len(X)
 
     with torch.no_grad():
-        outputs = model(X_tensor)
-        predictions = (torch.sigmoid(outputs) > 0.5).cpu().numpy().flatten()
+        for i in range(0, n_samples, batch_size):
+            batch_X = X[i:i+batch_size]
+            X_tensor = torch.tensor(batch_X, dtype=torch.float32).to(device)
+            outputs = model(X_tensor)
+            preds = (torch.sigmoid(outputs) > 0.5).cpu().numpy().flatten()
+            all_predictions.append(preds)
+
+    predictions = np.concatenate(all_predictions)
 
     logger.info(f"  Prédictions générées: {len(predictions)}")
     logger.info(f"  Distribution: {predictions.mean()*100:.1f}% LONG, {(1-predictions.mean())*100:.1f}% SHORT")
