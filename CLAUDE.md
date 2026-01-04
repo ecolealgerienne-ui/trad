@@ -2,7 +2,7 @@
 
 **Date**: 2026-01-04
 **Statut**: Pipeline complet implemente - Objectif 85% ATTEINT + Approche OHLC
-**Version**: 4.1
+**Version**: 4.4
 
 ---
 
@@ -1146,6 +1146,40 @@ Utiliser **deux filtres** (Octave + Kalman) appliques au meme signal pour obteni
 
 Les deux sont **complementaires**, pas redondants.
 
+### Resultats Empiriques - Comparaison Octave20 vs Kalman (2026-01-04)
+
+Analyse sur 20000 samples (split train) pour chaque indicateur :
+
+| Indicateur | Concordance | Desaccord | Isoles (%) | Interpretation |
+|------------|-------------|-----------|------------|----------------|
+| RSI | 86.8% | 13.2% | 66.2% | Plus nerveux, plus de transitions |
+| CCI | 88.6% | 11.4% | 64.8% | Vitesse moyenne |
+| **MACD** | **90.2%** | **9.8%** | **62.9%** | Plus stable, moins de desaccord |
+
+**Observations cles :**
+
+1. **Plus l'indicateur est "lourd", plus les filtres sont d'accord**
+   - RSI (oscillateur vitesse) : 86.8% concordance
+   - CCI (oscillateur deviation) : 88.6% concordance
+   - MACD (indicateur tendance) : 90.2% concordance
+
+2. **~65% des desaccords sont isoles** (1 sample)
+   - = Moments transitoires brefs
+   - Les 35% restants = blocs de desaccord (vraies zones d'incertitude)
+
+3. **Implications pour la state machine :**
+   - MACD : Signal le plus fiable, moins besoin de confirmation
+   - RSI : Necessite plus de filtrage anti-flicker
+   - Zones de desaccord = prudence accrue dans les decisions
+
+**Commande de comparaison :**
+```bash
+python src/compare_datasets.py \
+    --file1 data/prepared/dataset_btc_eth_bnb_ada_ltc_ohlcv2_<indicator>_octave20.npz \
+    --file2 data/prepared/dataset_btc_eth_bnb_ada_ltc_ohlcv2_<indicator>_kalman.npz \
+    --split train --sample 20000
+```
+
 ### Ce que ca apporte
 
 - Mesure de **robustesse** du signal
@@ -1271,4 +1305,4 @@ Le modele reste inchange, on ameliore la **qualite decisionnelle** en aval.
 
 **Cree par**: Claude Code
 **Derniere MAJ**: 2026-01-04
-**Version**: 4.3 (+ Feature Multi-Filtres documentee)
+**Version**: 4.4 (+ Resultats comparaison Octave20 vs Kalman)
