@@ -2,7 +2,7 @@
 
 **Date**: 2026-01-04
 **Statut**: Pipeline complet implemente - Objectif 85% ATTEINT + Approche OHLC
-**Version**: 4.4
+**Version**: 4.5
 
 ---
 
@@ -1301,8 +1301,125 @@ C'est une strategie d'**architecture evolutive**:
 
 Le modele reste inchange, on ameliore la **qualite decisionnelle** en aval.
 
+### Methodologie - Apprendre la State Machine des Erreurs
+
+**Principe fondamental**: Les accords sont sans interet, les desaccords contiennent toute l'information.
+
+#### Pourquoi analyser les desaccords?
+
+| Situation | Information | Action |
+|-----------|-------------|--------|
+| Tous d'accord | Aucune (decision evidente) | Rien a apprendre |
+| **Desaccord** | Zone de conflit | **Deduire des regles** |
+
+La state machine n'ajoute pas de signal, elle ajoute de la **coherence temporelle**.
+
+#### Methode 1: Analyse Conditionnelle des Erreurs (RECOMMANDEE)
+
+**Etape 1 - Logger tout** (script `analyze_errors_state_machine.py`):
+```
+Pour chaque timestep:
+- Predictions: RSI_pred, CCI_pred, MACD_pred
+- Filtres: Octave_dir, Kalman_dir, Kalman_var
+- Contexte: StepIdx, trade_duration
+- Reference: Oracle action
+- Resultat: action modele, P&L
+```
+
+**Etape 2 - Isoler les cas problematiques**:
+```python
+# Erreurs a analyser
+Model = LONG, Oracle = HOLD ou SHORT
+Model = SHORT, Oracle = HOLD ou LONG
+```
+
+**Etape 3 - Chercher les patterns**:
+```
+❌ Erreurs frequentes quand:
+   - RSI = DOWN, MACD = UP (conflit)
+   - Kalman variance elevee
+   - StepIdx < 3 (debut de cycle)
+
+❌ Sorties prematurees quand:
+   - Octave encore UP
+   - trade_duration < 3 periodes
+```
+
+**Etape 4 - Transformer en regles**:
+```python
+if position == LONG and model_pred == DOWN:
+    if octave_dir == kalman_dir == UP:
+        if trade_duration < 3:
+            action = HOLD  # Ignorer le flip
+```
+
+#### Methode 2: Decision Tree (Regles Explicites)
+
+Entrainer un arbre de decision peu profond:
+```python
+Inputs = [RSI_pred, CCI_pred, MACD_pred, Octave_dir, Kalman_dir, StepIdx]
+Target = Oracle_action
+max_depth = 4  # Limiter pour eviter overfit
+```
+
+Extraire les regles:
+```
+SI MACD == UP
+ET StepIdx < 3
+ET Kalman_var > seuil
+ALORS HOLD (pas encore confirme)
+```
+
+#### Methode 3: Clustering des Desaccords
+
+1. Filtrer les timesteps ou indicateurs/filtres divergent
+2. Clustering (K-means, DBSCAN) sur les features
+3. Chaque cluster = un "type de conflit"
+
+| Cluster | Caracteristiques | Interpretation |
+|---------|------------------|----------------|
+| A | RSI flip, MACD stable | Faux retournement |
+| B | Tous changent, StepIdx > 4 | Vrai retournement |
+| C | Kalman_var haute | Zone d'incertitude |
+
+#### Priorite d'Implementation
+
+| # | Methode | Complexite | Risque overfit |
+|---|---------|------------|----------------|
+| **1** | Analyse erreurs | Faible | Faible |
+| 2 | Decision Tree | Moyenne | Moyen |
+| 3 | Clustering | Elevee | Eleve |
+
+#### Script analyze_errors_state_machine.py
+
+```bash
+# Analyser les erreurs sur le split test
+python src/analyze_errors_state_machine.py \
+    --data data/prepared/dataset_..._octave20.npz \
+    --data-kalman data/prepared/dataset_..._kalman.npz \
+    --split test \
+    --output results/error_analysis.csv
+```
+
+Colonnes generees:
+- `timestamp`, `asset`
+- `rsi_pred`, `cci_pred`, `macd_pred`
+- `octave_dir`, `kalman_dir`, `filters_agree`
+- `oracle_action`, `model_action`, `is_error`
+- `trade_duration`, `step_idx`
+
+#### Ce qu'il ne faut PAS faire
+
+| ⚠️ Piege | Pourquoi |
+|----------|----------|
+| Chercher des regles ou tout va bien | Aucun signal |
+| Laisser un NN decider seul | Perte de stabilite |
+| Apprendre sur le P&L directement | Trop bruite |
+| Trop de regles | Explosion combinatoire |
+| Seuils trop fins | Sur-optimisation |
+
 ---
 
 **Cree par**: Claude Code
 **Derniere MAJ**: 2026-01-04
-**Version**: 4.4 (+ Resultats comparaison Octave20 vs Kalman)
+**Version**: 4.5 (+ Methodologie State Machine)
