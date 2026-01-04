@@ -1555,7 +1555,9 @@ class Context:
     position: str           # FLAT, LONG, SHORT
     entry_time: int         # Timestamp entree
     last_transition: int    # Derniere transition MACD
-    confirmation_count: int # Compteur de confirmations
+    confirmation_count: int # Compteur de confirmations (directionnel)
+    exit_delay_count: int   # Compteur delai sortie (max 1 si FORT)
+    prev_macd: int          # Direction MACD precedente (pour reset)
 ```
 
 **Fonction d'accord :**
@@ -1609,6 +1611,7 @@ def should_enter(macd_pred, rsi_pred, cci_pred, ctx, current_time):
 def should_exit(macd_pred, rsi_pred, cci_pred, ctx, current_time):
     """
     Decide si on doit sortir de position.
+    REGLE CRITIQUE: Ne JAMAIS bloquer une sortie MACD indefiniment.
     """
     if ctx.position == 'FLAT':
         return False
@@ -1626,19 +1629,55 @@ def should_exit(macd_pred, rsi_pred, cci_pred, ctx, current_time):
 
     agreement = get_agreement_level(macd_pred, rsi_pred, cci_pred, ...)
 
-    # Regle 4: RSI/CCI peuvent bloquer la sortie
-    if agreement == 'FORT':
-        return False  # Trop de confusion, rester
-
-    # Sortir si accord ou partiel confirme
+    # CORRECTION EXPERT: Sortie TOUJOURS possible si MACD change
+    # - TOTAL: sortie immediate
+    # - PARTIEL: sortie apres 1 confirmation
+    # - FORT: sortie apres 1 periode max (JAMAIS bloquer)
     if agreement == 'TOTAL':
         return True
-    elif agreement == 'PARTIEL' and ctx.confirmation_count >= 2:
+    elif agreement == 'PARTIEL' and ctx.confirmation_count >= 1:
         return True
+    elif agreement == 'FORT':
+        # Delai max 1 periode, puis sortie forcee
+        if ctx.exit_delay_count >= 1:
+            return True  # Sortie forcee pour proteger le capital
+        ctx.exit_delay_count += 1
+        return False
 
     ctx.confirmation_count += 1
     return False
 ```
+
+**Definition stricte de la confirmation (CRITIQUE) :**
+```python
+def update_confirmation(macd_pred, prev_macd, agreement, ctx):
+    """
+    La confirmation doit etre:
+    - Directionnelle (MACD stable)
+    - Coherente (pas de desaccord fort)
+    - Reinitialisable (reset si contradiction)
+    """
+    macd_stable = (macd_pred == prev_macd)
+
+    if macd_stable and agreement != 'FORT':
+        ctx.confirmation_count += 1
+    else:
+        ctx.confirmation_count = 0  # RESET obligatoire
+
+    # Reset aussi le delai de sortie si direction change
+    if not macd_stable:
+        ctx.exit_delay_count = 0
+```
+
+**Asymetrie entree/sortie (validation expert) :**
+
+| Action | Risque si ratee | Reactivite |
+|--------|-----------------|------------|
+| Entree | Opportunite manquee | Peut attendre |
+| **Sortie** | **Perte reelle** | **Doit etre reactive** |
+
+> "Les sorties doivent etre plus reactives que les entrees."
+> — Expert
 
 **Diagramme simplifie :**
 ```
