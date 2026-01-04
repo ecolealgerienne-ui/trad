@@ -1127,6 +1127,148 @@ Liste organisee des experiences et optimisations a tester pour atteindre 90%+.
 
 ---
 
+## FEATURE FUTURE - Machine a Etat Multi-Filtres (Octave + Kalman)
+
+**Date**: 2026-01-04
+**Statut**: A implementer apres stabilisation du modele ML
+**Priorite**: Post-production
+
+### Concept
+
+Utiliser **deux filtres** (Octave + Kalman) appliques au meme signal pour obtenir plusieurs estimations de l'etat latent. Ces estimations sont utilisees dans la **machine a etat** (pas dans le modele ML).
+
+### Difference Fondamentale Octave vs Kalman
+
+| Filtre | Nature | Ce qu'il "voit" bien |
+|--------|--------|----------------------|
+| **Octave** | Frequentiel (Butterworth) | Structure, cycles, tendances |
+| **Kalman** | Etat probabiliste | Continuite, incertitude, variance |
+
+Les deux sont **complementaires**, pas redondants.
+
+### Ce que ca apporte
+
+- Mesure de **robustesse** du signal
+- Information sur la **vitesse** (Octave) et la **stabilite/confiance** (Kalman)
+- Capacite a detecter:
+  - Transitions reelles vs bruit transitoire
+  - Zones d'incertitude (desaccord entre filtres)
+
+### Ce que ca N'apporte PAS
+
+- Pas de nouvel alpha
+- Pas d'amelioration brute de l'accuracy ML
+- Ce n'est pas une source d'edge autonome
+
+**C'est un amplificateur de decision, pas une source d'alpha.**
+
+### Ou utiliser ces filtres (CRUCIAL)
+
+**❌ PAS dans le modele ML:**
+- Double comptage d'information
+- Correlation extreme entre les deux
+- Peu de gain ML
+- Risque de fuite deguisee
+
+**✅ Dans la machine a etat:**
+- Regles de validation
+- Modulation de confiance
+- Gestion des sorties
+
+### Regles de Combinaison
+
+#### Cas 1: Accord total
+```
+Octave_dir == UP
+Kalman_dir == UP
+```
+→ Signal fort → tolerance au bruit ↑
+→ Trades plus longs
+
+#### Cas 2: Desaccord
+```
+Octave_dir != Kalman_dir
+```
+→ Zone de transition
+→ Reduire l'agressivite:
+  - Confirmation plus longue
+  - Sorties plus strictes
+  - Pas d'inversion directe
+
+#### Cas 3: Kalman variance elevee
+```
+Kalman_var > seuil
+```
+→ Marche instable
+→ Interdire nouvelles entrees
+→ Laisser courir positions existantes
+
+### Exemple d'Integration dans la State Machine
+
+**Entree LONG:**
+```python
+if model_pred == UP:
+    if octave_dir == UP and kalman_dir != DOWN:
+        enter_long()      # Accord = confiance haute
+    else:
+        wait_confirmation()  # Desaccord = patience
+```
+
+**Sortie LONG (early):**
+```python
+if octave_dir == DOWN and kalman_dir == DOWN:
+    exit_long()  # Vrai retournement confirme
+```
+
+**Sortie LONG (late):**
+```python
+if kalman_var > seuil and rsi_faiblit:
+    exit_long()  # Marche devient instable
+```
+
+### Application au Probleme de Micro-Sorties
+
+Le modele fait ~2500 trades vs ~800 pour Oracle (3x trop).
+
+Avec cette logique:
+- **Accord filtres** → permettre le trade
+- **Desaccord filtres** → ignorer le changement (probablement du bruit)
+
+Cela devrait reduire les micro-sorties sans toucher au modele ML.
+
+### Implementation Prevue
+
+1. **Calculer les deux filtres** sur le signal cible (ex: MACD)
+2. **Extraire la direction** de chaque filtre (pente > 0 ?)
+3. **Extraire la variance Kalman** comme mesure d'incertitude
+4. **Ajouter ces colonnes** au DataFrame de backtest
+5. **Modifier la state machine** pour utiliser ces informations
+
+### Pieges a Eviter
+
+**⚠️ 1. Trop de regles**
+```
+Octave + Kalman + RSI + CCI + MACD = explosion combinatoire
+```
+→ Solution: Garder simple
+  - Octave = structure
+  - Kalman = confiance
+  - ML = direction
+
+**⚠️ 2. Seuils trop fins**
+→ Sur-optimisation, non robustesse
+→ Garder des seuils grossiers
+
+### Avantage Architectural
+
+C'est une strategie d'**architecture evolutive**:
+- **Aujourd'hui**: Modele ML stable + state machine simple
+- **Demain**: Enrichir la machine sans retrainer le modele
+
+Le modele reste inchange, on ameliore la **qualite decisionnelle** en aval.
+
+---
+
 **Cree par**: Claude Code
 **Derniere MAJ**: 2026-01-04
-**Version**: 4.2 (Backtest reel + Diagnostic micro-sorties)
+**Version**: 4.3 (+ Feature Multi-Filtres documentee)
