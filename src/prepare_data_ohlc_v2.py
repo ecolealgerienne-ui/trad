@@ -195,16 +195,20 @@ def add_ohlc_features_to_df(df: pd.DataFrame, clip_value: float = 0.10) -> pd.Da
 # =============================================================================
 
 def add_filtered_and_labels_to_df(df: pd.DataFrame, target: str,
-                                   octave_step: float = OCTAVE_STEP) -> pd.DataFrame:
+                                   octave_step: float = OCTAVE_STEP,
+                                   delta: int = 0) -> pd.DataFrame:
     """
     Calcule le signal filtré et les labels, les ajoute au DataFrame.
 
-    Labels: label[t] = 1 si filtered[t-1] > filtered[t-2] else 0
+    Labels: label[t] = 1 si filtered[t-1] > filtered[t-2-delta] else 0
+
+    Avec delta=0 (défaut): filtered[t-1] > filtered[t-2]
+    Avec delta=1:          filtered[t-1] > filtered[t-3]
 
     Alignement vérifié:
     - À l'index t, on a accès aux features OHLC jusqu'à t
-    - Le label[t] = filtered[t-1] > filtered[t-2] (pente PASSÉE)
-    - Donc on prédit la pente entre t-2 et t-1 avec les données jusqu'à t
+    - Le label[t] = filtered[t-1] > filtered[t-2-delta] (pente PASSÉE)
+    - Donc on prédit la pente entre t-2-delta et t-1 avec les données jusqu'à t
     """
     df = df.copy()
 
@@ -230,25 +234,26 @@ def add_filtered_and_labels_to_df(df: pd.DataFrame, target: str,
 
     df['filtered'] = filtered
 
-    # Calculer labels: filtered[t-1] > filtered[t-2]
+    # Calculer labels: filtered[t-1] > filtered[t-2-delta]
     # shift(1) : valeur à t-1
-    # shift(2) : valeur à t-2
+    # shift(2+delta) : valeur à t-2-delta
     df['filtered_t1'] = df['filtered'].shift(1)
-    df['filtered_t2'] = df['filtered'].shift(2)
+    df['filtered_t2'] = df['filtered'].shift(2 + delta)
 
-    # Label = 1 si pente positive (filtered[t-1] > filtered[t-2])
+    # Label = 1 si pente positive (filtered[t-1] > filtered[t-2-delta])
     df['label'] = (df['filtered_t1'] > df['filtered_t2']).astype(int)
 
     # Log pour vérification avec exemple
+    ref_idx = 2 + delta  # Index de référence pour comparaison
     logger.info(f"     Filtered: min={df['filtered'].min():.4f}, max={df['filtered'].max():.4f}")
-    logger.info(f"     Labels: {df['label'].sum()}/{len(df)} = {df['label'].mean()*100:.1f}% UP")
+    logger.info(f"     Labels (delta={delta}): {df['label'].sum()}/{len(df)} = {df['label'].mean()*100:.1f}% UP")
 
     # Afficher quelques exemples pour vérification
     sample_idx = min(100, len(df) - 1)
     logger.info(f"     Exemple idx={sample_idx}:")
-    logger.info(f"       filtered[{sample_idx-2}]={df['filtered'].iloc[sample_idx-2]:.4f}")
+    logger.info(f"       filtered[{sample_idx-ref_idx}]={df['filtered'].iloc[sample_idx-ref_idx]:.4f}")
     logger.info(f"       filtered[{sample_idx-1}]={df['filtered'].iloc[sample_idx-1]:.4f}")
-    logger.info(f"       label[{sample_idx}]={df['label'].iloc[sample_idx]} (filtered[{sample_idx-1}] > filtered[{sample_idx-2}])")
+    logger.info(f"       label[{sample_idx}]={df['label'].iloc[sample_idx]} (filtered[{sample_idx-1}] > filtered[{sample_idx-ref_idx}])")
 
     return df
 
@@ -407,7 +412,8 @@ def verify_alignment(df: pd.DataFrame, X: np.ndarray, Y: np.ndarray,
 
 def prepare_single_asset(file_path: str, asset_name: str, target: str,
                          octave_step: float = OCTAVE_STEP,
-                         clip_value: float = 0.10) -> tuple:
+                         clip_value: float = 0.10,
+                         delta: int = 0) -> tuple:
     """
     Prépare les données pour un seul asset.
 
@@ -438,7 +444,7 @@ def prepare_single_asset(file_path: str, asset_name: str, target: str,
     logger.info(f"     Features OHLC ajoutées (clip ±{clip_value*100:.0f}%)")
 
     # 4. Ajouter filtre et labels
-    df = add_filtered_and_labels_to_df(df, target, octave_step)
+    df = add_filtered_and_labels_to_df(df, target, octave_step, delta)
 
     # 5. TRIM edges (après tous les calculs pour éviter effets de bord du filtre)
     df = df.iloc[TRIM_EDGES:-TRIM_EDGES]
@@ -463,9 +469,15 @@ def prepare_and_save(target: str,
                      assets: list = None,
                      output_path: str = None,
                      octave_step: float = OCTAVE_STEP,
-                     clip_value: float = 0.10) -> str:
+                     clip_value: float = 0.10,
+                     delta: int = 0) -> str:
     """
     Prépare les données OHLC normalisées et les sauvegarde.
+
+    Args:
+        delta: Décalage pour le calcul du label.
+               delta=0: filtered[i-1] > filtered[i-2]
+               delta=1: filtered[i-1] > filtered[i-3]
     """
     if assets is None:
         assets = DEFAULT_ASSETS
@@ -478,9 +490,9 @@ def prepare_and_save(target: str,
     logger.info("="*80)
     logger.info("PRÉPARATION DES DONNÉES OHLC v2 (avec synchronisation index)")
     logger.info("="*80)
-    logger.info(f"Target: FL_{target.upper()} (Octave step={octave_step})")
+    logger.info(f"Target: FL_{target.upper()} (Octave step={octave_step}, delta={delta})")
     logger.info(f"Assets: {', '.join(assets)}")
-    logger.info(f"Label: slope(filtered_{target}[i-2] → filtered_{target}[i-1])")
+    logger.info(f"Label: slope(filtered_{target}[i-{2+delta}] → filtered_{target}[i-1])")
     logger.info(f"       → Le modèle ré-estime l'état PASSÉ du marché")
 
     # Préparer chaque asset
@@ -489,7 +501,7 @@ def prepare_and_save(target: str,
     for asset_name in assets:
         file_path = AVAILABLE_ASSETS_5M[asset_name]
         X, Y, indices, df = prepare_single_asset(
-            file_path, asset_name, target, octave_step, clip_value
+            file_path, asset_name, target, octave_step, clip_value, delta
         )
 
         # Split chronologique
@@ -523,7 +535,8 @@ def prepare_and_save(target: str,
     # Sauvegarder
     if output_path is None:
         assets_str = '_'.join(assets).lower()
-        output_path = f"data/prepared/dataset_{assets_str}_ohlcv2_{target}_octave{int(octave_step*100)}.npz"
+        delta_str = f"_delta{delta}" if delta > 0 else ""
+        output_path = f"data/prepared/dataset_{assets_str}_ohlcv2_{target}_octave{int(octave_step*100)}{delta_str}.npz"
 
     output_dir = Path(output_path).parent
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -535,9 +548,10 @@ def prepare_and_save(target: str,
         'target': target,
         'filter_type': 'octave',
         'octave_step': octave_step,
+        'delta': delta,
         # Définition explicite du label (recommandé par expert)
-        'label_formula': 'filtered[t-1] > filtered[t-2]',
-        'label_definition': f'slope(filtered_{target}[i-2] → filtered_{target}[i-1])',
+        'label_formula': f'filtered[t-1] > filtered[t-{2+delta}]',
+        'label_definition': f'slope(filtered_{target}[i-{2+delta}] → filtered_{target}[i-1])',
         'label_interpretation': 'pente PASSÉE du signal filtré (le modèle ré-estime le passé, pas le futur)',
         'clip_value': clip_value,
         'train_size': len(X_train),
@@ -590,7 +604,12 @@ def main():
         epilog=f"""
 Exemples:
   python src/prepare_data_ohlc_v2.py --target close --assets BTC ETH BNB ADA LTC
+  python src/prepare_data_ohlc_v2.py --target close --delta 1  # f[i-1] > f[i-3]
   python src/prepare_data_ohlc_v2.py --target macd --assets BTC ETH
+
+Delta:
+  --delta 0 (défaut): label = filtered[i-1] > filtered[i-2]
+  --delta 1:          label = filtered[i-1] > filtered[i-3]
 
 Targets disponibles: {', '.join(available_targets)}
 Assets disponibles: {', '.join(available_assets)}
@@ -606,6 +625,8 @@ Assets disponibles: {', '.join(available_assets)}
                         help=f'Assets à inclure')
     parser.add_argument('--octave-step', type=float, default=OCTAVE_STEP,
                         help=f'Paramètre du filtre Octave')
+    parser.add_argument('--delta', '-d', type=int, default=0,
+                        help='Décalage label: delta=0 → f[i-1]>f[i-2], delta=1 → f[i-1]>f[i-3]')
     parser.add_argument('--output', '-o', type=str, default=None,
                         help='Chemin de sortie')
     parser.add_argument('--clip', type=float, default=0.10,
@@ -620,7 +641,8 @@ Assets disponibles: {', '.join(available_assets)}
         assets=args.assets,
         output_path=args.output,
         octave_step=args.octave_step,
-        clip_value=args.clip
+        clip_value=args.clip,
+        delta=args.delta
     )
 
     print(f"\n✅ Terminé! Dataset: {output_path}")
