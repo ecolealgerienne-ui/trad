@@ -305,6 +305,7 @@ def run_state_machine(
     rsi_kalman: np.ndarray,
     cci_kalman: np.ndarray,
     macd_kalman: np.ndarray,
+    returns: np.ndarray = None,
     verbose: bool = True
 ) -> Tuple[np.ndarray, dict]:
     """
@@ -314,6 +315,7 @@ def run_state_machine(
         *_pred: Prédictions du modèle (0 ou 1)
         *_octave: Labels Octave (direction)
         *_kalman: Labels Kalman (direction)
+        returns: Rendements (c_ret) pour calcul PnL (optionnel)
 
     Returns:
         positions: Array des positions (0=FLAT, 1=LONG, -1=SHORT)
@@ -334,8 +336,15 @@ def run_state_machine(
         'exits_partiel': 0,
         'exits_fort_forced': 0,
         'blocked_by_fort': 0,
-        'agreement_counts': {'TOTAL': 0, 'PARTIEL': 0, 'FORT': 0}
+        'agreement_counts': {'TOTAL': 0, 'PARTIEL': 0, 'FORT': 0},
+        # PnL par état d'entrée
+        'pnl_by_entry_state': {'TOTAL': [], 'PARTIEL': []},
+        'total_pnl': 0.0
     }
+
+    # Variables pour tracker le trade en cours
+    current_entry_agreement = None
+    current_trade_pnl = 0.0
 
     for i in range(n_samples):
         # Récupérer les signaux
@@ -354,6 +363,14 @@ def run_state_machine(
         # Mettre à jour la confirmation
         update_confirmation(m_pred, agreement, ctx)
 
+        # Accumuler le PnL si en position
+        if ctx.position != Position.FLAT and returns is not None:
+            period_return = returns[i]
+            if ctx.position == Position.LONG:
+                current_trade_pnl += period_return
+            else:  # SHORT
+                current_trade_pnl -= period_return
+
         # Vérifier sortie
         if ctx.position != Position.FLAT:
             if should_exit(m_pred, r_pred, c_pred, octave_dir, kalman_dir, ctx):
@@ -363,9 +380,16 @@ def run_state_machine(
                     'start': ctx.current_trade_start,
                     'end': i,
                     'duration': trade_duration,
-                    'type': ctx.position.value
+                    'type': ctx.position.value,
+                    'entry_agreement': current_entry_agreement,
+                    'pnl': current_trade_pnl
                 })
                 stats['n_trades'] += 1
+                stats['total_pnl'] += current_trade_pnl
+
+                # PnL par état d'entrée
+                if current_entry_agreement and current_entry_agreement in stats['pnl_by_entry_state']:
+                    stats['pnl_by_entry_state'][current_entry_agreement].append(current_trade_pnl)
 
                 # Stats par type de sortie
                 if agreement == Agreement.TOTAL:
@@ -379,6 +403,8 @@ def run_state_machine(
                 ctx.position = Position.FLAT
                 ctx.confirmation_count = 0
                 ctx.exit_delay_count = 0
+                current_trade_pnl = 0.0
+                current_entry_agreement = None
 
         # Vérifier entrée
         if ctx.position == Position.FLAT:
@@ -394,11 +420,13 @@ def run_state_machine(
                 else:
                     stats['n_short'] += 1
 
-                # Stats par type d'entrée
+                # Stats par type d'entrée et enregistrer l'état d'entrée
                 if agreement == Agreement.TOTAL:
                     stats['entries_total'] += 1
+                    current_entry_agreement = 'TOTAL'
                 else:
                     stats['entries_partiel'] += 1
+                    current_entry_agreement = 'PARTIEL'
             elif agreement == Agreement.FORT:
                 stats['blocked_by_fort'] += 1
 
@@ -440,6 +468,20 @@ def run_state_machine(
             print(f"   Moyenne: {np.mean(durations):.1f} périodes")
             print(f"   Médiane: {np.median(durations):.1f} périodes")
             print(f"   Max: {max(durations)} périodes")
+
+        # Statistiques PnL
+        if returns is not None:
+            print(f"\n💰 Performance (PnL):")
+            print(f"   PnL Total: {stats['total_pnl']*100:+.2f}%")
+
+            for state in ['TOTAL', 'PARTIEL']:
+                pnls = stats['pnl_by_entry_state'][state]
+                if pnls:
+                    total = sum(pnls)
+                    avg = np.mean(pnls)
+                    n_win = sum(1 for p in pnls if p > 0)
+                    win_rate = n_win / len(pnls) * 100
+                    print(f"   {state}: {total*100:+.2f}% ({len(pnls)} trades, WR={win_rate:.1f}%, avg={avg*100:+.3f}%)")
 
     return positions, stats
 
@@ -526,17 +568,24 @@ def main():
     cci_kalman = datasets['cci_kalman']['Y'].flatten()
     macd_kalman = datasets['macd_kalman']['Y'].flatten()
 
+    # Extraire les returns (c_ret = index 3) du dernier timestep
+    # Features OHLC: [O_ret, H_ret, L_ret, C_ret, Range_ret]
+    X = datasets['macd_octave']['X']  # Shape: (n_samples, seq_len, 5)
+    returns = X[:, -1, 3]  # c_ret du dernier timestep
+
     print(f"\n📊 Données chargées:")
     print(f"   Samples: {len(macd_pred):,}")
     print(f"   RSI pred mean: {rsi_pred.mean():.3f}")
     print(f"   CCI pred mean: {cci_pred.mean():.3f}")
     print(f"   MACD pred mean: {macd_pred.mean():.3f}")
+    print(f"   Returns mean: {returns.mean()*100:.4f}%, std: {returns.std()*100:.4f}%")
 
     # Exécuter la state machine
     positions, stats = run_state_machine(
         rsi_pred, cci_pred, macd_pred,
         rsi_octave, cci_octave, macd_octave,
-        rsi_kalman, cci_kalman, macd_kalman
+        rsi_kalman, cci_kalman, macd_kalman,
+        returns=returns
     )
 
     # Sauvegarder si demandé
@@ -545,6 +594,50 @@ def main():
         output_path.parent.mkdir(parents=True, exist_ok=True)
         np.save(output_path, positions)
         print(f"\n💾 Positions sauvegardées: {output_path}")
+
+    # Résumé PnL par état d'entrée
+    print("\n" + "="*80)
+    print("ANALYSE PnL PAR ÉTAT D'ENTRÉE")
+    print("="*80)
+
+    for state in ['TOTAL', 'PARTIEL']:
+        pnls = stats['pnl_by_entry_state'][state]
+        if pnls:
+            n_trades = len(pnls)
+            total_pnl = sum(pnls)
+            avg_pnl = np.mean(pnls)
+            n_win = sum(1 for p in pnls if p > 0)
+            n_loss = sum(1 for p in pnls if p < 0)
+            win_rate = n_win / n_trades * 100
+
+            print(f"\n📊 {state}:")
+            print(f"   Trades: {n_trades}")
+            print(f"   PnL Total: {total_pnl*100:+.2f}%")
+            print(f"   PnL Moyen: {avg_pnl*100:+.4f}%")
+            print(f"   Win Rate: {win_rate:.1f}% ({n_win}W / {n_loss}L)")
+            if n_win > 0:
+                avg_win = np.mean([p for p in pnls if p > 0])
+                print(f"   Avg Win: {avg_win*100:+.4f}%")
+            if n_loss > 0:
+                avg_loss = np.mean([p for p in pnls if p < 0])
+                print(f"   Avg Loss: {avg_loss*100:+.4f}%")
+
+    # Comparaison
+    total_pnls = stats['pnl_by_entry_state']['TOTAL']
+    partiel_pnls = stats['pnl_by_entry_state']['PARTIEL']
+
+    if total_pnls and partiel_pnls:
+        avg_total = np.mean(total_pnls)
+        avg_partiel = np.mean(partiel_pnls)
+        print(f"\n🔍 Comparaison:")
+        print(f"   TOTAL avg PnL: {avg_total*100:+.4f}%")
+        print(f"   PARTIEL avg PnL: {avg_partiel*100:+.4f}%")
+        if avg_total > avg_partiel:
+            diff = (avg_total - avg_partiel) * 100
+            print(f"   → TOTAL surperforme PARTIEL de {diff:.4f}% par trade")
+        else:
+            diff = (avg_partiel - avg_total) * 100
+            print(f"   → PARTIEL surperforme TOTAL de {diff:.4f}% par trade")
 
     print("\n" + "="*80)
     print("✅ STATE MACHINE TERMINÉE")
