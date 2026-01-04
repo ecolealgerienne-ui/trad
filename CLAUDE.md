@@ -1503,6 +1503,162 @@ Colonnes generees:
 → **MACD confirme comme pivot** : plus stable, moins sensible aux conflits
 → **RSI/CCI = modulateurs** necessitant plus de filtrage
 
+#### Regles State Machine (Validees)
+
+**Regle 1 - MACD pivot**
+MACD decide de la direction principale. RSI/CCI ne declenchent jamais seuls.
+
+**Regle 2 - Confirmation conditionnelle**
+```
+Accord total (MACD + RSI + CCI)  → 0 confirmation, agir vite
+Desaccord partiel               → 2 confirmations requises
+Desaccord fort                  → Aucune action
+```
+
+**Regle 3 - Delai post-transition conditionnel**
+```
+MACD transition + accord total  → Pas de delai
+MACD transition + desaccord     → 1 periode de delai
+RSI/CCI transition              → Toujours 2 periodes de delai
+```
+
+**Regle 4 - RSI/CCI = modulateurs uniquement**
+Ils peuvent :
+- ✅ Bloquer une action
+- ✅ Retarder une action
+- ✅ Confirmer une action
+- ❌ Jamais declencher seuls
+
+**Justification empirique :**
+
+| Situation | Taux erreur | Action |
+|-----------|-------------|--------|
+| Accord total | 13-16% | Agir vite |
+| Desaccord | 18-38% | Patience |
+| RSI post-transition | 5.4x erreurs | Forte inertie |
+| MACD propre | 2.6x erreurs | Reactif |
+
+> "L'inertie doit etre conditionnelle, la vitesse doit etre permise quand le signal est propre."
+
+#### Implementation State Machine Proposee
+
+**Etats :**
+```
+FLAT   → Pas de position
+LONG   → Position acheteuse
+SHORT  → Position vendeuse
+```
+
+**Variables de contexte :**
+```python
+class Context:
+    position: str           # FLAT, LONG, SHORT
+    entry_time: int         # Timestamp entree
+    last_transition: int    # Derniere transition MACD
+    confirmation_count: int # Compteur de confirmations
+```
+
+**Fonction d'accord :**
+```python
+def get_agreement_level(macd, rsi, cci, octave_dir, kalman_dir):
+    """
+    Retourne le niveau d'accord des signaux.
+    """
+    indicators_agree = (macd == rsi == cci)
+    filters_agree = (octave_dir == kalman_dir)
+
+    if indicators_agree and filters_agree:
+        return 'TOTAL'      # Tous d'accord → agir vite
+    elif not indicators_agree and not filters_agree:
+        return 'FORT'       # Desaccord fort → ne rien faire
+    else:
+        return 'PARTIEL'    # Desaccord partiel → confirmation requise
+```
+
+**Logique de transition :**
+```python
+def should_enter(macd_pred, rsi_pred, cci_pred, ctx, current_time):
+    """
+    Decide si on doit entrer en position.
+    """
+    if ctx.position != 'FLAT':
+        return False
+
+    agreement = get_agreement_level(macd_pred, rsi_pred, cci_pred, ...)
+    time_since_transition = current_time - ctx.last_transition
+
+    # Regle 1: MACD decide la direction
+    direction = 'LONG' if macd_pred == 1 else 'SHORT'
+
+    # Regle 2: Confirmation conditionnelle
+    if agreement == 'FORT':
+        return False  # Aucune action
+    elif agreement == 'PARTIEL':
+        if ctx.confirmation_count < 2:
+            ctx.confirmation_count += 1
+            return False
+    # agreement == 'TOTAL' → pas de confirmation requise
+
+    # Regle 3: Delai post-transition MACD
+    if agreement != 'TOTAL' and time_since_transition < 1:
+        return False
+
+    ctx.confirmation_count = 0
+    return direction
+
+def should_exit(macd_pred, rsi_pred, cci_pred, ctx, current_time):
+    """
+    Decide si on doit sortir de position.
+    """
+    if ctx.position == 'FLAT':
+        return False
+
+    # Signal oppose a la position?
+    if ctx.position == 'LONG' and macd_pred == 0:
+        exit_signal = True
+    elif ctx.position == 'SHORT' and macd_pred == 1:
+        exit_signal = True
+    else:
+        exit_signal = False
+
+    if not exit_signal:
+        return False
+
+    agreement = get_agreement_level(macd_pred, rsi_pred, cci_pred, ...)
+
+    # Regle 4: RSI/CCI peuvent bloquer la sortie
+    if agreement == 'FORT':
+        return False  # Trop de confusion, rester
+
+    # Sortir si accord ou partiel confirme
+    if agreement == 'TOTAL':
+        return True
+    elif agreement == 'PARTIEL' and ctx.confirmation_count >= 2:
+        return True
+
+    ctx.confirmation_count += 1
+    return False
+```
+
+**Diagramme simplifie :**
+```
+                    ┌─────────────────────────────────────┐
+                    │                                     │
+                    ▼                                     │
+┌──────┐  MACD=UP + accord  ┌──────┐  MACD=DOWN + accord  │
+│ FLAT │ ─────────────────► │ LONG │ ──────────────────────┘
+└──────┘                    └──────┘
+    ▲                           │
+    │   MACD=DOWN + accord      │   MACD=UP + accord
+    │ ◄─────────────────────────┘
+    │
+    │         ┌───────┐
+    └─────────│ SHORT │◄────────┘
+              └───────┘
+
+Note: "accord" = agreement TOTAL ou PARTIEL avec confirmations
+```
+
 #### Ce qu'il ne faut PAS faire
 
 | ⚠️ Piege | Pourquoi |
