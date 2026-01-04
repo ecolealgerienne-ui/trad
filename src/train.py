@@ -40,6 +40,7 @@ from model import create_model, compute_metrics
 from prepare_data import load_prepared_data
 from data_utils import normalize_labels_for_single_output
 from utils import log_dataset_metadata
+from datetime import datetime
 
 
 class IndicatorDataset(Dataset):
@@ -386,6 +387,94 @@ def parse_args():
     return parser.parse_args()
 
 
+def generate_predictions(model: nn.Module, X: np.ndarray, device: str, batch_size: int = 512) -> np.ndarray:
+    """
+    Génère les prédictions du modèle sur un dataset.
+
+    Args:
+        model: Modèle entraîné
+        X: Features (n_samples, seq_length, n_features)
+        device: Device
+        batch_size: Taille des batches
+
+    Returns:
+        Prédictions binaires (n_samples, n_outputs)
+    """
+    model.eval()
+    dataset = IndicatorDataset(X, np.zeros((len(X), 1)))  # Y factice
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+
+    all_preds = []
+    with torch.no_grad():
+        for X_batch, _ in loader:
+            X_batch = X_batch.to(device)
+            outputs = model(X_batch)
+            # Convertir logits en probabilités puis en binaire
+            probs = torch.sigmoid(outputs)
+            preds = (probs > 0.5).float()
+            all_preds.append(preds.cpu().numpy())
+
+    return np.concatenate(all_preds, axis=0)
+
+
+def save_predictions_to_npz(
+    npz_path: str,
+    model: nn.Module,
+    X_train: np.ndarray,
+    X_val: np.ndarray,
+    X_test: np.ndarray,
+    device: str,
+    model_path: str
+):
+    """
+    Génère les prédictions et met à jour le fichier .npz avec Y_train_pred, Y_val_pred, Y_test_pred.
+
+    Args:
+        npz_path: Chemin vers le fichier .npz original
+        model: Modèle entraîné
+        X_train, X_val, X_test: Features
+        device: Device
+        model_path: Chemin du modèle sauvegardé (pour metadata)
+    """
+    logger.info("\n📊 Génération des prédictions...")
+
+    # Générer prédictions
+    Y_train_pred = generate_predictions(model, X_train, device)
+    Y_val_pred = generate_predictions(model, X_val, device)
+    Y_test_pred = generate_predictions(model, X_test, device)
+
+    logger.info(f"  Train: {Y_train_pred.shape}, mean={Y_train_pred.mean():.3f}")
+    logger.info(f"  Val:   {Y_val_pred.shape}, mean={Y_val_pred.mean():.3f}")
+    logger.info(f"  Test:  {Y_test_pred.shape}, mean={Y_test_pred.mean():.3f}")
+
+    # Charger le fichier .npz existant
+    logger.info(f"\n💾 Mise à jour du fichier: {npz_path}")
+    existing_data = dict(np.load(npz_path, allow_pickle=True))
+
+    # Mettre à jour metadata
+    if 'metadata' in existing_data:
+        metadata = json.loads(str(existing_data['metadata']))
+    else:
+        metadata = {}
+
+    metadata['predictions_added_at'] = datetime.now().isoformat()
+    metadata['predictions_model'] = str(model_path)
+    metadata['predictions_train_mean'] = float(Y_train_pred.mean())
+    metadata['predictions_val_mean'] = float(Y_val_pred.mean())
+    metadata['predictions_test_mean'] = float(Y_test_pred.mean())
+
+    # Ajouter les prédictions
+    existing_data['Y_train_pred'] = Y_train_pred
+    existing_data['Y_val_pred'] = Y_val_pred
+    existing_data['Y_test_pred'] = Y_test_pred
+    existing_data['metadata'] = json.dumps(metadata)
+
+    # Sauvegarder
+    np.savez_compressed(npz_path, **existing_data)
+    logger.info(f"  ✅ Prédictions sauvegardées dans {npz_path}")
+    logger.info(f"     Nouvelles clés: Y_train_pred, Y_val_pred, Y_test_pred")
+
+
 # Mapping indicateur -> index (pour datasets multi-output)
 # Pour les single-output (close, macd40, etc.), l'index est None
 INDICATOR_INDEX = {
@@ -591,6 +680,28 @@ def main():
     logger.info(f"  Historique sauvegardé: {history_path}")
 
     # =========================================================================
+    # 6. GÉNÉRER ET SAUVEGARDER LES PRÉDICTIONS
+    # =========================================================================
+    if args.data:
+        logger.info("\n6. Génération des prédictions...")
+
+        # Charger le meilleur modèle
+        checkpoint = torch.load(save_path, map_location=device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        logger.info(f"  Meilleur modèle chargé: {save_path}")
+
+        # Sauvegarder les prédictions dans le .npz
+        save_predictions_to_npz(
+            npz_path=args.data,
+            model=model,
+            X_train=X_train,
+            X_val=X_val,
+            X_test=X_test,
+            device=device,
+            model_path=save_path
+        )
+
+    # =========================================================================
     # RÉSUMÉ FINAL
     # =========================================================================
     logger.info("\n" + "="*80)
@@ -603,11 +714,16 @@ def main():
     if single_indicator:
         logger.info(f"  Indicateur: {indicator_name}")
 
+    if args.data:
+        logger.info(f"\n📊 Prédictions sauvegardées dans: {args.data}")
+        logger.info(f"   Nouvelles clés: Y_train_pred, Y_val_pred, Y_test_pred")
+
     logger.info(f"\nProchaines étapes:")
     if single_indicator:
         logger.info(f"  - Évaluer: python src/evaluate.py --data <dataset> --indicator {args.indicator}")
     else:
         logger.info(f"  - Évaluer sur test set: python src/evaluate.py --data <dataset>")
+    logger.info(f"  - Backtest: python tests/test_trading_strategy_ohlc.py --data {args.data} --use-predictions")
     logger.info(f"  - Visualiser historique: voir {history_path}")
 
 

@@ -61,6 +61,7 @@ def load_dataset(npz_path: str) -> dict:
 
     Returns:
         dict avec X_train, Y_train, X_val, Y_val, X_test, Y_test, metadata
+        + Y_train_pred, Y_val_pred, Y_test_pred si disponibles
     """
     logger.info(f"📂 Chargement: {npz_path}")
 
@@ -74,6 +75,16 @@ def load_dataset(npz_path: str) -> dict:
         'X_test': data['X_test'],
         'Y_test': data['Y_test'],
     }
+
+    # Charger prédictions si disponibles
+    if 'Y_train_pred' in data:
+        result['Y_train_pred'] = data['Y_train_pred']
+        result['Y_val_pred'] = data['Y_val_pred']
+        result['Y_test_pred'] = data['Y_test_pred']
+        result['has_predictions'] = True
+        logger.info(f"  ✅ Prédictions trouvées dans le fichier")
+    else:
+        result['has_predictions'] = False
 
     # Charger metadata
     if 'metadata' in data:
@@ -432,10 +443,13 @@ Exemples:
   # Mode Oracle (utilise les labels réels Y)
   python tests/test_trading_strategy_ohlc.py --data data/prepared/dataset_xxx.npz
 
-  # Limiter à 20000 samples (~69 jours)
-  python tests/test_trading_strategy_ohlc.py --data data/prepared/dataset_xxx.npz --limit 20000
+  # Mode Prédictions sauvegardées (recommandé après entraînement)
+  python tests/test_trading_strategy_ohlc.py --data data/prepared/dataset_xxx.npz --use-predictions
 
-  # Mode Modèle (utilise les prédictions du modèle)
+  # Limiter à 20000 samples (~69 jours)
+  python tests/test_trading_strategy_ohlc.py --data data/prepared/dataset_xxx.npz -p --limit 20000
+
+  # Mode Modèle (charge le modèle et génère les prédictions)
   python tests/test_trading_strategy_ohlc.py --data data/prepared/dataset_xxx.npz --model models/best_model.pth
 
   # Spécifier le split à utiliser
@@ -446,7 +460,9 @@ Exemples:
     parser.add_argument('--data', '-d', type=str, required=True,
                         help='Chemin vers le dataset .npz')
     parser.add_argument('--model', '-m', type=str, default=None,
-                        help='Chemin vers le modèle .pth (optionnel, sinon utilise les labels)')
+                        help='Chemin vers le modèle .pth (optionnel)')
+    parser.add_argument('--use-predictions', '-p', action='store_true',
+                        help='Utiliser les prédictions sauvegardées dans le .npz (Y_*_pred)')
     parser.add_argument('--split', '-s', type=str, default='test',
                         choices=['train', 'val', 'test'],
                         help='Split à utiliser (défaut: test)')
@@ -491,8 +507,20 @@ Exemples:
     print(f"   Durée totale: {total_days:.1f} jours ({total_periods} périodes × 5min)")
 
     # Déterminer les signaux
-    if args.model:
-        # Mode Modèle : utiliser les prédictions
+    if args.use_predictions:
+        # Mode Prédictions sauvegardées
+        if not dataset.get('has_predictions', False):
+            print("❌ Erreur: Pas de prédictions dans le fichier .npz")
+            print("   Entraînez d'abord avec: python src/train.py --data <dataset>")
+            return
+        pred_key = f'Y_{args.split}_pred'
+        signals = dataset[pred_key]
+        if args.limit and args.limit < len(signals):
+            signals = signals[:args.limit]
+        signals = signals.flatten()
+        strategy_name = "Modèle (Prédictions sauvegardées)"
+    elif args.model:
+        # Mode Modèle : charger et générer les prédictions
         signals = load_model_predictions(args.model, X)
         strategy_name = f"Modèle ({Path(args.model).stem})"
     else:
@@ -519,7 +547,13 @@ Exemples:
     print(f"  Split: {args.split}")
     print(f"  Samples: {len(X)}")
     print(f"  Durée: {results['total_duration_days']:.1f} jours")
-    print(f"  Mode: {'Modèle' if args.model else 'Oracle'}")
+    if args.use_predictions:
+        mode_str = "Prédictions sauvegardées"
+    elif args.model:
+        mode_str = f"Modèle ({Path(args.model).stem})"
+    else:
+        mode_str = "Oracle"
+    print(f"  Mode: {mode_str}")
     print(f"\n  Rendement: {results['total_return_pct']:+.2f}%")
     print(f"  vs Buy&Hold: {results['buy_hold_return_pct']:+.2f}%")
     print(f"  Surperformance: {results['total_return_pct'] - results['buy_hold_return_pct']:+.2f}%")
