@@ -4,11 +4,27 @@ Script de préparation des données OHLC v2 - Avec synchronisation par index.
 Approche rigoureuse:
 1. Charger données brutes avec DatetimeIndex
 2. Calculer indicateurs → ajouter au DataFrame
-3. Calculer filtre → ajouter au DataFrame
-4. Calculer labels → ajouter au DataFrame
-5. Créer séquences avec vérification des index
+3. Calculer features OHLC → ajouter au DataFrame
+4. Calculer filtre + labels → ajouter au DataFrame
+5. TRIM edges (après calculs pour éviter effets de bord du filtre)
+6. Créer séquences avec vérification des index
 
 Toutes les données restent synchronisées via l'index datetime.
+
+=== NOTES IMPORTANTES (de l'expert) ===
+
+1. C_ret encode principalement des patterns clôture-à-clôture.
+   - O_ret, H_ret, L_ret capturent la micro-structure intra-bougie.
+   - Range_ret capture la volatilité intra-bougie.
+
+2. Définition du label:
+   - label[i] = 1 si filtered[i-1] > filtered[i-2] (pente passée positive)
+   - Le modèle ré-estime l'état PASSÉ du marché, pas le futur.
+   - La valeur vient de la DYNAMIQUE des prédictions (changements d'avis).
+
+3. Convention timestamp OHLC:
+   - Timestamp = Open time (début de la bougie)
+   - Close[10:05] = prix de clôture de la bougie 10:05-10:10, disponible après 10:10
 
 Usage:
     python src/prepare_data_ohlc_v2.py --target close --assets BTC ETH BNB ADA LTC
@@ -145,17 +161,27 @@ def add_indicators_to_df(df: pd.DataFrame) -> pd.DataFrame:
 def add_ohlc_features_to_df(df: pd.DataFrame, clip_value: float = 0.10) -> pd.DataFrame:
     """
     Calcule les features OHLC normalisées et les ajoute au DataFrame.
+
+    Features (5 canaux):
+    - O_ret: Gap overnight/intraday → micro-structure (où le marché ouvre vs dernière clôture)
+    - H_ret: Force acheteuse intra-bougie → micro-structure
+    - L_ret: Force vendeuse intra-bougie → micro-structure
+    - C_ret: Rendement clôture-à-clôture → patterns principaux appris par CNN
+    - Range_ret: Volatilité intra-bougie → activité du marché
+
+    Note: C_ret encode les patterns clôture-à-clôture (le "gros" du signal).
+          O/H/L_ret capturent la micro-structure intra-bougie.
     """
     df = df.copy()
 
     prev_close = df['close'].shift(1)
 
-    # 5 canaux OHLC normalisés
-    df['o_ret'] = (df['open'] - prev_close) / prev_close
-    df['h_ret'] = (df['high'] - prev_close) / prev_close
-    df['l_ret'] = (df['low'] - prev_close) / prev_close
-    df['c_ret'] = (df['close'] - prev_close) / prev_close
-    df['range_ret'] = (df['high'] - df['low']) / prev_close
+    # 5 canaux OHLC normalisés (tous relatifs à la clôture précédente)
+    df['o_ret'] = (df['open'] - prev_close) / prev_close      # Gap d'ouverture
+    df['h_ret'] = (df['high'] - prev_close) / prev_close      # Extension haussière
+    df['l_ret'] = (df['low'] - prev_close) / prev_close       # Extension baissière
+    df['c_ret'] = (df['close'] - prev_close) / prev_close     # Rendement net
+    df['range_ret'] = (df['high'] - df['low']) / prev_close   # Volatilité
 
     # Clipper les outliers
     for col in ['o_ret', 'h_ret', 'l_ret', 'c_ret', 'range_ret']:
@@ -454,7 +480,8 @@ def prepare_and_save(target: str,
     logger.info("="*80)
     logger.info(f"Target: FL_{target.upper()} (Octave step={octave_step})")
     logger.info(f"Assets: {', '.join(assets)}")
-    logger.info(f"Formule labels: filtered[t-1] > filtered[t-2]")
+    logger.info(f"Label: slope(filtered_{target}[i-2] → filtered_{target}[i-1])")
+    logger.info(f"       → Le modèle ré-estime l'état PASSÉ du marché")
 
     # Préparer chaque asset
     all_splits = {'train': [], 'val': [], 'test': []}
@@ -508,7 +535,10 @@ def prepare_and_save(target: str,
         'target': target,
         'filter_type': 'octave',
         'octave_step': octave_step,
+        # Définition explicite du label (recommandé par expert)
         'label_formula': 'filtered[t-1] > filtered[t-2]',
+        'label_definition': f'slope(filtered_{target}[i-2] → filtered_{target}[i-1])',
+        'label_interpretation': 'pente PASSÉE du signal filtré (le modèle ré-estime le passé, pas le futur)',
         'clip_value': clip_value,
         'train_size': len(X_train),
         'val_size': len(X_val),
@@ -516,6 +546,15 @@ def prepare_and_save(target: str,
         'sequence_length': SEQUENCE_LENGTH,
         'n_features': 5,
         'features': ['o_ret', 'h_ret', 'l_ret', 'c_ret', 'range_ret'],
+        'features_description': {
+            'o_ret': 'Gap ouverture vs clôture précédente (micro-structure)',
+            'h_ret': 'Extension haussière intra-bougie (micro-structure)',
+            'l_ret': 'Extension baissière intra-bougie (micro-structure)',
+            'c_ret': 'Rendement clôture-à-clôture (patterns principaux)',
+            'range_ret': 'Volatilité intra-bougie (activité marché)',
+        },
+        'alignment_verified': True,
+        'timestamp_convention': 'open_time (début de bougie)',
     }
 
     np.savez_compressed(
