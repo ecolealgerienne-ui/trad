@@ -22,8 +22,14 @@ Mode NORMAL (déprécié):
 - PARTIEL = entrée après 2 confirmations
 - FORT = bloqué
 
+Filtre VOLATILITÉ (nouveau - 2026-01-04):
+- Utilise range_ret (High-Low) comme proxy ATR
+- Ne trader que si volatilité > percentile X (--min-volatility-pct)
+- Objectif: Trader seulement en haute volatilité où les moves couvrent les frais
+- Usage: --min-volatility-pct 50 (ne trader que si volatilité > médiane)
+
 Usage:
-    # Mode Transition-Only (recommandé pour frais réels)
+    # Mode Strict + filtre volatilité (recommandé)
     python src/state_machine.py \
         --rsi-octave data/prepared/dataset_..._rsi_octave20.npz \
         --cci-octave data/prepared/dataset_..._cci_octave20.npz \
@@ -31,9 +37,9 @@ Usage:
         --rsi-kalman data/prepared/dataset_..._rsi_kalman.npz \
         --cci-kalman data/prepared/dataset_..._cci_kalman.npz \
         --macd-kalman data/prepared/dataset_..._macd_kalman.npz \
-        --split test --transition-only --min-stability 2 --fees 0.1
+        --split test --strict --min-volatility-pct 50 --fees 0.1
 
-    # Mode Strict (sans frais)
+    # Mode Strict simple (sans frais)
     python src/state_machine.py \
         ... --split test --strict
 """
@@ -370,6 +376,8 @@ def run_state_machine(
     min_stability: int = 2,
     threshold: float = 0.5,
     min_confidence: float = 0.0,
+    volatility: np.ndarray = None,
+    min_volatility_pct: float = 0.0,
     verbose: bool = True
 ) -> Tuple[np.ndarray, dict]:
     """
@@ -388,6 +396,8 @@ def run_state_machine(
         min_stability: Nombre de périodes de stabilité du signal avant entrée
         threshold: Seuil de probabilité pour binarisation (défaut: 0.5)
         min_confidence: Confiance minimale (ex: 0.2 = ignorer si 0.3<p<0.7)
+        volatility: Volatilité (range_ret) pour chaque sample (optionnel)
+        min_volatility_pct: Percentile min de volatilité (0-100, ex: 50 = médiane)
 
     Returns:
         positions: Array des positions (0=FLAT, 1=LONG, -1=SHORT)
@@ -405,6 +415,11 @@ def run_state_machine(
             pnl_by_asset[asset] = []
             trades_by_asset[asset] = 0
 
+    # Calculer le seuil de volatilité si demandé
+    volatility_threshold = 0.0
+    if volatility is not None and min_volatility_pct > 0:
+        volatility_threshold = np.percentile(volatility, min_volatility_pct)
+
     # Statistiques
     stats = {
         'n_trades': 0,
@@ -420,6 +435,7 @@ def run_state_machine(
         'blocked_by_no_transition': 0,  # Pour mode transition-only
         'blocked_by_low_stability': 0,  # Pour mode transition-only
         'blocked_by_low_confidence': 0,  # Pour filtrage par confiance
+        'blocked_by_low_volatility': 0,  # Pour filtrage par volatilité
         'agreement_counts': {'TOTAL': 0, 'PARTIEL': 0, 'FORT': 0},
         # PnL par état d'entrée
         'pnl_by_entry_state': {'TOTAL': [], 'PARTIEL': []},
@@ -433,6 +449,8 @@ def run_state_machine(
         'min_stability': min_stability,
         'threshold': threshold,
         'min_confidence': min_confidence,
+        'min_volatility_pct': min_volatility_pct,
+        'volatility_threshold': volatility_threshold,
         'fees_rate': fees
     }
 
@@ -456,6 +474,14 @@ def run_state_machine(
         low_confidence = (m_conf < min_confidence or r_conf < min_confidence or c_conf < min_confidence)
         if low_confidence:
             stats['blocked_by_low_confidence'] += 1
+
+        # Vérifier si volatilité suffisante
+        low_volatility = False
+        if volatility is not None and min_volatility_pct > 0:
+            current_vol = volatility[i]
+            if current_vol < volatility_threshold:
+                low_volatility = True
+                stats['blocked_by_low_volatility'] += 1
 
         # Binariser avec threshold
         m_pred = 1 if m_prob >= threshold else 0
@@ -552,8 +578,8 @@ def run_state_machine(
 
         # Vérifier entrée
         if ctx.position == Position.FLAT:
-            # Bloquer entrée si confiance insuffisante
-            if low_confidence and min_confidence > 0:
+            # Bloquer entrée si confiance insuffisante ou volatilité trop basse
+            if (low_confidence and min_confidence > 0) or (low_volatility and min_volatility_pct > 0):
                 new_position = None
             else:
                 new_position = should_enter(
@@ -623,6 +649,8 @@ def run_state_machine(
             mode_str = "NORMAL (déprécié)"
         print(f"\n⚙️ Mode: {mode_str}")
         print(f"   Threshold: {threshold:.2f}, Min Confidence: {min_confidence:.2f}")
+        if min_volatility_pct > 0:
+            print(f"   Min Volatilité: percentile {min_volatility_pct:.0f} (seuil={volatility_threshold*100:.4f}%)")
         if fees > 0:
             print(f"   Frais: {fees*100:.2f}% par trade (entrée + sortie)")
 
@@ -656,6 +684,8 @@ def run_state_machine(
             print(f"   Bloquées (stabilité < {min_stability}): {stats['blocked_by_low_stability']}")
         if min_confidence > 0:
             print(f"   Bloquées (confiance < {min_confidence:.2f}): {stats['blocked_by_low_confidence']}")
+        if min_volatility_pct > 0:
+            print(f"   Bloquées (volatilité < p{min_volatility_pct:.0f}): {stats['blocked_by_low_volatility']}")
 
         print(f"\n📉 Sorties:")
         print(f"   Via TOTAL: {stats['exits_total']}")
@@ -748,6 +778,8 @@ def main():
                         help='Seuil de probabilité pour binarisation (défaut: 0.5)')
     parser.add_argument('--min-confidence', type=float, default=0.0,
                         help='Confiance minimale requise (ex: 0.2 = ignorer si 0.3<p<0.7)')
+    parser.add_argument('--min-volatility-pct', type=float, default=0.0,
+                        help='Percentile min de volatilité (0-100, ex: 50 = médiane). Trader seulement si volatilité > seuil.')
 
     args = parser.parse_args()
 
@@ -805,10 +837,11 @@ def main():
     cci_kalman = datasets['cci_kalman']['Y'].flatten()
     macd_kalman = datasets['macd_kalman']['Y'].flatten()
 
-    # Extraire les returns (c_ret = index 3) du dernier timestep
+    # Extraire les returns (c_ret = index 3) et volatilité (range_ret = index 4) du dernier timestep
     # Features OHLC: [O_ret, H_ret, L_ret, C_ret, Range_ret]
     X = datasets['macd_octave']['X']  # Shape: (n_samples, seq_len, 5)
     returns = X[:, -1, 3]  # c_ret du dernier timestep
+    volatility = X[:, -1, 4]  # range_ret du dernier timestep (proxy ATR)
     n_samples = len(macd_pred)
 
     # Extraire les assets et créer les indices
@@ -841,6 +874,10 @@ def main():
     print(f"   CCI pred mean: {cci_pred.mean():.3f}")
     print(f"   MACD pred mean: {macd_pred.mean():.3f}")
     print(f"   Returns mean: {returns.mean()*100:.4f}%, std: {returns.std()*100:.4f}%")
+    print(f"   Volatilité mean: {volatility.mean()*100:.4f}%, median: {np.median(volatility)*100:.4f}%")
+    if args.min_volatility_pct > 0:
+        vol_threshold = np.percentile(volatility, args.min_volatility_pct)
+        print(f"   Seuil volatilité (p{args.min_volatility_pct:.0f}): {vol_threshold*100:.4f}%")
     if fees > 0:
         print(f"   Frais: {fees*100:.2f}% par trade")
 
@@ -857,7 +894,9 @@ def main():
         transition_only=args.transition_only,
         min_stability=args.min_stability,
         threshold=args.threshold,
-        min_confidence=args.min_confidence
+        min_confidence=args.min_confidence,
+        volatility=volatility,
+        min_volatility_pct=args.min_volatility_pct
     )
 
     # Sauvegarder si demandé
