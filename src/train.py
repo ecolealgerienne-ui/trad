@@ -377,6 +377,10 @@ def parse_args():
                         choices=['all', 'rsi', 'cci', 'macd', 'close', 'macd40', 'macd26', 'macd13'],
                         help='Indicateur à entraîner (all=multi-output, autres=single-output)')
 
+    # Nom du filtre (pour le nom du modèle)
+    parser.add_argument('--filter', '-f', type=str, default=None,
+                        help='Nom du filtre utilisé (ex: octave20, kalman). Inclus dans le nom du modèle.')
+
     # Autres
     parser.add_argument('--seed', type=int, default=RANDOM_SEED,
                         help='Random seed pour reproductibilité')
@@ -645,7 +649,7 @@ def main():
         'indicator': args.indicator,
     }
 
-    # Chemin de sauvegarde (inclut le préfixe dataset + indicateur)
+    # Chemin de sauvegarde (inclut le préfixe dataset + filtre + indicateur)
     # Extraire le préfixe du dataset (ex: "ohlcv2" de "dataset_..._ohlcv2_cci_octave20.npz")
     dataset_prefix = ""
     if args.data:
@@ -657,17 +661,22 @@ def main():
                 dataset_prefix = prefix
                 break
 
+    # Construire le suffixe du nom de fichier
+    suffix_parts = []
+    if dataset_prefix:
+        suffix_parts.append(dataset_prefix)
+    if args.filter:
+        suffix_parts.append(args.filter)
     if single_indicator:
-        if dataset_prefix:
-            save_path = args.save_path.replace('.pth', f'_{dataset_prefix}_{args.indicator}.pth')
-        else:
-            save_path = args.save_path.replace('.pth', f'_{args.indicator}.pth')
-        logger.info(f"  Modèle sera sauvegardé: {save_path}")
+        suffix_parts.append(args.indicator)
+
+    if suffix_parts:
+        suffix = '_'.join(suffix_parts)
+        save_path = args.save_path.replace('.pth', f'_{suffix}.pth')
     else:
-        if dataset_prefix:
-            save_path = args.save_path.replace('.pth', f'_{dataset_prefix}.pth')
-        else:
-            save_path = args.save_path
+        save_path = args.save_path
+
+    logger.info(f"  Modèle sera sauvegardé: {save_path}")
 
     history = train_model(
         train_loader=train_loader,
