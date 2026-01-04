@@ -216,6 +216,10 @@ def parse_args():
                         choices=['all', 'rsi', 'cci', 'macd', 'close', 'macd40', 'macd26', 'macd13'],
                         help='Indicateur à évaluer (all=multi-output, autres=single-output)')
 
+    parser.add_argument('--filter', '-f', type=str, default=None,
+                        help='Nom du filtre utilisé (ex: octave20, kalman). '
+                             'Utilisé pour trouver le modèle automatiquement.')
+
     return parser.parse_args()
 
 
@@ -263,21 +267,43 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     logger.info(f"\nDevice: {device}")
 
-    # Chemin du modèle
+    # Chemin du modèle (logique identique à train.py)
     if args.model:
         model_path = args.model
-    elif single_indicator:
-        model_path = BEST_MODEL_PATH.replace('.pth', f'_{args.indicator}.pth')
     else:
-        model_path = BEST_MODEL_PATH
+        # Extraire le préfixe du dataset (ex: "ohlcv2" de "dataset_..._ohlcv2_cci_octave20.npz")
+        dataset_prefix = ""
+        if args.data:
+            data_name = Path(args.data).stem
+            known_prefixes = ['ohlcv2', 'ohlc', '5min_30min', '5min', '30min']
+            for prefix in known_prefixes:
+                if prefix in data_name:
+                    dataset_prefix = prefix
+                    break
+
+        # Construire le suffixe du nom de fichier
+        suffix_parts = []
+        if dataset_prefix:
+            suffix_parts.append(dataset_prefix)
+        if args.filter:
+            suffix_parts.append(args.filter)
+        if single_indicator:
+            suffix_parts.append(args.indicator)
+
+        if suffix_parts:
+            suffix = '_'.join(suffix_parts)
+            model_path = BEST_MODEL_PATH.replace('.pth', f'_{suffix}.pth')
+        else:
+            model_path = BEST_MODEL_PATH
 
     # Vérifier que le modèle existe
     if not Path(model_path).exists():
         logger.error(f"❌ Modèle non trouvé: {model_path}")
         if single_indicator:
-            logger.error(f"   Entraîner d'abord: python src/train.py --data <dataset> --indicator {args.indicator}")
+            filter_hint = f" --filter {args.filter}" if args.filter else ""
+            logger.error(f"   Entraîner d'abord: python src/train.py --data {args.data} --indicator {args.indicator}{filter_hint}")
         else:
-            logger.error(f"   Entraîner d'abord le modèle: python src/train.py --data <dataset>")
+            logger.error(f"   Entraîner d'abord le modèle: python src/train.py --data {args.data}")
         return
 
     # =========================================================================
