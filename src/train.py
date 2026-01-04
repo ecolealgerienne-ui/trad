@@ -409,9 +409,8 @@ def generate_predictions(model: nn.Module, X: np.ndarray, device: str, batch_siz
         for X_batch, _ in loader:
             X_batch = X_batch.to(device)
             outputs = model(X_batch)
-            # Convertir logits en probabilités puis en binaire
-            probs = torch.sigmoid(outputs)
-            preds = (probs > 0.5).float()
+            # Le modèle applique déjà sigmoid dans forward(), outputs sont des probabilités [0,1]
+            preds = (outputs > 0.5).float()
             all_preds.append(preds.cpu().numpy())
 
     return np.concatenate(all_preds, axis=0)
