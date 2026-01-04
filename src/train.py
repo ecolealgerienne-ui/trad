@@ -40,6 +40,7 @@ from model import create_model, compute_metrics
 from prepare_data import load_prepared_data
 from data_utils import normalize_labels_for_single_output
 from utils import log_dataset_metadata
+from datetime import datetime
 
 
 class IndicatorDataset(Dataset):
@@ -373,8 +374,12 @@ def parse_args():
 
     # Indicateur spécifique (optionnel)
     parser.add_argument('--indicator', '-i', type=str, default='all',
-                        choices=['all', 'rsi', 'cci', 'macd'],
-                        help='Indicateur à entraîner (all=multi-output, rsi/cci/macd=single-output)')
+                        choices=['all', 'rsi', 'cci', 'macd', 'close', 'macd40', 'macd26', 'macd13'],
+                        help='Indicateur à entraîner (all=multi-output, autres=single-output)')
+
+    # Nom du filtre (pour le nom du modèle)
+    parser.add_argument('--filter', '-f', type=str, default=None,
+                        help='Nom du filtre utilisé (ex: octave20, kalman). Inclus dans le nom du modèle.')
 
     # Autres
     parser.add_argument('--seed', type=int, default=RANDOM_SEED,
@@ -386,9 +391,143 @@ def parse_args():
     return parser.parse_args()
 
 
-# Mapping indicateur -> index
-INDICATOR_INDEX = {'rsi': 0, 'cci': 1, 'macd': 2}
-INDICATOR_NAMES = ['RSI', 'CCI', 'MACD']
+def generate_predictions(model: nn.Module, X: np.ndarray, device: str, batch_size: int = 512) -> np.ndarray:
+    """
+    Génère les prédictions du modèle sur un dataset.
+
+    Args:
+        model: Modèle entraîné
+        X: Features (n_samples, seq_length, n_features)
+        device: Device
+        batch_size: Taille des batches
+
+    Returns:
+        Probabilités continues [0,1] (n_samples, n_outputs)
+        NOTE: Les probabilités sont sauvegardées brutes, pas binarisées.
+              La binarisation (seuil 0.5) se fait dans la state machine.
+    """
+    model.eval()
+    dataset = IndicatorDataset(X, np.zeros((len(X), 1)))  # Y factice
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+
+    all_preds = []
+    with torch.no_grad():
+        for X_batch, _ in loader:
+            X_batch = X_batch.to(device)
+            outputs = model(X_batch)
+            # Le modèle applique déjà sigmoid dans forward(), outputs sont des probabilités [0,1]
+            # IMPORTANT: Sauvegarder les probabilités brutes, pas binarisées!
+            all_preds.append(outputs.cpu().numpy())
+
+    return np.concatenate(all_preds, axis=0)
+
+
+def save_predictions_to_npz(
+    npz_path: str,
+    model: nn.Module,
+    X_train: np.ndarray,
+    X_val: np.ndarray,
+    X_test: np.ndarray,
+    device: str,
+    model_path: str
+):
+    """
+    Génère les prédictions et met à jour le fichier .npz avec Y_train_pred, Y_val_pred, Y_test_pred.
+
+    Args:
+        npz_path: Chemin vers le fichier .npz original
+        model: Modèle entraîné
+        X_train, X_val, X_test: Features
+        device: Device
+        model_path: Chemin du modèle sauvegardé (pour metadata)
+    """
+    logger.info("\n📊 Génération des prédictions...")
+
+    # Générer prédictions
+    Y_train_pred = generate_predictions(model, X_train, device)
+    Y_val_pred = generate_predictions(model, X_val, device)
+    Y_test_pred = generate_predictions(model, X_test, device)
+
+    logger.info(f"  Train: {Y_train_pred.shape}, mean={Y_train_pred.mean():.3f}")
+    logger.info(f"  Val:   {Y_val_pred.shape}, mean={Y_val_pred.mean():.3f}")
+    logger.info(f"  Test:  {Y_test_pred.shape}, mean={Y_test_pred.mean():.3f}")
+
+    # Charger le fichier .npz existant
+    logger.info(f"\n💾 Mise à jour du fichier: {npz_path}")
+    existing_data = dict(np.load(npz_path, allow_pickle=True))
+
+    # Mettre à jour metadata
+    if 'metadata' in existing_data:
+        metadata = json.loads(str(existing_data['metadata']))
+    else:
+        metadata = {}
+
+    metadata['predictions_added_at'] = datetime.now().isoformat()
+    metadata['predictions_model'] = str(model_path)
+    metadata['predictions_train_mean'] = float(Y_train_pred.mean())
+    metadata['predictions_val_mean'] = float(Y_val_pred.mean())
+    metadata['predictions_test_mean'] = float(Y_test_pred.mean())
+
+    # Ajouter les prédictions
+    existing_data['Y_train_pred'] = Y_train_pred
+    existing_data['Y_val_pred'] = Y_val_pred
+    existing_data['Y_test_pred'] = Y_test_pred
+    existing_data['metadata'] = json.dumps(metadata)
+
+    # Sauvegarder
+    np.savez_compressed(npz_path, **existing_data)
+    logger.info(f"  ✅ Prédictions sauvegardées dans {npz_path}")
+    logger.info(f"     Nouvelles clés: Y_train_pred, Y_val_pred, Y_test_pred")
+
+
+# Mapping indicateur -> index (pour datasets multi-output)
+# Pour les single-output (close, macd40, etc.), l'index est None
+INDICATOR_INDEX = {
+    'rsi': 0, 'cci': 1, 'macd': 2,
+    'close': None, 'macd40': None, 'macd26': None, 'macd13': None
+}
+INDICATOR_NAMES = {
+    'rsi': 'RSI', 'cci': 'CCI', 'macd': 'MACD',
+    'close': 'CLOSE', 'macd40': 'MACD40', 'macd26': 'MACD26', 'macd13': 'MACD13'
+}
+
+
+def validate_args_vs_filename(args) -> None:
+    """
+    Vérifie la cohérence entre les paramètres --filter et --indicator et le nom du fichier de données.
+
+    Args:
+        args: Arguments parsés
+
+    Raises:
+        SystemExit: Si incohérence détectée
+    """
+    if not args.data:
+        return  # Pas de fichier, pas de validation
+
+    filename = Path(args.data).stem.lower()  # ex: dataset_btc_eth_bnb_ada_ltc_ohlcv2_rsi_kalman
+
+    # Vérifier le filtre
+    if args.filter:
+        filter_name = args.filter.lower()
+        if filter_name not in filename:
+            logger.error(f"❌ Incohérence détectée!")
+            logger.error(f"   --filter '{args.filter}' ne correspond pas au fichier")
+            logger.error(f"   Fichier: {Path(args.data).name}")
+            logger.error(f"   Le filtre '{filter_name}' n'est pas présent dans le nom du fichier")
+            raise SystemExit(1)
+
+    # Vérifier l'indicateur (sauf 'all')
+    if args.indicator != 'all':
+        indicator_name = args.indicator.lower()
+        if indicator_name not in filename:
+            logger.error(f"❌ Incohérence détectée!")
+            logger.error(f"   --indicator '{args.indicator}' ne correspond pas au fichier")
+            logger.error(f"   Fichier: {Path(args.data).name}")
+            logger.error(f"   L'indicateur '{indicator_name}' n'est pas présent dans le nom du fichier")
+            raise SystemExit(1)
+
+    logger.info(f"✅ Paramètres cohérents avec le fichier de données")
 
 
 def main():
@@ -407,6 +546,9 @@ def main():
     logger.info("PIPELINE D'ENTRAÎNEMENT CNN-LSTM")
     logger.info("="*80)
 
+    # Valider la cohérence des arguments avec le fichier de données
+    validate_args_vs_filename(args)
+
     # Seed pour reproductibilité
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -422,8 +564,8 @@ def main():
     # Déterminer mode (multi-output ou single-output)
     single_indicator = args.indicator != 'all'
     if single_indicator:
-        indicator_idx = INDICATOR_INDEX[args.indicator]
-        indicator_name = INDICATOR_NAMES[indicator_idx]
+        indicator_idx = INDICATOR_INDEX[args.indicator]  # None pour close, macd40, etc.
+        indicator_name = INDICATOR_NAMES[args.indicator]
         num_outputs = 1
         logger.info(f"\n🎯 Mode SINGLE-OUTPUT: {indicator_name}")
     else:
@@ -472,6 +614,8 @@ def main():
 
     # Filtrer les labels si mode single-output
     if single_indicator:
+        # Si indicator_idx est None (close, macd40, etc.), le dataset est déjà single-output
+        # La fonction normalize_labels_for_single_output gère ce cas automatiquement
         Y_train = normalize_labels_for_single_output(Y_train, indicator_idx, indicator_name)
         Y_val = normalize_labels_for_single_output(Y_val, indicator_idx, indicator_name)
         Y_test = normalize_labels_for_single_output(Y_test, indicator_idx, indicator_name)
@@ -548,12 +692,34 @@ def main():
         'indicator': args.indicator,
     }
 
-    # Chemin de sauvegarde (inclut l'indicateur si single-output)
+    # Chemin de sauvegarde (inclut le préfixe dataset + filtre + indicateur)
+    # Extraire le préfixe du dataset (ex: "ohlcv2" de "dataset_..._ohlcv2_cci_octave20.npz")
+    dataset_prefix = ""
+    if args.data:
+        data_name = Path(args.data).stem  # dataset_btc_eth_bnb_ada_ltc_ohlcv2_cci_octave20
+        # Chercher des préfixes connus dans le nom
+        known_prefixes = ['ohlcv2', 'ohlc', '5min_30min', '5min', '30min']
+        for prefix in known_prefixes:
+            if prefix in data_name:
+                dataset_prefix = prefix
+                break
+
+    # Construire le suffixe du nom de fichier
+    suffix_parts = []
+    if dataset_prefix:
+        suffix_parts.append(dataset_prefix)
+    if args.filter:
+        suffix_parts.append(args.filter)
     if single_indicator:
-        save_path = args.save_path.replace('.pth', f'_{args.indicator}.pth')
-        logger.info(f"  Modèle sera sauvegardé: {save_path}")
+        suffix_parts.append(args.indicator)
+
+    if suffix_parts:
+        suffix = '_'.join(suffix_parts)
+        save_path = args.save_path.replace('.pth', f'_{suffix}.pth')
     else:
         save_path = args.save_path
+
+    logger.info(f"  Modèle sera sauvegardé: {save_path}")
 
     history = train_model(
         train_loader=train_loader,
@@ -582,6 +748,28 @@ def main():
     logger.info(f"  Historique sauvegardé: {history_path}")
 
     # =========================================================================
+    # 6. GÉNÉRER ET SAUVEGARDER LES PRÉDICTIONS
+    # =========================================================================
+    if args.data:
+        logger.info("\n6. Génération des prédictions...")
+
+        # Charger le meilleur modèle
+        checkpoint = torch.load(save_path, map_location=device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        logger.info(f"  Meilleur modèle chargé: {save_path}")
+
+        # Sauvegarder les prédictions dans le .npz
+        save_predictions_to_npz(
+            npz_path=args.data,
+            model=model,
+            X_train=X_train,
+            X_val=X_val,
+            X_test=X_test,
+            device=device,
+            model_path=save_path
+        )
+
+    # =========================================================================
     # RÉSUMÉ FINAL
     # =========================================================================
     logger.info("\n" + "="*80)
@@ -594,11 +782,16 @@ def main():
     if single_indicator:
         logger.info(f"  Indicateur: {indicator_name}")
 
+    if args.data:
+        logger.info(f"\n📊 Prédictions sauvegardées dans: {args.data}")
+        logger.info(f"   Nouvelles clés: Y_train_pred, Y_val_pred, Y_test_pred")
+
     logger.info(f"\nProchaines étapes:")
     if single_indicator:
         logger.info(f"  - Évaluer: python src/evaluate.py --data <dataset> --indicator {args.indicator}")
     else:
         logger.info(f"  - Évaluer sur test set: python src/evaluate.py --data <dataset>")
+    logger.info(f"  - Backtest: python tests/test_trading_strategy_ohlc.py --data {args.data} --use-predictions")
     logger.info(f"  - Visualiser historique: voir {history_path}")
 
 

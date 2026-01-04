@@ -209,16 +209,30 @@ def parse_args():
                         help='Chemin vers les données préparées (.npz). '
                              'IMPORTANT: Doit être le même dataset utilisé pour l\'entraînement!')
 
+    parser.add_argument('--model', '-m', type=str, default=None,
+                        help='Chemin vers le modèle (.pth). Si non spécifié, utilise le chemin par défaut.')
+
     parser.add_argument('--indicator', '-i', type=str, default='all',
-                        choices=['all', 'rsi', 'cci', 'macd'],
-                        help='Indicateur à évaluer (all=multi-output, rsi/cci/macd=single-output)')
+                        choices=['all', 'rsi', 'cci', 'macd', 'close', 'macd40', 'macd26', 'macd13'],
+                        help='Indicateur à évaluer (all=multi-output, autres=single-output)')
+
+    parser.add_argument('--filter', '-f', type=str, default=None,
+                        help='Nom du filtre utilisé (ex: octave20, kalman). '
+                             'Utilisé pour trouver le modèle automatiquement.')
 
     return parser.parse_args()
 
 
-# Mapping indicateur -> index
-INDICATOR_INDEX = {'rsi': 0, 'cci': 1, 'macd': 2}
-INDICATOR_NAMES = ['RSI', 'CCI', 'MACD']
+# Mapping indicateur -> index (pour datasets multi-output)
+# Pour les single-output (close, macd40, etc.), l'index est None
+INDICATOR_INDEX = {
+    'rsi': 0, 'cci': 1, 'macd': 2,
+    'close': None, 'macd40': None, 'macd26': None, 'macd13': None
+}
+INDICATOR_NAMES = {
+    'rsi': 'RSI', 'cci': 'CCI', 'macd': 'MACD',
+    'close': 'CLOSE', 'macd40': 'MACD40', 'macd26': 'MACD26', 'macd13': 'MACD13'
+}
 
 
 def main():
@@ -239,8 +253,8 @@ def main():
     # Déterminer mode (multi-output ou single-output)
     single_indicator = args.indicator != 'all'
     if single_indicator:
-        indicator_idx = INDICATOR_INDEX[args.indicator]
-        indicator_name = INDICATOR_NAMES[indicator_idx]
+        indicator_idx = INDICATOR_INDEX[args.indicator]  # None pour close, macd40, etc.
+        indicator_name = INDICATOR_NAMES[args.indicator]
         num_outputs = 1
         logger.info(f"\n🎯 Mode SINGLE-OUTPUT: {indicator_name}")
     else:
@@ -253,19 +267,43 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     logger.info(f"\nDevice: {device}")
 
-    # Chemin du modèle (inclut l'indicateur si single-output)
-    if single_indicator:
-        model_path = BEST_MODEL_PATH.replace('.pth', f'_{args.indicator}.pth')
+    # Chemin du modèle (logique identique à train.py)
+    if args.model:
+        model_path = args.model
     else:
-        model_path = BEST_MODEL_PATH
+        # Extraire le préfixe du dataset (ex: "ohlcv2" de "dataset_..._ohlcv2_cci_octave20.npz")
+        dataset_prefix = ""
+        if args.data:
+            data_name = Path(args.data).stem
+            known_prefixes = ['ohlcv2', 'ohlc', '5min_30min', '5min', '30min']
+            for prefix in known_prefixes:
+                if prefix in data_name:
+                    dataset_prefix = prefix
+                    break
+
+        # Construire le suffixe du nom de fichier
+        suffix_parts = []
+        if dataset_prefix:
+            suffix_parts.append(dataset_prefix)
+        if args.filter:
+            suffix_parts.append(args.filter)
+        if single_indicator:
+            suffix_parts.append(args.indicator)
+
+        if suffix_parts:
+            suffix = '_'.join(suffix_parts)
+            model_path = BEST_MODEL_PATH.replace('.pth', f'_{suffix}.pth')
+        else:
+            model_path = BEST_MODEL_PATH
 
     # Vérifier que le modèle existe
     if not Path(model_path).exists():
         logger.error(f"❌ Modèle non trouvé: {model_path}")
         if single_indicator:
-            logger.error(f"   Entraîner d'abord: python src/train.py --data <dataset> --indicator {args.indicator}")
+            filter_hint = f" --filter {args.filter}" if args.filter else ""
+            logger.error(f"   Entraîner d'abord: python src/train.py --data {args.data} --indicator {args.indicator}{filter_hint}")
         else:
-            logger.error(f"   Entraîner d'abord le modèle: python src/train.py --data <dataset>")
+            logger.error(f"   Entraîner d'abord le modèle: python src/train.py --data {args.data}")
         return
 
     # =========================================================================

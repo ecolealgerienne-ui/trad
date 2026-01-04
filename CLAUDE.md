@@ -1,8 +1,81 @@
 # Modele CNN-LSTM Multi-Output - Guide Complet
 
-**Date**: 2026-01-03
-**Statut**: Pipeline complet implemente - Objectif 85% ATTEINT
-**Version**: 4.0
+**Date**: 2026-01-04
+**Statut**: CART valide architecture - Probleme = duree trades, pas volatilite
+**Version**: 4.8
+
+---
+
+## DECOUVERTE MAJEURE - Analyse CART (2026-01-04)
+
+### Resultats CART
+
+CART (Decision Tree) a ete utilise pour apprendre les regles optimales de la state machine.
+
+**Configuration testee:**
+- 3 classes (ENTER/HOLD/EXIT) → Echec (accuracy 40-45%)
+- 2 classes (AGIR/HOLD) → **64.7% accuracy**
+
+**Decouverte cle:**
+```
+Feature Importance:
+  volatility: 100.0%
+  macd_prob:    0.0%
+  rsi_prob:     0.0%
+  cci_prob:     0.0%
+```
+
+### Interpretation
+
+CART a decouvert que:
+1. **Volatilite decide SI on agit** (100% importance)
+2. **ML (MACD) decide la DIRECTION** (mais pas utilise par CART)
+3. RSI/CCI sont redondants pour la decision AGIR/HOLD
+
+### Architecture 3 niveaux validee
+
+```
+NIVEAU 1 - Gate Economique (CART):
+  if volatility < seuil → HOLD
+
+NIVEAU 2 - Direction (ML):
+  if macd_prob > 0.5 → LONG else SHORT
+
+NIVEAU 3 - Securite (optionnel):
+  RSI/CCI extremes → garde-fous
+```
+
+### MAIS: L'edge ne scale PAS avec la volatilite!
+
+| Seuil Vol | Trades | PnL Brut | Win Rate | PF |
+|-----------|--------|----------|----------|-----|
+| 0.13% (P35) | 130,783 | +469% | 43.5% | 1.03 |
+| 0.21% (P50) | 116,880 | +468% | 45.2% | 1.03 |
+| 0.70% (P95) | 21,044 | **+16%** | 46.5% | **1.00** |
+
+**Conclusion choquante:** Le modele est PIRE en haute volatilite!
+- P50: edge ~0.004%/trade
+- P95: edge ~0.000%/trade (aleatoire)
+
+### Probleme reel identifie
+
+Le probleme n'est PAS quand agir (volatilite), mais **combien de temps rester**:
+- Duree moyenne trade: 1.6 - 3.6 periodes (~8-18 min)
+- Le signal MACD flip constamment → trop de trades
+
+### Solutions a tester
+
+| # | Solution | Description |
+|---|----------|-------------|
+| 1 | **Hysteresis** | Entrer si prob > 0.6, sortir si < 0.4 |
+| 2 | **Holding minimum** | Rester minimum 10-20 periodes |
+| 3 | **Confirmation** | Attendre N periodes stables |
+| 4 | **Timeframe 15/30min** | Reduire bruit naturellement |
+
+### Scripts ajoutes
+
+- `src/learn_cart_policy.py` - Apprentissage regles CART
+- `src/state_machine_v2.py` - Architecture simplifiee CART
 
 ---
 
@@ -90,6 +163,295 @@ python src/evaluate.py --data data/prepared/dataset_btc_eth_bnb_ada_ltc_5min_30m
 Le **Step Index** (0.0 → 1.0) indique la position dans la fenetre 30min:
 - Step 1 (0.0): Debut de bougie 30min → plus de poids sur 5min
 - Step 6 (1.0): Fin de bougie 30min → confirmation fiable
+
+---
+
+## NOUVELLE APPROCHE - Features OHLC (2026-01-04)
+
+### Contexte
+
+Approche alternative utilisant les donnees OHLC brutes normalisees au lieu des indicateurs techniques (RSI, CCI, MACD).
+
+### Pipeline prepare_data_ohlc_v2.py
+
+```
+ETAPE 1: Chargement avec DatetimeIndex
+ETAPE 2: Calcul indicateurs (si besoin pour target)
+ETAPE 3: Calcul features OHLC normalisees
+ETAPE 4: Calcul filtre + labels
+ETAPE 5: TRIM edges (100 debut + 100 fin)
+ETAPE 6: Creation sequences avec verification index
+```
+
+### Features OHLC (5 canaux)
+
+| Feature | Formule | Role |
+|---------|---------|------|
+| **O_ret** | (Open[t] - Close[t-1]) / Close[t-1] | Gap d'ouverture (micro-structure) |
+| **H_ret** | (High[t] - Close[t-1]) / Close[t-1] | Extension haussiere intra-bougie |
+| **L_ret** | (Low[t] - Close[t-1]) / Close[t-1] | Extension baissiere intra-bougie |
+| **C_ret** | (Close[t] - Close[t-1]) / Close[t-1] | Rendement net (patterns principaux) |
+| **Range_ret** | (High[t] - Low[t]) / Close[t-1] | Volatilite intra-bougie |
+
+### Notes de l'Expert (IMPORTANT)
+
+**1. C_ret vs Micro-structure**
+- **C_ret** encode les patterns **cloture-a-cloture** → le "gros" du signal appris par CNN
+- **O_ret, H_ret, L_ret** capturent la **micro-structure intra-bougie**
+- **Range_ret** capture l'**activite/volatilite** du marche
+
+**2. Definition du Label (MISE A JOUR 2026-01-04)**
+```
+label[i] = 1 si filtered[i-2] > filtered[i-3] (pente PASSEE, decalee)
+```
+- **Decalage d'un pas** par rapport a la formule initiale `f[i-1] > f[i-2]`
+- Raison: Reduire la correlation avec filtfilt (filtre non-causal)
+- Le modele **re-estime l'etat PASSE** du marche, pas le futur
+- La valeur vient de la **DYNAMIQUE des predictions** (changements d'avis)
+
+**3. Convention Timestamp OHLC**
+```
+Timestamp = Open time (debut de la bougie)
+
+Exemple bougie 5min timestampee "10:05":
+- Open  = premier prix a 10:05:00
+- High  = prix max entre 10:05:00 et 10:09:59
+- Low   = prix min entre 10:05:00 et 10:09:59
+- Close = dernier prix a ~10:09:59
+
+→ Close[10:05] est disponible APRES 10:10:00
+→ Donc causal si utilise a partir de l'index suivant
+```
+
+**4. Alignement Features/Labels**
+```python
+# Pour chaque sequence i:
+X[i] = features[i-12:i]  # indices i-12 a i-1 (12 elements)
+Y[i] = labels[i]          # label a l'index i
+
+# Relation temporelle:
+# - Derniere feature: index i-1 (Close[i-1] disponible)
+# - Label: filtered[i-2] > filtered[i-3] (pente passee, decalee)
+# → Pas de data leakage (decalage supplementaire vs filtfilt)
+```
+
+### Commandes OHLC
+
+```bash
+# Preparer (5 features OHLC)
+python src/prepare_data_ohlc_v2.py --target close --assets BTC ETH BNB ADA LTC
+
+# Entrainer
+python src/train.py --data data/prepared/dataset_btc_eth_bnb_ada_ltc_ohlcv2_close_octave20.npz --indicator close
+
+# Evaluer
+python src/evaluate.py --data data/prepared/dataset_btc_eth_bnb_ada_ltc_ohlcv2_close_octave20.npz --indicator close
+```
+
+### Resultats OHLC (2026-01-04)
+
+#### Impact du decalage de label (filtfilt correlation fix)
+
+| Formule Label | Accuracy RSI | Notes |
+|---------------|--------------|-------|
+| `f[i-1] > f[i-2]` (ancienne) | 76.6% | Modele "trichait" via filtfilt |
+| `f[i-1] > f[i-3]` (delta=1) | 79.7% | Amelioration partielle |
+| **`f[i-2] > f[i-3]`** (nouvelle) | **83.3%** | Formule finale, honnete |
+
+**Conclusion**: Le decalage d'un pas supplementaire (de i-1 a i-2) elimine la correlation residuelle avec le filtre non-causal.
+
+#### Resultats par target
+
+| Target | Features | Accuracy | Notes |
+|--------|----------|----------|-------|
+| **RSI** | OHLC 5ch | **83.3%** | Avec formule corrigee |
+| MACD | OHLC 5ch | 84.3% | Indicateur de tendance lourde |
+| CLOSE | OHLC 5ch | 78.1% | Plus volatil, plus difficile |
+
+### Backtest Oracle (Labels Parfaits)
+
+Resultats sur 20000 samples (~69 jours) en mode Oracle:
+
+| Metrique | Valeur |
+|----------|--------|
+| **Rendement strategie** | **+1628%** |
+| Rendement Buy & Hold | +45% |
+| **Surperformance** | **+1584%** |
+| Win Rate | 78.4% |
+| Total trades | 2543 |
+| Rendement moyen/trade | +0.640% |
+| Duree moyenne trade | 8 periodes (~40 min) |
+| Max Drawdown | -2.78% |
+| LONG (1272 trades) | +837% |
+| SHORT (1271 trades) | +792% |
+
+**Note**: Calcul en rendement simple (somme), pas compose.
+
+### Objectif Realiste
+
+Meme a **5% du gain Oracle**, on obtient:
+- Rendement: **+81%** sur 69 jours
+- Surperformance vs B&H: **+36%**
+
+### Interpretation Strategique
+
+Le modele ne "predit pas le futur" mais **re-estime le passe** de maniere robuste:
+- A chaque instant, il estime si la pente filtree entre t-3 et t-2 etait positive
+- L'interet n'est pas l'accuracy brute, mais les **changements d'avis**
+- Un changement d'avis indique que les features recentes contredisent la tendance passee → signal de retournement
+
+---
+
+## BACKTEST REEL - Resultats et Diagnostic (2026-01-04)
+
+### Bug Corrige: Double Sigmoid
+
+**Probleme identifie**: Le modele applique sigmoid dans `forward()` (model.py:201), mais les scripts de backtest et train appliquaient sigmoid une deuxieme fois.
+
+**Impact**: Toutes les predictions etaient ecrasees vers 0.5 → 100% LONG apres seuil.
+
+**Fichiers corriges**:
+- `tests/test_trading_strategy_ohlc.py` - fonction `load_model_predictions()`
+- `src/train.py` - fonction `generate_predictions()`
+
+```python
+# AVANT (bug)
+preds = (torch.sigmoid(outputs) > 0.5)  # Double sigmoid!
+
+# APRES (corrige)
+preds = (outputs > 0.5)  # outputs deja en [0,1]
+```
+
+### Resultats Backtest Reels
+
+| Mode | Split | Inversé | Rendement | Win Rate | Trades |
+|------|-------|---------|-----------|----------|--------|
+| Oracle | Train | Non | **+1042%** | 67.9% | ~800 |
+| Model | Train | Non | -754% | 27.7% | ~2500 |
+| Model | Train | Oui | +739% | 70.0% | ~2500 |
+| Model | Test | Oui | **-1.57%** | 61.7% | ~500 |
+
+**Note**: L'inversion des signaux sur train (+739%) etait de l'overfitting pur - ne generalise pas sur test.
+
+### Diagnostic: Probleme de Micro-Sorties
+
+Le modele predit bien les tendances (accuracy 83%), mais :
+
+1. **Trop de trades**: ~2500 sur train vs ~800 pour Oracle (3x plus)
+2. **Micro-sorties**: Le modele change d'avis en pleine tendance
+3. **Duree moyenne**: ~1h par trade (vs ~40min Oracle, mais trop de trades)
+
+**Cause racine**: Le modele "flicke" entre 0 et 1 meme quand la tendance globale est correcte. Ces micro-sorties generent des entrees/sorties inutiles qui mangent les profits.
+
+### Solutions a Implementer
+
+| # | Solution | Description | Statut |
+|---|----------|-------------|--------|
+| 1 | **Hysteresis** | Seuil asymetrique: entrer si P > 0.6, sortir si P < 0.4 | A tester |
+| 2 | **Confirmation N periodes** | Attendre signal stable 2-3 periodes avant changement | A tester |
+| 3 | **Lissage probabilites** | Moyenne mobile sur outputs avant seuillage | A tester |
+| 4 | **Filtre anti-flicker** | Ignorer changements < 5 periodes apres dernier trade | A tester |
+
+### Prochaine Etape
+
+Implementer un filtre de stabilite sur les signaux dans `test_trading_strategy_ohlc.py` pour reduire les micro-sorties et evaluer l'impact sur le rendement.
+
+---
+
+## STATE MACHINE - Resultats Complets (2026-01-04)
+
+### Architecture Validee
+
+La state machine utilise 6 signaux:
+- **3 predictions ML** (RSI, CCI, MACD) - probabilites [0,1]
+- **2 filtres** (Octave20, Kalman) - direction de reference
+- **Accord** = TOTAL (tous d'accord), PARTIEL (desaccord partiel), FORT (desaccord total)
+
+### Modes Testes
+
+| Mode | Description | Resultat |
+|------|-------------|----------|
+| **STRICT** | Seul TOTAL autorise les entrees | ✅ +1305% PnL brut |
+| TRANSITION-ONLY | Entrer sur CHANGEMENT vers TOTAL | ❌ -749% (detruit signal) |
+| Confiance 0.15-0.40 | Filtrer predictions incertaines | ✅ Ameliore WR |
+
+### Resultats STRICT + Confiance (Test Set, 445 jours)
+
+| Conf | Trades | PnL Brut | WR | PF | Frais (0.2%) | PnL Net |
+|------|--------|----------|------|------|--------------|---------|
+| 0.00 | 94,726 | +1220% | 40.7% | 1.07 | -18945% | -17725% |
+| 0.15 | 84,562 | +1305% | 41.8% | 1.09 | -16912% | -15607% |
+| 0.25 | 77,213 | +1371% | 42.5% | 1.10 | -15443% | -14072% |
+| **0.35** | **67,893** | **+1348%** | **42.8%** | **1.11** | -13579% | -12231% |
+| 0.40 | 61,238 | +1103% | 42.7% | 1.10 | -12248% | -11145% |
+
+**Sweet spot = conf 0.35** : Meilleur WR (42.8%) et PF (1.11)
+
+### Distribution des Probabilites (Octave vs Kalman)
+
+| Plage | Octave20 | Kalman |
+|-------|----------|--------|
+| Confiant (<0.3 ou ≥0.7) | **76.7%** | 56.2% |
+| Incertain (0.3-0.7) | 23.2% | **43.9%** |
+
+**Conclusion**: Octave20 produit des predictions plus confiantes (distribution bimodale).
+
+### Probleme Fondamental: FRAIS
+
+```
+Edge par trade = +0.015% (WR 42.8%, Avg Win +0.45%, Avg Loss -0.30%)
+Frais par trade = 0.20% (entree + sortie)
+
+Ratio = 0.015% / 0.20% = 7.5%
+→ On gagne seulement 7.5% des frais!
+
+Trades max rentables = 1348% / 0.20% = ~6,740
+Trades actuels = 67,893
+→ 10x trop de trades
+```
+
+### Pourquoi Transition-Only a Echoue
+
+| Metrique | STRICT | TRANSITION-ONLY |
+|----------|--------|-----------------|
+| Trades | 94,726 | 30,087 |
+| WR | 40.7% | **33.1%** ❌ |
+| PnL Brut | +1220% | **-749%** ❌ |
+
+La logique "entrer sur changement vers TOTAL" filtre les **continuations** qui etaient les meilleurs trades. Les transitions sont moins stables que les continuations.
+
+### Scripts Ajoutes
+
+1. **`src/state_machine.py`** - Machine a etat complete
+   ```bash
+   python src/state_machine.py \
+       --rsi-octave ... --cci-octave ... --macd-octave ... \
+       --rsi-kalman ... --cci-kalman ... --macd-kalman ... \
+       --split test --strict --min-confidence 0.35 --fees 0.1
+   ```
+
+2. **`src/regenerate_predictions.py`** - Regenerer les probabilites
+   ```bash
+   python src/regenerate_predictions.py \
+       --data data/prepared/dataset_..._macd_octave20.npz \
+       --indicator macd
+   ```
+
+### Conclusion State Machine
+
+Le modele ML fonctionne (accuracy 83-85%, PF 1.11) mais:
+- **Trade trop frequemment** (~30 trades/jour/asset)
+- **Edge trop faible** (+0.015%/trade vs 0.20% frais)
+- **Impossible rentable** avec frais standard (0.1% par trade)
+
+### Pistes pour Rentabilite
+
+| # | Solution | Impact Estime |
+|---|----------|---------------|
+| 1 | **Timeframe 15min/30min** | Reduit trades naturellement |
+| 2 | **Maker fees (0.02%)** | 10x moins de frais |
+| 3 | **Holding minimum** | Forcer duree min par trade |
+| 4 | **Features ATR/Volume** | Filtrer par volatilite |
 
 ---
 
@@ -935,6 +1297,589 @@ Liste organisee des experiences et optimisations a tester pour atteindre 90%+.
 
 ---
 
+## FEATURE FUTURE - Machine a Etat Multi-Filtres (Octave + Kalman)
+
+**Date**: 2026-01-04
+**Statut**: A implementer apres stabilisation du modele ML
+**Priorite**: Post-production
+
+### Concept
+
+Utiliser **deux filtres** (Octave + Kalman) appliques au meme signal pour obtenir plusieurs estimations de l'etat latent. Ces estimations sont utilisees dans la **machine a etat** (pas dans le modele ML).
+
+### Difference Fondamentale Octave vs Kalman
+
+| Filtre | Nature | Ce qu'il "voit" bien |
+|--------|--------|----------------------|
+| **Octave** | Frequentiel (Butterworth) | Structure, cycles, tendances |
+| **Kalman** | Etat probabiliste | Continuite, incertitude, variance |
+
+Les deux sont **complementaires**, pas redondants.
+
+### Resultats Empiriques - Comparaison Octave20 vs Kalman (2026-01-04)
+
+#### Concordance des labels (Train vs Test)
+
+| Indicateur | Train | Test | Delta | Isoles (Test) |
+|------------|-------|------|-------|---------------|
+| RSI | 86.8% | 88.5% | +1.7% | 69.0% |
+| CCI | 88.6% | 89.2% | +0.6% | 67.0% |
+| MACD | 90.2% | 89.9% | -0.3% | 64.6% |
+
+**Observation** : Concordance stable ou meilleure sur test → les filtres generalisent bien.
+
+#### Accuracy ML (OHLC 5 features)
+
+| Indicateur | Octave20 | Kalman | Delta |
+|------------|----------|--------|-------|
+| RSI | 83.3% | 81.4% | **-1.9%** |
+| CCI | ~85% | 79.0% | **~-6%** |
+| MACD | 84.3% | 77.5% | **-6.8%** |
+
+**Conclusion** : **Octave20 > Kalman** pour le ML, sans exception.
+
+#### Paradoxe MACD (RESOLU)
+
+| Observation | MACD | RSI |
+|-------------|------|-----|
+| Concordance filtres | **90%** (meilleure) | 87% |
+| Perte accuracy Kalman | **-6.8%** (pire) | -1.9% |
+
+**Ce n'est PAS un paradoxe** (validation expert) :
+
+- MACD est deja un indicateur tres lisse
+- Kalman re-lisse encore → **trop peu d'entropie**
+- Resultat : peu de retournements, transitions graduelles, frontieres floues
+- **Pour un humain** : excellent (signal propre)
+- **Pour un classifieur ML** : cauchemar (pas assez de contraste)
+
+> "Haute concordance ≠ bonne predictibilite. Le ML a besoin de contraste, pas de douceur."
+
+#### Observations cles
+
+1. **Plus l'indicateur est "lourd", plus les filtres sont d'accord**
+   - RSI (oscillateur vitesse) : 87-89% concordance
+   - CCI (oscillateur deviation) : 89% concordance
+   - MACD (indicateur tendance) : 90% concordance
+
+2. **~2/3 des desaccords sont isoles** (1 sample) - CHIFFRE CLE
+   - = Moments transitoires brefs (micro pullbacks, respirations)
+   - Les 35% restants = blocs de desaccord (vraies zones d'incertitude)
+   - **Implication** : Sortir sur un desaccord isole est presque toujours une erreur
+   - **Justification mathematique** pour la regle de confirmation 2+ periodes
+
+3. **Recommandations finales (validees par expert) :**
+   - **Modele ML** : Utiliser **Octave20 exclusivement** (labels nets, meilleure separabilite)
+   - **Kalman** : Detecteur d'incertitude, pas predicteur ("Est-ce que je suis confiant ?")
+   - **Anti-flicker** : Confirmation 2+ periodes = filtre quasi-optimal (elimine 65% faux signaux)
+   - **MACD** : Indicateur pivot (plus stable), RSI/CCI = modulateurs
+
+#### Architecture Finale (convergence)
+
+```
+OHLC → Modele ML (Octave20)
+           ↓
+     Direction probabiliste
+           ↓
+ Kalman → Incertitude / confiance
+           ↓
+  Machine a etats :
+    - MACD pivot (declencheur principal)
+    - RSI/CCI modulateurs (pas declencheurs)
+    - Confirmation temporelle (2+ periodes)
+    - Ignorer desaccords isoles
+    - Prudence en zone Kalman floue
+```
+
+> "Tu n'es plus dans l'exploration, mais dans la convergence."
+> — Expert
+
+**Commande de comparaison :**
+```bash
+python src/compare_datasets.py \
+    --file1 data/prepared/dataset_btc_eth_bnb_ada_ltc_ohlcv2_<indicator>_octave20.npz \
+    --file2 data/prepared/dataset_btc_eth_bnb_ada_ltc_ohlcv2_<indicator>_kalman.npz \
+    --split train --sample 20000
+```
+
+### Ce que ca apporte
+
+- Mesure de **robustesse** du signal
+- Information sur la **vitesse** (Octave) et la **stabilite/confiance** (Kalman)
+- Capacite a detecter:
+  - Transitions reelles vs bruit transitoire
+  - Zones d'incertitude (desaccord entre filtres)
+
+### Ce que ca N'apporte PAS
+
+- Pas de nouvel alpha
+- Pas d'amelioration brute de l'accuracy ML
+- Ce n'est pas une source d'edge autonome
+
+**C'est un amplificateur de decision, pas une source d'alpha.**
+
+### Ou utiliser ces filtres (CRUCIAL)
+
+**❌ PAS dans le modele ML:**
+- Double comptage d'information
+- Correlation extreme entre les deux
+- Peu de gain ML
+- Risque de fuite deguisee
+
+**✅ Dans la machine a etat:**
+- Regles de validation
+- Modulation de confiance
+- Gestion des sorties
+
+### Regles de Combinaison
+
+#### Cas 1: Accord total
+```
+Octave_dir == UP
+Kalman_dir == UP
+```
+→ Signal fort → tolerance au bruit ↑
+→ Trades plus longs
+
+#### Cas 2: Desaccord
+```
+Octave_dir != Kalman_dir
+```
+→ Zone de transition
+→ Reduire l'agressivite:
+  - Confirmation plus longue
+  - Sorties plus strictes
+  - Pas d'inversion directe
+
+#### Cas 3: Kalman variance elevee
+```
+Kalman_var > seuil
+```
+→ Marche instable
+→ Interdire nouvelles entrees
+→ Laisser courir positions existantes
+
+### Exemple d'Integration dans la State Machine
+
+**Entree LONG:**
+```python
+if model_pred == UP:
+    if octave_dir == UP and kalman_dir != DOWN:
+        enter_long()      # Accord = confiance haute
+    else:
+        wait_confirmation()  # Desaccord = patience
+```
+
+**Sortie LONG (early):**
+```python
+if octave_dir == DOWN and kalman_dir == DOWN:
+    exit_long()  # Vrai retournement confirme
+```
+
+**Sortie LONG (late):**
+```python
+if kalman_var > seuil and rsi_faiblit:
+    exit_long()  # Marche devient instable
+```
+
+### Application au Probleme de Micro-Sorties
+
+Le modele fait ~2500 trades vs ~800 pour Oracle (3x trop).
+
+Avec cette logique:
+- **Accord filtres** → permettre le trade
+- **Desaccord filtres** → ignorer le changement (probablement du bruit)
+
+Cela devrait reduire les micro-sorties sans toucher au modele ML.
+
+### Implementation Prevue
+
+1. **Calculer les deux filtres** sur le signal cible (ex: MACD)
+2. **Extraire la direction** de chaque filtre (pente > 0 ?)
+3. **Extraire la variance Kalman** comme mesure d'incertitude
+4. **Ajouter ces colonnes** au DataFrame de backtest
+5. **Modifier la state machine** pour utiliser ces informations
+
+### Pieges a Eviter
+
+**⚠️ 1. Trop de regles**
+```
+Octave + Kalman + RSI + CCI + MACD = explosion combinatoire
+```
+→ Solution: Garder simple
+  - Octave = structure
+  - Kalman = confiance
+  - ML = direction
+
+**⚠️ 2. Seuils trop fins**
+→ Sur-optimisation, non robustesse
+→ Garder des seuils grossiers
+
+### Avantage Architectural
+
+C'est une strategie d'**architecture evolutive**:
+- **Aujourd'hui**: Modele ML stable + state machine simple
+- **Demain**: Enrichir la machine sans retrainer le modele
+
+Le modele reste inchange, on ameliore la **qualite decisionnelle** en aval.
+
+### Methodologie - Apprendre la State Machine des Erreurs
+
+**Principe fondamental**: Les accords sont sans interet, les desaccords contiennent toute l'information.
+
+#### Pourquoi analyser les desaccords?
+
+| Situation | Information | Action |
+|-----------|-------------|--------|
+| Tous d'accord | Aucune (decision evidente) | Rien a apprendre |
+| **Desaccord** | Zone de conflit | **Deduire des regles** |
+
+La state machine n'ajoute pas de signal, elle ajoute de la **coherence temporelle**.
+
+#### Methode 1: Analyse Conditionnelle des Erreurs (RECOMMANDEE)
+
+**Etape 1 - Logger tout** (script `analyze_errors_state_machine.py`):
+```
+Pour chaque timestep:
+- Predictions: RSI_pred, CCI_pred, MACD_pred
+- Filtres: Octave_dir, Kalman_dir, Kalman_var
+- Contexte: StepIdx, trade_duration
+- Reference: Oracle action
+- Resultat: action modele, P&L
+```
+
+**Etape 2 - Isoler les cas problematiques**:
+```python
+# Erreurs a analyser
+Model = LONG, Oracle = HOLD ou SHORT
+Model = SHORT, Oracle = HOLD ou LONG
+```
+
+**Etape 3 - Chercher les patterns**:
+```
+❌ Erreurs frequentes quand:
+   - RSI = DOWN, MACD = UP (conflit)
+   - Kalman variance elevee
+   - StepIdx < 3 (debut de cycle)
+
+❌ Sorties prematurees quand:
+   - Octave encore UP
+   - trade_duration < 3 periodes
+```
+
+**Etape 4 - Transformer en regles**:
+```python
+if position == LONG and model_pred == DOWN:
+    if octave_dir == kalman_dir == UP:
+        if trade_duration < 3:
+            action = HOLD  # Ignorer le flip
+```
+
+#### Methode 2: Decision Tree (Regles Explicites)
+
+Entrainer un arbre de decision peu profond:
+```python
+Inputs = [RSI_pred, CCI_pred, MACD_pred, Octave_dir, Kalman_dir, StepIdx]
+Target = Oracle_action
+max_depth = 4  # Limiter pour eviter overfit
+```
+
+Extraire les regles:
+```
+SI MACD == UP
+ET StepIdx < 3
+ET Kalman_var > seuil
+ALORS HOLD (pas encore confirme)
+```
+
+#### Methode 3: Clustering des Desaccords
+
+1. Filtrer les timesteps ou indicateurs/filtres divergent
+2. Clustering (K-means, DBSCAN) sur les features
+3. Chaque cluster = un "type de conflit"
+
+| Cluster | Caracteristiques | Interpretation |
+|---------|------------------|----------------|
+| A | RSI flip, MACD stable | Faux retournement |
+| B | Tous changent, StepIdx > 4 | Vrai retournement |
+| C | Kalman_var haute | Zone d'incertitude |
+
+#### Priorite d'Implementation
+
+| # | Methode | Complexite | Risque overfit |
+|---|---------|------------|----------------|
+| **1** | Analyse erreurs | Faible | Faible |
+| 2 | Decision Tree | Moyenne | Moyen |
+| 3 | Clustering | Elevee | Eleve |
+
+#### Script analyze_errors_state_machine.py
+
+```bash
+# Analyser les erreurs sur le split test
+python src/analyze_errors_state_machine.py \
+    --data data/prepared/dataset_..._octave20.npz \
+    --data-kalman data/prepared/dataset_..._kalman.npz \
+    --split test \
+    --output results/error_analysis.csv
+```
+
+Colonnes generees:
+- `timestamp`, `asset`
+- `rsi_pred`, `cci_pred`, `macd_pred`
+- `octave_dir`, `kalman_dir`, `filters_agree`
+- `oracle_action`, `model_action`, `is_error`
+- `trade_duration`, `step_idx`
+
+#### Resultats Analyse Erreurs (Test Set - 640k samples)
+
+| Metrique | RSI | CCI | MACD |
+|----------|-----|-----|------|
+| **Accuracy** | 83.4% | 82.5% | **84.2%** |
+| Erreurs totales | 106k | 112k | **101k** |
+| False Positive | 8.9% | 10.1% | 8.0% |
+| False Negative | 7.7% | 7.4% | 7.8% |
+| Accord filtres | 88.4% | 89.1% | 90.2% |
+| **Erreur si accord** | 13.8% | 15.8% | 15.6% |
+| **Erreur si desaccord** | 38.3% | 31.5% | 18.3% |
+| **Ratio desaccord/accord** | **2.8x** | 2.0x | 1.2x |
+| Erreurs isolees | **70%** | 62% | 63% |
+| Erreur apres transition | **5.4x** | 3.1x | 2.6x |
+
+**Observations cles :**
+
+1. **MACD = Indicateur le plus stable**
+   - Meilleure accuracy (84.2%), moins d'erreurs
+   - Ratio desaccord/accord = 1.2x seulement → insensible aux conflits de filtres
+   - Regle 1 (prudence si desaccord) NON necessaire pour MACD
+
+2. **RSI = Le plus sensible aux conflits**
+   - 2.8x plus d'erreurs quand filtres en desaccord
+   - 70% d'erreurs isolees (le plus eleve)
+   - 5.4x plus d'erreurs apres transition → tres reactif
+
+3. **Regles validees empiriquement :**
+   - Confirmation 2+ periodes : elimine 60-70% des erreurs (toutes isolees)
+   - Delai post-transition : critique pour RSI (5.4x), modere pour MACD (2.6x)
+   - Prudence si desaccord filtres : critique RSI (2.8x), inutile MACD (1.2x)
+
+**Implications State Machine :**
+
+| Regle | RSI | CCI | MACD |
+|-------|-----|-----|------|
+| Prudence si desaccord filtres | ✅ Critique | ✅ Important | ❌ Pas necessaire |
+| Confirmation 2+ periodes | ✅ | ✅ | ✅ |
+| Delai post-transition | ✅ Critique | ✅ Important | ✅ Modere |
+
+→ **MACD confirme comme pivot** : plus stable, moins sensible aux conflits
+→ **RSI/CCI = modulateurs** necessitant plus de filtrage
+
+#### Regles State Machine (Validees)
+
+**Regle 1 - MACD pivot**
+MACD decide de la direction principale. RSI/CCI ne declenchent jamais seuls.
+
+**Regle 2 - Confirmation conditionnelle**
+```
+Accord total (MACD + RSI + CCI)  → 0 confirmation, agir vite
+Desaccord partiel               → 2 confirmations requises
+Desaccord fort                  → Aucune action
+```
+
+**Regle 3 - Delai post-transition conditionnel**
+```
+MACD transition + accord total  → Pas de delai
+MACD transition + desaccord     → 1 periode de delai
+RSI/CCI transition              → Toujours 2 periodes de delai
+```
+
+**Regle 4 - RSI/CCI = modulateurs uniquement**
+Ils peuvent :
+- ✅ Bloquer une action
+- ✅ Retarder une action
+- ✅ Confirmer une action
+- ❌ Jamais declencher seuls
+
+**Justification empirique :**
+
+| Situation | Taux erreur | Action |
+|-----------|-------------|--------|
+| Accord total | 13-16% | Agir vite |
+| Desaccord | 18-38% | Patience |
+| RSI post-transition | 5.4x erreurs | Forte inertie |
+| MACD propre | 2.6x erreurs | Reactif |
+
+> "L'inertie doit etre conditionnelle, la vitesse doit etre permise quand le signal est propre."
+
+#### Implementation State Machine Proposee
+
+**Etats :**
+```
+FLAT   → Pas de position
+LONG   → Position acheteuse
+SHORT  → Position vendeuse
+```
+
+**Variables de contexte :**
+```python
+class Context:
+    position: str           # FLAT, LONG, SHORT
+    entry_time: int         # Timestamp entree
+    last_transition: int    # Derniere transition MACD
+    confirmation_count: int # Compteur de confirmations (directionnel)
+    exit_delay_count: int   # Compteur delai sortie (max 1 si FORT)
+    prev_macd: int          # Direction MACD precedente (pour reset)
+```
+
+**Fonction d'accord :**
+```python
+def get_agreement_level(macd, rsi, cci, octave_dir, kalman_dir):
+    """
+    Retourne le niveau d'accord des signaux.
+    """
+    indicators_agree = (macd == rsi == cci)
+    filters_agree = (octave_dir == kalman_dir)
+
+    if indicators_agree and filters_agree:
+        return 'TOTAL'      # Tous d'accord → agir vite
+    elif not indicators_agree and not filters_agree:
+        return 'FORT'       # Desaccord fort → ne rien faire
+    else:
+        return 'PARTIEL'    # Desaccord partiel → confirmation requise
+```
+
+**Logique de transition :**
+```python
+def should_enter(macd_pred, rsi_pred, cci_pred, ctx, current_time):
+    """
+    Decide si on doit entrer en position.
+    """
+    if ctx.position != 'FLAT':
+        return False
+
+    agreement = get_agreement_level(macd_pred, rsi_pred, cci_pred, ...)
+    time_since_transition = current_time - ctx.last_transition
+
+    # Regle 1: MACD decide la direction
+    direction = 'LONG' if macd_pred == 1 else 'SHORT'
+
+    # Regle 2: Confirmation conditionnelle
+    if agreement == 'FORT':
+        return False  # Aucune action
+    elif agreement == 'PARTIEL':
+        if ctx.confirmation_count < 2:
+            ctx.confirmation_count += 1
+            return False
+    # agreement == 'TOTAL' → pas de confirmation requise
+
+    # Regle 3: Delai post-transition MACD
+    if agreement != 'TOTAL' and time_since_transition < 1:
+        return False
+
+    ctx.confirmation_count = 0
+    return direction
+
+def should_exit(macd_pred, rsi_pred, cci_pred, ctx, current_time):
+    """
+    Decide si on doit sortir de position.
+    REGLE CRITIQUE: Ne JAMAIS bloquer une sortie MACD indefiniment.
+    """
+    if ctx.position == 'FLAT':
+        return False
+
+    # Signal oppose a la position?
+    if ctx.position == 'LONG' and macd_pred == 0:
+        exit_signal = True
+    elif ctx.position == 'SHORT' and macd_pred == 1:
+        exit_signal = True
+    else:
+        exit_signal = False
+
+    if not exit_signal:
+        return False
+
+    agreement = get_agreement_level(macd_pred, rsi_pred, cci_pred, ...)
+
+    # CORRECTION EXPERT: Sortie TOUJOURS possible si MACD change
+    # - TOTAL: sortie immediate
+    # - PARTIEL: sortie apres 1 confirmation
+    # - FORT: sortie apres 1 periode max (JAMAIS bloquer)
+    if agreement == 'TOTAL':
+        return True
+    elif agreement == 'PARTIEL' and ctx.confirmation_count >= 1:
+        return True
+    elif agreement == 'FORT':
+        # Delai max 1 periode, puis sortie forcee
+        if ctx.exit_delay_count >= 1:
+            return True  # Sortie forcee pour proteger le capital
+        ctx.exit_delay_count += 1
+        return False
+
+    ctx.confirmation_count += 1
+    return False
+```
+
+**Definition stricte de la confirmation (CRITIQUE) :**
+```python
+def update_confirmation(macd_pred, prev_macd, agreement, ctx):
+    """
+    La confirmation doit etre:
+    - Directionnelle (MACD stable)
+    - Coherente (pas de desaccord fort)
+    - Reinitialisable (reset si contradiction)
+    """
+    macd_stable = (macd_pred == prev_macd)
+
+    if macd_stable and agreement != 'FORT':
+        ctx.confirmation_count += 1
+    else:
+        ctx.confirmation_count = 0  # RESET obligatoire
+
+    # Reset aussi le delai de sortie si direction change
+    if not macd_stable:
+        ctx.exit_delay_count = 0
+```
+
+**Asymetrie entree/sortie (validation expert) :**
+
+| Action | Risque si ratee | Reactivite |
+|--------|-----------------|------------|
+| Entree | Opportunite manquee | Peut attendre |
+| **Sortie** | **Perte reelle** | **Doit etre reactive** |
+
+> "Les sorties doivent etre plus reactives que les entrees."
+> — Expert
+
+**Diagramme simplifie :**
+```
+                    ┌─────────────────────────────────────┐
+                    │                                     │
+                    ▼                                     │
+┌──────┐  MACD=UP + accord  ┌──────┐  MACD=DOWN + accord  │
+│ FLAT │ ─────────────────► │ LONG │ ──────────────────────┘
+└──────┘                    └──────┘
+    ▲                           │
+    │   MACD=DOWN + accord      │   MACD=UP + accord
+    │ ◄─────────────────────────┘
+    │
+    │         ┌───────┐
+    └─────────│ SHORT │◄────────┘
+              └───────┘
+
+Note: "accord" = agreement TOTAL ou PARTIEL avec confirmations
+```
+
+#### Ce qu'il ne faut PAS faire
+
+| ⚠️ Piege | Pourquoi |
+|----------|----------|
+| Chercher des regles ou tout va bien | Aucun signal |
+| Laisser un NN decider seul | Perte de stabilite |
+| Apprendre sur le P&L directement | Trop bruite |
+| Trop de regles | Explosion combinatoire |
+| Seuils trop fins | Sur-optimisation |
+
+---
+
 **Cree par**: Claude Code
-**Derniere MAJ**: 2026-01-03
-**Version**: 4.0 (Clock-Injected 7 features, 85.1% accuracy)
+**Derniere MAJ**: 2026-01-04
+**Version**: 4.8 (+ CART Analysis + State Machine V2)
