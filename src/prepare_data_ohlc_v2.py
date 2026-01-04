@@ -47,7 +47,10 @@ from constants import (
     TRIM_EDGES,
     PREPARED_DATA_DIR,
     SEQUENCE_LENGTH,
+    KALMAN_PROCESS_VAR,
+    KALMAN_MEASURE_VAR,
 )
+from filters import kalman_filter
 
 # Périodes STANDARD des indicateurs
 RSI_PERIOD = 14
@@ -195,6 +198,7 @@ def add_ohlc_features_to_df(df: pd.DataFrame, clip_value: float = 0.10) -> pd.Da
 # =============================================================================
 
 def add_filtered_and_labels_to_df(df: pd.DataFrame, target: str,
+                                   filter_type: str = 'kalman',
                                    octave_step: float = OCTAVE_STEP,
                                    delta: int = 0) -> pd.DataFrame:
     """
@@ -209,6 +213,9 @@ def add_filtered_and_labels_to_df(df: pd.DataFrame, target: str,
     - À l'index t, on a accès aux features OHLC jusqu'à t-1 (Close[t-1] finalisé)
     - Le label[t] = filtered[t-2] > filtered[t-3-delta] (pente PASSÉE, décalée)
     - Donc on prédit la pente entre t-3-delta et t-2 avec les données jusqu'à t-1
+
+    Args:
+        filter_type: 'kalman' ou 'octave'
     """
     df = df.copy()
 
@@ -225,12 +232,19 @@ def add_filtered_and_labels_to_df(df: pd.DataFrame, target: str,
     else:
         raise ValueError(f"Target inconnu: {target}")
 
-    # Appliquer filtre Octave
-    # Note: filtfilt a besoin de données sans NaN
+    # Appliquer le filtre choisi
     valid_mask = ~np.isnan(raw_signal)
     filtered = np.full(len(raw_signal), np.nan)
+
     if valid_mask.sum() > 10:
-        filtered[valid_mask] = octave_filter(raw_signal[valid_mask], octave_step)
+        if filter_type == 'kalman':
+            # Filtre de Kalman (non-causal avec smoother)
+            filtered = kalman_filter(raw_signal, KALMAN_PROCESS_VAR, KALMAN_MEASURE_VAR)
+        elif filter_type == 'octave':
+            # Filtre Octave (Butterworth + filtfilt)
+            filtered[valid_mask] = octave_filter(raw_signal[valid_mask], octave_step)
+        else:
+            raise ValueError(f"Filter type inconnu: {filter_type}. Utiliser 'kalman' ou 'octave'.")
 
     df['filtered'] = filtered
 
@@ -411,6 +425,7 @@ def verify_alignment(df: pd.DataFrame, X: np.ndarray, Y: np.ndarray,
 # =============================================================================
 
 def prepare_single_asset(file_path: str, asset_name: str, target: str,
+                         filter_type: str = 'kalman',
                          octave_step: float = OCTAVE_STEP,
                          clip_value: float = 0.10,
                          delta: int = 0) -> tuple:
@@ -425,6 +440,9 @@ def prepare_single_asset(file_path: str, asset_name: str, target: str,
     5. TRIM edges (après tous les calculs pour éviter effets de bord)
     6. Créer séquences avec conservation des index
     7. Vérifier alignement
+
+    Args:
+        filter_type: 'kalman' ou 'octave'
 
     Returns:
         (X, Y, indices, df) pour vérification
@@ -444,7 +462,7 @@ def prepare_single_asset(file_path: str, asset_name: str, target: str,
     logger.info(f"     Features OHLC ajoutées (clip ±{clip_value*100:.0f}%)")
 
     # 4. Ajouter filtre et labels
-    df = add_filtered_and_labels_to_df(df, target, octave_step, delta)
+    df = add_filtered_and_labels_to_df(df, target, filter_type, octave_step, delta)
 
     # 5. TRIM edges (après tous les calculs pour éviter effets de bord du filtre)
     df = df.iloc[TRIM_EDGES:-TRIM_EDGES]
@@ -468,6 +486,7 @@ def prepare_single_asset(file_path: str, asset_name: str, target: str,
 def prepare_and_save(target: str,
                      assets: list = None,
                      output_path: str = None,
+                     filter_type: str = 'kalman',
                      octave_step: float = OCTAVE_STEP,
                      clip_value: float = 0.10,
                      delta: int = 0) -> str:
@@ -475,6 +494,7 @@ def prepare_and_save(target: str,
     Prépare les données OHLC normalisées et les sauvegarde.
 
     Args:
+        filter_type: 'kalman' ou 'octave'
         delta: Décalage pour le calcul du label.
                delta=0: filtered[i-2] > filtered[i-3]
                delta=1: filtered[i-2] > filtered[i-4]
@@ -490,7 +510,7 @@ def prepare_and_save(target: str,
     logger.info("="*80)
     logger.info("PRÉPARATION DES DONNÉES OHLC v2 (avec synchronisation index)")
     logger.info("="*80)
-    logger.info(f"Target: FL_{target.upper()} (Octave step={octave_step}, delta={delta})")
+    logger.info(f"Target: FL_{target.upper()} (filter={filter_type}, delta={delta})")
     logger.info(f"Assets: {', '.join(assets)}")
     logger.info(f"Label: slope(filtered_{target}[i-{3+delta}] → filtered_{target}[i-2])")
     logger.info(f"       → Le modèle ré-estime l'état PASSÉ du marché")
@@ -501,7 +521,7 @@ def prepare_and_save(target: str,
     for asset_name in assets:
         file_path = AVAILABLE_ASSETS_5M[asset_name]
         X, Y, indices, df = prepare_single_asset(
-            file_path, asset_name, target, octave_step, clip_value, delta
+            file_path, asset_name, target, filter_type, octave_step, clip_value, delta
         )
 
         # Split chronologique
@@ -536,7 +556,7 @@ def prepare_and_save(target: str,
     if output_path is None:
         assets_str = '_'.join(assets).lower()
         delta_str = f"_delta{delta}" if delta > 0 else ""
-        output_path = f"data/prepared/dataset_{assets_str}_ohlcv2_{target}_octave{int(octave_step*100)}{delta_str}.npz"
+        output_path = f"data/prepared/dataset_{assets_str}_ohlcv2_{target}_{filter_type}{delta_str}.npz"
 
     output_dir = Path(output_path).parent
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -546,8 +566,9 @@ def prepare_and_save(target: str,
         'version': 'v2_with_index_sync',
         'assets': assets,
         'target': target,
-        'filter_type': 'octave',
-        'octave_step': octave_step,
+        'filter_type': filter_type,
+        'octave_step': octave_step if filter_type == 'octave' else None,
+        'kalman_params': {'process_var': KALMAN_PROCESS_VAR, 'measure_var': KALMAN_MEASURE_VAR} if filter_type == 'kalman' else None,
         'delta': delta,
         # Définition explicite du label (recommandé par expert)
         'label_formula': f'filtered[t-2] > filtered[t-{3+delta}]',
@@ -597,15 +618,20 @@ def main():
     """Point d'entrée CLI."""
     available_assets = list(AVAILABLE_ASSETS_5M.keys())
     available_targets = ['close', 'rsi', 'cci', 'macd']
+    available_filters = ['kalman', 'octave']
 
     parser = argparse.ArgumentParser(
         description="Prépare les datasets OHLC v2 avec synchronisation par index",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=f"""
 Exemples:
-  python src/prepare_data_ohlc_v2.py --target close --assets BTC ETH BNB ADA LTC
-  python src/prepare_data_ohlc_v2.py --target close --delta 1  # f[i-2] > f[i-4]
-  python src/prepare_data_ohlc_v2.py --target macd --assets BTC ETH
+  python src/prepare_data_ohlc_v2.py --target cci --filter kalman --assets BTC ETH BNB ADA LTC
+  python src/prepare_data_ohlc_v2.py --target close --filter octave --assets BTC ETH
+  python src/prepare_data_ohlc_v2.py --target macd --filter kalman --delta 1  # f[i-2] > f[i-4]
+
+Filtres:
+  --filter kalman (défaut): Filtre de Kalman (smoother non-causal)
+  --filter octave:          Filtre Butterworth + filtfilt
 
 Delta:
   --delta 0 (défaut): label = filtered[i-2] > filtered[i-3]
@@ -619,14 +645,17 @@ Assets disponibles: {', '.join(available_assets)}
     parser.add_argument('--target', '-t', type=str, required=True,
                         choices=available_targets,
                         help=f'Indicateur cible')
+    parser.add_argument('--filter', '-f', type=str, default='kalman',
+                        choices=available_filters,
+                        help='Type de filtre: kalman (défaut) ou octave')
     parser.add_argument('--assets', '-a', type=str, nargs='+',
                         default=DEFAULT_ASSETS,
                         choices=available_assets,
                         help=f'Assets à inclure')
     parser.add_argument('--octave-step', type=float, default=OCTAVE_STEP,
-                        help=f'Paramètre du filtre Octave')
+                        help=f'Paramètre du filtre Octave (ignoré si --filter kalman)')
     parser.add_argument('--delta', '-d', type=int, default=0,
-                        help='Décalage label: delta=0 → f[i-1]>f[i-2], delta=1 → f[i-1]>f[i-3]')
+                        help='Décalage label: delta=0 → f[i-2]>f[i-3], delta=1 → f[i-2]>f[i-4]')
     parser.add_argument('--output', '-o', type=str, default=None,
                         help='Chemin de sortie')
     parser.add_argument('--clip', type=float, default=0.10,
@@ -640,6 +669,7 @@ Assets disponibles: {', '.join(available_assets)}
         target=args.target,
         assets=args.assets,
         output_path=args.output,
+        filter_type=args.filter,
         octave_step=args.octave_step,
         clip_value=args.clip,
         delta=args.delta
@@ -647,7 +677,7 @@ Assets disponibles: {', '.join(available_assets)}
 
     print(f"\n✅ Terminé! Dataset: {output_path}")
     print(f"\nPour entraîner:")
-    print(f"  python src/train.py --data {output_path} --indicator {args.target}")
+    print(f"  python src/train.py --data {output_path} --indicator {args.target} --filter {args.filter}")
 
 
 if __name__ == '__main__':
