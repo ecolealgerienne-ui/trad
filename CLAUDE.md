@@ -229,6 +229,62 @@ Le modele ne "predit pas le futur" mais **re-estime le passe** de maniere robust
 
 ---
 
+## BACKTEST REEL - Resultats et Diagnostic (2026-01-04)
+
+### Bug Corrige: Double Sigmoid
+
+**Probleme identifie**: Le modele applique sigmoid dans `forward()` (model.py:201), mais les scripts de backtest et train appliquaient sigmoid une deuxieme fois.
+
+**Impact**: Toutes les predictions etaient ecrasees vers 0.5 → 100% LONG apres seuil.
+
+**Fichiers corriges**:
+- `tests/test_trading_strategy_ohlc.py` - fonction `load_model_predictions()`
+- `src/train.py` - fonction `generate_predictions()`
+
+```python
+# AVANT (bug)
+preds = (torch.sigmoid(outputs) > 0.5)  # Double sigmoid!
+
+# APRES (corrige)
+preds = (outputs > 0.5)  # outputs deja en [0,1]
+```
+
+### Resultats Backtest Reels
+
+| Mode | Split | Inversé | Rendement | Win Rate | Trades |
+|------|-------|---------|-----------|----------|--------|
+| Oracle | Train | Non | **+1042%** | 67.9% | ~800 |
+| Model | Train | Non | -754% | 27.7% | ~2500 |
+| Model | Train | Oui | +739% | 70.0% | ~2500 |
+| Model | Test | Oui | **-1.57%** | 61.7% | ~500 |
+
+**Note**: L'inversion des signaux sur train (+739%) etait de l'overfitting pur - ne generalise pas sur test.
+
+### Diagnostic: Probleme de Micro-Sorties
+
+Le modele predit bien les tendances (accuracy 83%), mais :
+
+1. **Trop de trades**: ~2500 sur train vs ~800 pour Oracle (3x plus)
+2. **Micro-sorties**: Le modele change d'avis en pleine tendance
+3. **Duree moyenne**: ~1h par trade (vs ~40min Oracle, mais trop de trades)
+
+**Cause racine**: Le modele "flicke" entre 0 et 1 meme quand la tendance globale est correcte. Ces micro-sorties generent des entrees/sorties inutiles qui mangent les profits.
+
+### Solutions a Implementer
+
+| # | Solution | Description | Statut |
+|---|----------|-------------|--------|
+| 1 | **Hysteresis** | Seuil asymetrique: entrer si P > 0.6, sortir si P < 0.4 | A tester |
+| 2 | **Confirmation N periodes** | Attendre signal stable 2-3 periodes avant changement | A tester |
+| 3 | **Lissage probabilites** | Moyenne mobile sur outputs avant seuillage | A tester |
+| 4 | **Filtre anti-flicker** | Ignorer changements < 5 periodes apres dernier trade | A tester |
+
+### Prochaine Etape
+
+Implementer un filtre de stabilite sur les signaux dans `test_trading_strategy_ohlc.py` pour reduire les micro-sorties et evaluer l'impact sur le rendement.
+
+---
+
 ## IMPORTANT - Regles pour Claude
 
 **NE PAS EXECUTER les scripts d'entrainement/evaluation.**
@@ -1072,5 +1128,5 @@ Liste organisee des experiences et optimisations a tester pour atteindre 90%+.
 ---
 
 **Cree par**: Claude Code
-**Derniere MAJ**: 2026-01-03
-**Version**: 4.0 (Clock-Injected 7 features, 85.1% accuracy)
+**Derniere MAJ**: 2026-01-04
+**Version**: 4.2 (Backtest reel + Diagnostic micro-sorties)
