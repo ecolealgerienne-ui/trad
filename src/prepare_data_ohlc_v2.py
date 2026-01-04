@@ -174,6 +174,11 @@ def add_filtered_and_labels_to_df(df: pd.DataFrame, target: str,
     Calcule le signal filtré et les labels, les ajoute au DataFrame.
 
     Labels: label[t] = 1 si filtered[t-1] > filtered[t-2] else 0
+
+    Alignement vérifié:
+    - À l'index t, on a accès aux features OHLC jusqu'à t
+    - Le label[t] = filtered[t-1] > filtered[t-2] (pente PASSÉE)
+    - Donc on prédit la pente entre t-2 et t-1 avec les données jusqu'à t
     """
     df = df.copy()
 
@@ -200,16 +205,24 @@ def add_filtered_and_labels_to_df(df: pd.DataFrame, target: str,
     df['filtered'] = filtered
 
     # Calculer labels: filtered[t-1] > filtered[t-2]
-    # Pour chaque ligne t, on compare filtered à t-1 vs t-2
-    df['filtered_t1'] = df['filtered'].shift(1)  # filtered[t-1]
-    df['filtered_t2'] = df['filtered'].shift(2)  # filtered[t-2]
+    # shift(1) : valeur à t-1
+    # shift(2) : valeur à t-2
+    df['filtered_t1'] = df['filtered'].shift(1)
+    df['filtered_t2'] = df['filtered'].shift(2)
 
     # Label = 1 si pente positive (filtered[t-1] > filtered[t-2])
     df['label'] = (df['filtered_t1'] > df['filtered_t2']).astype(int)
 
-    # Log pour vérification
+    # Log pour vérification avec exemple
     logger.info(f"     Filtered: min={df['filtered'].min():.4f}, max={df['filtered'].max():.4f}")
     logger.info(f"     Labels: {df['label'].sum()}/{len(df)} = {df['label'].mean()*100:.1f}% UP")
+
+    # Afficher quelques exemples pour vérification
+    sample_idx = min(100, len(df) - 1)
+    logger.info(f"     Exemple idx={sample_idx}:")
+    logger.info(f"       filtered[{sample_idx-2}]={df['filtered'].iloc[sample_idx-2]:.4f}")
+    logger.info(f"       filtered[{sample_idx-1}]={df['filtered'].iloc[sample_idx-1]:.4f}")
+    logger.info(f"       label[{sample_idx}]={df['label'].iloc[sample_idx]} (filtered[{sample_idx-1}] > filtered[{sample_idx-2}])")
 
     return df
 
@@ -348,6 +361,15 @@ def prepare_single_asset(file_path: str, asset_name: str, target: str,
     """
     Prépare les données pour un seul asset.
 
+    Pipeline:
+    1. Charger données brutes avec DatetimeIndex
+    2. Calculer indicateurs → ajouter au df
+    3. Calculer features OHLC → ajouter au df
+    4. Calculer filtre + labels → ajouter au df
+    5. TRIM edges (après tous les calculs pour éviter effets de bord)
+    6. Créer séquences avec conservation des index
+    7. Vérifier alignement
+
     Returns:
         (X, Y, indices, df) pour vérification
     """
@@ -355,21 +377,22 @@ def prepare_single_asset(file_path: str, asset_name: str, target: str,
 
     # 1. Charger avec index
     df = load_data_with_index(file_path, asset_name)
+    logger.info(f"     Chargé: {len(df)} lignes")
 
-    # 2. Trim edges
-    df = df.iloc[TRIM_EDGES:-TRIM_EDGES]
-    logger.info(f"     Après trim: {len(df)} lignes")
-
-    # 3. Ajouter indicateurs
+    # 2. Ajouter indicateurs
     df = add_indicators_to_df(df)
     logger.info(f"     Indicateurs ajoutés: RSI, CCI, MACD")
 
-    # 4. Ajouter features OHLC
+    # 3. Ajouter features OHLC
     df = add_ohlc_features_to_df(df, clip_value)
     logger.info(f"     Features OHLC ajoutées (clip ±{clip_value*100:.0f}%)")
 
-    # 5. Ajouter filtre et labels
+    # 4. Ajouter filtre et labels
     df = add_filtered_and_labels_to_df(df, target, octave_step)
+
+    # 5. TRIM edges (après tous les calculs pour éviter effets de bord du filtre)
+    df = df.iloc[TRIM_EDGES:-TRIM_EDGES]
+    logger.info(f"     Après trim ±{TRIM_EDGES}: {len(df)} lignes")
 
     # 6. Créer séquences
     feature_cols = ['o_ret', 'h_ret', 'l_ret', 'c_ret', 'range_ret']
