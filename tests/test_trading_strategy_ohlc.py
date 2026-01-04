@@ -500,6 +500,8 @@ Exemples:
                         help='Limiter le nombre de samples (ex: 20000)')
     parser.add_argument('--output', '-o', type=str, default=None,
                         help='Chemin de sortie pour la visualisation')
+    parser.add_argument('--invert', '-i', action='store_true',
+                        help='Inverser les signaux (mean reversion: 1→SHORT, 0→LONG)')
 
     args = parser.parse_args()
 
@@ -557,6 +559,12 @@ Exemples:
         # Mode Oracle : utiliser les labels réels
         signals = Y.flatten()
         strategy_name = "Oracle (Labels Réels)"
+
+    # Inverser les signaux si demandé (mean reversion)
+    if args.invert:
+        signals = 1 - signals
+        strategy_name += " [INVERTED]"
+        print(f"\n⚠️  Signaux inversés (mean reversion)")
 
     # Backtest
     results = backtest_strategy(X, signals, name=strategy_name)
