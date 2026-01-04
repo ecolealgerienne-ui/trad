@@ -373,8 +373,8 @@ def parse_args():
 
     # Indicateur spécifique (optionnel)
     parser.add_argument('--indicator', '-i', type=str, default='all',
-                        choices=['all', 'rsi', 'cci', 'macd'],
-                        help='Indicateur à entraîner (all=multi-output, rsi/cci/macd=single-output)')
+                        choices=['all', 'rsi', 'cci', 'macd', 'close', 'macd40', 'macd26', 'macd13'],
+                        help='Indicateur à entraîner (all=multi-output, autres=single-output)')
 
     # Autres
     parser.add_argument('--seed', type=int, default=RANDOM_SEED,
@@ -386,9 +386,16 @@ def parse_args():
     return parser.parse_args()
 
 
-# Mapping indicateur -> index
-INDICATOR_INDEX = {'rsi': 0, 'cci': 1, 'macd': 2}
-INDICATOR_NAMES = ['RSI', 'CCI', 'MACD']
+# Mapping indicateur -> index (pour datasets multi-output)
+# Pour les single-output (close, macd40, etc.), l'index est None
+INDICATOR_INDEX = {
+    'rsi': 0, 'cci': 1, 'macd': 2,
+    'close': None, 'macd40': None, 'macd26': None, 'macd13': None
+}
+INDICATOR_NAMES = {
+    'rsi': 'RSI', 'cci': 'CCI', 'macd': 'MACD',
+    'close': 'CLOSE', 'macd40': 'MACD40', 'macd26': 'MACD26', 'macd13': 'MACD13'
+}
 
 
 def main():
@@ -422,8 +429,8 @@ def main():
     # Déterminer mode (multi-output ou single-output)
     single_indicator = args.indicator != 'all'
     if single_indicator:
-        indicator_idx = INDICATOR_INDEX[args.indicator]
-        indicator_name = INDICATOR_NAMES[indicator_idx]
+        indicator_idx = INDICATOR_INDEX[args.indicator]  # None pour close, macd40, etc.
+        indicator_name = INDICATOR_NAMES[args.indicator]
         num_outputs = 1
         logger.info(f"\n🎯 Mode SINGLE-OUTPUT: {indicator_name}")
     else:
@@ -472,6 +479,8 @@ def main():
 
     # Filtrer les labels si mode single-output
     if single_indicator:
+        # Si indicator_idx est None (close, macd40, etc.), le dataset est déjà single-output
+        # La fonction normalize_labels_for_single_output gère ce cas automatiquement
         Y_train = normalize_labels_for_single_output(Y_train, indicator_idx, indicator_name)
         Y_val = normalize_labels_for_single_output(Y_val, indicator_idx, indicator_name)
         Y_test = normalize_labels_for_single_output(Y_test, indicator_idx, indicator_name)
