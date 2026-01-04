@@ -243,8 +243,9 @@ def backtest_strategy(X: np.ndarray, signals: np.ndarray, name: str = "Strategy"
         # Rendement moyen par trade
         avg_return = df_trades['return'].mean() * 100
 
-        # Durée moyenne des trades
+        # Durée moyenne des trades (en périodes et en jours)
         avg_duration = df_trades['duration'].mean()
+        avg_duration_days = avg_duration * 5 / 60 / 24  # 5 min par période
 
         # Sharpe ratio (simplifié)
         returns_std = df_trades['return'].std()
@@ -268,6 +269,7 @@ def backtest_strategy(X: np.ndarray, signals: np.ndarray, name: str = "Strategy"
         win_rate = 0
         avg_return = 0
         avg_duration = 0
+        avg_duration_days = 0
         sharpe = 0
         max_drawdown = 0
         total_trades = 0
@@ -278,6 +280,9 @@ def backtest_strategy(X: np.ndarray, signals: np.ndarray, name: str = "Strategy"
     buy_hold_return = (1 + c_ret).prod() - 1
     buy_hold_return_pct = buy_hold_return * 100
 
+    # Durée totale du backtest en jours
+    total_duration_days = n_samples * 5 / 60 / 24
+
     results = {
         'name': name,
         'total_return_pct': total_return_pct,
@@ -285,6 +290,8 @@ def backtest_strategy(X: np.ndarray, signals: np.ndarray, name: str = "Strategy"
         'win_rate_pct': win_rate,
         'avg_return_pct': avg_return,
         'avg_duration': avg_duration,
+        'avg_duration_days': avg_duration_days,
+        'total_duration_days': total_duration_days,
         'sharpe_ratio': sharpe,
         'max_drawdown_pct': max_drawdown,
         'total_trades': total_trades,
@@ -295,6 +302,7 @@ def backtest_strategy(X: np.ndarray, signals: np.ndarray, name: str = "Strategy"
 
     # Afficher résultats
     print(f"\n📊 RÉSULTATS:")
+    print(f"  Durée totale backtest: {total_duration_days:.1f} jours")
     print(f"  Rendement stratégie: {total_return_pct:+.2f}%")
     print(f"  Rendement Buy & Hold: {buy_hold_return_pct:+.2f}%")
     print(f"  Surperformance: {total_return_pct - buy_hold_return_pct:+.2f}%")
@@ -302,7 +310,7 @@ def backtest_strategy(X: np.ndarray, signals: np.ndarray, name: str = "Strategy"
     print(f"  Sharpe Ratio: {sharpe:.2f}")
     print(f"  Max Drawdown: {max_drawdown:.2f}%")
     print(f"  Total trades: {total_trades}")
-    print(f"  Durée moyenne trade: {avg_duration:.1f} périodes")
+    print(f"  Durée moyenne trade: {avg_duration:.1f} périodes ({avg_duration_days:.2f} jours)")
     print(f"  Rendement LONG: {long_return*100:+.2f}%")
     print(f"  Rendement SHORT: {short_return*100:+.2f}%")
 
@@ -398,11 +406,14 @@ Exemples:
   # Mode Oracle (utilise les labels réels Y)
   python tests/test_trading_strategy_ohlc.py --data data/prepared/dataset_xxx.npz
 
+  # Limiter à 20000 samples (~69 jours)
+  python tests/test_trading_strategy_ohlc.py --data data/prepared/dataset_xxx.npz --limit 20000
+
   # Mode Modèle (utilise les prédictions du modèle)
   python tests/test_trading_strategy_ohlc.py --data data/prepared/dataset_xxx.npz --model models/best_model.pth
 
   # Spécifier le split à utiliser
-  python tests/test_trading_strategy_ohlc.py --data data/prepared/dataset_xxx.npz --split test
+  python tests/test_trading_strategy_ohlc.py --data data/prepared/dataset_xxx.npz --split train
         """
     )
 
@@ -413,6 +424,8 @@ Exemples:
     parser.add_argument('--split', '-s', type=str, default='test',
                         choices=['train', 'val', 'test'],
                         help='Split à utiliser (défaut: test)')
+    parser.add_argument('--limit', '-l', type=int, default=None,
+                        help='Limiter le nombre de samples (ex: 20000)')
     parser.add_argument('--output', '-o', type=str, default=None,
                         help='Chemin de sortie pour la visualisation')
 
@@ -437,8 +450,19 @@ Exemples:
     X = dataset[X_key]
     Y = dataset[Y_key]
 
-    print(f"\n📊 Split utilisé: {args.split}")
+    # Limiter le nombre de samples si demandé
+    if args.limit and args.limit < len(X):
+        X = X[:args.limit]
+        Y = Y[:args.limit]
+        print(f"\n📊 Split utilisé: {args.split} (limité à {args.limit} samples)")
+    else:
+        print(f"\n📊 Split utilisé: {args.split}")
     print(f"   Samples: {len(X)}")
+
+    # Calculer durée totale en jours (5 min par période)
+    total_periods = len(X)
+    total_days = total_periods * 5 / 60 / 24
+    print(f"   Durée totale: {total_days:.1f} jours ({total_periods} périodes × 5min)")
 
     # Déterminer les signaux
     if args.model:
@@ -467,10 +491,13 @@ Exemples:
     print(f"  Target: {metadata.get('target', 'N/A')}")
     print(f"  Label: {metadata.get('label_formula', 'N/A')}")
     print(f"  Split: {args.split}")
+    print(f"  Samples: {len(X)}")
+    print(f"  Durée: {results['total_duration_days']:.1f} jours")
     print(f"  Mode: {'Modèle' if args.model else 'Oracle'}")
     print(f"\n  Rendement: {results['total_return_pct']:+.2f}%")
     print(f"  vs Buy&Hold: {results['buy_hold_return_pct']:+.2f}%")
     print(f"  Surperformance: {results['total_return_pct'] - results['buy_hold_return_pct']:+.2f}%")
+    print(f"  Trades: {results['total_trades']} (durée moy: {results['avg_duration_days']:.2f} jours)")
 
 
 if __name__ == '__main__':
