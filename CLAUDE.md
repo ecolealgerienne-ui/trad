@@ -1,8 +1,81 @@
 # Modele CNN-LSTM Multi-Output - Guide Complet
 
 **Date**: 2026-01-04
-**Statut**: State Machine complete - Accuracy 85% OK mais frais > edge
-**Version**: 4.7
+**Statut**: CART valide architecture - Probleme = duree trades, pas volatilite
+**Version**: 4.8
+
+---
+
+## DECOUVERTE MAJEURE - Analyse CART (2026-01-04)
+
+### Resultats CART
+
+CART (Decision Tree) a ete utilise pour apprendre les regles optimales de la state machine.
+
+**Configuration testee:**
+- 3 classes (ENTER/HOLD/EXIT) → Echec (accuracy 40-45%)
+- 2 classes (AGIR/HOLD) → **64.7% accuracy**
+
+**Decouverte cle:**
+```
+Feature Importance:
+  volatility: 100.0%
+  macd_prob:    0.0%
+  rsi_prob:     0.0%
+  cci_prob:     0.0%
+```
+
+### Interpretation
+
+CART a decouvert que:
+1. **Volatilite decide SI on agit** (100% importance)
+2. **ML (MACD) decide la DIRECTION** (mais pas utilise par CART)
+3. RSI/CCI sont redondants pour la decision AGIR/HOLD
+
+### Architecture 3 niveaux validee
+
+```
+NIVEAU 1 - Gate Economique (CART):
+  if volatility < seuil → HOLD
+
+NIVEAU 2 - Direction (ML):
+  if macd_prob > 0.5 → LONG else SHORT
+
+NIVEAU 3 - Securite (optionnel):
+  RSI/CCI extremes → garde-fous
+```
+
+### MAIS: L'edge ne scale PAS avec la volatilite!
+
+| Seuil Vol | Trades | PnL Brut | Win Rate | PF |
+|-----------|--------|----------|----------|-----|
+| 0.13% (P35) | 130,783 | +469% | 43.5% | 1.03 |
+| 0.21% (P50) | 116,880 | +468% | 45.2% | 1.03 |
+| 0.70% (P95) | 21,044 | **+16%** | 46.5% | **1.00** |
+
+**Conclusion choquante:** Le modele est PIRE en haute volatilite!
+- P50: edge ~0.004%/trade
+- P95: edge ~0.000%/trade (aleatoire)
+
+### Probleme reel identifie
+
+Le probleme n'est PAS quand agir (volatilite), mais **combien de temps rester**:
+- Duree moyenne trade: 1.6 - 3.6 periodes (~8-18 min)
+- Le signal MACD flip constamment → trop de trades
+
+### Solutions a tester
+
+| # | Solution | Description |
+|---|----------|-------------|
+| 1 | **Hysteresis** | Entrer si prob > 0.6, sortir si < 0.4 |
+| 2 | **Holding minimum** | Rester minimum 10-20 periodes |
+| 3 | **Confirmation** | Attendre N periodes stables |
+| 4 | **Timeframe 15/30min** | Reduire bruit naturellement |
+
+### Scripts ajoutes
+
+- `src/learn_cart_policy.py` - Apprentissage regles CART
+- `src/state_machine_v2.py` - Architecture simplifiee CART
 
 ---
 
@@ -1809,4 +1882,4 @@ Note: "accord" = agreement TOTAL ou PARTIEL avec confirmations
 
 **Cree par**: Claude Code
 **Derniere MAJ**: 2026-01-04
-**Version**: 4.7 (+ State Machine Resultats Complets)
+**Version**: 4.8 (+ CART Analysis + State Machine V2)
