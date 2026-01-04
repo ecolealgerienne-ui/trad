@@ -1148,29 +1148,51 @@ Les deux sont **complementaires**, pas redondants.
 
 ### Resultats Empiriques - Comparaison Octave20 vs Kalman (2026-01-04)
 
-Analyse sur 20000 samples (split train) pour chaque indicateur :
+#### Concordance des labels (Train vs Test)
 
-| Indicateur | Concordance | Desaccord | Isoles (%) | Interpretation |
-|------------|-------------|-----------|------------|----------------|
-| RSI | 86.8% | 13.2% | 66.2% | Plus nerveux, plus de transitions |
-| CCI | 88.6% | 11.4% | 64.8% | Vitesse moyenne |
-| **MACD** | **90.2%** | **9.8%** | **62.9%** | Plus stable, moins de desaccord |
+| Indicateur | Train | Test | Delta | Isoles (Test) |
+|------------|-------|------|-------|---------------|
+| RSI | 86.8% | 88.5% | +1.7% | 69.0% |
+| CCI | 88.6% | 89.2% | +0.6% | 67.0% |
+| MACD | 90.2% | 89.9% | -0.3% | 64.6% |
 
-**Observations cles :**
+**Observation** : Concordance stable ou meilleure sur test → les filtres generalisent bien.
+
+#### Accuracy ML (OHLC 5 features)
+
+| Indicateur | Octave20 | Kalman | Delta |
+|------------|----------|--------|-------|
+| RSI | 83.3% | 81.4% | **-1.9%** |
+| CCI | ~85% | 79.0% | **~-6%** |
+| MACD | 84.3% | 77.5% | **-6.8%** |
+
+**Conclusion** : **Octave20 > Kalman** pour le ML, sans exception.
+
+#### Paradoxe MACD
+
+| Observation | MACD | RSI |
+|-------------|------|-----|
+| Concordance filtres | **90%** (meilleure) | 87% |
+| Perte accuracy Kalman | **-6.8%** (pire) | -1.9% |
+
+**Explication** : Une haute concordance ne signifie pas une bonne predictibilite. Le MACD Kalman a des labels "plus flous" qui sont plus difficiles a apprendre.
+
+#### Observations cles
 
 1. **Plus l'indicateur est "lourd", plus les filtres sont d'accord**
-   - RSI (oscillateur vitesse) : 86.8% concordance
-   - CCI (oscillateur deviation) : 88.6% concordance
-   - MACD (indicateur tendance) : 90.2% concordance
+   - RSI (oscillateur vitesse) : 87-89% concordance
+   - CCI (oscillateur deviation) : 89% concordance
+   - MACD (indicateur tendance) : 90% concordance
 
-2. **~65% des desaccords sont isoles** (1 sample)
+2. **~2/3 des desaccords sont isoles** (1 sample)
    - = Moments transitoires brefs
    - Les 35% restants = blocs de desaccord (vraies zones d'incertitude)
 
-3. **Implications pour la state machine :**
-   - MACD : Signal le plus fiable, moins besoin de confirmation
-   - RSI : Necessite plus de filtrage anti-flicker
-   - Zones de desaccord = prudence accrue dans les decisions
+3. **Recommandations finales :**
+   - **Modele ML** : Utiliser **Octave20 exclusivement**
+   - **State Machine** : Kalman pour detecter zones d'incertitude
+   - **Anti-flicker** : Confirmation 2+ periodes elimine ~65% des faux signaux
+   - **Indicateur principal** : MACD (plus stable, meilleure accuracy)
 
 **Commande de comparaison :**
 ```bash
