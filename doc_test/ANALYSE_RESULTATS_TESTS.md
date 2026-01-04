@@ -677,12 +677,33 @@ python src/train.py --data dataset_ohlc_macd.npz \
 | 1 feature par indicateur | 5 features OHLC |
 | ~78% accuracy | **~84% accuracy** |
 
+### Tests Additionnels (2026-01-04)
+
+| Test | Accuracy | Résultat |
+|------|----------|----------|
+| Modèle 256/256 | ~84% | ❌ Pas de gain |
+| Delta=1 | 84.0% | ❌ Léger overfit |
+| Formule `t > t-1` | 77.9% | ❌ Moins bon |
+
+**Conclusion** : La config initiale (128/128, delta=0, formule `t-2 > t-3`) est optimale.
+
+### Configuration Optimale OHLC Finale
+
+```
+Input: OHLC 5 canaux (O_ret, H_ret, L_ret, C_ret, Range_ret)
+Clipping: ±10%
+Target: FL_MACD (Octave 0.20)
+Formule labels: filtered[t-2] > filtered[t-3]
+Modèle: CNN 128 / LSTM 128×3 / Dense 64
+Batch: 512
+Accuracy: 84.3%
+```
+
 ### Prochaines Étapes
 
-1. **Modèle plus grand** : 256 filters, 256 LSTM pour exploiter les 5 canaux
-2. **OHLC + Delta** : Tester avec delta=1,2,3 pour voir le gain
-3. **OHLC + Stacking** : Combiner plusieurs modèles OHLC
-4. **OHLC → MACD40** : Tester la cible optimale pour trading
+1. **OHLC → MACD40** : Tester la cible optimale pour trading
+2. **OHLC + Stacking** : Combiner plusieurs modèles OHLC
+3. **Backtest trading** : Valider les 84.3% en conditions réelles
 
 ---
 
