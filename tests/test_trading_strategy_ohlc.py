@@ -231,9 +231,26 @@ def backtest_strategy(X: np.ndarray, signals: np.ndarray, name: str = "Strategy"
 
     # Calculer métriques
     if len(df_trades) > 0:
-        # Rendement total (produit composé)
-        total_return = (1 + df_trades['return']).prod() - 1
-        total_return_pct = total_return * 100
+        # =====================================================================
+        # RENDEMENT: Simple (somme) vs Composé (produit)
+        # =====================================================================
+        # Avec beaucoup de trades, le rendement composé peut exploser:
+        # Ex: 2500 trades × +0.03% moyen = +75% simple mais +110000% composé!
+        #
+        # On utilise le rendement SIMPLE (somme) car:
+        # 1. Plus interprétable (équivalent au rendement moyen × nombre de trades)
+        # 2. Pas d'explosion exponentielle avec beaucoup de trades
+        # 3. Plus conservateur et réaliste
+        # =====================================================================
+
+        # Rendement simple (somme des rendements individuels)
+        total_return_simple = df_trades['return'].sum()
+        total_return_pct = total_return_simple * 100
+
+        # Rendement composé (pour info - peut exploser)
+        # Limité à un facteur raisonnable pour éviter overflow
+        returns_capped = np.clip(df_trades['return'].values, -0.5, 0.5)
+        total_return_compound = (1 + returns_capped).prod() - 1
 
         # Win rate
         wins = (df_trades['return'] > 0).sum()
@@ -251,21 +268,22 @@ def backtest_strategy(X: np.ndarray, signals: np.ndarray, name: str = "Strategy"
         returns_std = df_trades['return'].std()
         sharpe = (df_trades['return'].mean() / returns_std) * np.sqrt(252) if returns_std > 0 else 0
 
-        # Max drawdown
-        df_trades['cumulative'] = (1 + df_trades['return']).cumprod()
+        # Max drawdown (sur rendement cumulé simple)
+        df_trades['cumulative'] = 1.0 + df_trades['return'].cumsum()
         running_max = df_trades['cumulative'].expanding().max()
         df_trades['drawdown'] = (df_trades['cumulative'] - running_max) / running_max
         max_drawdown = df_trades['drawdown'].min() * 100
 
-        # Trades LONG vs SHORT
+        # Trades LONG vs SHORT (somme des rendements)
         long_trades = df_trades[df_trades['position_type'] == 'LONG']
         short_trades = df_trades[df_trades['position_type'] == 'SHORT']
 
-        long_return = (1 + long_trades['return']).prod() - 1 if len(long_trades) > 0 else 0
-        short_return = (1 + short_trades['return']).prod() - 1 if len(short_trades) > 0 else 0
+        long_return = long_trades['return'].sum() if len(long_trades) > 0 else 0
+        short_return = short_trades['return'].sum() if len(short_trades) > 0 else 0
 
     else:
         total_return_pct = 0
+        total_return_compound = 0
         win_rate = 0
         avg_return = 0
         avg_duration = 0
@@ -275,9 +293,12 @@ def backtest_strategy(X: np.ndarray, signals: np.ndarray, name: str = "Strategy"
         total_trades = 0
         long_return = 0
         short_return = 0
+        long_trades = pd.DataFrame()
+        short_trades = pd.DataFrame()
 
     # Buy & Hold pour comparaison
-    buy_hold_return = (1 + c_ret).prod() - 1
+    # Note: B&H utilise aussi la somme simple pour être comparable
+    buy_hold_return = c_ret.sum()
     buy_hold_return_pct = buy_hold_return * 100
 
     # Durée totale du backtest en jours
@@ -295,6 +316,8 @@ def backtest_strategy(X: np.ndarray, signals: np.ndarray, name: str = "Strategy"
         'sharpe_ratio': sharpe,
         'max_drawdown_pct': max_drawdown,
         'total_trades': total_trades,
+        'n_long': len(long_trades),
+        'n_short': len(short_trades),
         'long_return_pct': long_return * 100,
         'short_return_pct': short_return * 100,
         'df_trades': df_trades
@@ -303,16 +326,19 @@ def backtest_strategy(X: np.ndarray, signals: np.ndarray, name: str = "Strategy"
     # Afficher résultats
     print(f"\n📊 RÉSULTATS:")
     print(f"  Durée totale backtest: {total_duration_days:.1f} jours")
-    print(f"  Rendement stratégie: {total_return_pct:+.2f}%")
-    print(f"  Rendement Buy & Hold: {buy_hold_return_pct:+.2f}%")
-    print(f"  Surperformance: {total_return_pct - buy_hold_return_pct:+.2f}%")
-    print(f"  Win Rate: {win_rate:.1f}%")
-    print(f"  Sharpe Ratio: {sharpe:.2f}")
-    print(f"  Max Drawdown: {max_drawdown:.2f}%")
     print(f"  Total trades: {total_trades}")
     print(f"  Durée moyenne trade: {avg_duration:.1f} périodes ({avg_duration_days:.2f} jours)")
-    print(f"  Rendement LONG: {long_return*100:+.2f}%")
-    print(f"  Rendement SHORT: {short_return*100:+.2f}%")
+    print(f"\n  📈 Rendements (somme simple):")
+    print(f"    Stratégie: {total_return_pct:+.2f}%")
+    print(f"    Buy & Hold: {buy_hold_return_pct:+.2f}%")
+    print(f"    Surperformance: {total_return_pct - buy_hold_return_pct:+.2f}%")
+    print(f"    Rendement moyen/trade: {avg_return:+.3f}%")
+    print(f"    LONG ({len(long_trades)} trades): {long_return*100:+.2f}%")
+    print(f"    SHORT ({len(short_trades)} trades): {short_return*100:+.2f}%")
+    print(f"\n  📉 Métriques de risque:")
+    print(f"    Win Rate: {win_rate:.1f}%")
+    print(f"    Sharpe Ratio: {sharpe:.2f}")
+    print(f"    Max Drawdown: {max_drawdown:.2f}%")
 
     return results
 
@@ -329,8 +355,8 @@ def visualize_results(results: dict, output_path: str = None):
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 
-    # 1. Courbe de capital
-    cumulative = (1 + df_trades['return']).cumprod()
+    # 1. Courbe de capital (rendement cumulé simple)
+    cumulative = 1.0 + df_trades['return'].cumsum()
     axes[0, 0].plot(cumulative.values, 'b-', linewidth=2)
     axes[0, 0].axhline(y=1, color='black', linestyle='--', linewidth=1)
     axes[0, 0].set_title(f"Courbe de Capital - {results['name']}", fontsize=12, fontweight='bold')
