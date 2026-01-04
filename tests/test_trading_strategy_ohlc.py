@@ -161,7 +161,8 @@ def load_model_predictions(model_path: str, X: np.ndarray, batch_size: int = 512
             batch_X = X[i:i+batch_size]
             X_tensor = torch.tensor(batch_X, dtype=torch.float32).to(device)
             outputs = model(X_tensor)
-            preds = (torch.sigmoid(outputs) > 0.5).cpu().numpy().flatten()
+            # Le modèle applique déjà sigmoid dans forward(), outputs sont des probabilités [0,1]
+            preds = (outputs > 0.5).cpu().numpy().flatten()
             all_predictions.append(preds)
 
     predictions = np.concatenate(all_predictions)
