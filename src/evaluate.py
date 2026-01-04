@@ -209,16 +209,26 @@ def parse_args():
                         help='Chemin vers les données préparées (.npz). '
                              'IMPORTANT: Doit être le même dataset utilisé pour l\'entraînement!')
 
+    parser.add_argument('--model', '-m', type=str, default=None,
+                        help='Chemin vers le modèle (.pth). Si non spécifié, utilise le chemin par défaut.')
+
     parser.add_argument('--indicator', '-i', type=str, default='all',
-                        choices=['all', 'rsi', 'cci', 'macd'],
-                        help='Indicateur à évaluer (all=multi-output, rsi/cci/macd=single-output)')
+                        choices=['all', 'rsi', 'cci', 'macd', 'close', 'macd40', 'macd26', 'macd13'],
+                        help='Indicateur à évaluer (all=multi-output, autres=single-output)')
 
     return parser.parse_args()
 
 
-# Mapping indicateur -> index
-INDICATOR_INDEX = {'rsi': 0, 'cci': 1, 'macd': 2}
-INDICATOR_NAMES = ['RSI', 'CCI', 'MACD']
+# Mapping indicateur -> index (pour datasets multi-output)
+# Pour les single-output (close, macd40, etc.), l'index est None
+INDICATOR_INDEX = {
+    'rsi': 0, 'cci': 1, 'macd': 2,
+    'close': None, 'macd40': None, 'macd26': None, 'macd13': None
+}
+INDICATOR_NAMES = {
+    'rsi': 'RSI', 'cci': 'CCI', 'macd': 'MACD',
+    'close': 'CLOSE', 'macd40': 'MACD40', 'macd26': 'MACD26', 'macd13': 'MACD13'
+}
 
 
 def main():
@@ -239,8 +249,8 @@ def main():
     # Déterminer mode (multi-output ou single-output)
     single_indicator = args.indicator != 'all'
     if single_indicator:
-        indicator_idx = INDICATOR_INDEX[args.indicator]
-        indicator_name = INDICATOR_NAMES[indicator_idx]
+        indicator_idx = INDICATOR_INDEX[args.indicator]  # None pour close, macd40, etc.
+        indicator_name = INDICATOR_NAMES[args.indicator]
         num_outputs = 1
         logger.info(f"\n🎯 Mode SINGLE-OUTPUT: {indicator_name}")
     else:
@@ -253,8 +263,10 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     logger.info(f"\nDevice: {device}")
 
-    # Chemin du modèle (inclut l'indicateur si single-output)
-    if single_indicator:
+    # Chemin du modèle
+    if args.model:
+        model_path = args.model
+    elif single_indicator:
         model_path = BEST_MODEL_PATH.replace('.pth', f'_{args.indicator}.pth')
     else:
         model_path = BEST_MODEL_PATH
