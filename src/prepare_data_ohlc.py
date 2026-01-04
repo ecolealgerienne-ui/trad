@@ -196,13 +196,14 @@ def generate_octave_labels(indicator: np.ndarray, step: float = OCTAVE_STEP,
     """
     Génère les labels depuis indicateur filtré.
 
-    Label[t] = 1 si filtered[t-2] > filtered[t-3-delta]
-    Label[t] = 0 sinon
+    Formule simplifiée:
+        Label[t] = 1 si filtered[t] > filtered[t-1]
+        Label[t] = 0 sinon
 
     Args:
         indicator: Valeurs de l'indicateur
         step: Paramètre du filtre Octave
-        delta: Décalage supplémentaire (défaut: 0)
+        delta: Non utilisé (gardé pour compatibilité)
 
     Returns:
         labels: np.array de 0/1
@@ -211,10 +212,9 @@ def generate_octave_labels(indicator: np.ndarray, step: float = OCTAVE_STEP,
 
     labels = np.zeros(len(filtered), dtype=int)
 
-    # Formule: filtered[t-2] > filtered[t-3-delta]
-    start_idx = 3 + delta
-    for t in range(start_idx, len(filtered)):
-        if filtered[t-2] > filtered[t-3-delta]:
+    # Formule simple: filtered[t] > filtered[t-1]
+    for t in range(1, len(filtered)):
+        if filtered[t] > filtered[t-1]:
             labels[t] = 1
 
     return labels
