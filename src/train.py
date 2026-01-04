@@ -645,12 +645,29 @@ def main():
         'indicator': args.indicator,
     }
 
-    # Chemin de sauvegarde (inclut l'indicateur si single-output)
+    # Chemin de sauvegarde (inclut le préfixe dataset + indicateur)
+    # Extraire le préfixe du dataset (ex: "ohlcv2" de "dataset_..._ohlcv2_cci_octave20.npz")
+    dataset_prefix = ""
+    if args.data:
+        data_name = Path(args.data).stem  # dataset_btc_eth_bnb_ada_ltc_ohlcv2_cci_octave20
+        # Chercher des préfixes connus dans le nom
+        known_prefixes = ['ohlcv2', 'ohlc', '5min_30min', '5min', '30min']
+        for prefix in known_prefixes:
+            if prefix in data_name:
+                dataset_prefix = prefix
+                break
+
     if single_indicator:
-        save_path = args.save_path.replace('.pth', f'_{args.indicator}.pth')
+        if dataset_prefix:
+            save_path = args.save_path.replace('.pth', f'_{dataset_prefix}_{args.indicator}.pth')
+        else:
+            save_path = args.save_path.replace('.pth', f'_{args.indicator}.pth')
         logger.info(f"  Modèle sera sauvegardé: {save_path}")
     else:
-        save_path = args.save_path
+        if dataset_prefix:
+            save_path = args.save_path.replace('.pth', f'_{dataset_prefix}.pth')
+        else:
+            save_path = args.save_path
 
     history = train_model(
         train_loader=train_loader,
