@@ -1,8 +1,8 @@
 # Modele CNN-LSTM Multi-Output - Guide Complet
 
 **Date**: 2026-01-04
-**Statut**: Pipeline complet implemente - Objectif 85% ATTEINT + Approche OHLC
-**Version**: 4.6
+**Statut**: State Machine complete - Accuracy 85% OK mais frais > edge
+**Version**: 4.7
 
 ---
 
@@ -282,6 +282,103 @@ Le modele predit bien les tendances (accuracy 83%), mais :
 ### Prochaine Etape
 
 Implementer un filtre de stabilite sur les signaux dans `test_trading_strategy_ohlc.py` pour reduire les micro-sorties et evaluer l'impact sur le rendement.
+
+---
+
+## STATE MACHINE - Resultats Complets (2026-01-04)
+
+### Architecture Validee
+
+La state machine utilise 6 signaux:
+- **3 predictions ML** (RSI, CCI, MACD) - probabilites [0,1]
+- **2 filtres** (Octave20, Kalman) - direction de reference
+- **Accord** = TOTAL (tous d'accord), PARTIEL (desaccord partiel), FORT (desaccord total)
+
+### Modes Testes
+
+| Mode | Description | Resultat |
+|------|-------------|----------|
+| **STRICT** | Seul TOTAL autorise les entrees | ✅ +1305% PnL brut |
+| TRANSITION-ONLY | Entrer sur CHANGEMENT vers TOTAL | ❌ -749% (detruit signal) |
+| Confiance 0.15-0.40 | Filtrer predictions incertaines | ✅ Ameliore WR |
+
+### Resultats STRICT + Confiance (Test Set, 445 jours)
+
+| Conf | Trades | PnL Brut | WR | PF | Frais (0.2%) | PnL Net |
+|------|--------|----------|------|------|--------------|---------|
+| 0.00 | 94,726 | +1220% | 40.7% | 1.07 | -18945% | -17725% |
+| 0.15 | 84,562 | +1305% | 41.8% | 1.09 | -16912% | -15607% |
+| 0.25 | 77,213 | +1371% | 42.5% | 1.10 | -15443% | -14072% |
+| **0.35** | **67,893** | **+1348%** | **42.8%** | **1.11** | -13579% | -12231% |
+| 0.40 | 61,238 | +1103% | 42.7% | 1.10 | -12248% | -11145% |
+
+**Sweet spot = conf 0.35** : Meilleur WR (42.8%) et PF (1.11)
+
+### Distribution des Probabilites (Octave vs Kalman)
+
+| Plage | Octave20 | Kalman |
+|-------|----------|--------|
+| Confiant (<0.3 ou ≥0.7) | **76.7%** | 56.2% |
+| Incertain (0.3-0.7) | 23.2% | **43.9%** |
+
+**Conclusion**: Octave20 produit des predictions plus confiantes (distribution bimodale).
+
+### Probleme Fondamental: FRAIS
+
+```
+Edge par trade = +0.015% (WR 42.8%, Avg Win +0.45%, Avg Loss -0.30%)
+Frais par trade = 0.20% (entree + sortie)
+
+Ratio = 0.015% / 0.20% = 7.5%
+→ On gagne seulement 7.5% des frais!
+
+Trades max rentables = 1348% / 0.20% = ~6,740
+Trades actuels = 67,893
+→ 10x trop de trades
+```
+
+### Pourquoi Transition-Only a Echoue
+
+| Metrique | STRICT | TRANSITION-ONLY |
+|----------|--------|-----------------|
+| Trades | 94,726 | 30,087 |
+| WR | 40.7% | **33.1%** ❌ |
+| PnL Brut | +1220% | **-749%** ❌ |
+
+La logique "entrer sur changement vers TOTAL" filtre les **continuations** qui etaient les meilleurs trades. Les transitions sont moins stables que les continuations.
+
+### Scripts Ajoutes
+
+1. **`src/state_machine.py`** - Machine a etat complete
+   ```bash
+   python src/state_machine.py \
+       --rsi-octave ... --cci-octave ... --macd-octave ... \
+       --rsi-kalman ... --cci-kalman ... --macd-kalman ... \
+       --split test --strict --min-confidence 0.35 --fees 0.1
+   ```
+
+2. **`src/regenerate_predictions.py`** - Regenerer les probabilites
+   ```bash
+   python src/regenerate_predictions.py \
+       --data data/prepared/dataset_..._macd_octave20.npz \
+       --indicator macd
+   ```
+
+### Conclusion State Machine
+
+Le modele ML fonctionne (accuracy 83-85%, PF 1.11) mais:
+- **Trade trop frequemment** (~30 trades/jour/asset)
+- **Edge trop faible** (+0.015%/trade vs 0.20% frais)
+- **Impossible rentable** avec frais standard (0.1% par trade)
+
+### Pistes pour Rentabilite
+
+| # | Solution | Impact Estime |
+|---|----------|---------------|
+| 1 | **Timeframe 15min/30min** | Reduit trades naturellement |
+| 2 | **Maker fees (0.02%)** | 10x moins de frais |
+| 3 | **Holding minimum** | Forcer duree min par trade |
+| 4 | **Features ATR/Volume** | Filtrer par volatilite |
 
 ---
 
@@ -1712,4 +1809,4 @@ Note: "accord" = agreement TOTAL ou PARTIEL avec confirmations
 
 **Cree par**: Claude Code
 **Derniere MAJ**: 2026-01-04
-**Version**: 4.6 (+ Validation Expert + Architecture Finale)
+**Version**: 4.7 (+ State Machine Resultats Complets)
