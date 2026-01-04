@@ -75,7 +75,9 @@ def load_dataset(path: str, split: str = 'test') -> dict:
         'X': data[f'X_{split}'],
         'Y': data[f'Y_{split}'],
         'Y_pred': data.get(f'Y_{split}_pred', None),
-        'metadata': None
+        'metadata': None,
+        'assets': None,
+        'samples_per_asset': None
     }
 
     # Charger les prédictions si disponibles
@@ -86,7 +88,13 @@ def load_dataset(path: str, split: str = 'test') -> dict:
     # Charger métadonnées
     if 'metadata' in data:
         try:
-            result['metadata'] = json.loads(str(data['metadata']))
+            meta = json.loads(str(data['metadata']))
+            result['metadata'] = meta
+            # Extraire les assets et samples par asset
+            if 'assets' in meta:
+                result['assets'] = meta['assets']
+            if f'samples_per_asset_{split}' in meta:
+                result['samples_per_asset'] = meta[f'samples_per_asset_{split}']
         except:
             pass
 
@@ -322,6 +330,9 @@ def run_state_machine(
     macd_kalman: np.ndarray,
     returns: np.ndarray = None,
     strict: bool = False,
+    fees: float = 0.0,
+    asset_indices: np.ndarray = None,
+    assets: List[str] = None,
     verbose: bool = True
 ) -> Tuple[np.ndarray, dict]:
     """
@@ -333,6 +344,9 @@ def run_state_machine(
         *_kalman: Labels Kalman (direction)
         returns: Rendements (c_ret) pour calcul PnL (optionnel)
         strict: Si True, seul TOTAL autorise les entrées (recommandé)
+        fees: Frais par trade (ex: 0.001 = 0.1%)
+        asset_indices: Index de l'asset pour chaque sample
+        assets: Liste des noms d'assets
 
     Returns:
         positions: Array des positions (0=FLAT, 1=LONG, -1=SHORT)
@@ -341,6 +355,14 @@ def run_state_machine(
     n_samples = len(macd_pred)
     positions = np.zeros(n_samples, dtype=int)
     ctx = Context()
+
+    # Initialiser PnL par asset
+    pnl_by_asset = {}
+    trades_by_asset = {}
+    if assets:
+        for asset in assets:
+            pnl_by_asset[asset] = []
+            trades_by_asset[asset] = 0
 
     # Statistiques
     stats = {
@@ -358,12 +380,18 @@ def run_state_machine(
         # PnL par état d'entrée
         'pnl_by_entry_state': {'TOTAL': [], 'PARTIEL': []},
         'total_pnl': 0.0,
-        'strict_mode': strict
+        'total_pnl_after_fees': 0.0,
+        'total_fees': 0.0,
+        'pnl_by_asset': pnl_by_asset,
+        'trades_by_asset': trades_by_asset,
+        'strict_mode': strict,
+        'fees_rate': fees
     }
 
     # Variables pour tracker le trade en cours
     current_entry_agreement = None
     current_trade_pnl = 0.0
+    current_entry_asset = None
 
     for i in range(n_samples):
         # Récupérer les signaux
@@ -374,6 +402,13 @@ def run_state_machine(
         # Direction des filtres (basée sur les labels = pente filtrée)
         octave_dir = int(macd_octave[i])  # MACD comme référence principale
         kalman_dir = int(macd_kalman[i])
+
+        # Déterminer l'asset courant
+        current_asset = None
+        if asset_indices is not None and assets:
+            asset_idx = int(asset_indices[i])
+            if 0 <= asset_idx < len(assets):
+                current_asset = assets[asset_idx]
 
         # Calculer l'accord
         agreement = get_agreement_level(m_pred, r_pred, c_pred, octave_dir, kalman_dir)
@@ -393,6 +428,10 @@ def run_state_machine(
         # Vérifier sortie
         if ctx.position != Position.FLAT:
             if should_exit(m_pred, r_pred, c_pred, octave_dir, kalman_dir, ctx):
+                # Calculer les frais (entrée + sortie = 2x fees)
+                trade_fees = 2 * fees
+                pnl_after_fees = current_trade_pnl - trade_fees
+
                 # Enregistrer le trade
                 trade_duration = i - ctx.current_trade_start
                 ctx.trades.append({
@@ -401,14 +440,24 @@ def run_state_machine(
                     'duration': trade_duration,
                     'type': ctx.position.value,
                     'entry_agreement': current_entry_agreement,
-                    'pnl': current_trade_pnl
+                    'pnl': current_trade_pnl,
+                    'pnl_after_fees': pnl_after_fees,
+                    'fees': trade_fees,
+                    'asset': current_entry_asset
                 })
                 stats['n_trades'] += 1
                 stats['total_pnl'] += current_trade_pnl
+                stats['total_pnl_after_fees'] += pnl_after_fees
+                stats['total_fees'] += trade_fees
 
                 # PnL par état d'entrée
                 if current_entry_agreement and current_entry_agreement in stats['pnl_by_entry_state']:
                     stats['pnl_by_entry_state'][current_entry_agreement].append(current_trade_pnl)
+
+                # PnL par asset
+                if current_entry_asset and current_entry_asset in pnl_by_asset:
+                    pnl_by_asset[current_entry_asset].append(pnl_after_fees)
+                    trades_by_asset[current_entry_asset] += 1
 
                 # Stats par type de sortie
                 if agreement == Agreement.TOTAL:
@@ -424,6 +473,7 @@ def run_state_machine(
                 ctx.exit_delay_count = 0
                 current_trade_pnl = 0.0
                 current_entry_agreement = None
+                current_entry_asset = None
 
         # Vérifier entrée
         if ctx.position == Position.FLAT:
@@ -433,6 +483,7 @@ def run_state_machine(
                 ctx.current_trade_start = i
                 ctx.last_transition = i
                 ctx.confirmation_count = 0
+                current_entry_asset = current_asset  # Stocker l'asset d'entrée
 
                 if new_position == Position.LONG:
                     stats['n_long'] += 1
@@ -467,8 +518,19 @@ def run_state_machine(
         print("="*80)
         mode_str = "STRICT (TOTAL only)" if strict else "NORMAL (déprécié)"
         print(f"\n⚙️ Mode: {mode_str}")
+        if fees > 0:
+            print(f"   Frais: {fees*100:.2f}% par trade (entrée + sortie)")
+
+        # Calculer la période de test
+        n_assets = len(assets) if assets else 1
+        samples_per_asset = n_samples // n_assets
+        minutes = samples_per_asset * 5
+        days = minutes / 60 / 24
+        months = days / 30
+
         print(f"\n📊 Statistiques globales:")
-        print(f"   Samples: {n_samples:,}")
+        print(f"   Samples: {n_samples:,} ({n_assets} assets × {samples_per_asset:,})")
+        print(f"   Période: {days:.0f} jours (~{months:.1f} mois par asset)")
         print(f"   Trades: {stats['n_trades']}")
         print(f"   LONG: {stats['n_long']}, SHORT: {stats['n_short']}")
 
@@ -493,15 +555,22 @@ def run_state_machine(
         if ctx.trades:
             durations = [t['duration'] for t in ctx.trades]
             print(f"\n⏱️ Durée des trades:")
-            print(f"   Moyenne: {np.mean(durations):.1f} périodes")
-            print(f"   Médiane: {np.median(durations):.1f} périodes")
-            print(f"   Max: {max(durations)} périodes")
+            print(f"   Moyenne: {np.mean(durations):.1f} périodes (~{np.mean(durations)*5:.0f} min)")
+            print(f"   Médiane: {np.median(durations):.1f} périodes (~{np.median(durations)*5:.0f} min)")
+            print(f"   Max: {max(durations)} périodes (~{max(durations)*5:.0f} min)")
 
         # Statistiques PnL
         if returns is not None:
-            print(f"\n💰 Performance (PnL):")
-            print(f"   PnL Total: {stats['total_pnl']*100:+.2f}%")
+            print(f"\n💰 Performance Globale:")
+            print(f"   PnL Brut: {stats['total_pnl']*100:+.2f}%")
+            if fees > 0:
+                print(f"   Frais totaux: {stats['total_fees']*100:.2f}% ({stats['n_trades']} × {fees*200:.2f}%)")
+                print(f"   PnL Net: {stats['total_pnl_after_fees']*100:+.2f}%")
+                print(f"   Par mois: {stats['total_pnl_after_fees']/months*100:+.1f}%")
+            else:
+                print(f"   Par mois: {stats['total_pnl']/months*100:+.1f}%")
 
+            # Stats par état d'entrée
             for state in ['TOTAL', 'PARTIEL']:
                 pnls = stats['pnl_by_entry_state'][state]
                 if pnls:
@@ -509,7 +578,22 @@ def run_state_machine(
                     avg = np.mean(pnls)
                     n_win = sum(1 for p in pnls if p > 0)
                     win_rate = n_win / len(pnls) * 100
-                    print(f"   {state}: {total*100:+.2f}% ({len(pnls)} trades, WR={win_rate:.1f}%, avg={avg*100:+.3f}%)")
+                    print(f"   {state}: {total*100:+.2f}% ({len(pnls)} trades, WR={win_rate:.1f}%)")
+
+        # Résultats par asset
+        if assets and any(pnl_by_asset.values()):
+            print(f"\n📈 Performance par Asset:")
+            for asset in assets:
+                pnls = pnl_by_asset.get(asset, [])
+                n_trades = trades_by_asset.get(asset, 0)
+                if pnls:
+                    total_pnl = sum(pnls)
+                    avg_pnl = np.mean(pnls)
+                    n_win = sum(1 for p in pnls if p > 0)
+                    win_rate = n_win / len(pnls) * 100 if pnls else 0
+                    print(f"   {asset}: {total_pnl*100:+.2f}% ({n_trades} trades, WR={win_rate:.1f}%, avg={avg_pnl*100:+.4f}%)")
+                else:
+                    print(f"   {asset}: pas de trades")
 
     return positions, stats
 
@@ -544,8 +628,13 @@ def main():
                         help='Fichier de sortie pour les positions (.npy)')
     parser.add_argument('--strict', action='store_true',
                         help='Mode strict: seul TOTAL autorise les entrées (recommandé)')
+    parser.add_argument('--fees', '-f', type=float, default=0.0,
+                        help='Frais par trade en %% (ex: 0.1 = 0.1%% par trade)')
 
     args = parser.parse_args()
+
+    # Convertir les frais en décimal
+    fees = args.fees / 100 if args.fees > 0 else 0.0
 
     print("="*80)
     print("STATE MACHINE - Trading basé sur ML")
@@ -602,13 +691,40 @@ def main():
     # Features OHLC: [O_ret, H_ret, L_ret, C_ret, Range_ret]
     X = datasets['macd_octave']['X']  # Shape: (n_samples, seq_len, 5)
     returns = X[:, -1, 3]  # c_ret du dernier timestep
+    n_samples = len(macd_pred)
+
+    # Extraire les assets et créer les indices
+    assets = datasets['macd_octave'].get('assets', None)
+    samples_per_asset = datasets['macd_octave'].get('samples_per_asset', None)
+
+    asset_indices = None
+    if assets and samples_per_asset:
+        # Créer un array d'indices d'assets
+        asset_indices = np.zeros(n_samples, dtype=int)
+        offset = 0
+        for i, (asset, count) in enumerate(zip(assets, samples_per_asset)):
+            asset_indices[offset:offset + count] = i
+            offset += count
+        print(f"\n📊 Assets détectés: {', '.join(assets)}")
+    elif assets:
+        # Estimer samples_per_asset si non disponible
+        n_assets = len(assets)
+        samples_per_asset_est = n_samples // n_assets
+        asset_indices = np.zeros(n_samples, dtype=int)
+        for i in range(n_assets):
+            start = i * samples_per_asset_est
+            end = (i + 1) * samples_per_asset_est if i < n_assets - 1 else n_samples
+            asset_indices[start:end] = i
+        print(f"\n📊 Assets détectés: {', '.join(assets)} (estimation: {samples_per_asset_est:,} samples chacun)")
 
     print(f"\n📊 Données chargées:")
-    print(f"   Samples: {len(macd_pred):,}")
+    print(f"   Samples: {n_samples:,}")
     print(f"   RSI pred mean: {rsi_pred.mean():.3f}")
     print(f"   CCI pred mean: {cci_pred.mean():.3f}")
     print(f"   MACD pred mean: {macd_pred.mean():.3f}")
     print(f"   Returns mean: {returns.mean()*100:.4f}%, std: {returns.std()*100:.4f}%")
+    if fees > 0:
+        print(f"   Frais: {fees*100:.2f}% par trade")
 
     # Exécuter la state machine
     positions, stats = run_state_machine(
@@ -616,7 +732,10 @@ def main():
         rsi_octave, cci_octave, macd_octave,
         rsi_kalman, cci_kalman, macd_kalman,
         returns=returns,
-        strict=args.strict
+        strict=args.strict,
+        fees=fees,
+        asset_indices=asset_indices,
+        assets=assets
     )
 
     # Sauvegarder si demandé
@@ -626,49 +745,46 @@ def main():
         np.save(output_path, positions)
         print(f"\n💾 Positions sauvegardées: {output_path}")
 
-    # Résumé PnL par état d'entrée
+    # Résumé final
     print("\n" + "="*80)
-    print("ANALYSE PnL PAR ÉTAT D'ENTRÉE")
+    print("RÉSUMÉ FINAL")
     print("="*80)
 
-    for state in ['TOTAL', 'PARTIEL']:
-        pnls = stats['pnl_by_entry_state'][state]
-        if pnls:
-            n_trades = len(pnls)
-            total_pnl = sum(pnls)
-            avg_pnl = np.mean(pnls)
-            n_win = sum(1 for p in pnls if p > 0)
-            n_loss = sum(1 for p in pnls if p < 0)
-            win_rate = n_win / n_trades * 100
+    # Calculer métriques finales
+    total_pnl = stats['total_pnl']
+    total_pnl_net = stats['total_pnl_after_fees']
+    total_fees = stats['total_fees']
+    n_trades = stats['n_trades']
 
-            print(f"\n📊 {state}:")
-            print(f"   Trades: {n_trades}")
-            print(f"   PnL Total: {total_pnl*100:+.2f}%")
-            print(f"   PnL Moyen: {avg_pnl*100:+.4f}%")
-            print(f"   Win Rate: {win_rate:.1f}% ({n_win}W / {n_loss}L)")
-            if n_win > 0:
-                avg_win = np.mean([p for p in pnls if p > 0])
-                print(f"   Avg Win: {avg_win*100:+.4f}%")
-            if n_loss > 0:
-                avg_loss = np.mean([p for p in pnls if p < 0])
-                print(f"   Avg Loss: {avg_loss*100:+.4f}%")
+    # Période en mois
+    n_assets = len(assets) if assets else 1
+    samples_per_asset = n_samples // n_assets
+    months = (samples_per_asset * 5) / 60 / 24 / 30
 
-    # Comparaison
+    print(f"\n💰 Performance:")
+    print(f"   PnL Brut: {total_pnl*100:+.2f}%")
+    if fees > 0:
+        print(f"   Frais ({fees*100:.2f}% × 2 × {n_trades}): -{total_fees*100:.2f}%")
+        print(f"   PnL Net: {total_pnl_net*100:+.2f}%")
+        print(f"   Par mois (net): {total_pnl_net/months*100:+.1f}%")
+    else:
+        print(f"   Par mois: {total_pnl/months*100:+.1f}%")
+
+    # Win rate global
     total_pnls = stats['pnl_by_entry_state']['TOTAL']
-    partiel_pnls = stats['pnl_by_entry_state']['PARTIEL']
+    if total_pnls:
+        n_win = sum(1 for p in total_pnls if p > 0)
+        n_loss = sum(1 for p in total_pnls if p < 0)
+        win_rate = n_win / len(total_pnls) * 100
+        avg_win = np.mean([p for p in total_pnls if p > 0]) if n_win > 0 else 0
+        avg_loss = np.mean([p for p in total_pnls if p < 0]) if n_loss > 0 else 0
+        profit_factor = (n_win * avg_win) / (n_loss * abs(avg_loss)) if n_loss > 0 and avg_loss != 0 else float('inf')
 
-    if total_pnls and partiel_pnls:
-        avg_total = np.mean(total_pnls)
-        avg_partiel = np.mean(partiel_pnls)
-        print(f"\n🔍 Comparaison:")
-        print(f"   TOTAL avg PnL: {avg_total*100:+.4f}%")
-        print(f"   PARTIEL avg PnL: {avg_partiel*100:+.4f}%")
-        if avg_total > avg_partiel:
-            diff = (avg_total - avg_partiel) * 100
-            print(f"   → TOTAL surperforme PARTIEL de {diff:.4f}% par trade")
-        else:
-            diff = (avg_partiel - avg_total) * 100
-            print(f"   → PARTIEL surperforme TOTAL de {diff:.4f}% par trade")
+        print(f"\n📊 Métriques:")
+        print(f"   Win Rate: {win_rate:.1f}% ({n_win}W / {n_loss}L)")
+        print(f"   Avg Win: {avg_win*100:+.4f}%")
+        print(f"   Avg Loss: {avg_loss*100:+.4f}%")
+        print(f"   Profit Factor: {profit_factor:.2f}")
 
     print("\n" + "="*80)
     print("✅ STATE MACHINE TERMINÉE")
