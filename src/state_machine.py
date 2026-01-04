@@ -1,16 +1,20 @@
 """
 State Machine pour le trading basée sur les prédictions ML.
 
-Architecture validée par expert:
+Architecture validée par expert (2026-01-04):
 - MACD = pivot (décide la direction)
-- RSI/CCI = modulateurs (bloquent, retardent, confirment)
+- RSI/CCI = modulateurs
 - Octave/Kalman = confiance structurelle
 
-Règles clés:
-1. MACD pivot: jamais RSI/CCI seuls ne déclenchent
-2. Confirmation conditionnelle: TOTAL=0, PARTIEL=2, FORT=stop
-3. Délai post-transition conditionnel
-4. Sorties plus réactives que les entrées (jamais bloquer MACD exit)
+Mode STRICT (recommandé - validé empiriquement):
+- Seul l'accord TOTAL autorise les entrées
+- PARTIEL et FORT = FLAT (pas de trade)
+- Résultat test: +1300% (TOTAL) vs -286% (PARTIEL)
+
+Mode NORMAL (déprécié):
+- TOTAL = entrée immédiate
+- PARTIEL = entrée après 2 confirmations
+- FORT = bloqué
 
 Usage:
     python src/state_machine.py \
@@ -20,7 +24,7 @@ Usage:
         --rsi-kalman data/prepared/dataset_..._rsi_kalman.npz \
         --cci-kalman data/prepared/dataset_..._cci_kalman.npz \
         --macd-kalman data/prepared/dataset_..._macd_kalman.npz \
-        --split test
+        --split test --strict
 """
 
 import numpy as np
@@ -213,10 +217,14 @@ def should_enter(
     octave_dir: int,
     kalman_dir: int,
     ctx: Context,
-    current_time: int
+    current_time: int,
+    strict: bool = False
 ) -> Optional[Position]:
     """
     Décide si on doit entrer en position.
+
+    Args:
+        strict: Si True, seul TOTAL autorise l'entrée (PARTIEL bloqué)
 
     Returns:
         Position.LONG, Position.SHORT, ou None si pas d'entrée
@@ -230,6 +238,13 @@ def should_enter(
     # Règle 1: MACD décide la direction
     direction = Position.LONG if macd_pred == 1 else Position.SHORT
 
+    # Mode STRICT: seul TOTAL autorise l'entrée
+    if strict:
+        if agreement != Agreement.TOTAL:
+            return None
+        return direction
+
+    # Mode NORMAL (déprécié)
     # Règle 2: Confirmation conditionnelle
     if agreement == Agreement.FORT:
         return None  # Aucune action
@@ -306,6 +321,7 @@ def run_state_machine(
     cci_kalman: np.ndarray,
     macd_kalman: np.ndarray,
     returns: np.ndarray = None,
+    strict: bool = False,
     verbose: bool = True
 ) -> Tuple[np.ndarray, dict]:
     """
@@ -316,6 +332,7 @@ def run_state_machine(
         *_octave: Labels Octave (direction)
         *_kalman: Labels Kalman (direction)
         returns: Rendements (c_ret) pour calcul PnL (optionnel)
+        strict: Si True, seul TOTAL autorise les entrées (recommandé)
 
     Returns:
         positions: Array des positions (0=FLAT, 1=LONG, -1=SHORT)
@@ -336,10 +353,12 @@ def run_state_machine(
         'exits_partiel': 0,
         'exits_fort_forced': 0,
         'blocked_by_fort': 0,
+        'blocked_by_partiel': 0,  # Pour mode strict
         'agreement_counts': {'TOTAL': 0, 'PARTIEL': 0, 'FORT': 0},
         # PnL par état d'entrée
         'pnl_by_entry_state': {'TOTAL': [], 'PARTIEL': []},
-        'total_pnl': 0.0
+        'total_pnl': 0.0,
+        'strict_mode': strict
     }
 
     # Variables pour tracker le trade en cours
@@ -408,7 +427,7 @@ def run_state_machine(
 
         # Vérifier entrée
         if ctx.position == Position.FLAT:
-            new_position = should_enter(m_pred, r_pred, c_pred, octave_dir, kalman_dir, ctx, i)
+            new_position = should_enter(m_pred, r_pred, c_pred, octave_dir, kalman_dir, ctx, i, strict=strict)
             if new_position:
                 ctx.position = new_position
                 ctx.current_trade_start = i
@@ -427,8 +446,12 @@ def run_state_machine(
                 else:
                     stats['entries_partiel'] += 1
                     current_entry_agreement = 'PARTIEL'
-            elif agreement == Agreement.FORT:
-                stats['blocked_by_fort'] += 1
+            else:
+                # Entrée refusée
+                if agreement == Agreement.FORT:
+                    stats['blocked_by_fort'] += 1
+                elif agreement == Agreement.PARTIEL and strict:
+                    stats['blocked_by_partiel'] += 1
 
         # Enregistrer la position
         if ctx.position == Position.LONG:
@@ -442,6 +465,8 @@ def run_state_machine(
         print("\n" + "="*80)
         print("RÉSULTATS STATE MACHINE")
         print("="*80)
+        mode_str = "STRICT (TOTAL only)" if strict else "NORMAL (déprécié)"
+        print(f"\n⚙️ Mode: {mode_str}")
         print(f"\n📊 Statistiques globales:")
         print(f"   Samples: {n_samples:,}")
         print(f"   Trades: {stats['n_trades']}")
@@ -454,8 +479,11 @@ def run_state_machine(
 
         print(f"\n📈 Entrées:")
         print(f"   Via TOTAL: {stats['entries_total']}")
-        print(f"   Via PARTIEL: {stats['entries_partiel']}")
+        if not strict:
+            print(f"   Via PARTIEL: {stats['entries_partiel']}")
         print(f"   Bloquées par FORT: {stats['blocked_by_fort']}")
+        if strict:
+            print(f"   Bloquées par PARTIEL: {stats['blocked_by_partiel']}")
 
         print(f"\n📉 Sorties:")
         print(f"   Via TOTAL: {stats['exits_total']}")
@@ -514,6 +542,8 @@ def main():
                         help='Split à utiliser')
     parser.add_argument('--output', '-o', type=str, default=None,
                         help='Fichier de sortie pour les positions (.npy)')
+    parser.add_argument('--strict', action='store_true',
+                        help='Mode strict: seul TOTAL autorise les entrées (recommandé)')
 
     args = parser.parse_args()
 
@@ -585,7 +615,8 @@ def main():
         rsi_pred, cci_pred, macd_pred,
         rsi_octave, cci_octave, macd_octave,
         rsi_kalman, cci_kalman, macd_kalman,
-        returns=returns
+        returns=returns,
+        strict=args.strict
     )
 
     # Sauvegarder si demandé
