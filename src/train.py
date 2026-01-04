@@ -490,6 +490,44 @@ INDICATOR_NAMES = {
 }
 
 
+def validate_args_vs_filename(args) -> None:
+    """
+    Vérifie la cohérence entre les paramètres --filter et --indicator et le nom du fichier de données.
+
+    Args:
+        args: Arguments parsés
+
+    Raises:
+        SystemExit: Si incohérence détectée
+    """
+    if not args.data:
+        return  # Pas de fichier, pas de validation
+
+    filename = Path(args.data).stem.lower()  # ex: dataset_btc_eth_bnb_ada_ltc_ohlcv2_rsi_kalman
+
+    # Vérifier le filtre
+    if args.filter:
+        filter_name = args.filter.lower()
+        if filter_name not in filename:
+            logger.error(f"❌ Incohérence détectée!")
+            logger.error(f"   --filter '{args.filter}' ne correspond pas au fichier")
+            logger.error(f"   Fichier: {Path(args.data).name}")
+            logger.error(f"   Le filtre '{filter_name}' n'est pas présent dans le nom du fichier")
+            raise SystemExit(1)
+
+    # Vérifier l'indicateur (sauf 'all')
+    if args.indicator != 'all':
+        indicator_name = args.indicator.lower()
+        if indicator_name not in filename:
+            logger.error(f"❌ Incohérence détectée!")
+            logger.error(f"   --indicator '{args.indicator}' ne correspond pas au fichier")
+            logger.error(f"   Fichier: {Path(args.data).name}")
+            logger.error(f"   L'indicateur '{indicator_name}' n'est pas présent dans le nom du fichier")
+            raise SystemExit(1)
+
+    logger.info(f"✅ Paramètres cohérents avec le fichier de données")
+
+
 def main():
     """Pipeline complet d'entraînement."""
 
@@ -505,6 +543,9 @@ def main():
     logger.info("="*80)
     logger.info("PIPELINE D'ENTRAÎNEMENT CNN-LSTM")
     logger.info("="*80)
+
+    # Valider la cohérence des arguments avec le fichier de données
+    validate_args_vs_filename(args)
 
     # Seed pour reproductibilité
     torch.manual_seed(args.seed)
