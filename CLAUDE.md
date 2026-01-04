@@ -1460,6 +1460,49 @@ Colonnes generees:
 - `oracle_action`, `model_action`, `is_error`
 - `trade_duration`, `step_idx`
 
+#### Resultats Analyse Erreurs (Test Set - 640k samples)
+
+| Metrique | RSI | CCI | MACD |
+|----------|-----|-----|------|
+| **Accuracy** | 83.4% | 82.5% | **84.2%** |
+| Erreurs totales | 106k | 112k | **101k** |
+| False Positive | 8.9% | 10.1% | 8.0% |
+| False Negative | 7.7% | 7.4% | 7.8% |
+| Accord filtres | 88.4% | 89.1% | 90.2% |
+| **Erreur si accord** | 13.8% | 15.8% | 15.6% |
+| **Erreur si desaccord** | 38.3% | 31.5% | 18.3% |
+| **Ratio desaccord/accord** | **2.8x** | 2.0x | 1.2x |
+| Erreurs isolees | **70%** | 62% | 63% |
+| Erreur apres transition | **5.4x** | 3.1x | 2.6x |
+
+**Observations cles :**
+
+1. **MACD = Indicateur le plus stable**
+   - Meilleure accuracy (84.2%), moins d'erreurs
+   - Ratio desaccord/accord = 1.2x seulement → insensible aux conflits de filtres
+   - Regle 1 (prudence si desaccord) NON necessaire pour MACD
+
+2. **RSI = Le plus sensible aux conflits**
+   - 2.8x plus d'erreurs quand filtres en desaccord
+   - 70% d'erreurs isolees (le plus eleve)
+   - 5.4x plus d'erreurs apres transition → tres reactif
+
+3. **Regles validees empiriquement :**
+   - Confirmation 2+ periodes : elimine 60-70% des erreurs (toutes isolees)
+   - Delai post-transition : critique pour RSI (5.4x), modere pour MACD (2.6x)
+   - Prudence si desaccord filtres : critique RSI (2.8x), inutile MACD (1.2x)
+
+**Implications State Machine :**
+
+| Regle | RSI | CCI | MACD |
+|-------|-----|-----|------|
+| Prudence si desaccord filtres | ✅ Critique | ✅ Important | ❌ Pas necessaire |
+| Confirmation 2+ periodes | ✅ | ✅ | ✅ |
+| Delai post-transition | ✅ Critique | ✅ Important | ✅ Modere |
+
+→ **MACD confirme comme pivot** : plus stable, moins sensible aux conflits
+→ **RSI/CCI = modulateurs** necessitant plus de filtrage
+
 #### Ce qu'il ne faut PAS faire
 
 | ⚠️ Piege | Pourquoi |
