@@ -238,10 +238,17 @@ def create_sequences_with_index(df: pd.DataFrame,
     """
     Crée les séquences X, Y avec conservation des index pour vérification.
 
+    Alignement:
+        Pour chaque séquence i:
+        - X[i] = features[i-12:i] → indices i-12, i-11, ..., i-1 (12 éléments)
+        - Y[i] = label[i] = filtered[i-1] > filtered[i-2]
+        - idx_feature[i] = date de la DERNIÈRE feature (indice i-1)
+        - idx_label[i] = date du label (indice i)
+
     Returns:
         X: np.array (n_sequences, seq_length, n_features)
         Y: np.array (n_sequences, 1)
-        indices: list des index datetime de chaque séquence (dernier élément)
+        indices: list de tuples (idx_feature, idx_label) pour vérification
     """
     # Supprimer lignes avec NaN dans les colonnes utilisées
     cols_needed = feature_cols + [label_col]
@@ -261,12 +268,14 @@ def create_sequences_with_index(df: pd.DataFrame,
     idx_list = []
 
     for i in range(seq_length, len(features)):
-        # Séquence de features: [i-seq_length : i]
+        # Séquence de features: indices [i-seq_length, i-1] → 12 éléments
         X_list.append(features[i-seq_length:i])
-        # Label: à l'index i (correspondant à la dernière feature)
+        # Label: à l'index i
         Y_list.append(labels[i])
-        # Index datetime de la dernière observation
-        idx_list.append(dates[i])
+        # Stocker DEUX indices pour vérification:
+        # - idx_feature: date de la dernière feature (i-1)
+        # - idx_label: date du label (i)
+        idx_list.append((dates[i-1], dates[i]))
 
     X = np.array(X_list)
     Y = np.array(Y_list).reshape(-1, 1)
@@ -315,6 +324,10 @@ def verify_alignment(df: pd.DataFrame, X: np.ndarray, Y: np.ndarray,
                      indices: list, feature_cols: list) -> bool:
     """
     Vérifie que X, Y sont bien alignés avec le DataFrame original.
+
+    indices contient des tuples (idx_feature, idx_label) où:
+    - idx_feature: date de la dernière feature dans X
+    - idx_label: date du label dans Y
     """
     logger.info("     Vérification alignement...")
 
@@ -324,29 +337,40 @@ def verify_alignment(df: pd.DataFrame, X: np.ndarray, Y: np.ndarray,
 
     all_ok = True
     for i in check_indices:
-        idx = indices[i]
+        idx_feature, idx_label = indices[i]
 
         # Récupérer depuis DataFrame
-        df_row = df.loc[idx]
-        df_label = df_row['label']
-        df_features = df_row[feature_cols].values
+        df_row_feature = df.loc[idx_feature]
+        df_row_label = df.loc[idx_label]
+
+        df_label = df_row_label['label']
+        df_features = df_row_feature[feature_cols].values
 
         # Comparer avec X, Y
         y_val = Y[i, 0]
-        x_last = X[i, -1, :]  # Dernière ligne de la séquence
+        x_last = X[i, -1, :]  # Dernière feature de la séquence
 
         # Vérifier label
         if y_val != df_label:
-            logger.error(f"     ❌ Label mismatch at {idx}: Y={y_val}, df={df_label}")
+            logger.error(f"     ❌ Label mismatch at {idx_label}: Y={y_val}, df={df_label}")
             all_ok = False
 
-        # Vérifier features (dernière ligne)
+        # Vérifier features (dernière ligne de X = features à idx_feature)
         if not np.allclose(x_last, df_features, rtol=1e-5, equal_nan=True):
-            logger.error(f"     ❌ Features mismatch at {idx}")
+            logger.error(f"     ❌ Features mismatch at {idx_feature}")
+            logger.error(f"        X[-1]={x_last}")
+            logger.error(f"        df={df_features}")
             all_ok = False
 
     if all_ok:
         logger.info(f"     ✅ Alignement vérifié sur {n_checks} échantillons")
+
+        # Afficher un exemple pour confirmation
+        idx_f, idx_l = indices[0]
+        logger.info(f"     Exemple séquence 0:")
+        logger.info(f"       Dernière feature: {idx_f}")
+        logger.info(f"       Label: {idx_l} → Y={Y[0,0]}")
+        logger.info(f"       (label = filtered[{idx_f}] > filtered[précédent])")
 
     return all_ok
 
