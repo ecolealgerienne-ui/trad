@@ -196,16 +196,14 @@ def generate_octave_labels(indicator: np.ndarray, step: float = OCTAVE_STEP,
     """
     Génère les labels depuis indicateur filtré.
 
-    Formule optimale (testée 2026-01-04):
-        Label[t] = 1 si filtered[t-2] > filtered[t-3-delta]
+    Formule simplifiée:
+        Label[t] = 1 si filtered[t-1] > filtered[t-2]
         Label[t] = 0 sinon
-
-    Note: La formule simple (t > t-1) donne 77.9% vs 84.3% avec cette formule.
 
     Args:
         indicator: Valeurs de l'indicateur
         step: Paramètre du filtre Octave
-        delta: Décalage supplémentaire (défaut: 0)
+        delta: Décalage supplémentaire (défaut: 0, non utilisé avec formule simplifiée)
 
     Returns:
         labels: np.array de 0/1
@@ -214,10 +212,9 @@ def generate_octave_labels(indicator: np.ndarray, step: float = OCTAVE_STEP,
 
     labels = np.zeros(len(filtered), dtype=int)
 
-    # Formule optimale: filtered[t-2] > filtered[t-3-delta]
-    start_idx = 3 + delta
-    for t in range(start_idx, len(filtered)):
-        if filtered[t-2] > filtered[t-3-delta]:
+    # Formule simplifiée: filtered[t-1] > filtered[t-2]
+    for t in range(2, len(filtered)):
+        if filtered[t-1] > filtered[t-2]:
             labels[t] = 1
 
     return labels
