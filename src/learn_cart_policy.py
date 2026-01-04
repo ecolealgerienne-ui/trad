@@ -300,11 +300,14 @@ def train_cart(X: np.ndarray, y: np.ndarray,
         Arbre CART entraîné
     """
     if class_weight is None:
-        # Asymétrie: EXIT réactif, ENTER prudent
+        # Asymétrie CORRIGÉE:
+        # - EXIT poids ÉLEVÉ = modèle réactif aux sorties (ne pas les rater)
+        # - ENTER poids FAIBLE = modèle prudent aux entrées
+        # sklearn: poids = pénalité pour erreur sur cette classe
         class_weight = {
-            Action.EXIT: 0.5,   # Plus réactif aux sorties
+            Action.EXIT: 2.0,   # IMPORTANT: ne pas rater les sorties
             Action.HOLD: 1.0,   # Neutre
-            Action.ENTER: 1.5   # Plus prudent aux entrées
+            Action.ENTER: 0.5   # Prudent: mieux vaut rater une entrée
         }
 
     cart = DecisionTreeClassifier(
@@ -467,7 +470,7 @@ def main():
     print(f"   max_depth: {args.max_depth}")
     print(f"   min_samples_leaf: {args.min_samples_leaf}")
     print(f"   criterion: gini")
-    print(f"   class_weight: EXIT=0.5, HOLD=1.0, ENTER=1.5 (asymétrique)")
+    print(f"   class_weight: EXIT=2.0, HOLD=1.0, ENTER=0.5 (asymétrique corrigé)")
 
     cart = train_cart(
         X_train, y_train,
