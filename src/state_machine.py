@@ -6,6 +6,12 @@ Architecture validée par expert (2026-01-04):
 - RSI/CCI = modulateurs
 - Octave/Kalman = confiance structurelle
 
+Mode TRANSITION-ONLY (nouveau - 2026-01-04):
+- Entrer SEULEMENT sur CHANGEMENT vers TOTAL (pas continuation)
+- Signal doit être stable pendant min_stability périodes
+- Objectif: Réduire trades de 80-90% pour rendre les frais viables
+- Usage: --transition-only --min-stability 2
+
 Mode STRICT (recommandé - validé empiriquement):
 - Seul l'accord TOTAL autorise les entrées
 - PARTIEL et FORT = FLAT (pas de trade)
@@ -17,6 +23,7 @@ Mode NORMAL (déprécié):
 - FORT = bloqué
 
 Usage:
+    # Mode Transition-Only (recommandé pour frais réels)
     python src/state_machine.py \
         --rsi-octave data/prepared/dataset_..._rsi_octave20.npz \
         --cci-octave data/prepared/dataset_..._cci_octave20.npz \
@@ -24,7 +31,11 @@ Usage:
         --rsi-kalman data/prepared/dataset_..._rsi_kalman.npz \
         --cci-kalman data/prepared/dataset_..._cci_kalman.npz \
         --macd-kalman data/prepared/dataset_..._macd_kalman.npz \
-        --split test --strict
+        --split test --transition-only --min-stability 2 --fees 0.1
+
+    # Mode Strict (sans frais)
+    python src/state_machine.py \
+        ... --split test --strict
 """
 
 import numpy as np
@@ -59,6 +70,11 @@ class Context:
     confirmation_count: int = 0
     exit_delay_count: int = 0
     prev_macd: int = -1  # -1 = pas de valeur précédente
+
+    # Pour Transition-Only mode
+    prev_agreement: Agreement = None
+    signal_stability: int = 0  # Nombre de périodes avec même signal
+    prev_direction: int = -1   # Direction précédente (0=SHORT, 1=LONG)
 
     # Statistiques
     trades: List = field(default_factory=list)
@@ -226,13 +242,17 @@ def should_enter(
     kalman_dir: int,
     ctx: Context,
     current_time: int,
-    strict: bool = False
+    strict: bool = False,
+    transition_only: bool = False,
+    min_stability: int = 2
 ) -> Optional[Position]:
     """
     Décide si on doit entrer en position.
 
     Args:
         strict: Si True, seul TOTAL autorise l'entrée (PARTIEL bloqué)
+        transition_only: Si True, entrer seulement sur CHANGEMENT vers TOTAL
+        min_stability: Nombre de périodes de stabilité du signal avant entrée
 
     Returns:
         Position.LONG, Position.SHORT, ou None si pas d'entrée
@@ -245,6 +265,19 @@ def should_enter(
 
     # Règle 1: MACD décide la direction
     direction = Position.LONG if macd_pred == 1 else Position.SHORT
+
+    # Mode TRANSITION-ONLY (prioritaire sur STRICT)
+    if transition_only:
+        # Condition 1: TRANSITION vers TOTAL (pas continuation)
+        is_transition = (ctx.prev_agreement != Agreement.TOTAL and agreement == Agreement.TOTAL)
+        if not is_transition:
+            return None
+
+        # Condition 2: Signal stable pendant min_stability périodes
+        if ctx.signal_stability < min_stability:
+            return None
+
+        return direction
 
     # Mode STRICT: seul TOTAL autorise l'entrée
     if strict:
@@ -333,6 +366,8 @@ def run_state_machine(
     fees: float = 0.0,
     asset_indices: np.ndarray = None,
     assets: List[str] = None,
+    transition_only: bool = False,
+    min_stability: int = 2,
     verbose: bool = True
 ) -> Tuple[np.ndarray, dict]:
     """
@@ -347,6 +382,8 @@ def run_state_machine(
         fees: Frais par trade (ex: 0.001 = 0.1%)
         asset_indices: Index de l'asset pour chaque sample
         assets: Liste des noms d'assets
+        transition_only: Si True, entrer seulement sur CHANGEMENT vers TOTAL
+        min_stability: Nombre de périodes de stabilité du signal avant entrée
 
     Returns:
         positions: Array des positions (0=FLAT, 1=LONG, -1=SHORT)
@@ -376,6 +413,8 @@ def run_state_machine(
         'exits_fort_forced': 0,
         'blocked_by_fort': 0,
         'blocked_by_partiel': 0,  # Pour mode strict
+        'blocked_by_no_transition': 0,  # Pour mode transition-only
+        'blocked_by_low_stability': 0,  # Pour mode transition-only
         'agreement_counts': {'TOTAL': 0, 'PARTIEL': 0, 'FORT': 0},
         # PnL par état d'entrée
         'pnl_by_entry_state': {'TOTAL': [], 'PARTIEL': []},
@@ -385,6 +424,8 @@ def run_state_machine(
         'pnl_by_asset': pnl_by_asset,
         'trades_by_asset': trades_by_asset,
         'strict_mode': strict,
+        'transition_only_mode': transition_only,
+        'min_stability': min_stability,
         'fees_rate': fees
     }
 
@@ -413,6 +454,18 @@ def run_state_machine(
         # Calculer l'accord
         agreement = get_agreement_level(m_pred, r_pred, c_pred, octave_dir, kalman_dir)
         stats['agreement_counts'][agreement.value] += 1
+
+        # Mettre à jour signal_stability (basé sur direction MACD)
+        current_direction = m_pred
+        if ctx.prev_direction == -1:
+            # Premier sample
+            ctx.signal_stability = 1
+        elif current_direction == ctx.prev_direction:
+            # Direction stable → incrémenter
+            ctx.signal_stability += 1
+        else:
+            # Direction a changé → reset
+            ctx.signal_stability = 1
 
         # Mettre à jour la confirmation
         update_confirmation(m_pred, agreement, ctx)
@@ -477,7 +530,10 @@ def run_state_machine(
 
         # Vérifier entrée
         if ctx.position == Position.FLAT:
-            new_position = should_enter(m_pred, r_pred, c_pred, octave_dir, kalman_dir, ctx, i, strict=strict)
+            new_position = should_enter(
+                m_pred, r_pred, c_pred, octave_dir, kalman_dir, ctx, i,
+                strict=strict, transition_only=transition_only, min_stability=min_stability
+            )
             if new_position:
                 ctx.position = new_position
                 ctx.current_trade_start = i
@@ -498,11 +554,24 @@ def run_state_machine(
                     stats['entries_partiel'] += 1
                     current_entry_agreement = 'PARTIEL'
             else:
-                # Entrée refusée
-                if agreement == Agreement.FORT:
-                    stats['blocked_by_fort'] += 1
-                elif agreement == Agreement.PARTIEL and strict:
-                    stats['blocked_by_partiel'] += 1
+                # Entrée refusée - identifier la raison
+                if transition_only:
+                    # Mode transition-only
+                    is_transition = (ctx.prev_agreement != Agreement.TOTAL and agreement == Agreement.TOTAL)
+                    if agreement == Agreement.TOTAL and not is_transition:
+                        stats['blocked_by_no_transition'] += 1
+                    elif agreement == Agreement.TOTAL and ctx.signal_stability < min_stability:
+                        stats['blocked_by_low_stability'] += 1
+                    elif agreement == Agreement.FORT:
+                        stats['blocked_by_fort'] += 1
+                    elif agreement == Agreement.PARTIEL:
+                        stats['blocked_by_partiel'] += 1
+                else:
+                    # Mode strict ou normal
+                    if agreement == Agreement.FORT:
+                        stats['blocked_by_fort'] += 1
+                    elif agreement == Agreement.PARTIEL and strict:
+                        stats['blocked_by_partiel'] += 1
 
         # Enregistrer la position
         if ctx.position == Position.LONG:
@@ -512,11 +581,20 @@ def run_state_machine(
         else:
             positions[i] = 0
 
+        # Mettre à jour prev_agreement et prev_direction pour le prochain cycle
+        ctx.prev_agreement = agreement
+        ctx.prev_direction = current_direction
+
     if verbose:
         print("\n" + "="*80)
         print("RÉSULTATS STATE MACHINE")
         print("="*80)
-        mode_str = "STRICT (TOTAL only)" if strict else "NORMAL (déprécié)"
+        if transition_only:
+            mode_str = f"TRANSITION-ONLY (min_stability={min_stability})"
+        elif strict:
+            mode_str = "STRICT (TOTAL only)"
+        else:
+            mode_str = "NORMAL (déprécié)"
         print(f"\n⚙️ Mode: {mode_str}")
         if fees > 0:
             print(f"   Frais: {fees*100:.2f}% par trade (entrée + sortie)")
@@ -541,11 +619,14 @@ def run_state_machine(
 
         print(f"\n📈 Entrées:")
         print(f"   Via TOTAL: {stats['entries_total']}")
-        if not strict:
+        if not strict and not transition_only:
             print(f"   Via PARTIEL: {stats['entries_partiel']}")
         print(f"   Bloquées par FORT: {stats['blocked_by_fort']}")
-        if strict:
+        if strict or transition_only:
             print(f"   Bloquées par PARTIEL: {stats['blocked_by_partiel']}")
+        if transition_only:
+            print(f"   Bloquées (pas de transition): {stats['blocked_by_no_transition']}")
+            print(f"   Bloquées (stabilité < {min_stability}): {stats['blocked_by_low_stability']}")
 
         print(f"\n📉 Sorties:")
         print(f"   Via TOTAL: {stats['exits_total']}")
@@ -630,6 +711,10 @@ def main():
                         help='Mode strict: seul TOTAL autorise les entrées (recommandé)')
     parser.add_argument('--fees', '-f', type=float, default=0.0,
                         help='Frais par trade en %% (ex: 0.1 = 0.1%% par trade)')
+    parser.add_argument('--transition-only', action='store_true',
+                        help='Mode Transition-Only: entrer seulement sur CHANGEMENT vers TOTAL')
+    parser.add_argument('--min-stability', type=int, default=2,
+                        help='Nombre de périodes de stabilité du signal avant entrée')
 
     args = parser.parse_args()
 
@@ -735,7 +820,9 @@ def main():
         strict=args.strict,
         fees=fees,
         asset_indices=asset_indices,
-        assets=assets
+        assets=assets,
+        transition_only=args.transition_only,
+        min_stability=args.min_stability
     )
 
     # Sauvegarder si demandé
