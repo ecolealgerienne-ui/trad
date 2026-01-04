@@ -122,8 +122,10 @@ def load_model_predictions(model_path: str, X: np.ndarray) -> np.ndarray:
 
     # Créer le modèle
     n_features = X.shape[2]
+    seq_length = X.shape[1]
     model = MultiOutputCNNLSTM(
-        input_size=n_features,
+        sequence_length=seq_length,
+        num_indicators=n_features,
         num_outputs=1  # Single output pour OHLC
     ).to(device)
 
