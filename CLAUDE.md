@@ -2,7 +2,7 @@
 
 **Date**: 2026-01-04
 **Statut**: Pipeline complet implemente - Objectif 85% ATTEINT + Approche OHLC
-**Version**: 4.5
+**Version**: 4.6
 
 ---
 
@@ -1168,14 +1168,22 @@ Les deux sont **complementaires**, pas redondants.
 
 **Conclusion** : **Octave20 > Kalman** pour le ML, sans exception.
 
-#### Paradoxe MACD
+#### Paradoxe MACD (RESOLU)
 
 | Observation | MACD | RSI |
 |-------------|------|-----|
 | Concordance filtres | **90%** (meilleure) | 87% |
 | Perte accuracy Kalman | **-6.8%** (pire) | -1.9% |
 
-**Explication** : Une haute concordance ne signifie pas une bonne predictibilite. Le MACD Kalman a des labels "plus flous" qui sont plus difficiles a apprendre.
+**Ce n'est PAS un paradoxe** (validation expert) :
+
+- MACD est deja un indicateur tres lisse
+- Kalman re-lisse encore → **trop peu d'entropie**
+- Resultat : peu de retournements, transitions graduelles, frontieres floues
+- **Pour un humain** : excellent (signal propre)
+- **Pour un classifieur ML** : cauchemar (pas assez de contraste)
+
+> "Haute concordance ≠ bonne predictibilite. Le ML a besoin de contraste, pas de douceur."
 
 #### Observations cles
 
@@ -1184,15 +1192,37 @@ Les deux sont **complementaires**, pas redondants.
    - CCI (oscillateur deviation) : 89% concordance
    - MACD (indicateur tendance) : 90% concordance
 
-2. **~2/3 des desaccords sont isoles** (1 sample)
-   - = Moments transitoires brefs
+2. **~2/3 des desaccords sont isoles** (1 sample) - CHIFFRE CLE
+   - = Moments transitoires brefs (micro pullbacks, respirations)
    - Les 35% restants = blocs de desaccord (vraies zones d'incertitude)
+   - **Implication** : Sortir sur un desaccord isole est presque toujours une erreur
+   - **Justification mathematique** pour la regle de confirmation 2+ periodes
 
-3. **Recommandations finales :**
-   - **Modele ML** : Utiliser **Octave20 exclusivement**
-   - **State Machine** : Kalman pour detecter zones d'incertitude
-   - **Anti-flicker** : Confirmation 2+ periodes elimine ~65% des faux signaux
-   - **Indicateur principal** : MACD (plus stable, meilleure accuracy)
+3. **Recommandations finales (validees par expert) :**
+   - **Modele ML** : Utiliser **Octave20 exclusivement** (labels nets, meilleure separabilite)
+   - **Kalman** : Detecteur d'incertitude, pas predicteur ("Est-ce que je suis confiant ?")
+   - **Anti-flicker** : Confirmation 2+ periodes = filtre quasi-optimal (elimine 65% faux signaux)
+   - **MACD** : Indicateur pivot (plus stable), RSI/CCI = modulateurs
+
+#### Architecture Finale (convergence)
+
+```
+OHLC → Modele ML (Octave20)
+           ↓
+     Direction probabiliste
+           ↓
+ Kalman → Incertitude / confiance
+           ↓
+  Machine a etats :
+    - MACD pivot (declencheur principal)
+    - RSI/CCI modulateurs (pas declencheurs)
+    - Confirmation temporelle (2+ periodes)
+    - Ignorer desaccords isoles
+    - Prudence en zone Kalman floue
+```
+
+> "Tu n'es plus dans l'exploration, mais dans la convergence."
+> — Expert
 
 **Commande de comparaison :**
 ```bash
@@ -1444,4 +1474,4 @@ Colonnes generees:
 
 **Cree par**: Claude Code
 **Derniere MAJ**: 2026-01-04
-**Version**: 4.5 (+ Methodologie State Machine)
+**Version**: 4.6 (+ Validation Expert + Architecture Finale)
