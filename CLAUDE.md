@@ -1,8 +1,8 @@
 # Modele CNN-LSTM Multi-Output - Guide Complet
 
-**Date**: 2026-01-03
-**Statut**: Pipeline complet implemente - Objectif 85% ATTEINT
-**Version**: 4.0
+**Date**: 2026-01-04
+**Statut**: Pipeline complet implemente - Objectif 85% ATTEINT + Approche OHLC
+**Version**: 4.1
 
 ---
 
@@ -90,6 +90,103 @@ python src/evaluate.py --data data/prepared/dataset_btc_eth_bnb_ada_ltc_5min_30m
 Le **Step Index** (0.0 → 1.0) indique la position dans la fenetre 30min:
 - Step 1 (0.0): Debut de bougie 30min → plus de poids sur 5min
 - Step 6 (1.0): Fin de bougie 30min → confirmation fiable
+
+---
+
+## NOUVELLE APPROCHE - Features OHLC (2026-01-04)
+
+### Contexte
+
+Approche alternative utilisant les donnees OHLC brutes normalisees au lieu des indicateurs techniques (RSI, CCI, MACD).
+
+### Pipeline prepare_data_ohlc_v2.py
+
+```
+ETAPE 1: Chargement avec DatetimeIndex
+ETAPE 2: Calcul indicateurs (si besoin pour target)
+ETAPE 3: Calcul features OHLC normalisees
+ETAPE 4: Calcul filtre + labels
+ETAPE 5: TRIM edges (100 debut + 100 fin)
+ETAPE 6: Creation sequences avec verification index
+```
+
+### Features OHLC (5 canaux)
+
+| Feature | Formule | Role |
+|---------|---------|------|
+| **O_ret** | (Open[t] - Close[t-1]) / Close[t-1] | Gap d'ouverture (micro-structure) |
+| **H_ret** | (High[t] - Close[t-1]) / Close[t-1] | Extension haussiere intra-bougie |
+| **L_ret** | (Low[t] - Close[t-1]) / Close[t-1] | Extension baissiere intra-bougie |
+| **C_ret** | (Close[t] - Close[t-1]) / Close[t-1] | Rendement net (patterns principaux) |
+| **Range_ret** | (High[t] - Low[t]) / Close[t-1] | Volatilite intra-bougie |
+
+### Notes de l'Expert (IMPORTANT)
+
+**1. C_ret vs Micro-structure**
+- **C_ret** encode les patterns **cloture-a-cloture** → le "gros" du signal appris par CNN
+- **O_ret, H_ret, L_ret** capturent la **micro-structure intra-bougie**
+- **Range_ret** capture l'**activite/volatilite** du marche
+
+**2. Definition du Label**
+```
+label[i] = 1 si filtered[i-1] > filtered[i-2] (pente PASSEE positive)
+```
+- Le modele **re-estime l'etat PASSE** du marche, pas le futur
+- La valeur vient de la **DYNAMIQUE des predictions** (changements d'avis)
+- Ce n'est pas une prediction directe → c'est une estimation robuste de l'etat latent
+
+**3. Convention Timestamp OHLC**
+```
+Timestamp = Open time (debut de la bougie)
+
+Exemple bougie 5min timestampee "10:05":
+- Open  = premier prix a 10:05:00
+- High  = prix max entre 10:05:00 et 10:09:59
+- Low   = prix min entre 10:05:00 et 10:09:59
+- Close = dernier prix a ~10:09:59
+
+→ Close[10:05] est disponible APRES 10:10:00
+→ Donc causal si utilise a partir de l'index suivant
+```
+
+**4. Alignement Features/Labels**
+```python
+# Pour chaque sequence i:
+X[i] = features[i-12:i]  # indices i-12 a i-1 (12 elements)
+Y[i] = labels[i]          # label a l'index i
+
+# Relation temporelle:
+# - Derniere feature: index i-1 (Close[i-1] disponible)
+# - Label: filtered[i-1] > filtered[i-2] (pente passee)
+# → Pas de data leakage
+```
+
+### Commandes OHLC
+
+```bash
+# Preparer (5 features OHLC)
+python src/prepare_data_ohlc_v2.py --target close --assets BTC ETH BNB ADA LTC
+
+# Entrainer
+python src/train.py --data data/prepared/dataset_btc_eth_bnb_ada_ltc_ohlcv2_close_octave20.npz --indicator close
+
+# Evaluer
+python src/evaluate.py --data data/prepared/dataset_btc_eth_bnb_ada_ltc_ohlcv2_close_octave20.npz --indicator close
+```
+
+### Resultats Preliminaires
+
+| Target | Features | Accuracy | Notes |
+|--------|----------|----------|-------|
+| MACD | OHLC 5ch | 84.3% | Indicateur de tendance lourde |
+| CLOSE | OHLC 5ch | 78.1% | Plus volatil, plus difficile |
+
+### Interpretation Strategique
+
+Le modele ne "predit pas le futur" mais **re-estime le passe** de maniere robuste:
+- A chaque instant, il estime si la pente filtree entre t-2 et t-1 etait positive
+- L'interet n'est pas l'accuracy brute, mais les **changements d'avis**
+- Un changement d'avis indique que les features recentes contredisent la tendance passee → signal de retournement
 
 ---
 
