@@ -387,6 +387,10 @@ def main():
                         help='Entraîner uniquement sur accord TOTAL')
     parser.add_argument('--eval-split', type=str, default=None,
                         help='Split pour évaluation (défaut: même que --split)')
+    parser.add_argument('--balanced', action='store_true',
+                        help='Utiliser des poids égaux (1.0, 1.0, 1.0) au lieu d\'asymétriques')
+    parser.add_argument('--two-class', action='store_true',
+                        help='Reformuler en 2 classes: AGIR vs HOLD (direction via macd_prob)')
 
     args = parser.parse_args()
 
@@ -465,17 +469,45 @@ def main():
         X_train = X
         y_train = y_oracle
 
+    # Mode 2 classes: AGIR vs HOLD
+    if args.two_class:
+        print("\n🔄 Reformulation en 2 classes: AGIR vs HOLD...")
+        # AGIR = abs(action) == 1 (ENTER ou EXIT)
+        # HOLD = action == 0
+        y_train_binary = (np.abs(y_train) > 0).astype(int)  # 1=AGIR, 0=HOLD
+        n_agir = y_train_binary.sum()
+        n_hold = len(y_train_binary) - n_agir
+        print(f"   AGIR: {n_agir:,} ({n_agir/len(y_train_binary)*100:.1f}%)")
+        print(f"   HOLD: {n_hold:,} ({n_hold/len(y_train_binary)*100:.1f}%)")
+        y_train = y_train_binary
+
     # Entraîner CART
     print(f"\n🌳 Entraînement CART...")
     print(f"   max_depth: {args.max_depth}")
     print(f"   min_samples_leaf: {args.min_samples_leaf}")
     print(f"   criterion: gini")
-    print(f"   class_weight: EXIT=2.0, HOLD=1.0, ENTER=0.5 (asymétrique corrigé)")
+
+    # Déterminer les poids
+    if args.balanced:
+        if args.two_class:
+            class_weight = {0: 1.0, 1: 1.0}
+            print(f"   class_weight: HOLD=1.0, AGIR=1.0 (équilibré)")
+        else:
+            class_weight = {Action.EXIT: 1.0, Action.HOLD: 1.0, Action.ENTER: 1.0}
+            print(f"   class_weight: EXIT=1.0, HOLD=1.0, ENTER=1.0 (équilibré)")
+    else:
+        if args.two_class:
+            class_weight = {0: 1.0, 1: 1.5}  # Favoriser AGIR légèrement
+            print(f"   class_weight: HOLD=1.0, AGIR=1.5")
+        else:
+            class_weight = None  # Utiliser les défauts asymétriques
+            print(f"   class_weight: EXIT=2.0, HOLD=1.0, ENTER=0.5 (asymétrique)")
 
     cart = train_cart(
         X_train, y_train,
         max_depth=args.max_depth,
-        min_samples_leaf=args.min_samples_leaf
+        min_samples_leaf=args.min_samples_leaf,
+        class_weight=class_weight
     )
 
     print(f"\n   Nodes: {cart.tree_.node_count}")
@@ -495,23 +527,40 @@ def main():
     print(f"ÉVALUATION ({args.split.upper()})")
     print("="*80)
 
-    eval_result = evaluate_cart(cart, X_train, y_train, args.split)
+    # Noms des classes selon le mode
+    if args.two_class:
+        action_names = ['HOLD', 'AGIR']
+        labels = [0, 1]
+    else:
+        action_names = ['EXIT', 'HOLD', 'ENTER']
+        labels = [-1, 0, 1]
 
-    print(f"\n📊 Accuracy: {eval_result['accuracy']*100:.1f}%")
+    y_pred = cart.predict(X_train)
+    accuracy = (y_pred == y_train).mean()
+
+    print(f"\n📊 Accuracy: {accuracy*100:.1f}%")
 
     print(f"\n📊 Rapport par classe:")
-    for action_name in ['EXIT', 'HOLD', 'ENTER']:
-        if action_name in eval_result['report']:
-            r = eval_result['report'][action_name]
-            print(f"   {action_name}: precision={r['precision']:.2f}, recall={r['recall']:.2f}, f1={r['f1-score']:.2f}")
+    from sklearn.metrics import precision_recall_fscore_support
+    precision, recall, f1, support = precision_recall_fscore_support(
+        y_train, y_pred, labels=labels, zero_division=0
+    )
+    for i, name in enumerate(action_names):
+        print(f"   {name}: precision={precision[i]:.2f}, recall={recall[i]:.2f}, f1={f1[i]:.2f}, support={support[i]:,}")
 
     print(f"\n📊 Matrice de confusion:")
-    print("            Prédit")
-    print("           EXIT HOLD ENTER")
-    cm = eval_result['confusion_matrix']
-    print(f"Réel EXIT  {cm[0,0]:5d} {cm[0,1]:5d} {cm[0,2]:5d}")
-    print(f"     HOLD  {cm[1,0]:5d} {cm[1,1]:5d} {cm[1,2]:5d}")
-    print(f"     ENTER {cm[2,0]:5d} {cm[2,1]:5d} {cm[2,2]:5d}")
+    cm = confusion_matrix(y_train, y_pred, labels=labels)
+    if args.two_class:
+        print("            Prédit")
+        print("           HOLD  AGIR")
+        print(f"Réel HOLD  {cm[0,0]:6d} {cm[0,1]:6d}")
+        print(f"     AGIR  {cm[1,0]:6d} {cm[1,1]:6d}")
+    else:
+        print("            Prédit")
+        print("           EXIT HOLD ENTER")
+        print(f"Réel EXIT  {cm[0,0]:5d} {cm[0,1]:5d} {cm[0,2]:5d}")
+        print(f"     HOLD  {cm[1,0]:5d} {cm[1,1]:5d} {cm[1,2]:5d}")
+        print(f"     ENTER {cm[2,0]:5d} {cm[2,1]:5d} {cm[2,2]:5d}")
 
     # Évaluer sur un autre split si demandé
     if args.eval_split and args.eval_split != args.split:
