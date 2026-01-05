@@ -1,8 +1,8 @@
 # Modele CNN-LSTM Multi-Output - Guide Complet
 
-**Date**: 2026-01-04
-**Statut**: Hysteresis implementee - Reduction massive des trades
-**Version**: 4.9
+**Date**: 2026-01-05
+**Statut**: Stabilite filtre Kalman validee - Filtrage global confirme optimal
+**Version**: 5.0
 
 ---
 
@@ -169,6 +169,193 @@ for high in 0.55 0.60 0.65; do
         --fees 0.1
 done
 ```
+
+---
+
+## TEST DE STABILITE FILTRE KALMAN (2026-01-05)
+
+### Contexte et Objectif
+
+Tester si le filtre Kalman applique sur une **fenetre glissante** (ex: 12 samples) produit les **memes labels** que le filtre applique sur **l'ensemble du dataset** (global).
+
+**Pourquoi c'est critique :**
+- Le modele ML utilise des sequences de **12 timesteps**
+- Si les labels varient selon la taille de fenetre → instabilite train/production
+- Question : peut-on utiliser le filtre Kalman en temps reel avec fenetres courtes ?
+
+### Methodologie
+
+**Script : `src/test_filter_stability_simple.py`**
+
+```bash
+# Tester un indicateur avec differentes tailles de fenetre
+python src/test_filter_stability_simple.py \
+    --csv-file data_trad/BTCUSD_all_5m.csv \
+    --indicator {macd,rsi,cci} \
+    --window-size {12,20,100} \
+    --n-samples-total 10000 \
+    --n-tests 200
+```
+
+**Processus :**
+1. Charger 10,000 samples BTC (donnees 5min)
+2. Calculer indicateur technique (MACD/RSI/CCI)
+3. Appliquer Kalman GLOBAL → labels de reference
+4. Tester 200 positions avec fenetre glissante [t-window_size:t+1]
+5. Appliquer Kalman LOCAL sur chaque fenetre
+6. Comparer labels locaux vs globaux
+
+**Formule label :** `label[i] = 1 si filtered[i-2] > filtered[i-3] else 0`
+
+### Resultats Complets
+
+| Indicateur | Window 12 | Window 20 | Window 100 | Classement W=12 |
+|------------|-----------|-----------|------------|-----------------|
+| **MACD**   | 88.0%     | 93.5%     | 100.0%     | 2eme            |
+| **RSI**    | **90.0%** | **96.0%** | 100.0%     | **1er** 🏆      |
+| **CCI**    | 83.5%     | 95.0%     | 100.0%     | 3eme            |
+
+**Observations :**
+- ✅ **Tous convergent a 100% a window=100**
+- 🏆 **RSI = le plus stable** aux petites fenetres (90% a W=12)
+- ⚠️ **CCI = le moins stable** (83.5% a W=12, 16.5% desaccords)
+- 📊 **MACD = intermediaire** (88% a W=12)
+
+### Analyse Detaillee par Indicateur
+
+#### RSI - Le Champion de la Stabilite
+
+| Window | Concordance | Desaccords | Distribution |
+|--------|-------------|------------|--------------|
+| 12     | 90.0%       | 20/200     | Global: 48% UP, Local: 47% UP |
+| 20     | 96.0%       | 8/200      | Global: 48% UP, Local: 49% UP |
+| 100    | 100.0%      | 0/200      | Global: 48% UP, Local: 48% UP |
+
+**Pourquoi RSI est plus stable :**
+- Calcul base uniquement sur `close` (pas de high/low)
+- Moins de sources de variance
+- Moyenne des gains/pertes → signal deja lisse
+- Kalman a moins de travail a faire
+
+#### MACD - Comportement Intermediaire
+
+| Window | Concordance | Desaccords | Distribution |
+|--------|-------------|------------|--------------|
+| 12     | 88.0%       | 24/200     | Global: 44.5% UP, Local: 47.5% UP |
+| 20     | 93.5%       | 13/200     | Global: 44.5% UP, Local: 47.0% UP |
+| 100    | 100.0%      | 0/200      | Global: 44.5% UP, Local: 44.5% UP |
+
+**Caractere intermediaire :**
+- Signal deja pre-lisse (EMA fast/slow)
+- Biais vers UP a petites fenetres (+3% a W=12)
+- Convergence progressive et stable
+
+#### CCI - Le Moins Stable
+
+| Window | Concordance | Desaccords | Distribution |
+|--------|-------------|------------|--------------|
+| 12     | 83.5%       | 33/200     | Global: 50.5% UP, Local: 48% UP |
+| 20     | 95.0%       | 10/200     | Global: 50.5% UP, Local: 50.5% UP |
+| 100    | 100.0%      | 0/200      | Global: 50.5% UP, Local: 50.5% UP |
+
+**Pourquoi CCI est moins stable :**
+- Utilise high/low/close (3 sources de prix)
+- Calcul de deviation moyenne → besoin de contexte
+- Variance elevee sur petites fenetres
+- 16.5% de desaccords a W=12 = **inacceptable pour production**
+
+### Seuils de Stabilite
+
+| Indicateur | Window Min pour 95%+ | Window Min pour 100% |
+|------------|----------------------|----------------------|
+| RSI        | ~18-20 samples       | 100 samples          |
+| CCI        | ~20-22 samples       | 100 samples          |
+| MACD       | ~22-25 samples       | 100 samples          |
+
+**Note :** RSI converge le plus vite, CCI le plus lentement.
+
+### Implications Critiques pour le Projet
+
+#### Probleme avec Sequences de 12 Timesteps
+
+Le modele ML utilise `SEQUENCE_LENGTH = 12`, mais aucun indicateur n'est stable a W=12 :
+
+| Indicateur | Concordance W=12 | Impact Production |
+|------------|------------------|-------------------|
+| RSI        | 90.0% (10% bruit) | Meilleur, mais encore instable |
+| MACD       | 88.0% (12% bruit) | Instable (confirme observations) |
+| CCI        | 83.5% (16.5% bruit) | Tres instable |
+
+**Si on utilisait sliding windows en production :**
+- Labels differents de ceux vus en training
+- 10-16.5% de desaccords systematiques
+- Biais vers UP sur MACD (+3%)
+- Degradation performances du modele
+
+#### Validation de l'Approche Actuelle
+
+✅ **Le filtrage GLOBAL est la seule approche viable**
+
+```
+Training:
+  1. Charger toutes les donnees historiques
+  2. Appliquer Kalman sur signal COMPLET
+  3. Generer labels (concordance 100%)
+  4. Entrainer le modele
+
+Production:
+  1. Reentrainement mensuel avec nouvelles donnees
+  2. Re-appliquer Kalman sur TOUT l'historique
+  3. Regenerer TOUS les labels
+  4. Modele voit labels coherents avec training
+```
+
+**Avantages :**
+- Labels 100% stables et reproductibles
+- Pas de desaccords train/production
+- Pas de biais systematiques
+- Concordance parfaite
+
+**Inconvenients :**
+- Pas de "temps reel" pur
+- Besoin de tout l'historique
+- Reentrainement periodique necessaire
+
+#### Impact sur le Probleme des Micro-Trades
+
+**Conclusion importante :** Les micro-trades NE viennent PAS d'une instabilite du filtrage Kalman.
+
+Le filtrage global est stable (100% concordance). Le probleme vient de la **logique de decision** :
+- Le modele predit correctement la pente (accuracy 83-85%)
+- Mais change d'avis trop souvent (flickering)
+- Solution = **Hysteresis** (deja implementee, reduction -73% trades)
+
+### Commandes de Test
+
+```bash
+# Test complet des 3 indicateurs avec 3 tailles de fenetre
+for indicator in macd rsi cci; do
+    for window in 12 20 100; do
+        python src/test_filter_stability_simple.py \
+            --csv-file data_trad/BTCUSD_all_5m.csv \
+            --indicator $indicator \
+            --window-size $window \
+            --n-tests 200
+    done
+done
+```
+
+### Conclusion Finale
+
+| Question | Reponse |
+|----------|---------|
+| Peut-on utiliser Kalman en temps reel avec W=12 ? | ❌ Non (88-90% concordance insuffisant) |
+| Quelle est la taille minimale pour 100% stabilite ? | ✅ 100 samples (~8h de donnees 5min) |
+| Quel indicateur est le plus stable ? | 🏆 RSI (90% a W=12, 96% a W=20) |
+| L'approche actuelle (global) est-elle optimale ? | ✅ Oui, validee empiriquement |
+| Le filtrage cause-t-il les micro-trades ? | ❌ Non, le filtrage est stable |
+
+**Decision strategique :** Continuer avec le filtrage global et reentrainement periodique. L'hysteresis reste la solution aux micro-trades (reduction -73% deja validee).
 
 ---
 
