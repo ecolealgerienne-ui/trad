@@ -130,6 +130,9 @@ class Context:
     current_pnl: float = 0.0
     direction_at_entry: int = 0
     force_at_entry: int = 0
+    # Confirmation temporelle
+    prev_target: Position = Position.FLAT
+    confirmation_count: int = 0
 
 
 # =============================================================================
@@ -258,10 +261,11 @@ def run_dual_binary_strategy(
     use_predictions: bool = False,
     Y_pred: np.ndarray = None,
     threshold_force: float = 0.5,
+    min_confirmation: int = 1,
     verbose: bool = True
 ) -> Tuple[np.ndarray, Dict]:
     """
-    Stratégie Dual-Binary simple (Decision Matrix).
+    Stratégie Dual-Binary simple (Decision Matrix) avec confirmation temporelle.
 
     Args:
         Y: Labels (n_samples, 2) → [direction, force]
@@ -271,6 +275,7 @@ def run_dual_binary_strategy(
         use_predictions: Si True, utiliser Y_pred au lieu de Y
         Y_pred: Prédictions (si use_predictions=True)
         threshold_force: Seuil pour Force (défaut: 0.5)
+        min_confirmation: Nombre de périodes de signal stable requis avant d'agir (défaut: 1)
 
     Returns:
         positions: Array des positions (n_samples,)
@@ -331,11 +336,25 @@ def run_dual_binary_strategy(
             stats['n_hold'] += 1
 
         # ============================================
-        # LOGIQUE DE TRADING
+        # CONFIRMATION TEMPORELLE
         # ============================================
 
-        # Sortie si target_position = FLAT et on est en position
-        if target_position == Position.FLAT and ctx.position != Position.FLAT:
+        # Mettre à jour compteur de confirmation
+        if target_position == ctx.prev_target:
+            ctx.confirmation_count += 1
+        else:
+            ctx.prev_target = target_position
+            ctx.confirmation_count = 1
+
+        # Agir seulement si signal confirmé pendant min_confirmation périodes
+        confirmed = (ctx.confirmation_count >= min_confirmation)
+
+        # ============================================
+        # LOGIQUE DE TRADING (avec confirmation)
+        # ============================================
+
+        # Sortie si target_position = FLAT et on est en position ET confirmé
+        if confirmed and target_position == Position.FLAT and ctx.position != Position.FLAT:
             # Sortir de position (signal faible)
             trade_fees = 2 * fees  # Entrée + sortie
             pnl_after_fees = ctx.current_pnl - trade_fees
@@ -360,8 +379,8 @@ def run_dual_binary_strategy(
             ctx.position = Position.FLAT
             ctx.current_pnl = 0.0
 
-        # Entrée ou changement de direction
-        elif target_position != Position.FLAT:
+        # Entrée ou changement de direction (seulement si confirmé)
+        elif confirmed and target_position != Position.FLAT:
             if ctx.position == Position.FLAT:
                 # Nouvelle entrée
                 ctx.position = target_position
@@ -534,6 +553,12 @@ def main():
         default=0.5,
         help="Seuil pour Force (défaut: 0.5). Baisser à 0.3-0.4 pour augmenter Recall STRONG"
     )
+    parser.add_argument(
+        '--min-confirmation',
+        type=int,
+        default=1,
+        help="Périodes de signal stable requis avant d'agir (défaut: 1). 2-3 réduit flickering."
+    )
 
     args = parser.parse_args()
 
@@ -561,6 +586,8 @@ def main():
     logger.info(f"   Frais: {args.fees}% par trade")
     if args.threshold_force != 0.5:
         logger.info(f"   ⚙️  Seuil Force personnalisé: {args.threshold_force}")
+    if args.min_confirmation > 1:
+        logger.info(f"   ⏱️  Confirmation temporelle: {args.min_confirmation} périodes")
 
     positions, stats = run_dual_binary_strategy(
         Y=data['Y'],
@@ -568,7 +595,8 @@ def main():
         fees=fees_decimal,
         use_predictions=args.use_predictions,
         Y_pred=data['Y_pred'],
-        threshold_force=args.threshold_force
+        threshold_force=args.threshold_force,
+        min_confirmation=args.min_confirmation
     )
 
     # Afficher résultats
