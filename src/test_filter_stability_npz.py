@@ -101,8 +101,8 @@ def load_csv_and_compute_macd(csv_path: str, fast: int = 12, slow: int = 26, sig
         )
 
         df['macd'] = result['macd']
-        df['macd_signal'] = result['macd_signal']
-        df['macd_hist'] = result['macd_diff']
+        df['macd_signal'] = result['signal']
+        df['macd_hist'] = result['diff']
 
     except ImportError:
         # Fallback : calcul manuel
