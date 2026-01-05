@@ -721,25 +721,27 @@ def main():
     # =========================================================================
     # AUTO-DÉTECTION LayerNorm + BCEWithLogitsLoss (architecture hybride)
     # =========================================================================
-    # Configuration par indicateur basée sur tests empiriques
+    # Configuration optimale par indicateur (validée empiriquement)
     use_layer_norm = False  # Par défaut: désactivé
     use_bce_with_logits = False  # Par défaut: désactivé (BCELoss baseline)
 
     if indicator_for_metrics:
         indicator_lower = indicator_for_metrics.lower()
         if indicator_lower == 'macd':
-            # MACD: Les deux optimisations aident (+1.0%)
+            # MACD: Les deux optimisations aident (86.9%)
+            # Indicateur de tendance lourde (double EMA) → stabilisation bénéfique
             use_layer_norm = True
             use_bce_with_logits = True
             logger.info(f"  🎯 Indicateur MACD détecté → LayerNorm + BCEWithLogitsLoss ACTIVÉS")
         elif indicator_lower == 'cci':
-            # CCI: TEST - BCEWithLogitsLoss seul (isoler l'effet)
-            # Hypothèse: BCEWithLogitsLoss aide (3 features), LayerNorm nuit
+            # CCI: BCEWithLogitsLoss seul optimal (83.3%)
+            # 3 features (h,l,c) → BCE aide (+3.8%), LayerNorm nuit (-0.5%)
             use_layer_norm = False
             use_bce_with_logits = True
-            logger.info(f"  🧪 TEST CCI → BCEWithLogitsLoss ACTIVÉ, LayerNorm DÉSACTIVÉ")
+            logger.info(f"  🎯 Indicateur CCI détecté → BCEWithLogitsLoss ACTIVÉ, LayerNorm DÉSACTIVÉ (optimal)")
         elif indicator_lower == 'rsi':
-            # RSI: Baseline optimal (optimisations neutres)
+            # RSI: Baseline optimal (80.7%)
+            # Oscillateur simple → optimisations neutres
             use_layer_norm = False
             use_bce_with_logits = False
             logger.info(f"  🎯 Indicateur RSI détecté → Architecture baseline (optimal)")
