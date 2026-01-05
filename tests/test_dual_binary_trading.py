@@ -321,18 +321,49 @@ def run_dual_binary_strategy(
                 ctx.current_pnl -= ret
 
         # ============================================
-        # DECISION MATRIX (Stratégie Simple)
+        # DECISION MATRIX (Asymétrique : Entrée Stricte / Sortie Patiente)
+        # ============================================
+        # PRINCIPE : On entre seulement si Force STRONG (Sniper)
+        #            On sort seulement si Direction change (Hystérésis)
         # ============================================
 
         if direction == 1 and force == 1:
-            # UP + STRONG → LONG
+            # UP + STRONG → LONG (Entrée stricte)
             target_position = Position.LONG
         elif direction == 0 and force == 1:
-            # DOWN + STRONG → SHORT
+            # DOWN + STRONG → SHORT (Entrée stricte)
             target_position = Position.SHORT
         else:
-            # Autres (signaux WEAK) → HOLD
-            target_position = Position.FLAT
+            # Signaux WEAK → Logique de MAINTIEN (Hystérésis)
+            if ctx.position == Position.FLAT:
+                # Pas en position → on n'entre pas (signal trop faible)
+                target_position = Position.FLAT
+            elif ctx.position == Position.LONG:
+                # En LONG → on sort SEULEMENT si Direction passe à DOWN
+                if direction == 0:
+                    # Direction contraire
+                    if force == 1:
+                        # DOWN + STRONG → Renversement fort, on inverse
+                        target_position = Position.SHORT
+                    else:
+                        # DOWN + WEAK → Signal de sortie faible, on sort en FLAT
+                        target_position = Position.FLAT
+                else:
+                    # Direction toujours UP (ou neutre) → ON RESTE LONG
+                    target_position = Position.LONG
+            elif ctx.position == Position.SHORT:
+                # En SHORT → on sort SEULEMENT si Direction passe à UP
+                if direction == 1:
+                    if force == 1:
+                        # UP + STRONG → Renversement fort, on inverse
+                        target_position = Position.LONG
+                    else:
+                        # UP + WEAK → Signal de sortie faible, on sort en FLAT
+                        target_position = Position.FLAT
+                else:
+                    # Direction toujours DOWN (ou neutre) → ON RESTE SHORT
+                    target_position = Position.SHORT
+
             stats['n_hold'] += 1
 
         # ============================================
