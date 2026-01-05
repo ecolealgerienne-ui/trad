@@ -55,27 +55,28 @@ def analyze_position_concordance(
     concordance = (positions_oracle == positions_pred).sum() / n_samples
 
     # 2. Concordance par type de position
-    mask_oracle_long = (positions_oracle == Position.LONG.value)
-    mask_oracle_short = (positions_oracle == Position.SHORT.value)
-    mask_oracle_flat = (positions_oracle == Position.FLAT.value)
+    # Positions stockées comme int: LONG=1, SHORT=-1, FLAT=0
+    mask_oracle_long = (positions_oracle == 1)
+    mask_oracle_short = (positions_oracle == -1)
+    mask_oracle_flat = (positions_oracle == 0)
 
-    mask_pred_long = (positions_pred == Position.LONG.value)
-    mask_pred_short = (positions_pred == Position.SHORT.value)
-    mask_pred_flat = (positions_pred == Position.FLAT.value)
+    mask_pred_long = (positions_pred == 1)
+    mask_pred_short = (positions_pred == -1)
+    mask_pred_flat = (positions_pred == 0)
 
     # Concordance LONG
     n_oracle_long = mask_oracle_long.sum()
-    n_pred_agrees_long = (positions_pred[mask_oracle_long] == Position.LONG.value).sum() if n_oracle_long > 0 else 0
+    n_pred_agrees_long = (positions_pred[mask_oracle_long] == 1).sum() if n_oracle_long > 0 else 0
     concordance_long = n_pred_agrees_long / n_oracle_long if n_oracle_long > 0 else 0.0
 
     # Concordance SHORT
     n_oracle_short = mask_oracle_short.sum()
-    n_pred_agrees_short = (positions_pred[mask_oracle_short] == Position.SHORT.value).sum() if n_oracle_short > 0 else 0
+    n_pred_agrees_short = (positions_pred[mask_oracle_short] == -1).sum() if n_oracle_short > 0 else 0
     concordance_short = n_pred_agrees_short / n_oracle_short if n_oracle_short > 0 else 0.0
 
     # Concordance FLAT
     n_oracle_flat = mask_oracle_flat.sum()
-    n_pred_agrees_flat = (positions_pred[mask_oracle_flat] == Position.FLAT.value).sum() if n_oracle_flat > 0 else 0
+    n_pred_agrees_flat = (positions_pred[mask_oracle_flat] == 0).sum() if n_oracle_flat > 0 else 0
     concordance_flat = n_pred_agrees_flat / n_oracle_flat if n_oracle_flat > 0 else 0.0
 
     # 3. Analyse des désaccords
@@ -84,15 +85,15 @@ def analyze_position_concordance(
 
     # Types de désaccords
     # Oracle=LONG, Pred!=LONG
-    oracle_long_pred_wrong = mask_oracle_long & (positions_pred != Position.LONG.value)
+    oracle_long_pred_wrong = mask_oracle_long & (positions_pred != 1)
     n_oracle_long_missed = oracle_long_pred_wrong.sum()
 
     # Oracle=SHORT, Pred!=SHORT
-    oracle_short_pred_wrong = mask_oracle_short & (positions_pred != Position.SHORT.value)
+    oracle_short_pred_wrong = mask_oracle_short & (positions_pred != -1)
     n_oracle_short_missed = oracle_short_pred_wrong.sum()
 
     # Oracle=FLAT, Pred!=FLAT (faux trades)
-    oracle_flat_pred_wrong = mask_oracle_flat & (positions_pred != Position.FLAT.value)
+    oracle_flat_pred_wrong = mask_oracle_flat & (positions_pred != 0)
     n_false_trades = oracle_flat_pred_wrong.sum()
 
     # 4. Impact P&L des désaccords
