@@ -196,9 +196,9 @@ class MultiOutputCNNLSTM(nn.Module):
         # =====================================================================
         # Têtes de Sortie (num_outputs indépendants)
         # =====================================================================
-        # Chaque tête produit une logit → Sigmoid → probabilité
+        # Chaque tête produit des logits bruts (sigmoid appliqué dans la loss)
 
-        head_outputs = [torch.sigmoid(head(x)) for head in self.output_heads]
+        head_outputs = [head(x) for head in self.output_heads]  # Logits bruts
 
         # Concaténer les sorties: (batch, num_outputs)
         outputs = torch.cat(head_outputs, dim=1)
@@ -207,7 +207,7 @@ class MultiOutputCNNLSTM(nn.Module):
 
     def predict_proba(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Prédiction de probabilités (identique à forward).
+        Prédiction de probabilités.
 
         Args:
             x: Input tensor (batch, sequence_length, num_indicators)
@@ -215,7 +215,8 @@ class MultiOutputCNNLSTM(nn.Module):
         Returns:
             Probabilités (batch, num_outputs)
         """
-        return self.forward(x)
+        logits = self.forward(x)
+        return torch.sigmoid(logits)  # Convertir logits en probabilités
 
     def predict(self, x: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
         """
@@ -235,8 +236,9 @@ class MultiOutputCNNLSTM(nn.Module):
 
 class MultiOutputBCELoss(nn.Module):
     """
-    Loss BCE multi-output avec poids optionnels pour chaque sortie.
+    Loss BCEWithLogits multi-output avec poids optionnels pour chaque sortie.
 
+    Utilise BCEWithLogitsLoss pour stabilité numérique (sigmoid intégré).
     Calcule la BCE pour chaque output et fait la moyenne pondérée.
 
     Args:
@@ -262,14 +264,14 @@ class MultiOutputBCELoss(nn.Module):
         self.weights = torch.tensor(weights[:num_outputs], dtype=torch.float32)
         self.num_outputs = num_outputs
 
-        # BCE sans reduction (on veut calculer séparément pour chaque output)
-        self.bce = nn.BCELoss(reduction='none')
+        # BCEWithLogitsLoss pour stabilité numérique (sigmoid intégré dans la loss)
+        self.bce = nn.BCEWithLogitsLoss(reduction='none')
 
         if num_outputs == 3:
-            logger.info(f"✅ Loss multi-output créée:")
+            logger.info(f"✅ Loss multi-output créée (BCEWithLogitsLoss):")
             logger.info(f"  Poids: RSI={weights[0]}, CCI={weights[1]}, MACD={weights[2]}")
         else:
-            logger.info(f"✅ Loss single-output créée (poids={weights[0]})")
+            logger.info(f"✅ Loss single-output créée (BCEWithLogitsLoss, poids={weights[0]})")
 
     def forward(
         self,

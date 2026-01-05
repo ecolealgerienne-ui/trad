@@ -60,11 +60,14 @@ def evaluate_model(
             X_batch = X_batch.to(device)
             Y_batch = Y_batch.to(device)
 
-            # Forward
-            outputs = model(X_batch)
+            # Forward (retourne logits)
+            logits = model(X_batch)
 
-            # Loss
-            loss = loss_fn(outputs, Y_batch)
+            # Loss (BCEWithLogitsLoss applique sigmoid en interne)
+            loss = loss_fn(logits, Y_batch)
+
+            # Convertir logits en probabilités pour les métriques
+            outputs = torch.sigmoid(logits)
 
             # Accumuler
             total_loss += loss.item() * X_batch.size(0)
@@ -487,7 +490,8 @@ def main():
         with torch.no_grad():
             for X_batch, Y_batch in test_loader:
                 X_batch = X_batch.to(device)
-                outputs = model(X_batch)
+                logits = model(X_batch)
+                outputs = torch.sigmoid(logits)  # Convertir logits en probabilités
                 all_predictions.append(outputs.cpu())
                 all_targets.append(Y_batch.cpu())
 
