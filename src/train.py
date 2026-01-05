@@ -718,7 +718,22 @@ def main():
     # Utiliser valeurs détectées au lieu de num_outputs manuel
     num_outputs_final = n_outputs_detected
 
-    logger.info(f"  num_features={n_features_detected}, num_outputs={num_outputs_final}")
+    # =========================================================================
+    # AUTO-DÉTECTION LayerNorm (architecture hybride par indicateur)
+    # =========================================================================
+    # LayerNorm bénéficie uniquement à MACD (indicateur stable)
+    # RSI et CCI (volatils) se dégradent avec LayerNorm
+    use_layer_norm = False  # Par défaut: désactivé
+
+    if indicator_for_metrics:
+        indicator_lower = indicator_for_metrics.lower()
+        if indicator_lower == 'macd':
+            use_layer_norm = True
+            logger.info(f"  🎯 Indicateur MACD détecté → LayerNorm ACTIVÉ")
+        else:
+            logger.info(f"  🎯 Indicateur {indicator_for_metrics} détecté → LayerNorm DÉSACTIVÉ (optimal)")
+
+    logger.info(f"  num_features={n_features_detected}, num_outputs={num_outputs_final}, use_layer_norm={use_layer_norm}")
 
     model, loss_fn = create_model(
         device=device,
@@ -729,7 +744,8 @@ def main():
         lstm_num_layers=args.lstm_layers,
         lstm_dropout=args.lstm_dropout,
         dense_hidden_size=args.dense_hidden,
-        dense_dropout=args.dense_dropout
+        dense_dropout=args.dense_dropout,
+        use_layer_norm=use_layer_norm
     )
 
     # Optimizer
@@ -764,6 +780,7 @@ def main():
         'indicator': args.indicator,
         'is_dual_binary': is_dual_binary,
         'indicator_for_metrics': indicator_for_metrics,
+        'use_layer_norm': use_layer_norm,
     }
 
     # =========================================================================

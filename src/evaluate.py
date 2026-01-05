@@ -435,6 +435,7 @@ def main():
         lstm_dropout=model_config.get('lstm_dropout', 0.2),
         dense_hidden_size=model_config.get('dense_hidden_size', 32),
         dense_dropout=model_config.get('dense_dropout', 0.3),
+        use_layer_norm=model_config.get('use_layer_norm', True),  # Par défaut True pour rétrocompatibilité
     )
 
     # Charger poids

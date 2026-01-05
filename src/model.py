@@ -72,6 +72,8 @@ class MultiOutputCNNLSTM(nn.Module):
         lstm_dropout: Dropout LSTM (défaut: 0.2)
         dense_hidden_size: Taille couche dense (défaut: 32)
         dense_dropout: Dropout dense (défaut: 0.3)
+        use_layer_norm: Activer LayerNorm entre CNN et LSTM (défaut: True)
+                        Recommandé: True pour MACD, False pour RSI/CCI
     """
 
     def __init__(
@@ -85,13 +87,15 @@ class MultiOutputCNNLSTM(nn.Module):
         lstm_num_layers: int = LSTM_NUM_LAYERS,
         lstm_dropout: float = LSTM_DROPOUT,
         dense_hidden_size: int = DENSE_HIDDEN_SIZE,
-        dense_dropout: float = DENSE_DROPOUT
+        dense_dropout: float = DENSE_DROPOUT,
+        use_layer_norm: bool = True
     ):
         super(MultiOutputCNNLSTM, self).__init__()
 
         self.sequence_length = sequence_length
         self.num_indicators = num_indicators
         self.num_outputs = num_outputs
+        self.use_layer_norm = use_layer_norm
 
         # =====================================================================
         # CNN Layer (1D Convolution sur dimension temporelle)
@@ -114,10 +118,14 @@ class MultiOutputCNNLSTM(nn.Module):
         cnn_output_length = sequence_length
 
         # =====================================================================
-        # Layer Normalization (entre CNN et LSTM)
+        # Layer Normalization (entre CNN et LSTM) - OPTIONNEL
         # =====================================================================
         # Stabilise les gradients LSTM et réduit la dérive de covariance
-        self.layer_norm = nn.LayerNorm(cnn_filters)
+        # Activé uniquement pour MACD (indicateurs volatils comme RSI/CCI n'en bénéficient pas)
+        if use_layer_norm:
+            self.layer_norm = nn.LayerNorm(cnn_filters)
+        else:
+            self.layer_norm = None
 
         # =====================================================================
         # LSTM Layer
@@ -154,10 +162,12 @@ class MultiOutputCNNLSTM(nn.Module):
             nn.Linear(dense_hidden_size, 1) for _ in range(num_outputs)
         ])
 
-        logger.info("✅ Modèle CNN-LSTM créé (avec LayerNorm):")
+        layernorm_status = "avec LayerNorm" if use_layer_norm else "sans LayerNorm"
+        logger.info(f"✅ Modèle CNN-LSTM créé ({layernorm_status}):")
         logger.info(f"  Input: ({sequence_length}, {num_indicators})")
         logger.info(f"  CNN: {cnn_filters} filters, kernel={cnn_kernel_size}")
-        logger.info(f"  LayerNorm: {cnn_filters} features")
+        if use_layer_norm:
+            logger.info(f"  LayerNorm: {cnn_filters} features (ACTIVÉ)")
         logger.info(f"  LSTM: {lstm_hidden_size} hidden × {lstm_num_layers} layers")
         logger.info(f"  Dense: {dense_hidden_size}")
         logger.info(f"  Outputs: {num_outputs}")
@@ -190,9 +200,10 @@ class MultiOutputCNNLSTM(nn.Module):
         x = x.transpose(1, 2)
 
         # =====================================================================
-        # Layer Normalization (stabilisation avant LSTM)
+        # Layer Normalization (stabilisation avant LSTM) - OPTIONNEL
         # =====================================================================
-        x = self.layer_norm(x)  # Normalise sur la dimension features
+        if self.layer_norm is not None:
+            x = self.layer_norm(x)  # Normalise sur la dimension features
 
         # =====================================================================
         # LSTM
@@ -331,7 +342,8 @@ def create_model(
     lstm_num_layers: int = LSTM_NUM_LAYERS,
     lstm_dropout: float = LSTM_DROPOUT,
     dense_hidden_size: int = DENSE_HIDDEN_SIZE,
-    dense_dropout: float = DENSE_DROPOUT
+    dense_dropout: float = DENSE_DROPOUT,
+    use_layer_norm: bool = True
 ) -> Tuple[MultiOutputCNNLSTM, MultiOutputBCELoss]:
     """
     Factory function pour créer le modèle et la loss.
@@ -358,7 +370,8 @@ def create_model(
         lstm_num_layers=lstm_num_layers,
         lstm_dropout=lstm_dropout,
         dense_hidden_size=dense_hidden_size,
-        dense_dropout=dense_dropout
+        dense_dropout=dense_dropout,
+        use_layer_norm=use_layer_norm
     )
     loss_fn = MultiOutputBCELoss(num_outputs=num_outputs)
 
