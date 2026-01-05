@@ -54,6 +54,9 @@ class Context:
     trades: List[Trade] = field(default_factory=list)
     current_pnl: float = 0.0
     direction_at_entry: int = 0
+    # Confirmation temporelle
+    prev_target: Position = Position.FLAT
+    confirmation_count: int = 0
 
 
 def run_direction_only_strategy(
@@ -61,10 +64,11 @@ def run_direction_only_strategy(
     returns: np.ndarray,
     fees: float = 0.0,
     use_predictions: bool = False,
-    Y_pred: np.ndarray = None
+    Y_pred: np.ndarray = None,
+    min_confirmation: int = 1
 ) -> Tuple[np.ndarray, Dict]:
     """
-    Stratégie Direction SEULE (ignorer Force).
+    Stratégie Direction SEULE (ignorer Force) avec confirmation temporelle.
 
     Args:
         Y: Labels (n_samples, 2) → [direction, force]
@@ -72,6 +76,7 @@ def run_direction_only_strategy(
         fees: Frais par trade
         use_predictions: Si True, utiliser Y_pred
         Y_pred: Prédictions (si use_predictions=True)
+        min_confirmation: Nombre de périodes de signal stable requis avant d'agir (défaut: 1)
 
     Returns:
         positions: Array des positions
@@ -133,8 +138,25 @@ def run_direction_only_strategy(
             # DOWN (0) → SHORT
             target_position = Position.SHORT
 
-        # Logique de trading
-        if ctx.position == Position.FLAT:
+        # ============================================
+        # CONFIRMATION TEMPORELLE
+        # ============================================
+
+        # Mettre à jour compteur de confirmation
+        if target_position == ctx.prev_target:
+            ctx.confirmation_count += 1
+        else:
+            ctx.prev_target = target_position
+            ctx.confirmation_count = 1
+
+        # Agir seulement si signal confirmé pendant min_confirmation périodes
+        confirmed = (ctx.confirmation_count >= min_confirmation)
+
+        # ============================================
+        # Logique de trading (avec confirmation)
+        # ============================================
+
+        if confirmed and ctx.position == Position.FLAT:
             # Entrer en position
             ctx.position = target_position
             ctx.entry_time = i
@@ -146,7 +168,7 @@ def run_direction_only_strategy(
             else:
                 stats['n_short'] += 1
 
-        elif ctx.position != target_position:
+        elif confirmed and ctx.position != target_position:
             # Changement de direction = sortie + nouvelle entrée
             trade_fees = 2 * fees  # Sortie ancienne position
             pnl_after_fees = ctx.current_pnl - trade_fees
@@ -299,6 +321,12 @@ def main():
         action='store_true',
         help="Utiliser prédictions modèle"
     )
+    parser.add_argument(
+        '--min-confirmation',
+        type=int,
+        default=1,
+        help="Périodes de signal stable requis avant d'agir (défaut: 1). 2-3 réduit flickering."
+    )
 
     args = parser.parse_args()
 
@@ -318,6 +346,8 @@ def main():
     logger.info(f"\n🚀 Test Direction SEULE: {args.indicator.upper()} ({args.split})")
     logger.info(f"   Samples: {len(data['Y']):,}")
     logger.info(f"   Frais: {args.fees}% par trade")
+    if args.min_confirmation > 1:
+        logger.info(f"   ⏱️  Confirmation temporelle: {args.min_confirmation} périodes")
 
     # Run backtest
     positions, stats = run_direction_only_strategy(
@@ -325,7 +355,8 @@ def main():
         returns=returns,
         fees=fees_decimal,
         use_predictions=args.use_predictions,
-        Y_pred=data['Y_pred']
+        Y_pred=data['Y_pred'],
+        min_confirmation=args.min_confirmation
     )
 
     # Afficher résultats
