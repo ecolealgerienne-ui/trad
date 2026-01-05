@@ -238,6 +238,20 @@ def run_dual_binary_strategy(
             raise ValueError("use_predictions=True mais Y_pred est None")
         signals = Y_pred
         logger.info("🎯 Mode: Prédictions modèle")
+
+        # Convertir probabilités en labels binaires (seuil 0.5)
+        # Si Y_pred contient des probabilités [0,1], les seuiller
+        # Sinon, utiliser directement les labels
+        if signals.max() <= 1.0 and signals.min() >= 0.0:
+            # Vérifier si ce sont des probabilités continues ou des labels binaires
+            unique_vals = np.unique(signals)
+            if len(unique_vals) > 2:  # Plus de 2 valeurs → probabilités continues
+                signals = (signals > 0.5).astype(int)
+                logger.info("   📊 Prédictions converties (seuil 0.5): Direction et Force")
+                # Afficher distribution
+                dir_up = (signals[:, 0] == 1).sum()
+                force_strong = (signals[:, 1] == 1).sum()
+                logger.info(f"   📊 Distribution: Direction UP={dir_up/len(signals)*100:.1f}%, Force STRONG={force_strong/len(signals)*100:.1f}%")
     else:
         signals = Y
         logger.info("🎯 Mode: Labels Oracle (monde parfait)")
