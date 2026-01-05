@@ -126,9 +126,9 @@ def run_direction_only_strategy(
 
         # Calculer P&L si en position
         if ctx.position == Position.LONG:
-            ctx.current_pnl += returns[i] * 100  # Rendement en %
+            ctx.current_pnl += returns[i]  # Rendement en décimal
         elif ctx.position == Position.SHORT:
-            ctx.current_pnl += -returns[i] * 100
+            ctx.current_pnl += -returns[i]
 
         # Decision Matrix SIMPLIFIÉE (Direction seule)
         if direction == 1:
@@ -296,18 +296,18 @@ def print_results(stats: Dict, indicator: str, split: str, use_predictions: bool
     logger.info("\n💰 Performance:")
     logger.info(f"   Win Rate:         {stats['win_rate']*100:.2f}%")
     logger.info(f"   Profit Factor:    {stats['profit_factor']:.3f}")
-    logger.info(f"   Avg Win:          +{stats['avg_win']:.3f}%")
-    logger.info(f"   Avg Loss:         {stats['avg_loss']:.3f}%")
+    logger.info(f"   Avg Win:          +{stats['avg_win']*100:.3f}%")
+    logger.info(f"   Avg Loss:         {stats['avg_loss']*100:.3f}%")
 
     logger.info("\n💵 PnL:")
-    logger.info(f"   PnL Brut:         {stats['total_pnl']:+.2f}%")
-    logger.info(f"   Frais Totaux:     {stats['total_fees']:.2f}%")
-    logger.info(f"   PnL Net:          {stats['total_pnl_after_fees']:+.2f}%")
+    logger.info(f"   PnL Brut:         {stats['total_pnl']*100:+.2f}%")
+    logger.info(f"   Frais Totaux:     {stats['total_fees']*100:.2f}%")
+    logger.info(f"   PnL Net:          {stats['total_pnl_after_fees']*100:+.2f}%")
 
     # Métriques normalisées par asset et par mois
     if n_samples > 0 and n_assets > 0 and months_total > 0:
-        pnl_per_asset = stats['total_pnl_after_fees'] / n_assets
-        pnl_per_month = stats['total_pnl_after_fees'] / months_total
+        pnl_per_asset = (stats['total_pnl_after_fees'] * 100) / n_assets
+        pnl_per_month = (stats['total_pnl_after_fees'] * 100) / months_total
         logger.info(f"\n📊 Performance Normalisée:")
         logger.info(f"   PnL Net/asset:    {pnl_per_asset:+.2f}%")
         logger.info(f"   PnL Net/mois:     {pnl_per_month:+.2f}%")
