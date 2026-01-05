@@ -4,13 +4,18 @@ Modèle CNN-LSTM Multi-Output pour Prédiction de Pente d'Indicateurs.
 Architecture:
     Input: (batch, 12, 3) - 12 timesteps × 3 indicateurs
     → CNN (extraction features)
+    → LayerNorm (stabilisation gradients)
     → LSTM (patterns temporels)
     → Dense partagé
     → 3 têtes de sortie indépendantes (RSI, CCI, MACD)
     Output: (batch, 3) - 3 probabilités binaires
 
 Loss:
-    BCE moyenne sur les 3 outputs (poids égaux)
+    BCEWithLogitsLoss moyenne sur les 3 outputs (poids égaux)
+
+Optimisations:
+    - BCEWithLogitsLoss pour stabilité numérique
+    - LayerNorm entre CNN et LSTM pour réduire dérive de covariance
 
 Note:
     BOL (Bollinger Bands) a été retiré car impossible à synchroniser
@@ -51,9 +56,10 @@ class MultiOutputCNNLSTM(nn.Module):
 
     Architecture:
         1. CNN 1D pour extraction de features temporelles
-        2. LSTM pour capturer patterns séquentiels
-        3. Dense partagé
-        4. 3 têtes de sortie (RSI, CCI, MACD)
+        2. LayerNorm pour stabiliser les gradients LSTM
+        3. LSTM pour capturer patterns séquentiels
+        4. Dense partagé
+        5. 3 têtes de sortie (RSI, CCI, MACD)
 
     Args:
         sequence_length: Longueur des séquences (défaut: 12)
@@ -108,6 +114,12 @@ class MultiOutputCNNLSTM(nn.Module):
         cnn_output_length = sequence_length
 
         # =====================================================================
+        # Layer Normalization (entre CNN et LSTM)
+        # =====================================================================
+        # Stabilise les gradients LSTM et réduit la dérive de covariance
+        self.layer_norm = nn.LayerNorm(cnn_filters)
+
+        # =====================================================================
         # LSTM Layer
         # =====================================================================
         # Input: (batch, seq_len, features) = (batch, cnn_output_length, cnn_filters)
@@ -142,9 +154,10 @@ class MultiOutputCNNLSTM(nn.Module):
             nn.Linear(dense_hidden_size, 1) for _ in range(num_outputs)
         ])
 
-        logger.info("✅ Modèle CNN-LSTM créé:")
+        logger.info("✅ Modèle CNN-LSTM créé (avec LayerNorm):")
         logger.info(f"  Input: ({sequence_length}, {num_indicators})")
         logger.info(f"  CNN: {cnn_filters} filters, kernel={cnn_kernel_size}")
+        logger.info(f"  LayerNorm: {cnn_filters} features")
         logger.info(f"  LSTM: {lstm_hidden_size} hidden × {lstm_num_layers} layers")
         logger.info(f"  Dense: {dense_hidden_size}")
         logger.info(f"  Outputs: {num_outputs}")
@@ -175,6 +188,11 @@ class MultiOutputCNNLSTM(nn.Module):
 
         # Retransposer pour LSTM: (batch, sequence_length, cnn_filters)
         x = x.transpose(1, 2)
+
+        # =====================================================================
+        # Layer Normalization (stabilisation avant LSTM)
+        # =====================================================================
+        x = self.layer_norm(x)  # Normalise sur la dimension features
 
         # =====================================================================
         # LSTM
