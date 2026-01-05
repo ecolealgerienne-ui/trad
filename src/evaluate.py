@@ -32,7 +32,8 @@ def evaluate_model(
     model: torch.nn.Module,
     dataloader: DataLoader,
     loss_fn: torch.nn.Module,
-    device: str
+    device: str,
+    indicator_names: list = None
 ) -> Dict[str, float]:
     """
     Évalue le modèle sur un dataset.
@@ -42,6 +43,7 @@ def evaluate_model(
         dataloader: DataLoader
         loss_fn: Loss function
         device: Device
+        indicator_names: Noms des outputs (ex: ['Direction', 'Force'] pour dual-binary)
 
     Returns:
         Dictionnaire avec toutes les métriques
@@ -75,7 +77,7 @@ def evaluate_model(
     # Métriques
     all_predictions = torch.cat(all_predictions, dim=0)
     all_targets = torch.cat(all_targets, dim=0)
-    metrics = compute_metrics(all_predictions, all_targets)
+    metrics = compute_metrics(all_predictions, all_targets, indicator_names=indicator_names)
     metrics['loss'] = avg_loss
 
     return metrics
@@ -267,34 +269,58 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     logger.info(f"\nDevice: {device}")
 
-    # Chemin du modèle (logique identique à train.py)
+    # =========================================================================
+    # AUTO-DÉTECTION DU CHEMIN DU MODÈLE (logique identique à train.py)
+    # =========================================================================
     if args.model:
         model_path = args.model
     else:
-        # Extraire le préfixe du dataset (ex: "ohlcv2" de "dataset_..._ohlcv2_cci_octave20.npz")
-        dataset_prefix = ""
+        # Détecter l'indicateur et le filtre depuis le nom du fichier dataset
+        detected_indicator = None
+        detected_filter = None
+
         if args.data:
-            data_name = Path(args.data).stem
-            known_prefixes = ['ohlcv2', 'ohlc', '5min_30min', '5min', '30min']
-            for prefix in known_prefixes:
-                if prefix in data_name:
-                    dataset_prefix = prefix
+            data_name = Path(args.data).stem.lower()
+
+            # Détecter indicateur (ex: dataset_..._rsi_dual_binary_kalman.npz → 'rsi')
+            for ind in ['rsi', 'cci', 'macd', 'close']:
+                if f'_{ind}_' in data_name or data_name.endswith(f'_{ind}'):
+                    detected_indicator = ind
                     break
 
-        # Construire le suffixe du nom de fichier
-        suffix_parts = []
-        if dataset_prefix:
-            suffix_parts.append(dataset_prefix)
+            # Détecter filtre (ex: dataset_..._rsi_dual_binary_kalman.npz → 'kalman')
+            for filt in ['kalman', 'octave20', 'octave', 'decycler']:
+                if filt in data_name:
+                    detected_filter = filt
+                    break
+
+        # Priorité: CLI > filename
+        if args.indicator and args.indicator != 'all':
+            detected_indicator = args.indicator
         if args.filter:
-            suffix_parts.append(args.filter)
-        if single_indicator:
-            suffix_parts.append(args.indicator)
+            detected_filter = args.filter
+
+        # Construire le nom du modèle
+        suffix_parts = []
+        if detected_indicator:
+            suffix_parts.append(detected_indicator)
+        if detected_filter:
+            suffix_parts.append(detected_filter)
+
+        # Détecter si c'est dual-binary depuis le nom du fichier
+        if args.data and 'dual_binary' in Path(args.data).stem.lower():
+            suffix_parts.append('dual_binary')
 
         if suffix_parts:
             suffix = '_'.join(suffix_parts)
             model_path = BEST_MODEL_PATH.replace('.pth', f'_{suffix}.pth')
         else:
             model_path = BEST_MODEL_PATH
+
+        logger.info(f"\n🔍 Détection auto du modèle:")
+        logger.info(f"  Indicateur détecté: {detected_indicator or 'aucun'}")
+        logger.info(f"  Filtre détecté: {detected_filter or 'aucun'}")
+        logger.info(f"  Chemin modèle: {model_path}")
 
     # Vérifier que le modèle existe
     if not Path(model_path).exists():
@@ -338,7 +364,7 @@ def main():
     logger.info(f"  Test batches: {len(test_loader)}")
 
     # =========================================================================
-    # 4. CHARGER LE MODÈLE
+    # 4. CHARGER LE MODÈLE ET AUTO-DÉTECTER L'ARCHITECTURE
     # =========================================================================
     logger.info(f"\n4. Chargement du modèle depuis {model_path}...")
 
@@ -348,14 +374,53 @@ def main():
     # Récupérer config du modèle (ou utiliser défauts si ancien checkpoint)
     model_config = checkpoint.get('model_config', {})
 
-    # Détecter le nombre de features depuis les données
-    num_features = X_test.shape[2]
+    # =========================================================================
+    # AUTO-DÉTECTION DE L'ARCHITECTURE (comme train.py)
+    # =========================================================================
 
-    # Utiliser num_outputs de la config ou celui déterminé par --indicator
-    saved_num_outputs = model_config.get('num_outputs', 3)
-    if saved_num_outputs != num_outputs:
-        logger.warning(f"  ⚠️ num_outputs mismatch: modèle={saved_num_outputs}, demandé={num_outputs}")
+    # Détecter depuis le checkpoint
+    is_dual_binary = model_config.get('is_dual_binary', False)
+    indicator_for_metrics_saved = model_config.get('indicator_for_metrics', None)
+
+    # Détecter depuis les metadata du dataset
+    if metadata and 'label_names' in metadata and len(metadata['label_names']) == 2:
+        is_dual_binary = True
+        if not indicator_for_metrics_saved:
+            label_name = metadata['label_names'][0]  # Ex: 'rsi_dir'
+            indicator_for_metrics_saved = label_name.split('_')[0].upper()  # 'RSI'
+
+    # Détecter le nombre de features et outputs depuis les données
+    n_features_detected = X_test.shape[2]
+    n_outputs_detected = Y_test.shape[1]
+
+    logger.info(f"\n🔍 Architecture détectée:")
+    logger.info(f"  Features: {n_features_detected}")
+    logger.info(f"  Outputs: {n_outputs_detected}")
+    logger.info(f"  Dual-Binary: {is_dual_binary}")
+    if indicator_for_metrics_saved:
+        logger.info(f"  Indicateur: {indicator_for_metrics_saved}")
+
+    # Utiliser num_outputs de la config ou celui détecté depuis les données
+    num_features = n_features_detected
+    saved_num_outputs = model_config.get('num_outputs', n_outputs_detected)
+
+    if saved_num_outputs != n_outputs_detected:
+        logger.warning(f"  ⚠️ num_outputs mismatch: modèle={saved_num_outputs}, données={n_outputs_detected}")
         num_outputs = saved_num_outputs
+    else:
+        num_outputs = n_outputs_detected
+
+    # Préparer les noms d'indicateurs pour les métriques
+    if is_dual_binary:
+        # Dual-binary: ['Direction', 'Force']
+        indicator_names_for_metrics = ['Direction', 'Force']
+        logger.info(f"  Mode Dual-Binary détecté: {indicator_names_for_metrics}")
+    elif single_indicator:
+        # Single-output: ['MACD'] ou ['RSI'] etc.
+        indicator_names_for_metrics = [indicator_name]
+    else:
+        # Multi-output: ['RSI', 'CCI', 'MACD'] (défaut)
+        indicator_names_for_metrics = None  # compute_metrics utilisera les défauts
 
     model, loss_fn = create_model(
         device=device,
@@ -372,13 +437,14 @@ def main():
     # Charger poids
     model.load_state_dict(checkpoint['model_state_dict'])
 
-    logger.info(f"  ✅ Modèle chargé (époque {checkpoint['epoch']})")
-    logger.info(f"     Val Loss: {checkpoint['val_loss']:.4f}")
-    logger.info(f"     Val Acc: {checkpoint['val_accuracy']:.3f}")
-    if single_indicator:
-        logger.info(f"     Indicateur: {indicator_name}")
+    logger.info(f"\n✅ Modèle chargé:")
+    logger.info(f"  Époque: {checkpoint['epoch']}")
+    logger.info(f"  Val Loss: {checkpoint['val_loss']:.4f}")
+    logger.info(f"  Val Acc: {checkpoint['val_accuracy']:.3f}")
+    if indicator_for_metrics_saved:
+        logger.info(f"  Indicateur: {indicator_for_metrics_saved}")
     if model_config:
-        logger.info(f"     Config: CNN={model_config.get('cnn_filters')}, "
+        logger.info(f"  Config: CNN={model_config.get('cnn_filters')}, "
                    f"LSTM={model_config.get('lstm_hidden_size')}x{model_config.get('lstm_num_layers')}")
 
     # =========================================================================
@@ -386,12 +452,26 @@ def main():
     # =========================================================================
     logger.info("\n5. Évaluation sur test set...")
 
-    metrics = evaluate_model(model, test_loader, loss_fn, device)
+    metrics = evaluate_model(model, test_loader, loss_fn, device, indicator_names=indicator_names_for_metrics)
 
-    logger.info(f"\n  Test Loss: {metrics['loss']:.4f}")
+    # Affichage des métriques selon le mode
+    if is_dual_binary:
+        # Dual-binary: afficher Direction et Force séparément
+        logger.info(f"\n📊 Résultats Test:")
+        logger.info(f"  Loss: {metrics['loss']:.4f}, Avg Acc: {metrics['avg_accuracy']:.3f}")
+        logger.info(f"  Direction: Acc={metrics.get('Direction_accuracy', 0):.3f}, "
+                   f"F1={metrics.get('Direction_f1', 0):.3f}, "
+                   f"Prec={metrics.get('Direction_precision', 0):.3f}, "
+                   f"Rec={metrics.get('Direction_recall', 0):.3f}")
+        logger.info(f"  Force:     Acc={metrics.get('Force_accuracy', 0):.3f}, "
+                   f"F1={metrics.get('Force_f1', 0):.3f}, "
+                   f"Prec={metrics.get('Force_precision', 0):.3f}, "
+                   f"Rec={metrics.get('Force_recall', 0):.3f}")
+    else:
+        logger.info(f"\n  Test Loss: {metrics['loss']:.4f}")
 
-    # Afficher tableau
-    print_metrics_table(metrics)
+    # Afficher tableau complet
+    print_metrics_table(metrics, indicator_names=indicator_names_for_metrics)
 
     # =========================================================================
     # 6. VOTE MAJORITAIRE (seulement en mode multi-output)
@@ -445,14 +525,24 @@ def main():
 
     logger.info(f"\nRésultats clés:")
     logger.info(f"  Test Loss: {metrics['loss']:.4f}")
-    if single_indicator:
+
+    if is_dual_binary:
+        # Mode dual-binary: afficher Direction et Force
+        logger.info(f"  Mode: Dual-Binary ({indicator_for_metrics_saved or 'INDICATOR'})")
+        logger.info(f"  Avg Accuracy: {metrics['avg_accuracy']:.3f}")
+        logger.info(f"  Direction - Acc: {metrics.get('Direction_accuracy', 0):.3f}, F1: {metrics.get('Direction_f1', 0):.3f}")
+        logger.info(f"  Force - Acc: {metrics.get('Force_accuracy', 0):.3f}, F1: {metrics.get('Force_f1', 0):.3f}")
+    elif single_indicator:
+        # Mode single-output
         logger.info(f"  Indicateur: {indicator_name}")
         logger.info(f"  Accuracy: {metrics['avg_accuracy']:.3f}")
         logger.info(f"  F1: {metrics['avg_f1']:.3f}")
     else:
+        # Mode multi-output
         logger.info(f"  Accuracy moyenne: {metrics['avg_accuracy']:.3f}")
         logger.info(f"  F1 moyen: {metrics['avg_f1']:.3f}")
-        logger.info(f"  Vote majoritaire accuracy: {metrics['vote_accuracy']:.3f}")
+        if 'vote_accuracy' in metrics:
+            logger.info(f"  Vote majoritaire accuracy: {metrics['vote_accuracy']:.3f}")
 
     # Comparaison avec baseline (50% = hasard)
     baseline = 0.50
@@ -463,14 +553,32 @@ def main():
     logger.info(f"  Modèle: {metrics['avg_accuracy']:.1%}")
     logger.info(f"  Gain: {improvement:+.1f}%")
 
-    if metrics['avg_accuracy'] >= 0.70:
-        logger.info(f"\n🎯 Objectif 70%+ atteint ! ✅")
+    # Objectif selon le mode
+    if is_dual_binary:
+        # Objectif dual-binary: Direction 85%+, Force 65-70%+
+        dir_acc = metrics.get('Direction_accuracy', 0)
+        force_acc = metrics.get('Force_accuracy', 0)
+
+        logger.info(f"\n🎯 Objectifs Dual-Binary:")
+        if dir_acc >= 0.85:
+            logger.info(f"  Direction: {dir_acc:.1%} ✅ (objectif 85%+)")
+        else:
+            logger.info(f"  Direction: {dir_acc:.1%} ⚠️ (objectif 85%+)")
+
+        if force_acc >= 0.65:
+            logger.info(f"  Force: {force_acc:.1%} ✅ (objectif 65-70%+)")
+        else:
+            logger.info(f"  Force: {force_acc:.1%} ⚠️ (objectif 65-70%+)")
     else:
-        logger.info(f"\n⚠️ Objectif 70%+ pas encore atteint")
-        logger.info(f"   Suggestions:")
-        logger.info(f"   - Augmenter NUM_EPOCHS")
-        logger.info(f"   - Ajuster hyperparamètres (CNN_FILTERS, LSTM_HIDDEN_SIZE)")
-        logger.info(f"   - Vérifier qualité des labels")
+        # Objectif classique: 70%+
+        if metrics['avg_accuracy'] >= 0.70:
+            logger.info(f"\n🎯 Objectif 70%+ atteint ! ✅")
+        else:
+            logger.info(f"\n⚠️ Objectif 70%+ pas encore atteint")
+            logger.info(f"   Suggestions:")
+            logger.info(f"   - Augmenter NUM_EPOCHS")
+            logger.info(f"   - Ajuster hyperparamètres (CNN_FILTERS, LSTM_HIDDEN_SIZE)")
+            logger.info(f"   - Vérifier qualité des labels")
 
 
 if __name__ == '__main__':
