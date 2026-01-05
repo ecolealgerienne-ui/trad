@@ -16,7 +16,8 @@ CANDLES_PER_DAY = CANDLES_PER_HOUR * 24  # 288 bougies par jour
 
 # Dataset
 SEQUENCE_LENGTH = 12  # Nombre de timesteps pour l'input (t-12:t)
-TRIM_EDGES = 100  # Valeurs à enlever au début + fin (warm-up + artifacts)
+TRIM_EDGES = 200  # Valeurs à enlever au début + fin (warm-up + artifacts)
+                  # Augmenté à 200 pour dual-binary: MACD(~35) + Kalman(~50) + Z-Score(100) + shifts(3) = ~188
 
 # Multi-actifs
 BTC_CANDLES = 100000  # Nombre de bougies BTC à charger
