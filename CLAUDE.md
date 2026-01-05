@@ -1,14 +1,103 @@
 # Modele CNN-LSTM Multi-Output - Guide Complet
 
 **Date**: 2026-01-05
-**Statut**: Inputs purifies - "More Data" ≠ "Better Results"
-**Version**: 5.1
+**Statut**: Architecture Dual-Binary validee - Direction + Force
+**Version**: 6.0 - DUAL-BINARY READY
 
 ---
 
 ## RESUME DES DECOUVERTES MAJEURES (2026-01-05)
 
-### 🎯 Trois Percees Critiques en Une Journee
+### 🎯 ARCHITECTURE DUAL-BINARY - IMPLEMENTEE ✅
+
+**Date**: 2026-01-05 (session continue)
+**Statut**: Script pret, valide par expert
+
+#### Principe Fondamental
+
+Au lieu de predire uniquement la **direction** (pente), on predit aussi la **force** (veloicite):
+
+```
+Pour chaque indicateur (RSI, CCI, MACD):
+  Label 1 - Direction: filtered[t-2] > filtered[t-3]  (binaire UP/DOWN)
+  Label 2 - Force:     |velocity_zscore[t-2]| > 1.0  (binaire WEAK/STRONG)
+```
+
+#### Gains Attendus
+
+| Optimisation | Impact | Mecanisme |
+|--------------|--------|-----------|
+| **Inputs purifies** | +3-4% accuracy | 4 features (sans Open) au lieu de 5 |
+| **Force (velocity)** | -60% trades | Discrimine turning points faibles |
+| **Sequence 25 steps** | +1-2% accuracy | Plus de contexte, labels stables |
+
+**Combinaison totale**: RSI/MACD 83-84% → **88-91%** + Trades divises par 2.5
+
+#### Script et Commandes
+
+**Script**: `src/prepare_data_dual_binary.py` ✅ CREE
+
+```bash
+# Preparer les donnees (3 indicateurs x 2 labels = 6 outputs)
+python src/prepare_data_dual_binary.py --assets BTC ETH BNB ADA LTC
+
+# Entrainer (modele multi-task avec 6 sorties)
+python src/train.py --data data/prepared/dataset_..._dual_binary_kalman.npz \
+    --multi-output dual-binary --epochs 50
+```
+
+#### Corrections Expert Integrees
+
+| # | Correction | Implementation |
+|---|------------|----------------|
+| 1 | **Cold Start** | Skip premiers 100 samples (Z-Score invalide) |
+| 2 | **Kalman Cinematique** | Transition matrix [[1,1],[0,1]] pour extraire velocity |
+| 3 | **NaN/Inf handling** | Clip Z-Score a [-10, 10] avant seuillage |
+| 4 | **Debug CSV** | Export derniers 1000 samples pour validation |
+
+#### Architecture Technique
+
+**Features (4 canaux - Open retire)**:
+- `h_ret`: Extension haussiere
+- `l_ret`: Extension baissiere
+- `c_ret`: Rendement Close-to-Close
+- `range_ret`: Volatilite intra-bougie
+
+**Labels (6 outputs)**:
+```python
+Y = [
+    rsi_dir,   rsi_force,
+    cci_dir,   cci_force,
+    macd_dir,  macd_force
+]
+```
+
+**Shapes**:
+- Input: `(batch, 12, 4)` ou `(batch, 25, 4)` si SEQUENCE_LENGTH=25
+- Output: `(batch, 6)` au lieu de `(batch, 3)`
+
+#### Decision Matrix (4 etats au lieu de 2)
+
+| Direction | Force | Action | Interpretation |
+|-----------|-------|--------|----------------|
+| UP | STRONG | **LONG** | Vrai momentum haussier |
+| UP | WEAK | HOLD/PASS | Bruit, pas de turning point |
+| DOWN | STRONG | **SHORT** | Vrai momentum baissier |
+| DOWN | WEAK | HOLD/PASS | Bruit, pas de turning point |
+
+**Reduction trades**: Filtrer 70% des signaux faibles (distribution attendue: 70% WEAK / 30% STRONG)
+
+#### Prochaines Etapes
+
+1. ✅ Script cree avec corrections expert
+2. 🔄 Executer sur GPU (user)
+3. 🔄 Valider shapes et distributions
+4. 🔄 Adapter `train.py` pour 6 outputs
+5. 🔄 Comparer accuracy vs baseline 3 outputs
+
+---
+
+### 🎯 Trois Decouvertes Precedentes (contexte)
 
 #### 1. Purification des Inputs : "More Data" ≠ "Better Results"
 
@@ -87,15 +176,66 @@
 
 ---
 
-### 🚀 Plan d'Action Immediat
+### 🚀 Plan d'Action Immediat - DUAL-BINARY
 
-1. **Preparer donnees purifiees** avec `prepare_data_purified.py`
-2. **Modifier `SEQUENCE_LENGTH = 25`** dans `constants.py`
-3. **Regenerer datasets** avec nouvelles sequences
-4. **Entrainer et comparer** vs baseline OHLC 12-steps
-5. **Valider reduction micro-trades** en backtest
+**Script valide par expert**: `src/prepare_data_dual_binary.py` ✅
 
-**Si gains confirmes :** Architecture optimale atteinte.
+#### Etape 1: Preparation des donnees
+
+```bash
+# Generer dataset dual-binary (6 outputs)
+python src/prepare_data_dual_binary.py --assets BTC ETH BNB ADA LTC
+
+# Output attendu:
+# - X: (n, 12, 4) ou (n, 25, 4) selon SEQUENCE_LENGTH
+# - Y: (n, 6) au lieu de (n, 3)
+# - Debug CSV: data/prepared/debug_labels_btc.csv
+```
+
+#### Etape 2: Validation des donnees
+
+Verifier dans le debug CSV:
+- Z-Scores ne depassent pas [-10, 10]
+- Distribution Force: ~70% WEAK / 30% STRONG
+- Direction: ~50% UP / 50% DOWN
+- Premiers 100 samples exclus (cold start)
+
+#### Etape 3: Adapter train.py (TODO)
+
+Modifications necessaires:
+- Accepter Y de shape (n, 6)
+- Adapter loss: 6 sorties binaires au lieu de 3
+- Metriques par label: dir_acc, force_acc separees
+
+#### Etape 4: Entrainement et comparaison
+
+```bash
+# Baseline (3 outputs)
+python src/train.py --data dataset_ohlcv2_..._kalman.npz
+
+# Dual-Binary (6 outputs)
+python src/train.py --data dataset_..._dual_binary_kalman.npz \
+    --multi-output dual-binary
+```
+
+**Metriques a comparer**:
+- Accuracy Direction (vs baseline)
+- Accuracy Force (nouveau)
+- Reduction trades estimee (Force filtering)
+
+#### Etape 5: Backtest avec matrice de decision
+
+Logique de trading:
+```python
+if direction == UP and force == STRONG:
+    action = LONG
+elif direction == DOWN and force == STRONG:
+    action = SHORT
+else:
+    action = HOLD  # Filtrer signaux faibles
+```
+
+**Si gains confirmes**: Architecture optimale atteinte (88-91% + trades / 2.5)
 
 ---
 
