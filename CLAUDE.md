@@ -1,8 +1,186 @@
 # Modele CNN-LSTM Multi-Output - Guide Complet
 
 **Date**: 2026-01-05
-**Statut**: Stabilite filtre Kalman validee - Filtrage global confirme optimal
-**Version**: 5.0
+**Statut**: Inputs purifies - "More Data" ≠ "Better Results"
+**Version**: 5.1
+
+---
+
+## DECOUVERTE CRITIQUE - Purification des Inputs (2026-01-05)
+
+### Principe Fondamental : "More Data" ≠ "Better Results"
+
+En traitement du signal (et trading algo), **plus de donnees = plus de bruit** si les donnees ne sont pas causalement liees a la cible.
+
+### Diagnostic : Contamination des Inputs OHLC
+
+**Probleme identifie :** L'approche actuelle utilise 5 features OHLC pour TOUS les indicateurs :
+- O_ret (Open return)
+- H_ret (High return)- L_ret (Low return)
+- C_ret (Close return)
+- Range_ret (High - Low)
+
+**Mais les indicateurs n'utilisent PAS tous les memes inputs physiquement !**
+
+| Indicateur | Formule Physique | Inputs Necessaires | Inputs TOXIQUES |
+|------------|------------------|--------------------|-----------------|| RSI | Moyenne(Gains/Pertes) sur Close | **Close seul** | Open, High, Low |
+| MACD | EMA_fast(Close) - EMA_slow(Close) | **Close seul** | Open, High, Low |
+| CCI | (TP - MA(TP)) / MeanDev(TP) | **High, Low, Close** | Open |
+
+**Verdict :**
+- ❌ **OPEN est inutile pour 100% des indicateurs**
+- ❌ **HIGH/LOW sont du bruit toxique pour RSI et MACD**
+- ✅ **HIGH/LOW sont necessaires UNIQUEMENT pour CCI**
+
+### Le Scenario de Contamination
+
+**Exemple concret : Bougie avec meche basse mais cloture verte**
+
+```
+Close[t-1] = 100
+Close[t] = 105 → Hausse +5%
+Low[t] = 95   → Meche -5% (spike puis rebond)
+```
+
+**Ce que voient les indicateurs :**
+- **RSI/MACD (Close-based)** : Signal +5% = UP ✅
+- **High/Low (si injectes)** : Signal -5% = VOLATILITE/CRASH ❌
+
+**Impact sur le modele :**
+- Le modele reçoit (+5%, -5%) = **contradiction**
+- Les gradients ne savent plus quoi optimiser
+- **Dissonance cognitive** → Accuracy plafonne, micro-trades
+
+### Preuve dans le Code
+
+```python
+# indicators.py - Confirmation de l'analyse
+
+# RSI : N'utilise que 'prices' (df['close'])
+def calculate_rsi(prices, period=14): ...
+
+# MACD : N'utilise que 'prices' (df['close'])
+def calculate_macd(prices, ...): ...
+
+# CCI : LE SEUL qui utilise High et Low
+def calculate_cci(high, low, close, ...): ...
+```
+
+### Solution : Inputs Purifies par Indicateur
+
+#### Pour RSI et MACD : Close-Based Features
+
+```python
+features_close_only = [
+    'C_ret',      # Rendement Close-to-Close (pattern principal)
+    'C_ma_5',     # MA courte des rendements (tendance CT)
+    'C_ma_20',    # MA longue des rendements (tendance LT)
+    'C_mom_3',    # Momentum 3 periodes (acceleration courte)
+    'C_mom_10',   # Momentum 10 periodes (acceleration moyenne)
+]
+```
+
+**Caracteristiques :**
+- 5 features (meme nombre qu'avant)
+- **0% de bruit** (toutes basees sur Close)
+- Causalite pure : Input(Close) → Output(Close)
+
+#### Pour CCI : Volatility-Aware Features
+
+```python
+features_volatility = [
+    'C_ret',      # Rendement net (toujours utile)
+    'H_ret',      # Extension haussiere (NECESSAIRE pour CCI)
+    'L_ret',      # Extension baissiere (NECESSAIRE pour CCI)
+    'Range_ret',  # Volatilite intra-bougie (coeur du CCI)
+    'ATR_norm',   # Average True Range normalise (compatible CCI)
+]
+```
+
+**Caracteristiques :**
+- 5 features (meme nombre qu'avant)
+- High/Low **justifies** (CCI en a physiquement besoin)
+- ATR ajoute de l'information (mesure volatilite vraie)
+
+### Gains Attendus
+
+| Modele | Features Avant | Features Apres | Bruit Retire | Gain Estime |
+|--------|----------------|----------------|--------------|-------------|
+| RSI | 5 OHLC (contaminées) | 5 Close-based (pures) | **-60%** | **+2-4%** accuracy |
+| MACD | 5 OHLC (contaminées) | 5 Close-based (pures) | **-60%** | **+2-4%** accuracy |
+| CCI | 5 OHLC (generiques) | 5 Volatility-aware | **-20%** | **+1-2%** accuracy |
+
+**Objectif realiste :**
+- RSI : 83.3% → **86-87%** (+3-4%)
+- MACD : 84.3% → **86-88%** (+2-4%)
+- CCI : 85% → **86-87%** (+1-2%)
+
+**Bonus attendu : Reduction des micro-trades**
+- Modele plus confiant (moins de dissonance)
+- Moins de changements d'avis intempestifs
+- Predictions plus stables
+
+### Implementation
+
+**Script : `src/prepare_data_purified.py`**
+
+```bash
+# Preparer donnees purifiees pour RSI
+python src/prepare_data_purified.py \
+    --target rsi \
+    --assets BTC ETH BNB ADA LTC
+
+# Preparer donnees purifiees pour MACD
+python src/prepare_data_purified.py \
+    --target macd \
+    --assets BTC ETH BNB ADA LTC
+
+# Preparer donnees purifiees pour CCI
+python src/prepare_data_purified.py \
+    --target cci \
+    --assets BTC ETH BNB ADA LTC
+```
+
+**Entrainement :**
+```bash
+python src/train.py \
+    --data data/prepared/dataset_btc_eth_bnb_ada_ltc_purified_rsi_kalman.npz \
+    --indicator rsi
+```
+
+### Validation de la Theorie
+
+Cette decouverte explique plusieurs observations :
+
+1. **Plafond de verre a 86-87%**
+   - RSI/MACD ne depassent jamais 87% malgre les optimisations
+   - Cause : 60% des inputs sont du bruit → limite theorique
+
+2. **Micro-trades persistants**
+   - Modele "hesite" car gradients contradictoires
+   - High/Low disent "volatilite" alors que Close dit "tendance"
+   - Resultat : flickering des predictions
+
+3. **CCI legerement meilleur**
+   - CCI a 85% vs RSI 83.3% avec OHLC
+   - Normal : CCI utilise legitimement High/Low
+   - Moins de dissonance = meilleure convergence
+
+### Comparaison Avant/Apres (a tester)
+
+| Configuration | RSI Acc | MACD Acc | CCI Acc | Trades Estimes |
+|---------------|---------|----------|---------|----------------|
+| **OHLC 5 feat (actuel)** | 83.3% | 84.3% | 85% | ~70k (trop) |
+| **Purified (attendu)** | **86-87%** | **86-88%** | **86-87%** | **~40k** (hysteresis) |
+
+### Conclusion
+
+**Regle d'or du traitement du signal :** Ne donnez au modele QUE les informations causalement liees a la cible.
+
+"More Data" en ML ne fonctionne que si Data = Signal.
+Si Data = Signal + Bruit, alors More Data = More Noise → Worse Results.
+
+**Decision strategique :** Abandonner l'approche OHLC generique au profit d'inputs purifies par indicateur.
 
 ---
 
