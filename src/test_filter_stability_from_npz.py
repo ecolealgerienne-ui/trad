@@ -64,20 +64,30 @@ def extract_asset_data(dataset: dict, asset_name: str) -> Dict:
     assets = dataset['assets']
     samples_per_asset = dataset['samples_per_asset']
 
-    if not assets or not samples_per_asset:
-        raise ValueError("Métadonnées assets/samples_per_asset manquantes")
+    if not assets:
+        raise ValueError("Métadonnées assets manquantes")
 
     if asset_name not in assets:
         raise ValueError(f"Asset '{asset_name}' non trouvé. Assets disponibles: {assets}")
 
+    n_samples_total = len(dataset['X'])
+    n_assets = len(assets)
     asset_idx = assets.index(asset_name)
 
-    # Calculer offset
-    offset = sum(samples_per_asset[:asset_idx])
-    count = samples_per_asset[asset_idx]
+    # Si samples_per_asset disponible, l'utiliser
+    if samples_per_asset:
+        offset = sum(samples_per_asset[:asset_idx])
+        count = samples_per_asset[asset_idx]
+        print(f"\n📊 Extraction asset '{asset_name}' (exact):")
+    else:
+        # Estimer (comme dans state_machine.py)
+        samples_per_asset_est = n_samples_total // n_assets
+        offset = asset_idx * samples_per_asset_est
+        count = samples_per_asset_est if asset_idx < n_assets - 1 else (n_samples_total - offset)
+        print(f"\n📊 Extraction asset '{asset_name}' (estimation):")
+        print(f"   ⚠️ samples_per_asset non disponible, estimation: {samples_per_asset_est:,} par asset")
 
-    print(f"\n📊 Extraction asset '{asset_name}':")
-    print(f"   Position: {asset_idx + 1}/{len(assets)}")
+    print(f"   Position: {asset_idx + 1}/{n_assets}")
     print(f"   Offset: {offset:,}")
     print(f"   Samples: {count:,}")
 
