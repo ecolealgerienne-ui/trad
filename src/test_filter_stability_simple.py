@@ -1,26 +1,27 @@
 """
-Test de stabilité du filtre Kalman - Version SIMPLIFIÉE.
+Test de stabilité du filtre Kalman - Version GÉNÉRIQUE.
 
 Scénario :
 1. Charger données BTC brutes
 2. Extraire 10,000 valeurs
-3. Calculer MACD
-4. Appliquer Kalman sur MACD → MACD_filtré (GLOBAL)
-5. Calculer labels globaux : label[i] = (MACD_filtré[i-2] > MACD_filtré[i-3])
+3. Calculer indicateur technique (MACD, RSI ou CCI)
+4. Appliquer Kalman sur indicateur → indicateur_filtré (GLOBAL)
+5. Calculer labels globaux : label[i] = (filtré[i-2] > filtré[i-3])
 6. Tests de stabilité à partir de l'index 1000 :
    - Pour 200 positions échantillonnées
-   - Fenêtre locale [t-100:t+1]
+   - Fenêtre locale [t-window_size:t+1]
    - Appliquer Kalman sur fenêtre
    - Comparer label local vs global
 
 ⚠️ ATTENTION aux indices pour éviter désynchronisation temporelle !
 
 Usage:
-    python src/test_filter_stability_simple.py \\
-        --csv-file data_trad/BTCUSD_all_5m.csv \\
-        --n-samples-total 10000 \\
-        --start-test 1000 \\
-        --window-size 100 \\
+    python src/test_filter_stability_simple.py \
+        --csv-file data_trad/BTCUSD_all_5m.csv \
+        --indicator macd \
+        --n-samples-total 10000 \
+        --start-test 1000 \
+        --window-size 12 \
         --n-tests 200
 """
 
@@ -37,12 +38,12 @@ sys.path.insert(0, str(Path(__file__).parent))
 from pykalman import KalmanFilter
 
 
-def calculate_macd(close: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> pd.DataFrame:
+def calculate_macd(close: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> pd.Series:
     """
     Calcule MACD.
 
     Returns:
-        DataFrame avec colonnes : macd, signal, hist
+        Series avec signal MACD
     """
     try:
         from indicators_ta import calculate_macd_ta
@@ -54,11 +55,7 @@ def calculate_macd(close: pd.Series, fast: int = 12, slow: int = 26, signal: int
             window_sign=signal
         )
 
-        df_macd = pd.DataFrame({
-            'macd': result['macd'],
-            'signal': result['signal'],
-            'hist': result['diff']
-        })
+        return pd.Series(result['signal'], index=close.index)
 
     except ImportError:
         # Fallback : calcul manuel
@@ -67,13 +64,56 @@ def calculate_macd(close: pd.Series, fast: int = 12, slow: int = 26, signal: int
         macd_line = ema_fast - ema_slow
         signal_line = macd_line.ewm(span=signal, adjust=False).mean()
 
-        df_macd = pd.DataFrame({
-            'macd': macd_line,
-            'signal': signal_line,
-            'hist': macd_line - signal_line
-        })
+        return signal_line
 
-    return df_macd
+
+def calculate_rsi(close: pd.Series, window: int = 22) -> pd.Series:
+    """
+    Calcule RSI.
+
+    Returns:
+        Series avec RSI (0-100)
+    """
+    try:
+        from indicators_ta import calculate_rsi_ta
+
+        rsi = calculate_rsi_ta(close, window=window, fillna=False)
+        return pd.Series(rsi, index=close.index)
+
+    except ImportError:
+        # Fallback : calcul manuel
+        delta = close.diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
+
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs))
+
+        return rsi
+
+
+def calculate_cci(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 32) -> pd.Series:
+    """
+    Calcule CCI.
+
+    Returns:
+        Series avec CCI
+    """
+    try:
+        from indicators_ta import calculate_cci_ta
+
+        cci = calculate_cci_ta(high, low, close, window=window, fillna=False)
+        return pd.Series(cci, index=close.index)
+
+    except ImportError:
+        # Fallback : calcul manuel
+        tp = (high + low + close) / 3
+        sma = tp.rolling(window=window).mean()
+        mad = tp.rolling(window=window).apply(lambda x: np.abs(x - x.mean()).mean())
+
+        cci = (tp - sma) / (0.015 * mad)
+
+        return cci
 
 
 def apply_kalman_filter(data: np.ndarray) -> np.ndarray:
@@ -127,8 +167,9 @@ def compute_labels_from_filtered(filtered: np.ndarray) -> np.ndarray:
 
 
 def test_filter_stability(
-    macd_signal: np.ndarray,
+    indicator_signal: np.ndarray,
     labels_global: np.ndarray,
+    indicator_name: str,
     start_index: int = 1000,
     window_size: int = 100,
     n_tests: int = 200
@@ -138,13 +179,14 @@ def test_filter_stability(
 
     ⚠️ INDICES CRITIQUES :
         - Position testée : t
-        - Fenêtre locale : macd_signal[t-window_size:t+1]  (inclut t)
+        - Fenêtre locale : indicator_signal[t-window_size:t+1]  (inclut t)
         - Label local calculé : correspond à l'index t
         - Comparaison : label_local == labels_global[t]
 
     Args:
-        macd_signal: Signal MACD brut
+        indicator_signal: Signal indicateur brut
         labels_global: Labels précalculés (pente globale)
+        indicator_name: Nom de l'indicateur (pour affichage)
         start_index: Commencer les tests à cet index (défaut: 1000)
         window_size: Taille fenêtre locale (défaut: 100)
         n_tests: Nombre de positions à tester (défaut: 200)
@@ -152,10 +194,10 @@ def test_filter_stability(
     Returns:
         Dict avec statistiques
     """
-    n = len(macd_signal)
+    n = len(indicator_signal)
 
     print(f"\n{'='*80}")
-    print("TEST DE STABILITÉ - KALMAN")
+    print(f"TEST DE STABILITÉ - KALMAN ({indicator_name.upper()})")
     print(f"{'='*80}")
 
     print(f"\n⚙️ Configuration:")
@@ -192,7 +234,7 @@ def test_filter_stability(
         window_start = t - window_size
         window_end = t + 1  # +1 car python range est exclusif
 
-        window_data = macd_signal[window_start:window_end]
+        window_data = indicator_signal[window_start:window_end]
 
         # Vérification
         assert len(window_data) == window_size + 1, f"Fenêtre incorrecte: {len(window_data)} != {window_size + 1}"
@@ -284,12 +326,14 @@ def test_filter_stability(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Test de stabilité Kalman - Version simple",
+        description="Test de stabilité Kalman - Version générique",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
     parser.add_argument('--csv-file', type=str, required=True,
                         help='Fichier CSV BTC')
+    parser.add_argument('--indicator', type=str, choices=['macd', 'rsi', 'cci'], default='macd',
+                        help='Indicateur à tester (macd, rsi, cci)')
     parser.add_argument('--n-samples-total', type=int, default=10000,
                         help='Nombre de samples à extraire du CSV')
     parser.add_argument('--start-test', type=int, default=1000,
@@ -302,7 +346,7 @@ def main():
     args = parser.parse_args()
 
     print("="*80)
-    print("TEST DE STABILITÉ KALMAN - VERSION SIMPLIFIÉE")
+    print(f"TEST DE STABILITÉ KALMAN - {args.indicator.upper()}")
     print("="*80)
 
     # ============================================
@@ -319,18 +363,29 @@ def main():
     df = df.head(args.n_samples_total).copy()
     print(f"   Samples retenus: {len(df):,}")
 
-    print(f"\n3. Calcul MACD")
-    df_macd = calculate_macd(df['close'])
-    df['macd'] = df_macd['macd']
-    print(f"   MACD calculé: min={df['macd'].min():.4f}, max={df['macd'].max():.4f}")
+    print(f"\n3. Calcul {args.indicator.upper()}")
 
-    print(f"\n4. Application Kalman sur MACD (GLOBAL)")
-    macd_filtered_global = apply_kalman_filter(df['macd'].values)
-    df['macd_filtered'] = macd_filtered_global
-    print(f"   MACD filtré: min={np.nanmin(macd_filtered_global):.4f}, max={np.nanmax(macd_filtered_global):.4f}")
+    # Calculer l'indicateur sélectionné
+    if args.indicator == 'macd':
+        indicator_signal = calculate_macd(df['close'])
+        indicator_col = 'macd_signal'
+    elif args.indicator == 'rsi':
+        indicator_signal = calculate_rsi(df['close'])
+        indicator_col = 'rsi'
+    elif args.indicator == 'cci':
+        indicator_signal = calculate_cci(df['high'], df['low'], df['close'])
+        indicator_col = 'cci'
+
+    df[indicator_col] = indicator_signal
+    print(f"   {args.indicator.upper()} calculé: min={indicator_signal.min():.4f}, max={indicator_signal.max():.4f}")
+
+    print(f"\n4. Application Kalman sur {args.indicator.upper()} (GLOBAL)")
+    indicator_filtered_global = apply_kalman_filter(df[indicator_col].values)
+    df[f'{indicator_col}_filtered'] = indicator_filtered_global
+    print(f"   {args.indicator.upper()} filtré: min={np.nanmin(indicator_filtered_global):.4f}, max={np.nanmax(indicator_filtered_global):.4f}")
 
     print(f"\n5. Calcul labels globaux : label[i] = (filtered[i-2] > filtered[i-3])")
-    labels_global = compute_labels_from_filtered(macd_filtered_global)
+    labels_global = compute_labels_from_filtered(indicator_filtered_global)
     df['label'] = labels_global
 
     # Stats labels
@@ -348,8 +403,9 @@ def main():
     print(f"{'='*80}")
 
     results = test_filter_stability(
-        macd_signal=df['macd'].values,
+        indicator_signal=df[indicator_col].values,
         labels_global=labels_global,
+        indicator_name=args.indicator,
         start_index=args.start_test,
         window_size=args.window_size,
         n_tests=args.n_tests
@@ -363,6 +419,7 @@ def main():
     print(f"{'='*80}")
 
     print(f"\n🎯 Configuration:")
+    print(f"   Indicateur: {args.indicator.upper()}")
     print(f"   Dataset: {args.n_samples_total:,} samples")
     print(f"   Tests: {args.n_tests} positions (de {args.start_test:,} à {args.n_samples_total:,})")
     print(f"   Fenêtre: {args.window_size} samples")
