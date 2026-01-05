@@ -316,8 +316,10 @@ def add_dual_labels_to_df(df: pd.DataFrame,
 
         # 2. Label Direction (pente)
         # Direction[t] = 1 si filtered[t-2] > filtered[t-3]
-        pos_t2 = pd.Series(position).shift(2)
-        pos_t3 = pd.Series(position).shift(3)
+        # CORRECTIF CRITIQUE: Forcer l'index pour alignement temporel
+        pos_series = pd.Series(position, index=df.index)
+        pos_t2 = pos_series.shift(2)
+        pos_t3 = pos_series.shift(3)
         df[f'{ind}_dir'] = (pos_t2 > pos_t3).astype(int)
 
         # 3. Label Force (Z-Score de vélocité)
