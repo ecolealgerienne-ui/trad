@@ -765,32 +765,61 @@ def main():
         'indicator_for_metrics': indicator_for_metrics,
     }
 
-    # Chemin de sauvegarde (inclut le préfixe dataset + filtre + indicateur)
-    # Extraire le préfixe du dataset (ex: "ohlcv2" de "dataset_..._ohlcv2_cci_octave20.npz")
-    dataset_prefix = ""
+    # =========================================================================
+    # NOMMAGE AUTOMATIQUE DU MODÈLE (détection intelligente)
+    # =========================================================================
+    # Détecter l'indicateur depuis:
+    # 1. Les metadata (dual-binary: indicator_for_metrics)
+    # 2. Le nom du fichier (ex: dataset_..._rsi_dual_binary_kalman.npz → 'rsi')
+    # 3. L'argument CLI --indicator (fallback ancien pipeline)
+
+    detected_indicator = None
+    detected_filter = None
+
     if args.data:
-        data_name = Path(args.data).stem  # dataset_btc_eth_bnb_ada_ltc_ohlcv2_cci_octave20
-        # Chercher des préfixes connus dans le nom
-        known_prefixes = ['ohlcv2', 'ohlc', '5min_30min', '5min', '30min']
-        for prefix in known_prefixes:
-            if prefix in data_name:
-                dataset_prefix = prefix
+        data_name = Path(args.data).stem.lower()  # dataset_btc_eth_bnb_ada_ltc_rsi_dual_binary_kalman
+
+        # Détecter indicateur depuis le nom du fichier
+        for ind in ['rsi', 'cci', 'macd', 'close']:
+            if f'_{ind}_' in data_name or data_name.endswith(f'_{ind}'):
+                detected_indicator = ind
                 break
 
-    # Construire le suffixe du nom de fichier
-    suffix_parts = []
-    if dataset_prefix:
-        suffix_parts.append(dataset_prefix)
+        # Détecter filtre depuis le nom du fichier
+        for filt in ['kalman', 'octave20', 'octave', 'decycler']:
+            if filt in data_name:
+                detected_filter = filt
+                break
+
+    # Priorité: metadata > filename > CLI
+    if is_dual_binary and indicator_for_metrics:
+        detected_indicator = indicator_for_metrics.lower()
+
     if args.filter:
-        suffix_parts.append(args.filter)
-    if single_indicator:
-        suffix_parts.append(args.indicator)
+        detected_filter = args.filter
+
+    # Fallback sur CLI pour ancien pipeline
+    if not detected_indicator and single_indicator:
+        detected_indicator = args.indicator
+
+    # Construire le nom du modèle
+    suffix_parts = []
+    if detected_indicator:
+        suffix_parts.append(detected_indicator)
+    if detected_filter:
+        suffix_parts.append(detected_filter)
+    if is_dual_binary:
+        suffix_parts.append('dual_binary')
 
     if suffix_parts:
         suffix = '_'.join(suffix_parts)
         save_path = args.save_path.replace('.pth', f'_{suffix}.pth')
     else:
         save_path = args.save_path
+
+    logger.info(f"\n💾 Modèle sauvegardé:")
+    logger.info(f"  Indicateur détecté: {detected_indicator or 'aucun'}")
+    logger.info(f"  Filtre détecté: {detected_filter or 'aucun'}")
 
     logger.info(f"  Modèle sera sauvegardé: {save_path}")
 
