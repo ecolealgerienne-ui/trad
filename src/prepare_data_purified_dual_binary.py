@@ -194,78 +194,36 @@ def add_indicators_to_df(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # =============================================================================
-# FEATURES CLOSE-BASED (pour RSI et MACD)
+# FEATURES "PURE SIGNAL" (h_ret, l_ret, c_ret UNIQUEMENT)
 # =============================================================================
 
-def add_close_based_features(df: pd.DataFrame, clip_value: float = 0.10) -> pd.DataFrame:
+def add_pure_signal_features(df: pd.DataFrame, clip_value: float = 0.10) -> pd.DataFrame:
     """
-    Calcule les features PURES basées sur Close uniquement.
+    Calcule les 3 features "Pure Signal" recommandées par l'expert.
 
-    Features (5 canaux):
-    - C_ret: Rendement Close-to-Close (pattern principal)
-    - C_ma_5: MA courte des rendements (tendance CT)
-    - C_ma_20: MA longue des rendements (tendance LT)
-    - C_mom_3: Momentum 3 périodes (accélération courte)
-    - C_mom_10: Momentum 10 périodes (accélération moyenne)
+    Features (3 canaux):
+    - h_ret: Extension haussière (High return)
+    - l_ret: Extension baissière (Low return)
+    - c_ret: Rendement Close-to-Close
+
+    Notes:
+    - o_ret: BANNI (bruit microstructure)
+    - range_ret: BANNI (redondant pour CCI, bruit pour RSI/MACD)
+    - Stationnarité garantie (returns vs prix bruts)
+    - RSI/MACD n'utiliseront que c_ret (colonne 2)
+    - CCI utilisera les 3 colonnes
     """
     df = df.copy()
 
     prev_close = df['close'].shift(1)
 
-    # 1. Rendement Close-to-Close
-    df['C_ret'] = (df['close'] - prev_close) / prev_close
-
-    # 2. MA des rendements (tendances)
-    c_ret_series = df['C_ret']
-    df['C_ma_5'] = c_ret_series.rolling(5).mean().fillna(0)
-    df['C_ma_20'] = c_ret_series.rolling(20).mean().fillna(0)
-
-    # 3. Momentum (accélération)
-    df['C_mom_3'] = df['close'].pct_change(3).fillna(0)
-    df['C_mom_10'] = df['close'].pct_change(10).fillna(0)
+    # 3 features pures (ordre: h_ret, l_ret, c_ret)
+    df['h_ret'] = (df['high'] - prev_close) / prev_close
+    df['l_ret'] = (df['low'] - prev_close) / prev_close
+    df['c_ret'] = (df['close'] - prev_close) / prev_close
 
     # Clipper les outliers
-    for col in ['C_ret', 'C_ma_5', 'C_ma_20', 'C_mom_3', 'C_mom_10']:
-        df[col] = df[col].clip(-clip_value, clip_value)
-
-    return df
-
-
-# =============================================================================
-# FEATURES VOLATILITY-AWARE (pour CCI)
-# =============================================================================
-
-def add_volatility_features(df: pd.DataFrame, clip_value: float = 0.10) -> pd.DataFrame:
-    """
-    Calcule les features incluant High/Low (nécessaires pour CCI).
-
-    Features (5 canaux):
-    - C_ret: Rendement net (toujours utile)
-    - H_ret: Extension haussière (NÉCESSAIRE pour CCI)
-    - L_ret: Extension baissière (NÉCESSAIRE pour CCI)
-    - Range_ret: Volatilité intra-bougie (cœur du CCI)
-    - ATR_norm: Average True Range normalisé
-    """
-    df = df.copy()
-
-    prev_close = df['close'].shift(1)
-
-    # Rendements normalisés
-    df['C_ret'] = (df['close'] - prev_close) / prev_close
-    df['H_ret'] = (df['high'] - prev_close) / prev_close
-    df['L_ret'] = (df['low'] - prev_close) / prev_close
-    df['Range_ret'] = (df['high'] - df['low']) / prev_close
-
-    # ATR normalisé
-    high_low = df['high'] - df['low']
-    high_close = np.abs(df['high'] - prev_close)
-    low_close = np.abs(df['low'] - prev_close)
-    true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    atr = true_range.rolling(ATR_PERIOD).mean()
-    df['ATR_norm'] = atr / prev_close
-
-    # Clipper les outliers
-    for col in ['C_ret', 'H_ret', 'L_ret', 'Range_ret', 'ATR_norm']:
+    for col in ['h_ret', 'l_ret', 'c_ret']:
         df[col] = df[col].clip(-clip_value, clip_value)
 
     return df
@@ -465,14 +423,15 @@ def prepare_and_save_all(assets: list = None,
         raise ValueError(f"Assets invalides: {invalid_assets}")
 
     logger.info("="*80)
-    logger.info("PRÉPARATION MULTI-DATASETS (Purified + Dual-Binary)")
+    logger.info("PRÉPARATION MULTI-DATASETS (Pure Signal + Dual-Binary)")
     logger.info("="*80)
     logger.info(f"Assets: {', '.join(assets)}")
     logger.info(f"Génération de 3 datasets séparés:")
-    logger.info(f"  1. RSI  - Features: Close-based (5)")
-    logger.info(f"  2. MACD - Features: Close-based (5)")
-    logger.info(f"  3. CCI  - Features: Volatility-aware (5)")
+    logger.info(f"  1. RSI  - Features: c_ret (1)")
+    logger.info(f"  2. MACD - Features: c_ret (1)")
+    logger.info(f"  3. CCI  - Features: h_ret, l_ret, c_ret (3)")
     logger.info(f"Labels: Direction + Force (2 par indicateur)")
+    logger.info(f"Architecture: Pure Signal (zéro bruit toxique)")
 
     # Stockage par indicateur
     datasets = {
@@ -481,9 +440,10 @@ def prepare_and_save_all(assets: list = None,
         'cci': {'train': [], 'val': [], 'test': []}
     }
 
-    # Features par indicateur
-    features_close = ['C_ret', 'C_ma_5', 'C_ma_20', 'C_mom_3', 'C_mom_10']
-    features_volatility = ['C_ret', 'H_ret', 'L_ret', 'Range_ret', 'ATR_norm']
+    # Features par indicateur (Architecture "Pure Signal")
+    features_rsi = ['c_ret']  # 1 feature: Close uniquement
+    features_macd = ['c_ret']  # 1 feature: Close uniquement
+    features_cci = ['h_ret', 'l_ret', 'c_ret']  # 3 features: High, Low, Close
 
     # Préparer chaque asset
     for asset_name in assets:
@@ -501,23 +461,19 @@ def prepare_and_save_all(assets: list = None,
         df = add_indicators_to_df(df)
         logger.info(f"     Indicateurs: RSI, CCI, MACD")
 
-        # 3. Features Close-based
-        df = add_close_based_features(df, clip_value)
-        logger.info(f"     Features Close-based: 5 canaux")
+        # 3. Features Pure Signal (h_ret, l_ret, c_ret)
+        df = add_pure_signal_features(df, clip_value)
+        logger.info(f"     Features Pure Signal: 3 canaux (h_ret, l_ret, c_ret)")
 
-        # 4. Features Volatility-aware
-        df = add_volatility_features(df, clip_value)
-        logger.info(f"     Features Volatility-aware: 5 canaux")
-
-        # 5. TRIM edges
+        # 4. TRIM edges
         df = df.iloc[TRIM_EDGES:-TRIM_EDGES]
         logger.info(f"     Après trim ±{TRIM_EDGES}: {len(df)} lignes")
 
-        # 6. Préparer pour chaque indicateur
+        # 5. Préparer pour chaque indicateur
         for indicator, feature_cols in [
-            ('rsi', features_close),
-            ('macd', features_close),
-            ('cci', features_volatility)
+            ('rsi', features_rsi),      # 1 feature: c_ret
+            ('macd', features_macd),    # 1 feature: c_ret
+            ('cci', features_cci)       # 3 features: h_ret, l_ret, c_ret
         ]:
             X, Y, indices = prepare_indicator_dataset(
                 df, asset_name, indicator, feature_cols, clip_value
@@ -570,18 +526,27 @@ def prepare_and_save_all(assets: list = None,
         assets_str = '_'.join(assets).lower()
         output_path = output_dir / f"dataset_{assets_str}_{indicator}_dual_binary_kalman.npz"
 
-        # Features utilisées
-        if indicator in ['rsi', 'macd']:
-            feature_list = features_close
-            feature_type = 'Close-based (0% bruit)'
-        else:
-            feature_list = features_volatility
-            feature_type = 'Volatility-aware (High/Low justifiés)'
+        # Features et metadata par indicateur
+        if indicator == 'rsi':
+            feature_list = features_rsi
+            n_features = 1
+            feature_type = 'Pure Signal: c_ret uniquement (0% bruit)'
+            justification = 'RSI utilise Close dans sa formule. High/Low = bruit toxique.'
+        elif indicator == 'macd':
+            feature_list = features_macd
+            n_features = 1
+            feature_type = 'Pure Signal: c_ret uniquement (0% bruit)'
+            justification = 'MACD utilise Close dans sa formule. High/Low = bruit toxique.'
+        else:  # cci
+            feature_list = features_cci
+            n_features = 3
+            feature_type = 'Pure Signal: h_ret, l_ret, c_ret (Typical Price)'
+            justification = 'CCI utilise (H+L+C)/3 dans sa formule. High/Low justifiés.'
 
         metadata = {
             'created_at': datetime.now().isoformat(),
-            'version': 'purified_dual_binary_v1',
-            'architecture': 'Purified Inputs + Dual-Binary Labels',
+            'version': 'pure_signal_dual_binary_v1',
+            'architecture': 'Pure Signal + Dual-Binary Labels',
             'indicator': indicator.upper(),
             'assets': assets,
             'filter_type': 'kalman',
@@ -604,10 +569,12 @@ def prepare_and_save_all(assets: list = None,
             'val_size': len(X_val),
             'test_size': len(X_test),
             'sequence_length': SEQUENCE_LENGTH,
-            'n_features': 5,
+            'n_features': n_features,
             'features': feature_list,
             'feature_type': feature_type,
-            'purification_strategy': 'Inputs causalement liés à la cible uniquement',
+            'justification': justification,
+            'features_banned': ['o_ret (microstructure)', 'range_ret (redundant/noise)'],
+            'stationarity': 'Returns (stationnaires) vs prix bruts (non-stationnaires)',
         }
 
         np.savez_compressed(
@@ -639,18 +606,35 @@ def main():
     available_assets = list(AVAILABLE_ASSETS_5M.keys())
 
     parser = argparse.ArgumentParser(
-        description="Prépare les datasets avec Purified Inputs + Dual-Binary",
+        description="Prépare les datasets avec Pure Signal + Dual-Binary",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=f"""
+Architecture "Pure Signal" (Expert-Validated):
+==============================================
+
 Génère 3 fichiers .npz (un par indicateur):
 
-1. RSI  - Features: Close-based (5) + Labels: Direction + Force (2)
-2. MACD - Features: Close-based (5) + Labels: Direction + Force (2)
-3. CCI  - Features: Volatility-aware (5) + Labels: Direction + Force (2)
+1. RSI  - Features: c_ret (1) + Labels: Direction + Force (2)
+   └─ Shape: X=(n, 25, 1), Y=(n, 2)
+   └─ Justification: RSI utilise Close uniquement. High/Low = bruit toxique.
 
-Gains attendus:
-- RSI/MACD: +3-4% accuracy (retire 60% de bruit High/Low)
-- CCI: +1-2% accuracy (High/Low justifiés)
+2. MACD - Features: c_ret (1) + Labels: Direction + Force (2)
+   └─ Shape: X=(n, 25, 1), Y=(n, 2)
+   └─ Justification: MACD utilise Close uniquement. High/Low = bruit toxique.
+
+3. CCI  - Features: h_ret, l_ret, c_ret (3) + Labels: Direction + Force (2)
+   └─ Shape: X=(n, 25, 3), Y=(n, 2)
+   └─ Justification: CCI utilise (H+L+C)/3. High/Low justifiés.
+
+Features Bannies:
+- o_ret (Open): Bruit de microstructure
+- range_ret: Redondant pour CCI, bruit pour RSI/MACD
+
+Gains Attendus:
+- RSI/MACD: +3-4% accuracy (retire 60% de bruit)
+- CCI: +1-2% accuracy
+- Convergence: Plus rapide et plus propre
+- Stabilité: Fonctionne sur tous les prix (10k$ ou 100k$)
 
 Exemple:
   python src/prepare_data_purified_dual_binary.py --assets BTC ETH BNB ADA LTC
