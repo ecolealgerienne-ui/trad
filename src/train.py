@@ -440,9 +440,9 @@ def generate_predictions(model: nn.Module, X: np.ndarray, device: str, batch_siz
     with torch.no_grad():
         for X_batch, _ in loader:
             X_batch = X_batch.to(device)
-            outputs = model(X_batch)
-            # Le modèle retourne des logits, convertir en probabilités [0,1]
-            outputs = torch.sigmoid(outputs)
+            # Utiliser predict_proba() qui gère sigmoid conditionnellement
+            # (logits → sigmoid si use_bce_with_logits=True, sinon déjà en [0,1])
+            outputs = model.predict_proba(X_batch)
             # IMPORTANT: Sauvegarder les probabilités brutes, pas binarisées!
             all_preds.append(outputs.cpu().numpy())
 
@@ -719,21 +719,24 @@ def main():
     num_outputs_final = n_outputs_detected
 
     # =========================================================================
-    # AUTO-DÉTECTION LayerNorm (architecture hybride par indicateur)
+    # AUTO-DÉTECTION LayerNorm + BCEWithLogitsLoss (architecture hybride)
     # =========================================================================
-    # LayerNorm bénéficie uniquement à MACD (indicateur stable)
-    # RSI et CCI (volatils) se dégradent avec LayerNorm
+    # MACD (indicateur stable) bénéficie des deux optimisations
+    # RSI et CCI (volatils) se dégradent avec ces optimisations → baseline
     use_layer_norm = False  # Par défaut: désactivé
+    use_bce_with_logits = False  # Par défaut: désactivé (BCELoss baseline)
 
     if indicator_for_metrics:
         indicator_lower = indicator_for_metrics.lower()
         if indicator_lower == 'macd':
             use_layer_norm = True
-            logger.info(f"  🎯 Indicateur MACD détecté → LayerNorm ACTIVÉ")
+            use_bce_with_logits = True
+            logger.info(f"  🎯 Indicateur MACD détecté → LayerNorm + BCEWithLogitsLoss ACTIVÉS")
         else:
-            logger.info(f"  🎯 Indicateur {indicator_for_metrics} détecté → LayerNorm DÉSACTIVÉ (optimal)")
+            logger.info(f"  🎯 Indicateur {indicator_for_metrics} détecté → Architecture baseline (optimal)")
 
-    logger.info(f"  num_features={n_features_detected}, num_outputs={num_outputs_final}, use_layer_norm={use_layer_norm}")
+    logger.info(f"  num_features={n_features_detected}, num_outputs={num_outputs_final}")
+    logger.info(f"  use_layer_norm={use_layer_norm}, use_bce_with_logits={use_bce_with_logits}")
 
     model, loss_fn = create_model(
         device=device,
@@ -745,7 +748,8 @@ def main():
         lstm_dropout=args.lstm_dropout,
         dense_hidden_size=args.dense_hidden,
         dense_dropout=args.dense_dropout,
-        use_layer_norm=use_layer_norm
+        use_layer_norm=use_layer_norm,
+        use_bce_with_logits=use_bce_with_logits
     )
 
     # Optimizer
@@ -781,6 +785,7 @@ def main():
         'is_dual_binary': is_dual_binary,
         'indicator_for_metrics': indicator_for_metrics,
         'use_layer_norm': use_layer_norm,
+        'use_bce_with_logits': use_bce_with_logits,
     }
 
     # =========================================================================

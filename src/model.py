@@ -74,6 +74,10 @@ class MultiOutputCNNLSTM(nn.Module):
         dense_dropout: Dropout dense (défaut: 0.3)
         use_layer_norm: Activer LayerNorm entre CNN et LSTM (défaut: True)
                         Recommandé: True pour MACD, False pour RSI/CCI
+        use_bce_with_logits: Utiliser BCEWithLogitsLoss (défaut: True)
+                             Si True: forward() retourne logits bruts
+                             Si False: forward() retourne probabilités via sigmoid
+                             Recommandé: True pour MACD, False pour RSI/CCI
     """
 
     def __init__(
@@ -88,7 +92,8 @@ class MultiOutputCNNLSTM(nn.Module):
         lstm_dropout: float = LSTM_DROPOUT,
         dense_hidden_size: int = DENSE_HIDDEN_SIZE,
         dense_dropout: float = DENSE_DROPOUT,
-        use_layer_norm: bool = True
+        use_layer_norm: bool = True,
+        use_bce_with_logits: bool = True
     ):
         super(MultiOutputCNNLSTM, self).__init__()
 
@@ -96,6 +101,7 @@ class MultiOutputCNNLSTM(nn.Module):
         self.num_indicators = num_indicators
         self.num_outputs = num_outputs
         self.use_layer_norm = use_layer_norm
+        self.use_bce_with_logits = use_bce_with_logits
 
         # =====================================================================
         # CNN Layer (1D Convolution sur dimension temporelle)
@@ -225,12 +231,15 @@ class MultiOutputCNNLSTM(nn.Module):
         # =====================================================================
         # Têtes de Sortie (num_outputs indépendants)
         # =====================================================================
-        # Chaque tête produit des logits bruts (sigmoid appliqué dans la loss)
-
-        head_outputs = [head(x) for head in self.output_heads]  # Logits bruts
+        head_outputs = [head(x) for head in self.output_heads]
 
         # Concaténer les sorties: (batch, num_outputs)
         outputs = torch.cat(head_outputs, dim=1)
+
+        # Appliquer sigmoid si BCELoss classique (baseline pour RSI/CCI)
+        # Si BCEWithLogitsLoss (MACD), retourner logits bruts
+        if not self.use_bce_with_logits:
+            outputs = torch.sigmoid(outputs)  # Probabilités pour BCELoss
 
         return outputs
 
@@ -244,8 +253,14 @@ class MultiOutputCNNLSTM(nn.Module):
         Returns:
             Probabilités (batch, num_outputs)
         """
-        logits = self.forward(x)
-        return torch.sigmoid(logits)  # Convertir logits en probabilités
+        outputs = self.forward(x)
+
+        # Si use_bce_with_logits=True: forward() retourne logits, appliquer sigmoid
+        # Si use_bce_with_logits=False: forward() retourne déjà probabilités
+        if self.use_bce_with_logits:
+            return torch.sigmoid(outputs)
+        else:
+            return outputs  # Déjà en [0, 1]
 
     def predict(self, x: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
         """
@@ -263,11 +278,12 @@ class MultiOutputCNNLSTM(nn.Module):
         return predictions
 
 
-class MultiOutputBCELoss(nn.Module):
+class MultiOutputBCEWithLogitsLoss(nn.Module):
     """
-    Loss BCEWithLogits multi-output avec poids optionnels pour chaque sortie.
+    Loss BCE avec logits multi-output avec poids optionnels pour chaque sortie.
 
     Utilise BCEWithLogitsLoss pour stabilité numérique (sigmoid intégré).
+    Recommandé pour MACD uniquement.
     Calcule la BCE pour chaque output et fait la moyenne pondérée.
 
     Args:
@@ -280,7 +296,7 @@ class MultiOutputBCELoss(nn.Module):
         num_outputs: int = 3,
         weights: Tuple[float, ...] = None
     ):
-        super(MultiOutputBCELoss, self).__init__()
+        super(MultiOutputBCEWithLogitsLoss, self).__init__()
 
         # Poids par défaut selon le nombre d'outputs
         if weights is None:
@@ -333,6 +349,77 @@ class MultiOutputBCELoss(nn.Module):
         return weighted_loss
 
 
+class MultiOutputBCELoss(nn.Module):
+    """
+    Loss BCE classique multi-output avec poids optionnels pour chaque sortie.
+
+    Utilise BCELoss standard (modèle doit retourner probabilités via sigmoid).
+    Recommandé pour CCI et RSI (baseline v7.0).
+    Calcule la BCE pour chaque output et fait la moyenne pondérée.
+
+    Args:
+        num_outputs: Nombre de sorties (1 pour single-indicator, 3 pour multi)
+        weights: Poids pour chaque output (défaut: égaux)
+    """
+
+    def __init__(
+        self,
+        num_outputs: int = 3,
+        weights: Tuple[float, ...] = None
+    ):
+        super(MultiOutputBCELoss, self).__init__()
+
+        # Poids par défaut selon le nombre d'outputs
+        if weights is None:
+            if num_outputs == 3:
+                weights = (LOSS_WEIGHT_RSI, LOSS_WEIGHT_CCI, LOSS_WEIGHT_MACD)
+            else:
+                weights = tuple([1.0] * num_outputs)
+
+        # Convertir en tensor
+        self.weights = torch.tensor(weights[:num_outputs], dtype=torch.float32)
+        self.num_outputs = num_outputs
+
+        # BCE classique (attend des probabilités [0,1])
+        self.bce = nn.BCELoss(reduction='none')
+
+        if num_outputs == 3:
+            logger.info(f"✅ Loss multi-output créée (BCELoss baseline):")
+            logger.info(f"  Poids: RSI={weights[0]}, CCI={weights[1]}, MACD={weights[2]}")
+        else:
+            logger.info(f"✅ Loss single-output créée (BCELoss baseline, poids={weights[0]})")
+
+    def forward(
+        self,
+        predictions: torch.Tensor,
+        targets: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Calcule la loss BCE moyenne pondérée sur les outputs.
+
+        Args:
+            predictions: Probabilités (batch, num_outputs) - DOIT être [0,1]
+            targets: Labels (batch, num_outputs)
+
+        Returns:
+            Loss scalaire (moyenne pondérée)
+        """
+        # Déplacer weights sur le même device que predictions
+        if self.weights.device != predictions.device:
+            self.weights = self.weights.to(predictions.device)
+
+        # BCE pour chaque output: (batch, num_outputs)
+        bce_per_output = self.bce(predictions, targets.float())
+
+        # Moyenne sur batch: (num_outputs,)
+        bce_mean = bce_per_output.mean(dim=0)
+
+        # Pondération: scalaire
+        weighted_loss = (bce_mean * self.weights).sum() / self.weights.sum()
+
+        return weighted_loss
+
+
 def create_model(
     device: str = 'cpu',
     num_indicators: int = NUM_INDICATORS,
@@ -343,8 +430,9 @@ def create_model(
     lstm_dropout: float = LSTM_DROPOUT,
     dense_hidden_size: int = DENSE_HIDDEN_SIZE,
     dense_dropout: float = DENSE_DROPOUT,
-    use_layer_norm: bool = True
-) -> Tuple[MultiOutputCNNLSTM, MultiOutputBCELoss]:
+    use_layer_norm: bool = True,
+    use_bce_with_logits: bool = True
+) -> Tuple[MultiOutputCNNLSTM, nn.Module]:
     """
     Factory function pour créer le modèle et la loss.
 
@@ -358,6 +446,8 @@ def create_model(
         lstm_dropout: Dropout LSTM
         dense_hidden_size: Taille couche dense
         dense_dropout: Dropout dense
+        use_layer_norm: Activer LayerNorm (MACD: True, RSI/CCI: False)
+        use_bce_with_logits: Utiliser BCEWithLogitsLoss (MACD: True, RSI/CCI: False)
 
     Returns:
         (model, loss_fn)
@@ -371,9 +461,15 @@ def create_model(
         lstm_dropout=lstm_dropout,
         dense_hidden_size=dense_hidden_size,
         dense_dropout=dense_dropout,
-        use_layer_norm=use_layer_norm
+        use_layer_norm=use_layer_norm,
+        use_bce_with_logits=use_bce_with_logits
     )
-    loss_fn = MultiOutputBCELoss(num_outputs=num_outputs)
+
+    # Choisir la loss function selon l'indicateur
+    if use_bce_with_logits:
+        loss_fn = MultiOutputBCEWithLogitsLoss(num_outputs=num_outputs)
+    else:
+        loss_fn = MultiOutputBCELoss(num_outputs=num_outputs)
 
     # Déplacer sur device
     model = model.to(device)

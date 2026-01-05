@@ -60,14 +60,14 @@ def evaluate_model(
             X_batch = X_batch.to(device)
             Y_batch = Y_batch.to(device)
 
-            # Forward (retourne logits)
-            logits = model(X_batch)
+            # Forward (retourne logits ou probabilités selon use_bce_with_logits)
+            model_outputs = model(X_batch)
 
-            # Loss (BCEWithLogitsLoss applique sigmoid en interne)
-            loss = loss_fn(logits, Y_batch)
+            # Loss (applique sigmoid si BCEWithLogitsLoss, sinon attend probabilités)
+            loss = loss_fn(model_outputs, Y_batch)
 
-            # Convertir logits en probabilités pour les métriques
-            outputs = torch.sigmoid(logits)
+            # Obtenir probabilités pour métriques (gère sigmoid conditionnellement)
+            outputs = model.predict_proba(X_batch)
 
             # Accumuler
             total_loss += loss.item() * X_batch.size(0)
@@ -436,6 +436,7 @@ def main():
         dense_hidden_size=model_config.get('dense_hidden_size', 32),
         dense_dropout=model_config.get('dense_dropout', 0.3),
         use_layer_norm=model_config.get('use_layer_norm', True),  # Par défaut True pour rétrocompatibilité
+        use_bce_with_logits=model_config.get('use_bce_with_logits', True),  # Par défaut True pour rétrocompatibilité
     )
 
     # Charger poids
