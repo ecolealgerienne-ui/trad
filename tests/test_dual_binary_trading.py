@@ -210,13 +210,20 @@ def extract_c_ret(X: np.ndarray, indicator: str) -> np.ndarray:
     return c_ret
 
 
-def _convert_to_binary_labels(signals: np.ndarray, mode: str) -> np.ndarray:
+def _convert_to_binary_labels(
+    signals: np.ndarray,
+    mode: str,
+    threshold_direction: float = 0.5,
+    threshold_force: float = 0.5
+) -> np.ndarray:
     """
     Convertit probabilités en labels binaires si nécessaire.
 
     Args:
         signals: Array (n_samples, 2) - labels ou probabilités
         mode: 'Oracle' ou 'Prédictions' (pour logging)
+        threshold_direction: Seuil pour Direction (défaut: 0.5)
+        threshold_force: Seuil pour Force (défaut: 0.5)
 
     Returns:
         Binary labels {0, 1}
@@ -225,8 +232,12 @@ def _convert_to_binary_labels(signals: np.ndarray, mode: str) -> np.ndarray:
     if signals.max() <= 1.0 and signals.min() >= 0.0:
         unique_vals = np.unique(signals)
         if len(unique_vals) > 2:  # Plus de 2 valeurs → probabilités continues
-            signals = (signals > 0.5).astype(int)
-            logger.info(f"   📊 {mode} converties (seuil 0.5): Direction et Force")
+            # Appliquer seuils séparés pour Direction et Force
+            direction = (signals[:, 0] > threshold_direction).astype(int)
+            force = (signals[:, 1] > threshold_force).astype(int)
+            signals = np.column_stack([direction, force])
+
+            logger.info(f"   📊 {mode} converties - Direction seuil={threshold_direction}, Force seuil={threshold_force}")
             # Afficher distribution
             dir_up = (signals[:, 0] == 1).sum()
             force_strong = (signals[:, 1] == 1).sum()
@@ -246,6 +257,7 @@ def run_dual_binary_strategy(
     fees: float = 0.0,
     use_predictions: bool = False,
     Y_pred: np.ndarray = None,
+    threshold_force: float = 0.5,
     verbose: bool = True
 ) -> Tuple[np.ndarray, Dict]:
     """
@@ -258,6 +270,7 @@ def run_dual_binary_strategy(
         fees: Frais par trade (ex: 0.001 = 0.1%)
         use_predictions: Si True, utiliser Y_pred au lieu de Y
         Y_pred: Prédictions (si use_predictions=True)
+        threshold_force: Seuil pour Force (défaut: 0.5)
 
     Returns:
         positions: Array des positions (n_samples,)
@@ -268,11 +281,11 @@ def run_dual_binary_strategy(
             raise ValueError("use_predictions=True mais Y_pred est None")
         signals = Y_pred
         logger.info("🎯 Mode: Prédictions modèle")
-        signals = _convert_to_binary_labels(signals, "Prédictions")
+        signals = _convert_to_binary_labels(signals, "Prédictions", threshold_force=threshold_force)
     else:
         signals = Y
         logger.info("🎯 Mode: Labels Oracle (monde parfait)")
-        signals = _convert_to_binary_labels(signals, "Labels Oracle")
+        signals = _convert_to_binary_labels(signals, "Labels Oracle", threshold_force=threshold_force)
 
     n_samples = len(signals)
     positions = np.zeros(n_samples, dtype=int)
@@ -515,6 +528,12 @@ def main():
         action='store_true',
         help="Utiliser prédictions modèle au lieu de labels Oracle"
     )
+    parser.add_argument(
+        '--threshold-force',
+        type=float,
+        default=0.5,
+        help="Seuil pour Force (défaut: 0.5). Baisser à 0.3-0.4 pour augmenter Recall STRONG"
+    )
 
     args = parser.parse_args()
 
@@ -540,13 +559,16 @@ def main():
     logger.info(f"\n🚀 Lancement backtest: {args.indicator.upper()} ({args.split})")
     logger.info(f"   Samples: {len(data['Y']):,}")
     logger.info(f"   Frais: {args.fees}% par trade")
+    if args.threshold_force != 0.5:
+        logger.info(f"   ⚙️  Seuil Force personnalisé: {args.threshold_force}")
 
     positions, stats = run_dual_binary_strategy(
         Y=data['Y'],
         returns=returns,
         fees=fees_decimal,
         use_predictions=args.use_predictions,
-        Y_pred=data['Y_pred']
+        Y_pred=data['Y_pred'],
+        threshold_force=args.threshold_force
     )
 
     # Afficher résultats
