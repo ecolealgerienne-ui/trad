@@ -92,13 +92,15 @@ def run_state_machine_v2(
     fees: float = 0.0,
     asset_indices: np.ndarray = None,
     assets: List[str] = None,
-    verbose: bool = True
+    verbose: bool = True,
+    hysteresis_high: float = None,
+    hysteresis_low: float = None
 ) -> Tuple[np.ndarray, dict]:
     """
-    State Machine V2 - Architecture simplifiée.
+    State Machine V2 - Architecture simplifiée avec hysteresis.
 
     Niveau 1: Volatilité gate
-    Niveau 2: Direction MACD
+    Niveau 2: Direction MACD avec hysteresis
     Niveau 3: (désactivé dans cette version)
 
     Args:
@@ -107,8 +109,10 @@ def run_state_machine_v2(
         returns: Rendements (c_ret)
         vol_threshold: Seuil volatilité pour AGIR (défaut: 0.13%)
         vol_min: Seuil min (en dessous = bruit, ignorer)
-        direction_threshold: Seuil MACD pour direction
+        direction_threshold: Seuil MACD pour direction (utilisé si pas d'hysteresis)
         fees: Frais par trade (ex: 0.001 = 0.1%)
+        hysteresis_high: Seuil haut pour entrer (ex: 0.6). Si None, pas d'hysteresis
+        hysteresis_low: Seuil bas pour sortir (ex: 0.4). Si None, pas d'hysteresis
 
     Returns:
         positions: Array des positions
@@ -118,6 +122,11 @@ def run_state_machine_v2(
     positions = np.zeros(n_samples, dtype=int)
     ctx = Context()
 
+    # Activer hysteresis si les seuils sont fournis
+    use_hysteresis = (hysteresis_high is not None and hysteresis_low is not None)
+    if use_hysteresis and hysteresis_low >= hysteresis_high:
+        raise ValueError(f"hysteresis_low ({hysteresis_low}) doit être < hysteresis_high ({hysteresis_high})")
+
     # Stats
     stats = {
         'n_trades': 0,
@@ -125,11 +134,15 @@ def run_state_machine_v2(
         'n_short': 0,
         'blocked_by_low_vol': 0,
         'blocked_by_noise': 0,
+        'blocked_by_hysteresis': 0,  # Nouveau: signaux bloqués par hysteresis
         'total_pnl': 0.0,
         'total_pnl_after_fees': 0.0,
         'total_fees': 0.0,
         'vol_threshold': vol_threshold,
         'vol_min': vol_min,
+        'hysteresis_enabled': use_hysteresis,
+        'hysteresis_high': hysteresis_high if use_hysteresis else None,
+        'hysteresis_low': hysteresis_low if use_hysteresis else None,
     }
 
     # PnL par asset
@@ -171,13 +184,45 @@ def run_state_machine_v2(
             should_act = True
 
         # ============================================
-        # NIVEAU 2: DIRECTION (MACD)
+        # NIVEAU 2: DIRECTION (MACD) avec Hysteresis
         # ============================================
 
-        if prob > direction_threshold:
-            target_direction = Position.LONG
+        if use_hysteresis:
+            # Logique avec hysteresis: zone morte entre low et high
+            if ctx.position == Position.FLAT:
+                # Nouvelle entrée: besoin signal fort
+                if prob > hysteresis_high:
+                    target_direction = Position.LONG
+                elif prob < hysteresis_low:
+                    target_direction = Position.SHORT
+                else:
+                    # Zone morte: ne pas entrer
+                    target_direction = Position.FLAT
+                    stats['blocked_by_hysteresis'] += 1
+
+            elif ctx.position == Position.LONG:
+                # En LONG: sortir seulement si signal fort opposé
+                if prob < hysteresis_low:
+                    # Signal fort SHORT → sortir et inverser
+                    target_direction = Position.SHORT
+                else:
+                    # Garder LONG (même si prob < 0.5 mais > hysteresis_low)
+                    target_direction = Position.LONG
+
+            else:  # ctx.position == Position.SHORT
+                # En SHORT: sortir seulement si signal fort opposé
+                if prob > hysteresis_high:
+                    # Signal fort LONG → sortir et inverser
+                    target_direction = Position.LONG
+                else:
+                    # Garder SHORT (même si prob > 0.5 mais < hysteresis_high)
+                    target_direction = Position.SHORT
         else:
-            target_direction = Position.SHORT
+            # Logique sans hysteresis (comportement original)
+            if prob > direction_threshold:
+                target_direction = Position.LONG
+            else:
+                target_direction = Position.SHORT
 
         # ============================================
         # LOGIQUE DE TRADING
@@ -213,7 +258,7 @@ def run_state_machine_v2(
             ctx.current_pnl = 0.0
 
         # Entrée ou changement de direction
-        elif should_act:
+        elif should_act and target_direction != Position.FLAT:
             if ctx.position == Position.FLAT:
                 # Nouvelle entrée
                 ctx.position = target_direction
@@ -316,7 +361,13 @@ def run_state_machine_v2(
         print(f"\n⚙️ Configuration:")
         print(f"   Seuil volatilité: {vol_threshold*100:.2f}% (AGIR si >)")
         print(f"   Seuil bruit: {vol_min*100:.2f}% (ignorer si <)")
-        print(f"   Seuil direction: {direction_threshold:.2f}")
+        if stats['hysteresis_enabled']:
+            print(f"   Hysteresis ACTIVÉ:")
+            print(f"     - Seuil HAUT (entrer): {stats['hysteresis_high']:.2f}")
+            print(f"     - Seuil BAS (sortir): {stats['hysteresis_low']:.2f}")
+            print(f"     - Zone morte: [{stats['hysteresis_low']:.2f}, {stats['hysteresis_high']:.2f}]")
+        else:
+            print(f"   Seuil direction: {direction_threshold:.2f} (pas d'hysteresis)")
         if fees > 0:
             print(f"   Frais: {fees*100:.2f}% par trade")
 
@@ -333,6 +384,8 @@ def run_state_machine_v2(
         print(f"\n🚫 Blocages:")
         print(f"   Par bruit (vol < {vol_min*100:.2f}%): {stats['blocked_by_noise']:,}")
         print(f"   Par faible vol (< {vol_threshold*100:.2f}%): {stats['blocked_by_low_vol']:,}")
+        if stats['hysteresis_enabled']:
+            print(f"   Par hysteresis (zone morte): {stats['blocked_by_hysteresis']:,}")
 
         if ctx.trades:
             print(f"\n📈 Performance:")
@@ -377,9 +430,15 @@ def main():
     parser.add_argument('--vol-min', type=float, default=0.0008,
                         help='Seuil min (bruit à ignorer)')
     parser.add_argument('--direction-threshold', type=float, default=0.5,
-                        help='Seuil MACD pour direction')
+                        help='Seuil MACD pour direction (sans hysteresis)')
     parser.add_argument('--fees', type=float, default=0.0,
                         help='Frais par trade en %% (0.1 = 0.1%%)')
+
+    # Hysteresis
+    parser.add_argument('--hysteresis-high', type=float, default=None,
+                        help='Seuil haut pour ENTRER en position (ex: 0.6). Active hysteresis si fourni avec --hysteresis-low')
+    parser.add_argument('--hysteresis-low', type=float, default=None,
+                        help='Seuil bas pour SORTIR de position (ex: 0.4). Active hysteresis si fourni avec --hysteresis-high')
 
     args = parser.parse_args()
 
@@ -443,7 +502,9 @@ def main():
         direction_threshold=args.direction_threshold,
         fees=fees,
         asset_indices=asset_indices,
-        assets=assets
+        assets=assets,
+        hysteresis_high=args.hysteresis_high,
+        hysteresis_low=args.hysteresis_low
     )
 
     # Résumé
@@ -453,7 +514,13 @@ def main():
 
     print(f"\n🎯 Architecture CART validée:")
     print(f"   Niveau 1: Volatilité > {args.vol_threshold*100:.2f}% → AGIR")
-    print(f"   Niveau 2: MACD > 0.5 → LONG, sinon SHORT")
+    if args.hysteresis_high and args.hysteresis_low:
+        print(f"   Niveau 2: MACD avec HYSTERESIS")
+        print(f"     - Entrer LONG si prob > {args.hysteresis_high}")
+        print(f"     - Entrer SHORT si prob < {args.hysteresis_low}")
+        print(f"     - Zone morte: [{args.hysteresis_low}, {args.hysteresis_high}]")
+    else:
+        print(f"   Niveau 2: MACD > 0.5 → LONG, sinon SHORT")
     print(f"   Niveau 3: (garde-fous désactivés)")
 
     if stats['n_trades'] > 0:

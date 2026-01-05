@@ -119,7 +119,8 @@ def train_epoch(
     dataloader: DataLoader,
     loss_fn: nn.Module,
     optimizer: optim.Optimizer,
-    device: str
+    device: str,
+    indicator_names: list = None
 ) -> Dict[str, float]:
     """
     Entraîne le modèle sur une époque.
@@ -130,6 +131,7 @@ def train_epoch(
         loss_fn: Loss function
         optimizer: Optimizer
         device: Device
+        indicator_names: Noms des outputs (ex: ['Direction', 'Force'] pour dual-binary)
 
     Returns:
         Dictionnaire avec loss et métriques
@@ -167,7 +169,7 @@ def train_epoch(
     # Métriques
     all_predictions = torch.cat(all_predictions, dim=0)
     all_targets = torch.cat(all_targets, dim=0)
-    metrics = compute_metrics(all_predictions, all_targets)
+    metrics = compute_metrics(all_predictions, all_targets, indicator_names=indicator_names)
     metrics['loss'] = avg_loss
 
     return metrics
@@ -177,7 +179,8 @@ def validate_epoch(
     model: nn.Module,
     dataloader: DataLoader,
     loss_fn: nn.Module,
-    device: str
+    device: str,
+    indicator_names: list = None
 ) -> Dict[str, float]:
     """
     Valide le modèle sur une époque.
@@ -187,6 +190,7 @@ def validate_epoch(
         dataloader: DataLoader
         loss_fn: Loss function
         device: Device
+        indicator_names: Noms des outputs (ex: ['Direction', 'Force'] pour dual-binary)
 
     Returns:
         Dictionnaire avec loss et métriques
@@ -220,7 +224,7 @@ def validate_epoch(
     # Métriques
     all_predictions = torch.cat(all_predictions, dim=0)
     all_targets = torch.cat(all_targets, dim=0)
-    metrics = compute_metrics(all_predictions, all_targets)
+    metrics = compute_metrics(all_predictions, all_targets, indicator_names=indicator_names)
     metrics['loss'] = avg_loss
 
     return metrics
@@ -236,7 +240,8 @@ def train_model(
     num_epochs: int = NUM_EPOCHS,
     patience: int = EARLY_STOPPING_PATIENCE,
     save_path: str = BEST_MODEL_PATH,
-    model_config: Dict = None
+    model_config: Dict = None,
+    indicator_names: list = None
 ) -> Dict:
     """
     Boucle d'entraînement complète avec early stopping.
@@ -251,6 +256,8 @@ def train_model(
         num_epochs: Nombre max d'époques
         patience: Patience pour early stopping
         save_path: Chemin pour sauvegarder le meilleur modèle
+        model_config: Configuration du modèle
+        indicator_names: Noms des outputs (ex: ['Direction', 'Force'] pour dual-binary)
 
     Returns:
         Historique de l'entraînement
@@ -277,10 +284,10 @@ def train_model(
         logger.info(f"\nÉpoque {epoch+1}/{num_epochs}")
 
         # Train
-        train_metrics = train_epoch(model, train_loader, loss_fn, optimizer, device)
+        train_metrics = train_epoch(model, train_loader, loss_fn, optimizer, device, indicator_names)
 
         # Validation
-        val_metrics = validate_epoch(model, val_loader, loss_fn, device)
+        val_metrics = validate_epoch(model, val_loader, loss_fn, device, indicator_names)
 
         # Sauvegarder historique
         history['train_loss'].append(train_metrics['loss'])
@@ -289,12 +296,31 @@ def train_model(
         history['val_accuracy'].append(val_metrics['avg_accuracy'])
 
         # Logger
-        logger.info(f"  Train - Loss: {train_metrics['loss']:.4f}, "
-                   f"Acc: {train_metrics['avg_accuracy']:.3f}, "
-                   f"F1: {train_metrics['avg_f1']:.3f}")
-        logger.info(f"  Val   - Loss: {val_metrics['loss']:.4f}, "
-                   f"Acc: {val_metrics['avg_accuracy']:.3f}, "
-                   f"F1: {val_metrics['avg_f1']:.3f}")
+        if indicator_names and len(indicator_names) == 2:
+            # Dual-binary: afficher Direction et Force séparément
+            logger.info(f"  Train - Loss: {train_metrics['loss']:.4f}, "
+                       f"Avg Acc: {train_metrics['avg_accuracy']:.3f}, "
+                       f"Avg F1: {train_metrics['avg_f1']:.3f}")
+            logger.info(f"          Direction: Acc={train_metrics['Direction_accuracy']:.3f}, "
+                       f"F1={train_metrics['Direction_f1']:.3f}")
+            logger.info(f"          Force:     Acc={train_metrics['Force_accuracy']:.3f}, "
+                       f"F1={train_metrics['Force_f1']:.3f}")
+
+            logger.info(f"  Val   - Loss: {val_metrics['loss']:.4f}, "
+                       f"Avg Acc: {val_metrics['avg_accuracy']:.3f}, "
+                       f"Avg F1: {val_metrics['avg_f1']:.3f}")
+            logger.info(f"          Direction: Acc={val_metrics['Direction_accuracy']:.3f}, "
+                       f"F1={val_metrics['Direction_f1']:.3f}")
+            logger.info(f"          Force:     Acc={val_metrics['Force_accuracy']:.3f}, "
+                       f"F1={val_metrics['Force_f1']:.3f}")
+        else:
+            # Affichage standard
+            logger.info(f"  Train - Loss: {train_metrics['loss']:.4f}, "
+                       f"Acc: {train_metrics['avg_accuracy']:.3f}, "
+                       f"F1: {train_metrics['avg_f1']:.3f}")
+            logger.info(f"  Val   - Loss: {val_metrics['loss']:.4f}, "
+                       f"Acc: {val_metrics['avg_accuracy']:.3f}, "
+                       f"F1: {val_metrics['avg_f1']:.3f}")
 
         # Sauvegarder meilleur modèle
         if val_metrics['loss'] < history['best_val_loss']:
@@ -414,8 +440,9 @@ def generate_predictions(model: nn.Module, X: np.ndarray, device: str, batch_siz
     with torch.no_grad():
         for X_batch, _ in loader:
             X_batch = X_batch.to(device)
-            outputs = model(X_batch)
-            # Le modèle applique déjà sigmoid dans forward(), outputs sont des probabilités [0,1]
+            # Utiliser predict_proba() qui gère sigmoid conditionnellement
+            # (logits → sigmoid si use_bce_with_logits=True, sinon déjà en [0,1])
+            outputs = model.predict_proba(X_batch)
             # IMPORTANT: Sauvegarder les probabilités brutes, pas binarisées!
             all_preds.append(outputs.cpu().numpy())
 
@@ -606,16 +633,45 @@ def main():
         logger.error("❌ Argument --data requis!")
         logger.error("")
         logger.error("Préparez d'abord les données avec:")
-        logger.error("  python src/prepare_data_30min.py --assets BTC ETH --include-30min-features")
+        logger.error("  python src/prepare_data_purified_dual_binary.py --assets BTC ETH BNB ADA LTC")
         logger.error("")
         logger.error("Puis entraînez avec:")
-        logger.error("  python src/train.py --data data/prepared/dataset_btc_eth_5min_30min_labels30min_kalman.npz")
+        logger.error("  python src/train.py --data data/prepared/dataset_..._rsi_dual_binary_kalman.npz")
         raise SystemExit(1)
 
-    # Filtrer les labels si mode single-output
-    if single_indicator:
-        # Si indicator_idx est None (close, macd40, etc.), le dataset est déjà single-output
-        # La fonction normalize_labels_for_single_output gère ce cas automatiquement
+    # =========================================================================
+    # AUTO-DÉTECTION ARCHITECTURE (Pure Signal)
+    # =========================================================================
+    # Détecter n_features et n_outputs depuis les données
+    n_features_detected = X_train.shape[2]  # 1 pour RSI/MACD, 3 pour CCI
+    n_outputs_detected = Y_train.shape[1]   # 2 pour dual-binary (direction + force)
+
+    # Détecter si dual-binary depuis metadata
+    is_dual_binary = False
+    indicator_for_metrics = None
+
+    if metadata:
+        # Détection dual-binary
+        if 'label_names' in metadata and len(metadata['label_names']) == 2:
+            is_dual_binary = True
+            # Extraire nom indicateur (ex: ['rsi_dir', 'rsi_force'] -> 'rsi')
+            label_name = metadata['label_names'][0]
+            indicator_for_metrics = label_name.split('_')[0].upper()
+
+        # Log architecture détectée
+        logger.info(f"\n🔍 Architecture détectée:")
+        logger.info(f"  Features: {n_features_detected}")
+        logger.info(f"  Outputs: {n_outputs_detected}")
+
+        if is_dual_binary:
+            logger.info(f"  Type: DUAL-BINARY ({indicator_for_metrics})")
+            logger.info(f"  Labels: Direction + Force")
+        else:
+            logger.info(f"  Type: SINGLE-OUTPUT")
+
+    # Filtrer les labels si mode single-output (ancien pipeline)
+    if single_indicator and not is_dual_binary:
+        # Ancien pipeline (3 outputs -> 1)
         Y_train = normalize_labels_for_single_output(Y_train, indicator_idx, indicator_name)
         Y_val = normalize_labels_for_single_output(Y_val, indicator_idx, indicator_name)
         Y_test = normalize_labels_for_single_output(Y_test, indicator_idx, indicator_name)
@@ -655,21 +711,58 @@ def main():
     logger.info(f"  Val batches: {len(val_loader)}")
 
     # =========================================================================
-    # 3. CRÉER MODÈLE
+    # 3. CRÉER MODÈLE (Architecture Auto-Adaptative)
     # =========================================================================
     logger.info("\n3. Création du modèle...")
-    num_features = X_train.shape[2]  # Nombre de features en entrée
-    logger.info(f"  num_features={num_features}, num_outputs={num_outputs}")
+
+    # Utiliser valeurs détectées au lieu de num_outputs manuel
+    num_outputs_final = n_outputs_detected
+
+    # =========================================================================
+    # AUTO-DÉTECTION LayerNorm + BCEWithLogitsLoss (architecture hybride)
+    # =========================================================================
+    # Configuration optimale par indicateur (validée empiriquement)
+    use_layer_norm = False  # Par défaut: désactivé
+    use_bce_with_logits = False  # Par défaut: désactivé (BCELoss baseline)
+
+    if indicator_for_metrics:
+        indicator_lower = indicator_for_metrics.lower()
+        if indicator_lower == 'macd':
+            # MACD: Les deux optimisations aident (86.9%)
+            # Indicateur de tendance lourde (double EMA) → stabilisation bénéfique
+            use_layer_norm = True
+            use_bce_with_logits = True
+            logger.info(f"  🎯 Indicateur MACD détecté → LayerNorm + BCEWithLogitsLoss ACTIVÉS")
+        elif indicator_lower == 'cci':
+            # CCI: BCEWithLogitsLoss seul optimal (83.3%)
+            # 3 features (h,l,c) → BCE aide (+3.8%), LayerNorm nuit (-0.5%)
+            use_layer_norm = False
+            use_bce_with_logits = True
+            logger.info(f"  🎯 Indicateur CCI détecté → BCEWithLogitsLoss ACTIVÉ, LayerNorm DÉSACTIVÉ (optimal)")
+        elif indicator_lower == 'rsi':
+            # RSI: Baseline optimal (80.7%)
+            # Oscillateur simple → optimisations neutres
+            use_layer_norm = False
+            use_bce_with_logits = False
+            logger.info(f"  🎯 Indicateur RSI détecté → Architecture baseline (optimal)")
+        else:
+            logger.info(f"  🎯 Indicateur {indicator_for_metrics} détecté → Architecture baseline")
+
+    logger.info(f"  num_features={n_features_detected}, num_outputs={num_outputs_final}")
+    logger.info(f"  use_layer_norm={use_layer_norm}, use_bce_with_logits={use_bce_with_logits}")
+
     model, loss_fn = create_model(
         device=device,
-        num_indicators=num_features,
-        num_outputs=num_outputs,
+        num_indicators=n_features_detected,
+        num_outputs=num_outputs_final,
         cnn_filters=args.cnn_filters,
         lstm_hidden_size=args.lstm_hidden,
         lstm_num_layers=args.lstm_layers,
         lstm_dropout=args.lstm_dropout,
         dense_hidden_size=args.dense_hidden,
-        dense_dropout=args.dense_dropout
+        dense_dropout=args.dense_dropout,
+        use_layer_norm=use_layer_norm,
+        use_bce_with_logits=use_bce_with_logits
     )
 
     # Optimizer
@@ -680,6 +773,17 @@ def main():
     # =========================================================================
     logger.info(f"\n4. Entraînement ({args.epochs} époques max)...")
 
+    # Préparer noms indicateurs pour métriques
+    if is_dual_binary:
+        # Dual-binary: ['Direction', 'Force']
+        indicator_names_for_metrics = ['Direction', 'Force']
+    elif single_indicator:
+        # Single-output ancien pipeline
+        indicator_names_for_metrics = [indicator_name] if indicator_name else None
+    else:
+        # Multi-output ancien pipeline
+        indicator_names_for_metrics = None  # Défaut: RSI, CCI, MACD
+
     # Config du modèle pour sauvegarde
     model_config = {
         'cnn_filters': args.cnn_filters,
@@ -688,36 +792,70 @@ def main():
         'lstm_dropout': args.lstm_dropout,
         'dense_hidden_size': args.dense_hidden,
         'dense_dropout': args.dense_dropout,
-        'num_outputs': num_outputs,
+        'num_outputs': num_outputs_final,
+        'num_features': n_features_detected,
         'indicator': args.indicator,
+        'is_dual_binary': is_dual_binary,
+        'indicator_for_metrics': indicator_for_metrics,
+        'use_layer_norm': use_layer_norm,
+        'use_bce_with_logits': use_bce_with_logits,
     }
 
-    # Chemin de sauvegarde (inclut le préfixe dataset + filtre + indicateur)
-    # Extraire le préfixe du dataset (ex: "ohlcv2" de "dataset_..._ohlcv2_cci_octave20.npz")
-    dataset_prefix = ""
+    # =========================================================================
+    # NOMMAGE AUTOMATIQUE DU MODÈLE (détection intelligente)
+    # =========================================================================
+    # Détecter l'indicateur depuis:
+    # 1. Les metadata (dual-binary: indicator_for_metrics)
+    # 2. Le nom du fichier (ex: dataset_..._rsi_dual_binary_kalman.npz → 'rsi')
+    # 3. L'argument CLI --indicator (fallback ancien pipeline)
+
+    detected_indicator = None
+    detected_filter = None
+
     if args.data:
-        data_name = Path(args.data).stem  # dataset_btc_eth_bnb_ada_ltc_ohlcv2_cci_octave20
-        # Chercher des préfixes connus dans le nom
-        known_prefixes = ['ohlcv2', 'ohlc', '5min_30min', '5min', '30min']
-        for prefix in known_prefixes:
-            if prefix in data_name:
-                dataset_prefix = prefix
+        data_name = Path(args.data).stem.lower()  # dataset_btc_eth_bnb_ada_ltc_rsi_dual_binary_kalman
+
+        # Détecter indicateur depuis le nom du fichier
+        for ind in ['rsi', 'cci', 'macd', 'close']:
+            if f'_{ind}_' in data_name or data_name.endswith(f'_{ind}'):
+                detected_indicator = ind
                 break
 
-    # Construire le suffixe du nom de fichier
-    suffix_parts = []
-    if dataset_prefix:
-        suffix_parts.append(dataset_prefix)
+        # Détecter filtre depuis le nom du fichier
+        for filt in ['kalman', 'octave20', 'octave', 'decycler']:
+            if filt in data_name:
+                detected_filter = filt
+                break
+
+    # Priorité: metadata > filename > CLI
+    if is_dual_binary and indicator_for_metrics:
+        detected_indicator = indicator_for_metrics.lower()
+
     if args.filter:
-        suffix_parts.append(args.filter)
-    if single_indicator:
-        suffix_parts.append(args.indicator)
+        detected_filter = args.filter
+
+    # Fallback sur CLI pour ancien pipeline
+    if not detected_indicator and single_indicator:
+        detected_indicator = args.indicator
+
+    # Construire le nom du modèle
+    suffix_parts = []
+    if detected_indicator:
+        suffix_parts.append(detected_indicator)
+    if detected_filter:
+        suffix_parts.append(detected_filter)
+    if is_dual_binary:
+        suffix_parts.append('dual_binary')
 
     if suffix_parts:
         suffix = '_'.join(suffix_parts)
         save_path = args.save_path.replace('.pth', f'_{suffix}.pth')
     else:
         save_path = args.save_path
+
+    logger.info(f"\n💾 Modèle sauvegardé:")
+    logger.info(f"  Indicateur détecté: {detected_indicator or 'aucun'}")
+    logger.info(f"  Filtre détecté: {detected_filter or 'aucun'}")
 
     logger.info(f"  Modèle sera sauvegardé: {save_path}")
 
@@ -731,7 +869,8 @@ def main():
         num_epochs=args.epochs,
         patience=args.patience,
         save_path=save_path,
-        model_config=model_config
+        model_config=model_config,
+        indicator_names=indicator_names_for_metrics
     )
 
     # =========================================================================
@@ -779,19 +918,27 @@ def main():
     logger.info(f"  Époque: {history['best_epoch']}")
     logger.info(f"  Val Loss: {history['best_val_loss']:.4f}")
     logger.info(f"  Sauvegardé: {save_path}")
-    if single_indicator:
+
+    if is_dual_binary:
+        logger.info(f"  Type: DUAL-BINARY ({indicator_for_metrics})")
+        logger.info(f"  Features: {n_features_detected}")
+        logger.info(f"  Outputs: Direction + Force")
+    elif single_indicator:
         logger.info(f"  Indicateur: {indicator_name}")
+    else:
+        logger.info(f"  Type: MULTI-OUTPUT (RSI, CCI, MACD)")
 
     if args.data:
         logger.info(f"\n📊 Prédictions sauvegardées dans: {args.data}")
         logger.info(f"   Nouvelles clés: Y_train_pred, Y_val_pred, Y_test_pred")
 
     logger.info(f"\nProchaines étapes:")
-    if single_indicator:
+    if is_dual_binary:
+        logger.info(f"  - Évaluer: python src/evaluate.py --data {args.data}")
+    elif single_indicator:
         logger.info(f"  - Évaluer: python src/evaluate.py --data <dataset> --indicator {args.indicator}")
     else:
         logger.info(f"  - Évaluer sur test set: python src/evaluate.py --data <dataset>")
-    logger.info(f"  - Backtest: python tests/test_trading_strategy_ohlc.py --data {args.data} --use-predictions")
     logger.info(f"  - Visualiser historique: voir {history_path}")
 
 
