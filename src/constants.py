@@ -15,7 +15,8 @@ CANDLES_PER_HOUR = 60 // TIMEFRAME_MINUTES  # 12 bougies par heure
 CANDLES_PER_DAY = CANDLES_PER_HOUR * 24  # 288 bougies par jour
 
 # Dataset
-SEQUENCE_LENGTH = 12  # Nombre de timesteps pour l'input (t-12:t)
+SEQUENCE_LENGTH = 25  # Nombre de timesteps pour l'input (t-25:t) - 2h de contexte
+                      # Augmenté à 25 pour stabilité labels (~96% concordance vs 87% à 12)
 TRIM_EDGES = 200  # Valeurs à enlever au début + fin (warm-up + artifacts)
                   # Augmenté à 200 pour dual-binary: MACD(~35) + Kalman(~50) + Z-Score(100) + shifts(3) = ~188
 
