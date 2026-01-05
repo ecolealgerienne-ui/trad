@@ -482,13 +482,25 @@ def run_dual_binary_strategy(
     return positions, stats
 
 
-def print_results(stats: Dict, indicator: str, split: str, use_predictions: bool):
+def print_results(stats: Dict, indicator: str, split: str, use_predictions: bool, n_samples: int = 0, n_assets: int = 5):
     """Affiche les résultats du backtest."""
     mode = "Prédictions" if use_predictions else "Oracle"
+
+    # Calculer métriques temporelles
+    periods_per_asset = n_samples // n_assets if n_assets > 0 else n_samples
+    minutes_total = periods_per_asset * 5  # Périodes de 5 min
+    days_total = minutes_total / (60 * 24)
+    months_total = days_total / 30.0
 
     logger.info("\n" + "=" * 70)
     logger.info(f"📊 RÉSULTATS BACKTEST - {indicator.upper()} ({mode})")
     logger.info("=" * 70)
+
+    logger.info(f"\n📅 Période:")
+    logger.info(f"   Total samples:    {n_samples:,}")
+    logger.info(f"   Assets:           {n_assets}")
+    logger.info(f"   Samples/asset:    {periods_per_asset:,}")
+    logger.info(f"   Durée/asset:      {days_total:.0f} jours (~{months_total:.1f} mois)")
 
     logger.info(f"\n📈 Trades:")
     logger.info(f"  Total Trades:     {stats['n_trades']:,}")
@@ -507,6 +519,14 @@ def print_results(stats: Dict, indicator: str, split: str, use_predictions: bool
     logger.info(f"  PnL Brut:         {stats['total_pnl']*100:+.2f}%")
     logger.info(f"  Frais Totaux:     {stats['total_fees']*100:.2f}%")
     logger.info(f"  PnL Net:          {stats['total_pnl_after_fees']*100:+.2f}%")
+
+    # Métriques par asset et par mois
+    if n_assets > 0 and months_total > 0:
+        pnl_per_asset = (stats['total_pnl_after_fees'] * 100) / n_assets
+        pnl_per_month = (stats['total_pnl_after_fees'] * 100) / months_total
+        logger.info(f"\n📊 Performance Normalisée:")
+        logger.info(f"  PnL Net/asset:    {pnl_per_asset:+.2f}%")
+        logger.info(f"  PnL Net/mois:     {pnl_per_month:+.2f}%")
 
     logger.info("\n" + "=" * 70)
 
@@ -600,7 +620,7 @@ def main():
     )
 
     # Afficher résultats
-    print_results(stats, args.indicator, args.split, args.use_predictions)
+    print_results(stats, args.indicator, args.split, args.use_predictions, n_samples=len(data['Y']), n_assets=5)
 
     logger.info("\n✅ Backtest terminé")
 
