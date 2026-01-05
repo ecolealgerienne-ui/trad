@@ -93,16 +93,16 @@ def load_csv_and_compute_macd(csv_path: str, fast: int = 12, slow: int = 26, sig
     try:
         from indicators_ta import calculate_macd_ta
 
-        macd_line, signal_line, histogram = calculate_macd_ta(
+        result = calculate_macd_ta(
             df['close'],
-            fast_period=fast,
-            slow_period=slow,
-            signal_period=signal
+            window_fast=fast,
+            window_slow=slow,
+            window_sign=signal
         )
 
-        df['macd'] = macd_line
-        df['macd_signal'] = signal_line
-        df['macd_hist'] = histogram
+        df['macd'] = result['macd']
+        df['macd_signal'] = result['macd_signal']
+        df['macd_hist'] = result['macd_diff']
 
     except ImportError:
         # Fallback : calcul manuel
