@@ -155,6 +155,10 @@ class Context:
     # Confirmation temporelle
     prev_target: Position = Position.FLAT
     confirmation_count: int = 0
+    # Délai post-transition (éviter faux tops/bottoms)
+    prev_direction: int = -1  # Direction de la période précédente
+    periods_since_transition: int = 999  # Périodes depuis dernier changement Direction
+    transitions_blocked: int = 0  # Compteur de transitions bloquées
 
 
 # =============================================================================
@@ -284,6 +288,10 @@ def run_dual_binary_strategy(
     Y_pred: np.ndarray = None,
     threshold_force: float = 0.5,
     min_confirmation: int = 1,
+    transition_delay: int = 0,
+    continuations_only: bool = False,
+    oracle_transition_filter: bool = False,
+    require_oracle_agreement: bool = False,
     verbose: bool = True
 ) -> Tuple[np.ndarray, Dict]:
     """
@@ -298,6 +306,10 @@ def run_dual_binary_strategy(
         Y_pred: Prédictions (si use_predictions=True)
         threshold_force: Seuil pour Force (défaut: 0.5)
         min_confirmation: Nombre de périodes de signal stable requis avant d'agir (défaut: 1)
+        transition_delay: Périodes d'attente après changement Direction (défaut: 0 = désactivé)
+        continuations_only: Si True, trader SEULEMENT les continuations (Direction stable 3+ périodes)
+        oracle_transition_filter: TEST ORACLE - Bloquer sorties IA si transition Oracle détectée
+        require_oracle_agreement: TEST TIMING - Trader SEULEMENT si IA et Oracle d'accord au même moment
 
     Returns:
         positions: Array des positions (n_samples,)
@@ -328,6 +340,10 @@ def run_dual_binary_strategy(
         'total_pnl_after_fees': 0.0,
         'total_fees': 0.0,
         'fees_per_trade': fees,
+        'transitions_blocked': 0,  # Compteur entrées bloquées par transition_delay
+        'transitions_ignored': 0,  # Compteur transitions ignorées (continuations_only)
+        'oracle_transitions_blocked': 0,  # TEST ORACLE: Sorties bloquées car transition Oracle
+        'oracle_disagreements': 0,  # TEST TIMING: Entrées bloquées car IA ≠ Oracle
     }
 
     for i in range(n_samples):
@@ -341,6 +357,21 @@ def run_dual_binary_strategy(
                 ctx.current_pnl += ret
             else:  # SHORT
                 ctx.current_pnl -= ret
+
+        # ============================================
+        # DÉTECTION DE TRANSITION (éviter faux tops/bottoms)
+        # ============================================
+        if transition_delay > 0:
+            # Détecter changement de Direction
+            if ctx.prev_direction != -1 and direction != ctx.prev_direction:
+                # Transition détectée !
+                ctx.periods_since_transition = 0
+            else:
+                # Pas de transition, incrémenter compteur
+                ctx.periods_since_transition += 1
+
+            # Mettre à jour Direction précédente
+            ctx.prev_direction = direction
 
         # ============================================
         # DECISION MATRIX (Stratégie Simple - ORIGINALE)
@@ -362,6 +393,25 @@ def run_dual_binary_strategy(
             stats['n_hold'] += 1
 
         # ============================================
+        # FILTRAGE CONTINUATIONS UNIQUEMENT (Solution 2)
+        # ============================================
+        is_continuation = True  # Par défaut, autoriser
+
+        if continuations_only and i >= 2:
+            # Vérifier si Direction est STABLE depuis 3 périodes
+            # Continuation = direction[i] == direction[i-1] == direction[i-2]
+            prev_dir_1 = int(signals[i-1, 0])
+            prev_dir_2 = int(signals[i-2, 0])
+
+            is_continuation = (direction == prev_dir_1 == prev_dir_2)
+
+            if not is_continuation and target_position != Position.FLAT:
+                # C'est une transition (Direction a changé) - IGNORER
+                stats['transitions_ignored'] += 1
+                # Forcer FLAT pour ne pas entrer
+                target_position = Position.FLAT
+
+        # ============================================
         # CONFIRMATION TEMPORELLE
         # ============================================
 
@@ -374,6 +424,36 @@ def run_dual_binary_strategy(
 
         # Agir seulement si signal confirmé pendant min_confirmation périodes
         confirmed = (ctx.confirmation_count >= min_confirmation)
+
+        # ============================================
+        # TEST ORACLE: Bloquer sorties sur transitions Oracle
+        # ============================================
+        if oracle_transition_filter and i >= 1 and ctx.position != Position.FLAT:
+            # On est en position et IA veut sortir/inverser
+            if target_position != ctx.position:
+                # Vérifier si c'est une transition ORACLE (vraies labels)
+                oracle_dir_current = int(Y[i, 0])
+                oracle_dir_previous = int(Y[i-1, 0])
+                oracle_transition = (oracle_dir_current != oracle_dir_previous)
+
+                if oracle_transition:
+                    # TRANSITION ORACLE détectée → BLOQUER la sortie IA
+                    # Forcer à garder la position actuelle
+                    target_position = ctx.position
+                    stats['oracle_transitions_blocked'] += 1
+
+        # ============================================
+        # TEST TIMING: Trader SEULEMENT si IA et Oracle d'accord
+        # ============================================
+        if require_oracle_agreement and target_position != Position.FLAT:
+            # Vérifier si IA et Oracle sont d'accord sur Direction
+            oracle_dir = int(Y[i, 0])  # 0=DOWN, 1=UP
+            ia_dir = direction  # From predictions
+
+            if oracle_dir != ia_dir:
+                # Désaccord IA/Oracle → BLOQUER l'entrée
+                target_position = Position.FLAT
+                stats['oracle_disagreements'] += 1
 
         # ============================================
         # LOGIQUE DE TRADING (avec confirmation)
@@ -407,7 +487,13 @@ def run_dual_binary_strategy(
 
         # Entrée ou changement de direction (seulement si confirmé)
         elif confirmed and target_position != Position.FLAT:
-            if ctx.position == Position.FLAT:
+            # BLOQUER ENTRÉES pendant transition_delay (éviter faux tops/bottoms)
+            if transition_delay > 0 and ctx.periods_since_transition < transition_delay:
+                # Trop tôt après transition - NE PAS ENTRER
+                ctx.transitions_blocked += 1
+                pass  # Garder position actuelle (FLAT ou existante)
+
+            elif ctx.position == Position.FLAT:
                 # Nouvelle entrée
                 ctx.position = target_position
                 ctx.entry_time = i
@@ -505,6 +591,10 @@ def run_dual_binary_strategy(
         stats['avg_duration'] = 0
         stats['trades'] = []
 
+    # Copier compteurs
+    stats['transitions_blocked'] = ctx.transitions_blocked
+    # transitions_ignored déjà dans stats (compteur direct)
+
     return positions, stats
 
 
@@ -533,6 +623,14 @@ def print_results(stats: Dict, indicator: str, split: str, use_predictions: bool
     logger.info(f"  LONG:             {stats['n_long']:,}")
     logger.info(f"  SHORT:            {stats['n_short']:,}")
     logger.info(f"  HOLD (filtered):  {stats['n_hold']:,}")
+    if stats.get('transitions_blocked', 0) > 0:
+        logger.info(f"  Transitions bloquées: {stats['transitions_blocked']:,} (délai post-transition)")
+    if stats.get('transitions_ignored', 0) > 0:
+        logger.info(f"  Transitions ignorées: {stats['transitions_ignored']:,} (continuations uniquement)")
+    if stats.get('oracle_transitions_blocked', 0) > 0:
+        logger.info(f"  🎯 Sorties bloquées: {stats['oracle_transitions_blocked']:,} (TEST ORACLE: transitions détectées)")
+    if stats.get('oracle_disagreements', 0) > 0:
+        logger.info(f"  ⏰ Entrées bloquées: {stats['oracle_disagreements']:,} (TEST TIMING: IA ≠ Oracle)")
     logger.info(f"  Avg Duration:     {stats['avg_duration']:.1f} périodes")
 
     logger.info(f"\n💰 Performance:")
@@ -605,6 +703,27 @@ def main():
         default=1,
         help="Périodes de signal stable requis avant d'agir (défaut: 1). 2-3 réduit flickering."
     )
+    parser.add_argument(
+        '--transition-delay',
+        type=int,
+        default=0,
+        help="Périodes d'attente après changement Direction avant d'entrer (défaut: 0 = désactivé). 3-5 évite faux tops/bottoms."
+    )
+    parser.add_argument(
+        '--continuations-only',
+        action='store_true',
+        help="SOLUTION 2: Trader SEULEMENT les continuations (Direction stable 3+ périodes). Abandonne toutes les transitions."
+    )
+    parser.add_argument(
+        '--oracle-transition-filter',
+        action='store_true',
+        help="TEST ORACLE: Bloquer sorties IA si transition Oracle détectée. Isole l'impact des transitions."
+    )
+    parser.add_argument(
+        '--require-oracle-agreement',
+        action='store_true',
+        help="TEST TIMING: Trader SEULEMENT si IA et Oracle d'accord au même moment. Teste timing/amplitude."
+    )
 
     args = parser.parse_args()
 
@@ -634,6 +753,14 @@ def main():
         logger.info(f"   ⚙️  Seuil Force personnalisé: {args.threshold_force}")
     if args.min_confirmation > 1:
         logger.info(f"   ⏱️  Confirmation temporelle: {args.min_confirmation} périodes")
+    if args.transition_delay > 0:
+        logger.info(f"   🚦 Délai post-transition: {args.transition_delay} périodes (évite faux tops/bottoms)")
+    if args.continuations_only:
+        logger.info(f"   ⚡ SOLUTION 2: Continuations UNIQUEMENT (Direction stable 3+ périodes)")
+    if args.oracle_transition_filter:
+        logger.info(f"   🎯 TEST ORACLE: Bloquer sorties si transition Oracle détectée")
+    if args.require_oracle_agreement:
+        logger.info(f"   ⏰ TEST TIMING: Trader SEULEMENT si IA et Oracle d'accord (teste timing/amplitude)")
 
     positions, stats = run_dual_binary_strategy(
         Y=data['Y'],
@@ -642,7 +769,11 @@ def main():
         use_predictions=args.use_predictions,
         Y_pred=data['Y_pred'],
         threshold_force=args.threshold_force,
-        min_confirmation=args.min_confirmation
+        min_confirmation=args.min_confirmation,
+        transition_delay=args.transition_delay,
+        continuations_only=args.continuations_only,
+        oracle_transition_filter=args.oracle_transition_filter,
+        require_oracle_agreement=args.require_oracle_agreement
     )
 
     # Afficher résultats
