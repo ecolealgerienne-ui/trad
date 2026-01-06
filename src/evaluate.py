@@ -86,60 +86,6 @@ def evaluate_model(
     return metrics
 
 
-def compute_vote_metrics(
-    predictions: torch.Tensor,
-    targets: torch.Tensor,
-    threshold: float = 0.5
-) -> Dict[str, float]:
-    """
-    Calcule les métriques du vote majoritaire (moyenne des 3 prédictions).
-
-    Note: BOL retiré car impossible à synchroniser (toujours lag +1).
-
-    Args:
-        predictions: Probabilités (batch, 3)
-        targets: Labels (batch, 3)
-        threshold: Seuil de décision
-
-    Returns:
-        Dictionnaire avec métriques du vote
-    """
-    # Vote: moyenne des 3 probabilités
-    vote_probs = predictions.mean(dim=1)  # (batch,)
-
-    # Vote binaire
-    vote_preds = (vote_probs >= threshold).float()
-
-    # Target du vote: majorité des labels (>=2 sur 3)
-    vote_targets = (targets.sum(dim=1) >= 2).float()
-
-    # Métriques
-    correct = (vote_preds == vote_targets).sum().item()
-    total = len(vote_targets)
-    accuracy = correct / total
-
-    # TP, TN, FP, FN
-    tp = ((vote_preds == 1) & (vote_targets == 1)).sum().item()
-    tn = ((vote_preds == 0) & (vote_targets == 0)).sum().item()
-    fp = ((vote_preds == 1) & (vote_targets == 0)).sum().item()
-    fn = ((vote_preds == 0) & (vote_targets == 1)).sum().item()
-
-    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-    f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
-
-    return {
-        'vote_accuracy': accuracy,
-        'vote_precision': precision,
-        'vote_recall': recall,
-        'vote_f1': f1,
-        'vote_tp': tp,
-        'vote_tn': tn,
-        'vote_fp': fp,
-        'vote_fn': fn
-    }
-
-
 def print_metrics_table(metrics: Dict[str, float], indicator_names: list = None):
     """
     Affiche un tableau formaté des métriques.
@@ -501,40 +447,9 @@ def main():
     print_metrics_table(metrics, indicator_names=indicator_names_for_metrics)
 
     # =========================================================================
-    # 6. VOTE MAJORITAIRE (seulement en mode multi-output)
+    # 6. SAUVEGARDER RÉSULTATS
     # =========================================================================
-    if not single_indicator:
-        logger.info("\n6. Calcul du vote majoritaire...")
-
-        # Prédictions complètes
-        model.eval()
-        all_predictions = []
-        all_targets = []
-
-        with torch.no_grad():
-            for X_batch, Y_batch in test_loader:
-                X_batch = X_batch.to(device)
-                logits = model(X_batch)
-                outputs = torch.sigmoid(logits)  # Convertir logits en probabilités
-                all_predictions.append(outputs.cpu())
-                all_targets.append(Y_batch.cpu())
-
-        all_predictions = torch.cat(all_predictions, dim=0)
-        all_targets = torch.cat(all_targets, dim=0)
-
-        # Métriques vote
-        vote_metrics = compute_vote_metrics(all_predictions, all_targets)
-        metrics.update(vote_metrics)
-
-        # Afficher
-        print_metrics_table(metrics)
-    else:
-        logger.info("\n6. Vote majoritaire: N/A (mode single-output)")
-
-    # =========================================================================
-    # 7. SAUVEGARDER RÉSULTATS
-    # =========================================================================
-    logger.info("\n7. Sauvegarde des résultats...")
+    logger.info("\n6. Sauvegarde des résultats...")
 
     results_path = Path(RESULTS_DIR) / 'test_results.json'
     results_path.parent.mkdir(parents=True, exist_ok=True)
@@ -569,8 +484,6 @@ def main():
         # Mode multi-output
         logger.info(f"  Accuracy moyenne: {metrics['avg_accuracy']:.3f}")
         logger.info(f"  F1 moyen: {metrics['avg_f1']:.3f}")
-        if 'vote_accuracy' in metrics:
-            logger.info(f"  Vote majoritaire accuracy: {metrics['vote_accuracy']:.3f}")
 
     # Comparaison avec baseline (50% = hasard)
     baseline = 0.50
