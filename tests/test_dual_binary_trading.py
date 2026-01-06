@@ -291,6 +291,7 @@ def run_dual_binary_strategy(
     transition_delay: int = 0,
     continuations_only: bool = False,
     oracle_transition_filter: bool = False,
+    require_oracle_agreement: bool = False,
     verbose: bool = True
 ) -> Tuple[np.ndarray, Dict]:
     """
@@ -308,6 +309,7 @@ def run_dual_binary_strategy(
         transition_delay: Périodes d'attente après changement Direction (défaut: 0 = désactivé)
         continuations_only: Si True, trader SEULEMENT les continuations (Direction stable 3+ périodes)
         oracle_transition_filter: TEST ORACLE - Bloquer sorties IA si transition Oracle détectée
+        require_oracle_agreement: TEST TIMING - Trader SEULEMENT si IA et Oracle d'accord au même moment
 
     Returns:
         positions: Array des positions (n_samples,)
@@ -341,6 +343,7 @@ def run_dual_binary_strategy(
         'transitions_blocked': 0,  # Compteur entrées bloquées par transition_delay
         'transitions_ignored': 0,  # Compteur transitions ignorées (continuations_only)
         'oracle_transitions_blocked': 0,  # TEST ORACLE: Sorties bloquées car transition Oracle
+        'oracle_disagreements': 0,  # TEST TIMING: Entrées bloquées car IA ≠ Oracle
     }
 
     for i in range(n_samples):
@@ -438,6 +441,19 @@ def run_dual_binary_strategy(
                     # Forcer à garder la position actuelle
                     target_position = ctx.position
                     stats['oracle_transitions_blocked'] += 1
+
+        # ============================================
+        # TEST TIMING: Trader SEULEMENT si IA et Oracle d'accord
+        # ============================================
+        if require_oracle_agreement and target_position != Position.FLAT:
+            # Vérifier si IA et Oracle sont d'accord sur Direction
+            oracle_dir = int(Y[i, 0])  # 0=DOWN, 1=UP
+            ia_dir = direction  # From predictions
+
+            if oracle_dir != ia_dir:
+                # Désaccord IA/Oracle → BLOQUER l'entrée
+                target_position = Position.FLAT
+                stats['oracle_disagreements'] += 1
 
         # ============================================
         # LOGIQUE DE TRADING (avec confirmation)
@@ -613,6 +629,8 @@ def print_results(stats: Dict, indicator: str, split: str, use_predictions: bool
         logger.info(f"  Transitions ignorées: {stats['transitions_ignored']:,} (continuations uniquement)")
     if stats.get('oracle_transitions_blocked', 0) > 0:
         logger.info(f"  🎯 Sorties bloquées: {stats['oracle_transitions_blocked']:,} (TEST ORACLE: transitions détectées)")
+    if stats.get('oracle_disagreements', 0) > 0:
+        logger.info(f"  ⏰ Entrées bloquées: {stats['oracle_disagreements']:,} (TEST TIMING: IA ≠ Oracle)")
     logger.info(f"  Avg Duration:     {stats['avg_duration']:.1f} périodes")
 
     logger.info(f"\n💰 Performance:")
@@ -701,6 +719,11 @@ def main():
         action='store_true',
         help="TEST ORACLE: Bloquer sorties IA si transition Oracle détectée. Isole l'impact des transitions."
     )
+    parser.add_argument(
+        '--require-oracle-agreement',
+        action='store_true',
+        help="TEST TIMING: Trader SEULEMENT si IA et Oracle d'accord au même moment. Teste timing/amplitude."
+    )
 
     args = parser.parse_args()
 
@@ -736,6 +759,8 @@ def main():
         logger.info(f"   ⚡ SOLUTION 2: Continuations UNIQUEMENT (Direction stable 3+ périodes)")
     if args.oracle_transition_filter:
         logger.info(f"   🎯 TEST ORACLE: Bloquer sorties si transition Oracle détectée")
+    if args.require_oracle_agreement:
+        logger.info(f"   ⏰ TEST TIMING: Trader SEULEMENT si IA et Oracle d'accord (teste timing/amplitude)")
 
     positions, stats = run_dual_binary_strategy(
         Y=data['Y'],
@@ -747,7 +772,8 @@ def main():
         min_confirmation=args.min_confirmation,
         transition_delay=args.transition_delay,
         continuations_only=args.continuations_only,
-        oracle_transition_filter=args.oracle_transition_filter
+        oracle_transition_filter=args.oracle_transition_filter,
+        require_oracle_agreement=args.require_oracle_agreement
     )
 
     # Afficher résultats
