@@ -17,9 +17,16 @@ STRATÉGIE SIMPLE (Decision Matrix):
 
 DONNÉES D'ENTRÉE:
     Fichiers .npz générés par prepare_data_purified_dual_binary.py:
+
+    Kalman (baseline):
     - dataset_btc_eth_bnb_ada_ltc_rsi_dual_binary_kalman.npz
     - dataset_btc_eth_bnb_ada_ltc_macd_dual_binary_kalman.npz
     - dataset_btc_eth_bnb_ada_ltc_cci_dual_binary_kalman.npz
+
+    Octave (nouveau filtre):
+    - dataset_btc_eth_bnb_ada_ltc_rsi_dual_binary_octave20.npz
+    - dataset_btc_eth_bnb_ada_ltc_macd_dual_binary_octave20.npz
+    - dataset_btc_eth_bnb_ada_ltc_cci_dual_binary_octave20.npz
 
     Shape Y: (n_samples, 2) → [direction, force]
     Shape X: (n_samples, 25, n_features)
@@ -59,25 +66,36 @@ MÉTRIQUES:
     - Avg Duration (périodes par trade)
 
 Usage:
-    # Test MACD (recommandé: meilleur indicateur 86.9%)
-    # Par défaut: fees 0.15% (conservateur avec slippage)
+    # Test MACD Kalman (baseline)
+    # Par défaut: fees 0.15% (conservateur avec slippage), filter=kalman
     python tests/test_dual_binary_trading.py \\
         --indicator macd \\
+        --split test
+
+    # Test MACD Octave (nouveau filtre - meilleur Force)
+    python tests/test_dual_binary_trading.py \\
+        --indicator macd \\
+        --filter octave \\
         --split test
 
     # Test avec prédictions modèle (si disponibles)
     python tests/test_dual_binary_trading.py \\
         --indicator macd \\
+        --filter octave \\
         --split test \\
         --use-predictions
 
-    # Test avec fees personnalisés
-    python tests/test_dual_binary_trading.py --indicator macd --split test --fees 0.1  # Sans slippage
-    python tests/test_dual_binary_trading.py --indicator macd --split test --fees 0.02 # Maker fees optimiste
+    # Comparaison complète Octave vs Kalman (3 indicateurs)
+    python tests/test_dual_binary_trading.py --indicator rsi --filter kalman --split test
+    python tests/test_dual_binary_trading.py --indicator rsi --filter octave --split test
+    python tests/test_dual_binary_trading.py --indicator cci --filter kalman --split test
+    python tests/test_dual_binary_trading.py --indicator cci --filter octave --split test
+    python tests/test_dual_binary_trading.py --indicator macd --filter kalman --split test
+    python tests/test_dual_binary_trading.py --indicator macd --filter octave --split test
 
-    # Test RSI ou CCI
-    python tests/test_dual_binary_trading.py --indicator rsi --split test
-    python tests/test_dual_binary_trading.py --indicator cci --split test
+    # Test avec fees personnalisés
+    python tests/test_dual_binary_trading.py --indicator macd --filter octave --split test --fees 0.1  # Sans slippage
+    python tests/test_dual_binary_trading.py --indicator macd --filter octave --split test --fees 0.02 # Maker fees optimiste
 """
 
 import sys
@@ -102,11 +120,33 @@ logger = logging.getLogger(__name__)
 # CONSTANTES
 # =============================================================================
 
-# Mapping indicateurs → fichiers .npz
+# Fonction pour construire le chemin du dataset
+def get_dataset_path(indicator: str, filter_type: str = 'kalman') -> str:
+    """
+    Construit le chemin du dataset en fonction de l'indicateur et du filtre.
+
+    Args:
+        indicator: 'rsi', 'macd', ou 'cci'
+        filter_type: 'kalman' ou 'octave' (défaut: 'kalman')
+
+    Returns:
+        Chemin vers le fichier .npz
+    """
+    # Construire le suffixe du filtre
+    if filter_type == 'octave':
+        filter_suffix = 'octave20'
+    elif filter_type == 'kalman':
+        filter_suffix = 'kalman'
+    else:
+        raise ValueError(f"Filter type inconnu: {filter_type}. Choix: 'kalman', 'octave'")
+
+    return f'data/prepared/dataset_btc_eth_bnb_ada_ltc_{indicator}_dual_binary_{filter_suffix}.npz'
+
+# Legacy: Mapping pour rétrocompatibilité (Kalman par défaut)
 DATASET_PATHS = {
-    'rsi': 'data/prepared/dataset_btc_eth_bnb_ada_ltc_rsi_dual_binary_kalman.npz',
-    'macd': 'data/prepared/dataset_btc_eth_bnb_ada_ltc_macd_dual_binary_kalman.npz',
-    'cci': 'data/prepared/dataset_btc_eth_bnb_ada_ltc_cci_dual_binary_kalman.npz',
+    'rsi': get_dataset_path('rsi', 'kalman'),
+    'macd': get_dataset_path('macd', 'kalman'),
+    'cci': get_dataset_path('cci', 'kalman'),
 }
 
 # Index des features dans X (shape: n_samples, 25, n_features)
@@ -165,25 +205,28 @@ class Context:
 # FONCTIONS PRINCIPALES
 # =============================================================================
 
-def load_dataset(indicator: str, split: str = 'test') -> Dict:
+def load_dataset(indicator: str, split: str = 'test', filter_type: str = 'kalman') -> Dict:
     """
     Charge le dataset .npz pour l'indicateur spécifié.
 
     Args:
         indicator: 'rsi', 'macd', ou 'cci'
         split: 'train', 'val', ou 'test'
+        filter_type: 'kalman' ou 'octave' (défaut: 'kalman')
 
     Returns:
         dict avec X, Y, Y_pred (si disponible), metadata
     """
-    if indicator not in DATASET_PATHS:
-        raise ValueError(f"Indicateur inconnu: {indicator}. Choix: {list(DATASET_PATHS.keys())}")
+    if indicator not in ['rsi', 'macd', 'cci']:
+        raise ValueError(f"Indicateur inconnu: {indicator}. Choix: rsi, macd, cci")
 
-    path = DATASET_PATHS[indicator]
+    # Construire le chemin dynamiquement en fonction du filtre
+    path = get_dataset_path(indicator, filter_type)
+
     if not Path(path).exists():
         raise FileNotFoundError(
             f"Dataset introuvable: {path}\n"
-            f"Exécuter d'abord: python src/prepare_data_purified_dual_binary.py --assets BTC ETH BNB ADA LTC"
+            f"Exécuter d'abord: python src/prepare_data_purified_dual_binary.py --assets BTC ETH BNB ADA LTC --filter {filter_type}"
         )
 
     logger.info(f"📂 Chargement: {path}")
@@ -674,6 +717,13 @@ def main():
         help="Indicateur à tester (recommandé: macd)"
     )
     parser.add_argument(
+        '--filter',
+        type=str,
+        default='kalman',
+        choices=['kalman', 'octave'],
+        help="Type de filtre utilisé pour les labels (défaut: kalman)"
+    )
+    parser.add_argument(
         '--split',
         type=str,
         default='test',
@@ -731,7 +781,7 @@ def main():
     fees_decimal = args.fees / 100.0
 
     # Charger données
-    data = load_dataset(args.indicator, args.split)
+    data = load_dataset(args.indicator, args.split, args.filter)
 
     # Extraire c_ret
     returns = extract_c_ret(data['X'], args.indicator)
