@@ -32,6 +32,25 @@ CALCUL DU RENDEMENT:
     - Position LONG: PnL += c_ret
     - Position SHORT: PnL -= c_ret
 
+FEES ET SLIPPAGE (APPROCHE CONSERVATRICE):
+    Simulation pessimiste pour éviter les mauvaises surprises en production.
+
+    Frais par trade (un côté: entrée OU sortie):
+    - Binance Standard: 0.1% (0.001)
+    - Slippage estimé: 0.05% (0.0005) - décalage prix signal → exécution
+    - TOTAL PAR SIDE: 0.15% (0.0015)
+
+    Frais par trade complet (aller-retour: entrée + sortie):
+    - TOTAL ROUND-TRIP: 0.3% (0.003)
+
+    Philosophie: Si rentable avec 0.3% de frais simulés, ce sera une
+    "machine de guerre" avec les vrais frais Binance (0.1-0.2%).
+
+    Paramètre --fees:
+    - --fees 0.15 → 0.15% par side → 0.3% total (RECOMMANDÉ CONSERVATEUR)
+    - --fees 0.1  → 0.1% par side → 0.2% total (Binance sans slippage)
+    - --fees 0.02 → 0.02% par side → 0.04% total (Maker fees optimiste)
+
 MÉTRIQUES:
     - Total Trades
     - Win Rate (% trades positifs)
@@ -41,21 +60,24 @@ MÉTRIQUES:
 
 Usage:
     # Test MACD (recommandé: meilleur indicateur 86.9%)
+    # Par défaut: fees 0.15% (conservateur avec slippage)
     python tests/test_dual_binary_trading.py \\
         --indicator macd \\
-        --split test \\
-        --fees 0.1
+        --split test
 
     # Test avec prédictions modèle (si disponibles)
     python tests/test_dual_binary_trading.py \\
         --indicator macd \\
         --split test \\
-        --use-predictions \\
-        --fees 0.1
+        --use-predictions
+
+    # Test avec fees personnalisés
+    python tests/test_dual_binary_trading.py --indicator macd --split test --fees 0.1  # Sans slippage
+    python tests/test_dual_binary_trading.py --indicator macd --split test --fees 0.02 # Maker fees optimiste
 
     # Test RSI ou CCI
-    python tests/test_dual_binary_trading.py --indicator rsi --split test --fees 0.1
-    python tests/test_dual_binary_trading.py --indicator cci --split test --fees 0.1
+    python tests/test_dual_binary_trading.py --indicator rsi --split test
+    python tests/test_dual_binary_trading.py --indicator cci --split test
 """
 
 import sys
@@ -563,8 +585,8 @@ def main():
     parser.add_argument(
         '--fees',
         type=float,
-        default=0.1,
-        help="Frais par trade en %% (défaut: 0.1%% = 0.001)"
+        default=0.15,
+        help="Frais par side en %% (défaut: 0.15%% = Binance 0.1%% + Slippage 0.05%%)"
     )
     parser.add_argument(
         '--use-predictions',
@@ -607,7 +629,7 @@ def main():
     # Run backtest
     logger.info(f"\n🚀 Lancement backtest: {args.indicator.upper()} ({args.split})")
     logger.info(f"   Samples: {len(data['Y']):,}")
-    logger.info(f"   Frais: {args.fees}% par trade")
+    logger.info(f"   Frais: {args.fees}% par side → {args.fees*2:.2f}% total aller-retour")
     if args.threshold_force != 0.5:
         logger.info(f"   ⚙️  Seuil Force personnalisé: {args.threshold_force}")
     if args.min_confirmation > 1:
