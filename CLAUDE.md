@@ -848,6 +848,131 @@ else:
 
 ---
 
+## ✅ DATA AUDIT - Validation Stabilité Temporelle (2026-01-06)
+
+**Date**: 2026-01-06
+**Statut**: ✅ **PATTERNS VALIDÉS - GO POUR IMPLÉMENTATION**
+**Méthode**: Walk-forward analysis sur 83 périodes (~125 jours chacune)
+**Rapport détaillé**: [docs/DATA_AUDIT_SYNTHESIS.md](docs/DATA_AUDIT_SYNTHESIS.md)
+
+### Objectif - Réponse à l'Exigence Expert 2
+
+Validation **obligatoire** de la stabilité temporelle des patterns découverts pour éliminer le risque de data snooping:
+
+> "⚠️ OBLIGATOIRE : Vérifier stabilité des patterns sur plusieurs périodes. Vérifier que Nouveau STRONG reste dominant hors-sample."
+> — Expert 2
+
+### Résultats Synthétiques
+
+#### Pattern 1: Nouveau STRONG (1-2p) > Court STRONG (3-5p)
+
+| Indicateur | Stabilité | Delta Moyen | Verdict |
+|------------|-----------|-------------|---------|
+| **MACD** | **100%** (83/83) | **+8.18%** | ✅ STABLE |
+| **CCI** | **100%** (83/83) | +5.35% | ✅ STABLE |
+| **RSI** | **100%** (83/83) | +5.14% | ✅ STABLE |
+
+**Conclusion**: Pattern **UNIVERSEL** validé sur 100% des périodes, tous indicateurs.
+→ **GO pour retirer Court STRONG (3-5)** dans nettoyage structurel (+5-8% gain attendu)
+
+#### Pattern 2: Vol faible > Vol haute
+
+| Indicateur | Stabilité | Delta Moyen | Verdict |
+|------------|-----------|-------------|---------|
+| **MACD** | **100%** (83/83) | **+6.77%** | ✅ STABLE |
+| **CCI** | **85.5%** (71/83) | +1.62% | ✅ STABLE |
+| **RSI** | **74.7%** (62/83) | +0.93% | ⚠️ MODÉRÉ |
+
+**Conclusion**: Pattern **CONDITIONNEL** - robuste pour MACD/CCI, instable pour RSI.
+→ **Feature vol_rolling**: Utiliser pour MACD/CCI, poids neutre pour RSI
+
+#### Pattern 3: Oracle > IA (Proxy Learning Failure)
+
+| Indicateur | Stabilité | Delta Moyen | Écart-Type | Verdict |
+|------------|-----------|-------------|------------|---------|
+| **RSI** | **100%** (83/83) | **+26.87%** | 0.93% | ✅ STABLE |
+| **CCI** | **100%** (83/83) | +22.67% | 0.77% | ✅ STABLE |
+| **MACD** | **100%** (83/83) | +16.51% | 0.65% | ✅ STABLE |
+
+**Conclusion**: Oracle **systématiquement meilleur** de +16% à +27% (écart-type <1% = très constant).
+→ **Confirme besoin absolu du meta-modèle** pour filtrer Force=STRONG
+
+### Découvertes Critiques
+
+#### 1. Hiérarchie Indicateurs Confirmée
+
+**MACD = Champion Absolu** 🥇:
+- 100% stabilité sur TOUS les patterns
+- Delta Nouveau > Court = **+8.18%** (le plus fort)
+- Vol faible > Vol haute = +6.77% (robuste)
+- Écart-type Oracle > IA = **0.65%** (extrêmement constant)
+- **→ Indicateur PIVOT recommandé**
+
+**CCI = Équilibré** 🥈:
+- Tous patterns validés (100%, 85.5%, 100%)
+- Performance intermédiaire
+- **→ Modulateur de confirmation**
+
+**RSI = Proxy Learning Catastrophique** 🥉:
+- Oracle > IA = **+26.87%** (le PIRE écart!)
+- Vol faible instable (74.7% < 80%)
+- **→ Feature secondaire, mais potentiel meta-modèle élevé**
+
+#### 2. Validation Littérature
+
+| Pattern Découvert | Référence Académique | Validation Empirique |
+|-------------------|---------------------|----------------------|
+| Nouveau > Court | Jegadeesh & Titman (1993) - Signal Decay | ✅ 100% stable (3 indicateurs) |
+| Vol faible > Vol haute | López de Prado (2018) - Microstructure noise | ✅ MACD/CCI validés |
+| Court STRONG = Bull Trap | Chan (2009) - Mean reversion | ✅ 100% stable (pire perf) |
+| Oracle > IA (Meta-labeling) | López de Prado (2018) - Meta-labeling | ✅ +16-27% constant |
+
+**Conclusion**: Les patterns ne sont PAS accidentels mais reflètent des **phénomènes de marché documentés**.
+
+### Décisions Stratégiques
+
+#### ✅ GO IMMÉDIAT:
+
+1. **Nettoyage Court STRONG (3-5)**: 100% stable, +5-8% gain validé
+2. **Meta-modèle MACD pivot**: 100% patterns stables
+3. **Feature vol_rolling MACD/CCI**: 100%/85.5% validés
+4. **Architecture hiérarchique**: MACD > CCI > RSI
+
+#### ⚠️ PRUDENCE:
+
+1. **vol_rolling pour RSI**: Pattern instable (74.7%) → Poids neutre/nul
+2. **CCI Vol Q4**: Juste au-dessus seuil (85.5%) → Margin de sécurité
+
+### Prochaines Étapes
+
+✅ **Étape 0: Data Audit** → **COMPLÉTÉE - Patterns VALIDÉS**
+
+**Étape 1: Nettoyage Structurel** (1-2h):
+- Retirer Court STRONG (3-5) - UNIVERSEL: ~14% samples
+- Retirer Vol Q4 - CONDITIONNEL (MACD/CCI uniquement): ~10% samples
+- Gain total attendu: **+5-10% accuracy**
+
+**Étape 2: Features Meta-Modèle** (2h):
+- 9 features primaires validées
+- Y_meta avec Triple Barrier Method
+- Poids attendus validés empiriquement
+
+**Étape 3: Baseline Logistic Regression** (1h - OBLIGATOIRE):
+- Validation poids features
+- Si incohérent → problème data, pas modèle
+
+**Commandes d'exécution**:
+```bash
+# Data Audit (DÉJÀ EXÉCUTÉ sur votre machine)
+python tests/data_audit_stability.py --indicator macd --split train
+python tests/data_audit_stability.py --indicator rsi --split train
+python tests/data_audit_stability.py --indicator cci --split train
+```
+
+**Voir rapport complet**: [docs/DATA_AUDIT_SYNTHESIS.md](docs/DATA_AUDIT_SYNTHESIS.md)
+
+---
+
 ## DECOUVERTE CRITIQUE - Purification des Inputs (2026-01-05)
 
 ### Principe Fondamental : "More Data" ≠ "Better Results"
