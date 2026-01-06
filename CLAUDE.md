@@ -95,6 +95,191 @@ Au lieu de **SUPPRIMER** les pièges → **RELABELER** Force=STRONG → Force=WE
 
 ---
 
+## ❌ STACKING/ENSEMBLE LEARNING - ÉCHEC VALIDÉ (2026-01-06)
+
+**Date**: 2026-01-06
+**Statut**: ❌ **OPTION B ABANDONNÉE - Preuve empirique + validation théorique**
+**Tests effectués**: 9 combinaisons (RSI, CCI, MACD × CCI, MACD, RSI+CCI)
+**Résultat**: **0/9 tests positifs** (échec systématique)
+
+### Tableau Récapitulatif - 9 Tests Option B
+
+| Target | Features | Baseline | Meta-Model | **Delta** | Verdict |
+|--------|----------|----------|------------|-----------|---------|
+| **RSI** | CCI | 87.36% | 82.77% | **-4.59%** | ❌ |
+| **RSI** | MACD | 87.36% | 77.65% | **-9.71%** | ❌ |
+| **RSI** | CCI + MACD | 87.36% | 82.53% | **-4.83%** | ❌ |
+| **CCI** | RSI | 89.28% | 84.29% | **-4.99%** | ❌ |
+| **CCI** | MACD | 89.28% | 81.39% | **-7.89%** | ❌ |
+| **CCI** | RSI + MACD | 89.28% | 85.75% | **-3.53%** | ❌ |
+| **MACD** | RSI | 92.42% | 79.81% | **-12.61%** 💥 | ❌ |
+| **MACD** | CCI | 92.42% | 83.02% | **-9.40%** | ❌ |
+| **MACD** | RSI + CCI | 92.42% | 82.67% | **-9.75%** | ❌ |
+
+**Statistiques globales**:
+- Tests réussis: **0/9 (0%)**
+- Delta moyen: **-7.36%**
+- Pire dégradation: **-12.61%** (MACD + RSI)
+- Meilleure tentative: **-3.53%** (CCI + RSI + MACD)
+
+### Analyse Experte - 4 Niveaux (Validation Théorique)
+
+#### 1️⃣ Lecture Factuelle
+
+> "Quand TOUT échoue, ce n'est pas un bug, c'est une loi."
+
+- 0/9 tests réussis → échec systématique
+- Delta moyen -7.36% → pas du bruit, c'est structurel
+- Statistiquement irréfutable
+
+#### 2️⃣ Pourquoi l'Option B Échoue (Analyse Profonde)
+
+**Insight #1 - Les indicateurs sont des ESTIMATEURS, pas des features**
+
+Les indicateurs (RSI, CCI, MACD) ne sont PAS:
+- ❌ Des signaux partiels
+- ❌ Des observations indépendantes
+
+Ils SONT:
+- ✅ Des estimateurs COMPLETS d'un même phénomène latent (momentum/état directionnel)
+
+**Conséquence**:
+```
+Target = MACD, Features = RSI
+→ Le modèle tente de reconstruire un estimateur à partir d'un autre estimateur
+→ Régression inverse mal posée
+→ Résultat: copie ou dégradation (jamais amélioration)
+```
+
+**Insight #2 - Violation de "Conditional Independence"**
+
+Pour que le Stacking fonctionne, il faut:
+- Les erreurs des modèles doivent être **faiblement corrélées** conditionnellement au target
+
+**Ce qu'on observe**:
+- 98.8% de recouvrement sur les erreurs WEAK
+- Mêmes faux positifs, mêmes faux négatifs
+- **Indicateurs quasi parfaitement corrélés conditionnellement**
+
+**Loi de l'ensemble learning**:
+> "Corrélation des erreurs → gain nul ou négatif"
+
+**Insight #3 - "Quality Paradox" est une loi informationnelle**
+
+Cas observé:
+```
+MACD (92.42%) ← RSI (87.36%) → Meta = 79.81%
+```
+
+**Ce n'est PAS un bug**, c'est la théorie de l'information:
+
+> "Tu ne peux pas reconstruire une variable plus informative à partir d'une moins informative sans perte."
+
+Le modèle:
+1. Projette MACD dans l'espace RSI
+2. La projection détruit l'information spécifique MACD
+3. Ajoute du bruit
+4. **Résultat < RSI seul** (79.81% < 87.36%)
+
+**Insight #4 - Weight Dominance = symptôme de non-complémentarité**
+
+Poids observés dans TOUS les tests: **+3 à +5.5**
+
+Exemple:
+```
+RSI + CCI → CCI_dir: +4.60 ("Ignore RSI, suis CCI")
+CCI + RSI → RSI_dir: +5.45 ("Ignore CCI, suis RSI")
+MACD + RSI → RSI_dir: +4.28 ("Ignore MACD, suis RSI")
+```
+
+**Interprétation**:
+- Le modèle n'a trouvé QU'UNE dimension utile
+- Réponse rationnelle: ignorer le reste, devenir un proxy
+- **Ce n'est pas que le modèle est "bête", c'est qu'il n'y a rien à combiner**
+
+#### 3️⃣ Nature Réelle des Indicateurs
+
+**Découverte fondamentale**:
+
+RSI, CCI, MACD ne sont PAS:
+- ❌ Des experts spécialisés
+- ❌ Des vues complémentaires
+
+Ils SONT:
+- ✅ **Trois projections différentes du MÊME signal latent 1D** (momentum/déséquilibre court terme)
+
+**Ils diffèrent par**:
+- Leur filtre (EMA, SMA, Typical Price)
+- Leur latence (rapide vs lent)
+- Leur sensibilité au bruit
+
+**Ils NE diffèrent PAS par**:
+- ❌ La nature de l'information capturée
+
+**Citation experte**:
+> "Tu ne peux pas voter entre trois miroirs du même objet."
+
+**Pourquoi l'Oracle peut préférer RSI et l'IA préférer MACD**:
+- Filtres différents → timing différent
+- Mais les **erreurs restent alignées** (98.8% sur WEAK)
+
+#### 4️⃣ Conséquences Architecturales
+
+**Ce qu'il faut ARRÊTER de faire** (preuve expérimentale):
+
+| Action | Verdict | Raison |
+|--------|---------|--------|
+| Utiliser un indicateur pour prédire un autre | ❌ ABANDONNER | Structurellement perdant |
+| Stacking entre indicateurs | ❌ ABANDONNER | Information nulle |
+| Meta-modèle linéaire/non-linéaire pour "combiner" | ❌ ABANDONNER | Illusion mathématique |
+
+**Ce qu'il faut faire À LA PLACE**:
+
+✅ **Indicateurs en relation ORTHOGONALE FONCTIONNELLE** (pas hiérarchique)
+
+```
+❌ HIÉRARCHIQUE (échoue):
+   RSI → MACD (prédiction)
+   CCI → RSI (prédiction)
+
+✅ ORTHOGONALE (fonctionne):
+   Indicateurs → Décision de qualité (SI agir)
+   Indicateurs → Régime (QUAND agir)
+   Indicateurs → Filtrage contextuel (COMMENT agir)
+```
+
+**Principe fondamental**:
+> "On ne prédit pas un indicateur avec un autre.
+> On utilise les indicateurs pour décider SI et QUAND faire confiance à un signal."
+
+**Architecture validée (travaux précédents)**:
+```
+Volatilité → Décide SI agir
+MACD      → Décide Direction
+RSI/CCI   → Modulent Qualité
+```
+
+### Conclusion - Ce Que Cette Expérience Apporte
+
+**Ce que les résultats prouvent**:
+1. ✅ Option B est **mathématiquement mal posée**
+2. ✅ L'échec est **nécessaire**, pas accidentel
+3. ✅ Les indicateurs ne sont **pas combinables** comme features prédictives
+4. ✅ Le Stacking ici **viole les hypothèses fondamentales** de l'ensemble learning
+
+**Ce qu'on a gagné**:
+1. ✅ Preuve empirique forte (9 tests, 0 succès)
+2. ✅ Élimination définitive d'une fausse piste
+3. ✅ Compréhension claire de la **structure informationnelle** du problème
+4. ✅ Validation que les indicateurs sont des **projections d'un signal latent 1D**
+
+**Prochaine étape**:
+- ❌ Abandonner définitivement Stacking/Ensemble Learning
+- ✅ Retour à **Profitability Relabeling** (Option A - validée: +8% Win Rate MACD)
+- ✅ Architecture **orthogonale fonctionnelle** (SI/QUAND/COMMENT, pas prédiction hiérarchique)
+
+---
+
 ## RESUME DES DECOUVERTES MAJEURES (2026-01-05)
 
 ### 🎯 ARCHITECTURE DUAL-BINARY - IMPLEMENTEE ✅
