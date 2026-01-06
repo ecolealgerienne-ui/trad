@@ -321,41 +321,22 @@ def run_dual_binary_strategy(
                 ctx.current_pnl -= ret
 
         # ============================================
-        # DECISION MATRIX (Asymétrique : Entrée Stricte / Sortie Patiente)
+        # DECISION MATRIX (Stratégie Simple - ORIGINALE)
         # ============================================
-        # PRINCIPE : On entre seulement si Force STRONG (Sniper)
-        #            On sort seulement si Direction change (Hystérésis)
+        # LOGIQUE VALIDÉE : Exit on Force WEAK (réactif)
+        # - Crypto 5min : Trends courtes (~45min), Force WEAK = affaiblissement réel
+        # - PnL Brut +49.84% avec cette logique (vs -271% avec Hold on WEAK)
         # ============================================
 
         if direction == 1 and force == 1:
-            # UP + STRONG → LONG (Entrée stricte)
+            # UP + STRONG → LONG
             target_position = Position.LONG
         elif direction == 0 and force == 1:
-            # DOWN + STRONG → SHORT (Entrée stricte)
+            # DOWN + STRONG → SHORT
             target_position = Position.SHORT
         else:
-            # Signaux WEAK → Logique de MAINTIEN (Hystérésis)
-            if ctx.position == Position.FLAT:
-                # Pas en position → on n'entre pas (signal trop faible)
-                target_position = Position.FLAT
-            elif ctx.position == Position.LONG:
-                # En LONG → on sort SEULEMENT si Direction passe à DOWN
-                if direction == 0:
-                    # Direction contraire → TOUJOURS sortir en FLAT (pas de reversal)
-                    # Les reversals créent des whipsaws catastrophiques
-                    target_position = Position.FLAT
-                else:
-                    # Direction toujours UP (ou neutre) → ON RESTE LONG
-                    target_position = Position.LONG
-            elif ctx.position == Position.SHORT:
-                # En SHORT → on sort SEULEMENT si Direction passe à UP
-                if direction == 1:
-                    # Direction contraire → TOUJOURS sortir en FLAT (pas de reversal)
-                    target_position = Position.FLAT
-                else:
-                    # Direction toujours DOWN (ou neutre) → ON RESTE SHORT
-                    target_position = Position.SHORT
-
+            # Autres (signaux WEAK) → HOLD (sortir de position)
+            target_position = Position.FLAT
             stats['n_hold'] += 1
 
         # ============================================
