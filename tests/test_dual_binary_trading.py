@@ -290,6 +290,7 @@ def run_dual_binary_strategy(
     min_confirmation: int = 1,
     transition_delay: int = 0,
     continuations_only: bool = False,
+    oracle_transition_filter: bool = False,
     verbose: bool = True
 ) -> Tuple[np.ndarray, Dict]:
     """
@@ -306,6 +307,7 @@ def run_dual_binary_strategy(
         min_confirmation: Nombre de périodes de signal stable requis avant d'agir (défaut: 1)
         transition_delay: Périodes d'attente après changement Direction (défaut: 0 = désactivé)
         continuations_only: Si True, trader SEULEMENT les continuations (Direction stable 3+ périodes)
+        oracle_transition_filter: TEST ORACLE - Bloquer sorties IA si transition Oracle détectée
 
     Returns:
         positions: Array des positions (n_samples,)
@@ -338,6 +340,7 @@ def run_dual_binary_strategy(
         'fees_per_trade': fees,
         'transitions_blocked': 0,  # Compteur entrées bloquées par transition_delay
         'transitions_ignored': 0,  # Compteur transitions ignorées (continuations_only)
+        'oracle_transitions_blocked': 0,  # TEST ORACLE: Sorties bloquées car transition Oracle
     }
 
     for i in range(n_samples):
@@ -418,6 +421,23 @@ def run_dual_binary_strategy(
 
         # Agir seulement si signal confirmé pendant min_confirmation périodes
         confirmed = (ctx.confirmation_count >= min_confirmation)
+
+        # ============================================
+        # TEST ORACLE: Bloquer sorties sur transitions Oracle
+        # ============================================
+        if oracle_transition_filter and i >= 1 and ctx.position != Position.FLAT:
+            # On est en position et IA veut sortir/inverser
+            if target_position != ctx.position:
+                # Vérifier si c'est une transition ORACLE (vraies labels)
+                oracle_dir_current = int(Y[i, 0])
+                oracle_dir_previous = int(Y[i-1, 0])
+                oracle_transition = (oracle_dir_current != oracle_dir_previous)
+
+                if oracle_transition:
+                    # TRANSITION ORACLE détectée → BLOQUER la sortie IA
+                    # Forcer à garder la position actuelle
+                    target_position = ctx.position
+                    stats['oracle_transitions_blocked'] += 1
 
         # ============================================
         # LOGIQUE DE TRADING (avec confirmation)
@@ -591,6 +611,8 @@ def print_results(stats: Dict, indicator: str, split: str, use_predictions: bool
         logger.info(f"  Transitions bloquées: {stats['transitions_blocked']:,} (délai post-transition)")
     if stats.get('transitions_ignored', 0) > 0:
         logger.info(f"  Transitions ignorées: {stats['transitions_ignored']:,} (continuations uniquement)")
+    if stats.get('oracle_transitions_blocked', 0) > 0:
+        logger.info(f"  🎯 Sorties bloquées: {stats['oracle_transitions_blocked']:,} (TEST ORACLE: transitions détectées)")
     logger.info(f"  Avg Duration:     {stats['avg_duration']:.1f} périodes")
 
     logger.info(f"\n💰 Performance:")
@@ -674,6 +696,11 @@ def main():
         action='store_true',
         help="SOLUTION 2: Trader SEULEMENT les continuations (Direction stable 3+ périodes). Abandonne toutes les transitions."
     )
+    parser.add_argument(
+        '--oracle-transition-filter',
+        action='store_true',
+        help="TEST ORACLE: Bloquer sorties IA si transition Oracle détectée. Isole l'impact des transitions."
+    )
 
     args = parser.parse_args()
 
@@ -707,6 +734,8 @@ def main():
         logger.info(f"   🚦 Délai post-transition: {args.transition_delay} périodes (évite faux tops/bottoms)")
     if args.continuations_only:
         logger.info(f"   ⚡ SOLUTION 2: Continuations UNIQUEMENT (Direction stable 3+ périodes)")
+    if args.oracle_transition_filter:
+        logger.info(f"   🎯 TEST ORACLE: Bloquer sorties si transition Oracle détectée")
 
     positions, stats = run_dual_binary_strategy(
         Y=data['Y'],
@@ -717,7 +746,8 @@ def main():
         threshold_force=args.threshold_force,
         min_confirmation=args.min_confirmation,
         transition_delay=args.transition_delay,
-        continuations_only=args.continuations_only
+        continuations_only=args.continuations_only,
+        oracle_transition_filter=args.oracle_transition_filter
     )
 
     # Afficher résultats
