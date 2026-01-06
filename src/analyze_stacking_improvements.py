@@ -112,7 +112,7 @@ def analyze_individual_improvements(
     Args:
         meta_model: Modèle Stacking entraîné
         X_test: Méta-features (n, 6)
-        Y_test: Vérité terrain (n, 1)
+        Y_test: Vérité terrain (n, 1) - RÉFÉRENCE UNIQUE (MACD)
         raw_preds: Prédictions baseline de chaque indicateur
 
     Returns:
@@ -124,21 +124,25 @@ def analyze_individual_improvements(
     Y_stacking_pred = meta_model.predict(X_test)
     stacking_acc = accuracy_score(Y_test.ravel(), Y_stacking_pred) * 100
 
+    # RÉFÉRENCE UNIQUE: Y_test (de MACD, le meilleur baseline)
+    Y_true_reference = Y_test.ravel().astype(int)
+
     logger.info(f"\n" + "="*80)
     logger.info(f"📊 COMPARAISON BASELINE vs STACKING")
     logger.info(f"="*80)
+    logger.info(f"\n⚠️  Utilisation de Y_test MACD comme référence unique pour tous les indicateurs")
 
     for i, indicator in enumerate(['macd', 'rsi', 'cci']):
         # Baseline: prédictions de l'indicateur seul
         Y_baseline_pred_proba = raw_preds[indicator]['Y_pred'][:, 0]  # Direction probabilités
         Y_baseline_pred = (Y_baseline_pred_proba > 0.5).astype(int)  # Convertir en binaire
-        Y_true = raw_preds[indicator]['Y_true'][:, 0].astype(int)
 
-        baseline_acc = accuracy_score(Y_true, Y_baseline_pred) * 100
+        # Utiliser Y_true_reference (MACD) au lieu de Y_true propre à chaque indicateur
+        baseline_acc = accuracy_score(Y_true_reference, Y_baseline_pred) * 100
 
         # Analyser où Stacking corrige les erreurs de baseline
-        baseline_errors = (Y_baseline_pred != Y_true)
-        stacking_correct = (Y_stacking_pred == Y_true.ravel())
+        baseline_errors = (Y_baseline_pred != Y_true_reference)
+        stacking_correct = (Y_stacking_pred == Y_true_reference)
 
         # Samples où Stacking corrige baseline
         corrected_by_stacking = baseline_errors & stacking_correct
@@ -153,7 +157,7 @@ def analyze_individual_improvements(
 
         # Gain net
         net_gain = n_corrected - n_new_errors
-        net_gain_pct = (net_gain / len(Y_true)) * 100
+        net_gain_pct = (net_gain / len(Y_true_reference)) * 100
 
         results[indicator] = {
             'baseline_acc': baseline_acc,
