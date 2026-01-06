@@ -130,8 +130,9 @@ def analyze_individual_improvements(
 
     for i, indicator in enumerate(['macd', 'rsi', 'cci']):
         # Baseline: prédictions de l'indicateur seul
-        Y_baseline_pred = raw_preds[indicator]['Y_pred'][:, 0]  # Direction uniquement
-        Y_true = raw_preds[indicator]['Y_true'][:, 0]
+        Y_baseline_pred_proba = raw_preds[indicator]['Y_pred'][:, 0]  # Direction probabilités
+        Y_baseline_pred = (Y_baseline_pred_proba > 0.5).astype(int)  # Convertir en binaire
+        Y_true = raw_preds[indicator]['Y_true'][:, 0].astype(int)
 
         baseline_acc = accuracy_score(Y_true, Y_baseline_pred) * 100
 
