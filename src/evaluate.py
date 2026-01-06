@@ -273,6 +273,20 @@ def main():
     logger.info(f"\nDevice: {device}")
 
     # =========================================================================
+    # CHARGEMENT PRÉLIMINAIRE DES MÉTADONNÉES (pour détection filtre)
+    # =========================================================================
+    filter_type_metadata = None
+    if args.data and not args.model:
+        # Charger uniquement les métadonnées (rapide)
+        try:
+            preliminary_data = load_prepared_data(args.data)
+            preliminary_metadata = preliminary_data.get('metadata', {})
+            if preliminary_metadata and 'filter_type' in preliminary_metadata:
+                filter_type_metadata = preliminary_metadata['filter_type']
+        except Exception as e:
+            logger.warning(f"⚠️ Impossible de charger les métadonnées: {e}")
+
+    # =========================================================================
     # AUTO-DÉTECTION DU CHEMIN DU MODÈLE (logique identique à train.py)
     # =========================================================================
     if args.model:
@@ -291,7 +305,7 @@ def main():
                     detected_indicator = ind
                     break
 
-            # Détecter filtre (ex: dataset_..._rsi_dual_binary_kalman.npz → 'kalman')
+            # Détecter filtre (fallback si pas dans metadata)
             for filt in ['kalman', 'octave20', 'octave', 'decycler']:
                 if filt in data_name:
                     detected_filter = filt
@@ -300,7 +314,11 @@ def main():
         # Priorité: CLI > filename
         if args.indicator and args.indicator != 'all':
             detected_indicator = args.indicator
-        if args.filter:
+
+        # Priorité pour le filtre: metadata > CLI argument > filename
+        if filter_type_metadata:
+            detected_filter = filter_type_metadata
+        elif args.filter:
             detected_filter = args.filter
 
         # Construire le nom du modèle
@@ -323,6 +341,8 @@ def main():
         logger.info(f"\n🔍 Détection auto du modèle:")
         logger.info(f"  Indicateur détecté: {detected_indicator or 'aucun'}")
         logger.info(f"  Filtre détecté: {detected_filter or 'aucun'}")
+        if filter_type_metadata:
+            logger.info(f"  Source filtre: métadonnées")
         logger.info(f"  Chemin modèle: {model_path}")
 
     # Vérifier que le modèle existe
@@ -402,6 +422,8 @@ def main():
     logger.info(f"  Dual-Binary: {is_dual_binary}")
     if indicator_for_metrics_saved:
         logger.info(f"  Indicateur: {indicator_for_metrics_saved}")
+    if metadata and 'filter_type' in metadata:
+        logger.info(f"  Filtre: {metadata['filter_type'].upper()}")
 
     # Utiliser num_outputs de la config ou celui détecté depuis les données
     num_features = n_features_detected
