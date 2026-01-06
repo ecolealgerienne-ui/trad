@@ -289,6 +289,7 @@ def run_dual_binary_strategy(
     threshold_force: float = 0.5,
     min_confirmation: int = 1,
     transition_delay: int = 0,
+    continuations_only: bool = False,
     verbose: bool = True
 ) -> Tuple[np.ndarray, Dict]:
     """
@@ -304,6 +305,7 @@ def run_dual_binary_strategy(
         threshold_force: Seuil pour Force (défaut: 0.5)
         min_confirmation: Nombre de périodes de signal stable requis avant d'agir (défaut: 1)
         transition_delay: Périodes d'attente après changement Direction (défaut: 0 = désactivé)
+        continuations_only: Si True, trader SEULEMENT les continuations (Direction stable 3+ périodes)
 
     Returns:
         positions: Array des positions (n_samples,)
@@ -335,6 +337,7 @@ def run_dual_binary_strategy(
         'total_fees': 0.0,
         'fees_per_trade': fees,
         'transitions_blocked': 0,  # Compteur entrées bloquées par transition_delay
+        'transitions_ignored': 0,  # Compteur transitions ignorées (continuations_only)
     }
 
     for i in range(n_samples):
@@ -382,6 +385,25 @@ def run_dual_binary_strategy(
             # Autres (signaux WEAK) → HOLD (sortir de position)
             target_position = Position.FLAT
             stats['n_hold'] += 1
+
+        # ============================================
+        # FILTRAGE CONTINUATIONS UNIQUEMENT (Solution 2)
+        # ============================================
+        is_continuation = True  # Par défaut, autoriser
+
+        if continuations_only and i >= 2:
+            # Vérifier si Direction est STABLE depuis 3 périodes
+            # Continuation = direction[i] == direction[i-1] == direction[i-2]
+            prev_dir_1 = int(signals[i-1, 0])
+            prev_dir_2 = int(signals[i-2, 0])
+
+            is_continuation = (direction == prev_dir_1 == prev_dir_2)
+
+            if not is_continuation and target_position != Position.FLAT:
+                # C'est une transition (Direction a changé) - IGNORER
+                stats['transitions_ignored'] += 1
+                # Forcer FLAT pour ne pas entrer
+                target_position = Position.FLAT
 
         # ============================================
         # CONFIRMATION TEMPORELLE
@@ -533,8 +555,9 @@ def run_dual_binary_strategy(
         stats['avg_duration'] = 0
         stats['trades'] = []
 
-    # Copier compteur transitions bloquées
+    # Copier compteurs
     stats['transitions_blocked'] = ctx.transitions_blocked
+    # transitions_ignored déjà dans stats (compteur direct)
 
     return positions, stats
 
@@ -566,6 +589,8 @@ def print_results(stats: Dict, indicator: str, split: str, use_predictions: bool
     logger.info(f"  HOLD (filtered):  {stats['n_hold']:,}")
     if stats.get('transitions_blocked', 0) > 0:
         logger.info(f"  Transitions bloquées: {stats['transitions_blocked']:,} (délai post-transition)")
+    if stats.get('transitions_ignored', 0) > 0:
+        logger.info(f"  Transitions ignorées: {stats['transitions_ignored']:,} (continuations uniquement)")
     logger.info(f"  Avg Duration:     {stats['avg_duration']:.1f} périodes")
 
     logger.info(f"\n💰 Performance:")
@@ -644,6 +669,11 @@ def main():
         default=0,
         help="Périodes d'attente après changement Direction avant d'entrer (défaut: 0 = désactivé). 3-5 évite faux tops/bottoms."
     )
+    parser.add_argument(
+        '--continuations-only',
+        action='store_true',
+        help="SOLUTION 2: Trader SEULEMENT les continuations (Direction stable 3+ périodes). Abandonne toutes les transitions."
+    )
 
     args = parser.parse_args()
 
@@ -675,6 +705,8 @@ def main():
         logger.info(f"   ⏱️  Confirmation temporelle: {args.min_confirmation} périodes")
     if args.transition_delay > 0:
         logger.info(f"   🚦 Délai post-transition: {args.transition_delay} périodes (évite faux tops/bottoms)")
+    if args.continuations_only:
+        logger.info(f"   ⚡ SOLUTION 2: Continuations UNIQUEMENT (Direction stable 3+ périodes)")
 
     positions, stats = run_dual_binary_strategy(
         Y=data['Y'],
@@ -684,7 +716,8 @@ def main():
         Y_pred=data['Y_pred'],
         threshold_force=args.threshold_force,
         min_confirmation=args.min_confirmation,
-        transition_delay=args.transition_delay
+        transition_delay=args.transition_delay,
+        continuations_only=args.continuations_only
     )
 
     # Afficher résultats
