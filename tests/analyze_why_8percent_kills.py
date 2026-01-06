@@ -60,21 +60,26 @@ def load_data(indicator: str, split: str) -> Dict:
 
     data = np.load(file_path, allow_pickle=True)
 
-    # Vérifier que Y_pred existe
-    if 'Y_pred' not in data:
+    # Vérifier que Y_pred existe (avec le bon format de clé)
+    # Les clés utilisent le format Y_{split}_pred (ex: Y_train_pred, Y_test_pred)
+    pred_key_train = f'Y_train_pred'
+    pred_key_val = f'Y_val_pred'
+    pred_key_test = f'Y_test_pred'
+
+    if pred_key_test not in data:
         raise ValueError(
-            f"Y_pred absent dans {file_path}.\n"
+            f"Y_test_pred absent dans {file_path}.\n"
             "   Générer d'abord les prédictions:\n"
             "   python src/train.py --data <dataset> --epochs 50\n"
-            "   python src/evaluate.py --data <dataset>"
+            "   (Les prédictions sont automatiquement sauvegardées)"
         )
 
     # Extraire le split
     X_train, X_val, X_test = data['X_train'], data['X_val'], data['X_test']
     Y_train, Y_val, Y_test = data['Y_train'], data['Y_val'], data['Y_test']
-    Y_pred_train = data['Y_pred_train']
-    Y_pred_val = data['Y_pred_val']
-    Y_pred_test = data['Y_pred_test']
+    Y_pred_train = data.get(pred_key_train, None)
+    Y_pred_val = data.get(pred_key_val, None)
+    Y_pred_test = data.get(pred_key_test, None)
 
     split_data = {
         'train': (X_train, Y_train, Y_pred_train),
