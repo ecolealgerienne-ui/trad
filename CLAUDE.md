@@ -51,19 +51,40 @@
 
 ### Décisions Stratégiques Post-Validation
 
+### ⚠️ CORRECTION CRITIQUE: Relabeling vs Suppression
+
+**Problème identifié par utilisateur** (2026-01-06):
+
+> "Supprimer les données 'difficiles' (Duration 3-5, Vol Q4) revient à mettre des œillères au modèle.
+> Si tu les supprimes du Train : Le modèle ne voit jamais ces pièges.
+> En Prod : Il tombe dedans la tête la première car il ne sait pas que ce sont des pièges."
+
+**✅ APPROCHE CORRIGÉE: RELABELING (Target Correction)**
+
+Au lieu de **SUPPRIMER** les pièges → **RELABELER** Force=STRONG → Force=WEAK
+
+**Principe (Hard Negative Mining)**:
+1. Le modèle **VOIT** les configurations pièges (Duration 3-5, Vol Q4)
+2. Il **APPREND** à les reconnaître comme WEAK (pas STRONG)
+3. En prod, il **DÉTECTE** ces patterns et prédit correctement WEAK
+
+**Script validé**: `src/relabel_dataset_phase1.py` ✅
+
+**Documentation complète**: [docs/CORRECTION_RELABELING_VS_DELETION.md](docs/CORRECTION_RELABELING_VS_DELETION.md)
+
 **✅ GO IMMÉDIAT**:
-1. Nettoyage Court STRONG (3-5) - UNIVERSEL (100% stable, +5-8%)
-2. Nettoyage Vol Q4 - CONDITIONNEL (MACD/CCI uniquement, RSI exclu)
-3. Script Expert 1 intégré et prêt
+1. **RELABELING** Court STRONG (3-5) → Force=WEAK (UNIVERSEL)
+2. **RELABELING** Vol Q4 → Force=WEAK (MACD/CCI uniquement, RSI exclu)
+3. Réentraînement sur datasets `_relabeled.npz`
+4. Gain attendu: +3-5% accuracy + meilleure généralisation prod
 
-**❌ NE PAS FAIRE** (Expert 2):
-- Réentraîner CNN-LSTM "en espérant mieux"
-- Changer Y ou ajouter features sans nettoyage
+**❌ NE PAS FAIRE**:
+- ~~Supprimer les pièges du dataset~~ (Expert 1 approche incorrecte)
+- Réentraîner CNN-LSTM "en espérant mieux" sans relabeling
 - Passer directement à GAN
-> "Tout ça renforcerait le proxy learning, pas l'inverse."
 
-**Roadmap validée**:
-- Phase 1: Nettoyage structurel (immédiat)
+**Roadmap corrigée**:
+- Phase 1: **Relabeling** (Target Correction - Hard Negative Mining)
 - Phase 2: Meta-sélection (Logistic → RF/XGBoost → MLP si gain >5%)
 - Phase 3: GAN uniquement comme détecteur d'anomalies (pas cœur décisionnel)
 
