@@ -261,16 +261,16 @@ def main():
     X_test = splits['X_test']
     Y_test = splits['Y_test']
 
-    # Charger les prix (depuis metadata)
-    data = np.load(str(dataset_path))
-    prices_test = data.get('prices_test', None)
-
-    if prices_test is None:
-        print("❌ Prix test non disponibles dans le dataset!")
-        print("   Le dataset doit contenir 'prices_test' pour le Profitability Relabeling.")
-        return 1
-
     print(f"   Samples test: {len(X_test)}")
+
+    # Reconstruire prix à partir des returns (comme test_relabeling_impact.py)
+    print("   Reconstruction prix à partir de c_ret...")
+    idx_ret = 2 if indicator == 'cci' else 0  # CCI: c_ret est index 2, autres: index 0
+    returns = X_test[:, -1, idx_ret]  # Dernier timestep de chaque séquence
+
+    # Reconstruire série de prix (prix initial arbitraire = 100)
+    prices_test = 100 * np.cumprod(1 + returns)
+    print(f"   Prix reconstruits: {len(prices_test)} samples")
     print()
 
     # Application Profitability Relabeling

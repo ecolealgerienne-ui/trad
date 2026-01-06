@@ -13,6 +13,7 @@ Impact attendu: Entre Config 3 (trop agressif) et Config 4 (trop conservateur).
 """
 
 import numpy as np
+import pandas as pd
 import argparse
 from pathlib import Path
 import sys
@@ -203,18 +204,31 @@ def main():
     X_test = splits['X_test']
     Y_test = splits['Y_test']
 
-    # Charger metadata
-    data = np.load(str(dataset_path))
-    prices_test = data.get('prices_test', None)
-    duration_test = data.get('duration_test', None)
-    vol_rolling_test = data.get('vol_rolling_test', None)
-
-    if prices_test is None or duration_test is None or vol_rolling_test is None:
-        print("❌ Métadonnées manquantes dans le dataset!")
-        print("   Le dataset doit contenir: prices_test, duration_test, vol_rolling_test")
-        return 1
-
     print(f"   Samples test: {len(X_test)}")
+
+    # Recalculer métadonnées à partir de X (comme test_relabeling_impact.py)
+    print("   Recalcul métadonnées (duration, vol_rolling, prices)...")
+    idx_ret = 2 if indicator == 'cci' else 0  # CCI: c_ret est index 2, autres: index 0
+    returns = X_test[:, -1, idx_ret]
+
+    # Duration
+    force_labels = Y_test[:, 1]
+    duration_test = np.zeros_like(force_labels, dtype=int)
+    count = 0
+    for i in range(len(force_labels)):
+        if force_labels[i] == 1:
+            count += 1
+        else:
+            count = 0
+        duration_test[i] = count
+
+    # Vol rolling
+    vol_rolling_test = pd.Series(returns).abs().rolling(window=20).mean().fillna(0).values
+
+    # Prix (pour affichage uniquement)
+    prices_test = 100 * np.cumprod(1 + returns)
+
+    print(f"   Métadonnées recalculées: duration, vol_rolling, prices")
     print()
 
     # Application Smart Hybrid Relabeling
