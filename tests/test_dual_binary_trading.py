@@ -341,25 +341,17 @@ def run_dual_binary_strategy(
             elif ctx.position == Position.LONG:
                 # En LONG → on sort SEULEMENT si Direction passe à DOWN
                 if direction == 0:
-                    # Direction contraire
-                    if force == 1:
-                        # DOWN + STRONG → Renversement fort, on inverse
-                        target_position = Position.SHORT
-                    else:
-                        # DOWN + WEAK → Signal de sortie faible, on sort en FLAT
-                        target_position = Position.FLAT
+                    # Direction contraire → TOUJOURS sortir en FLAT (pas de reversal)
+                    # Les reversals créent des whipsaws catastrophiques
+                    target_position = Position.FLAT
                 else:
                     # Direction toujours UP (ou neutre) → ON RESTE LONG
                     target_position = Position.LONG
             elif ctx.position == Position.SHORT:
                 # En SHORT → on sort SEULEMENT si Direction passe à UP
                 if direction == 1:
-                    if force == 1:
-                        # UP + STRONG → Renversement fort, on inverse
-                        target_position = Position.LONG
-                    else:
-                        # UP + WEAK → Signal de sortie faible, on sort en FLAT
-                        target_position = Position.FLAT
+                    # Direction contraire → TOUJOURS sortir en FLAT (pas de reversal)
+                    target_position = Position.FLAT
                 else:
                     # Direction toujours DOWN (ou neutre) → ON RESTE SHORT
                     target_position = Position.SHORT
