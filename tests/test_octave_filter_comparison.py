@@ -21,8 +21,9 @@ PIPELINE:
 
 STRATÉGIES TESTÉES (6 combinaisons):
     Pour chaque indicateur (RSI, CCI, MACD):
-    - Stratégie 1 (Classique) : Signal basé sur filt_02
-    - Stratégie 2 (Différence) : Signal basé sur diff
+    - Stratégie 1 (Classique) : filt_02[t-2] > filt_02[t-3] → BUY/SELL
+    - Stratégie 2 (Différence) : diff > 0 → BUY, diff < 0 → SELL
+      (où diff = filt_02 - filt_025)
 
 DONNÉES:
     Source: data_trad/BTCUSD_all_5m.csv
@@ -256,11 +257,11 @@ def calculate_signals(df: pd.DataFrame) -> pd.DataFrame:
     Calcule les signaux de trading pour les 2 stratégies.
 
     Stratégie 1 (Classique): filt_02[t-2] > filt_02[t-3]
-    Stratégie 2 (Différence): diff[t-2] > diff[t-3]
+    Stratégie 2 (Différence): diff > 0 (filt_02 > filt_025)
 
     Ajoute les colonnes:
         - {indicator}_signal_classic : Stratégie 1 (1=BUY, 0=SELL)
-        - {indicator}_signal_diff : Stratégie 2 (1=BUY, 0=SELL)
+        - {indicator}_signal_diff : Stratégie 2 (1=BUY si diff>0, 0=SELL si diff<0)
 
     Args:
         df: DataFrame avec filtres
@@ -280,10 +281,11 @@ def calculate_signals(df: pd.DataFrame) -> pd.DataFrame:
         filt_02_t3 = df[f'{ind}_filt_02'].shift(3)
         df[f'{ind}_signal_classic'] = (filt_02_t2 > filt_02_t3).astype(int)
 
-        # Stratégie 2 : Différence (t-2 > t-3)
+        # Stratégie 2 : Signe de la différence (avec shift t-2 pour alignement)
+        # BUY si filt_02 > filt_025 (différence positive)
+        # SELL si filt_02 < filt_025 (différence négative)
         diff_t2 = df[f'{ind}_diff'].shift(2)
-        diff_t3 = df[f'{ind}_diff'].shift(3)
-        df[f'{ind}_signal_diff'] = (diff_t2 > diff_t3).astype(int)
+        df[f'{ind}_signal_diff'] = (diff_t2 > 0).astype(int)
 
     logger.info("   ✅ Signaux calculés (Classique + Différence)")
 
