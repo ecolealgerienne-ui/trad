@@ -17,6 +17,7 @@ Avantage: Zéro hypothèse, nettoyage parfait, apprentissage optimal.
 
 import numpy as np
 import argparse
+import sys
 from pathlib import Path
 
 

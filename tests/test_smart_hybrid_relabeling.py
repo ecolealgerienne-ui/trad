@@ -15,6 +15,7 @@ Impact attendu: Entre Config 3 (trop agressif) et Config 4 (trop conservateur).
 import numpy as np
 import pandas as pd
 import argparse
+import sys
 from pathlib import Path
 
 
