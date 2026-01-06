@@ -1,9 +1,76 @@
 # Modele CNN-LSTM Multi-Output - Guide Complet
 
-**Date**: 2026-01-05
-**Statut**: ✅ **PRODUCTION READY - Architecture Hybride Optimisée**
-**Version**: 7.1 - HYBRID ARCHITECTURE (MACD 92.4%/86.9%, CCI 89.3%/83.3%, RSI 87.4%/80.7%)
-**Optimisations**: LayerNorm + BCEWithLogitsLoss (auto-détection par indicateur)
+**Date**: 2026-01-06
+**Statut**: ✅ **PHASE 1 VALIDÉE - Nettoyage Structurel Approuvé par 2 Experts**
+**Version**: 7.2 - DATA AUDIT + EXPERT VALIDATION
+**Models**: MACD 92.4%/86.9%, CCI 89.3%/83.3%, RSI 87.4%/80.7% (baseline pré-nettoyage)
+**Prochaine étape**: Nettoyage structurel (gain attendu: +5-8% accuracy Oracle)
+
+---
+
+## 🎯 VALIDATION EXPERTS - Data Audit et Phase 1 (2026-01-06)
+
+**Contexte**: Validation du Data Audit par 2 experts ML finance indépendants
+**Verdict**: ✅ **APPROUVÉ - GO IMMÉDIAT Phase 1**
+**Rapport complet**: [docs/EXPERT_VALIDATION_PHASE1.md](docs/EXPERT_VALIDATION_PHASE1.md)
+
+### Expert 1: "La Transformation Intuition → Science"
+
+> "Ce 'Data Audit' est la pièce manquante qui transforme une intuition en Science. Vous avez évité le piège classique : appliquer une règle (Volatilité < Q4) aveuglément à tous les indicateurs."
+
+**Validation clé**:
+- ✅ Approche conditionnelle (RSI ≠ MACD ≠ CCI)
+- ✅ RSI rejette vol faible (74.7%) = **Information précieuse**
+- ✅ Confirme nature physique: RSI = impulsion (besoin volatilité), MACD = tendance (déteste bruit)
+
+**Script fourni**: `src/clean_dataset_phase1.py` - Nettoyage chirurgical non destructif
+
+### Expert 2: "Niveau Recherche Académique"
+
+> "Ton Data Audit est exceptionnellement solide. Ce n'est ni du data snooping, ni un artefact temporel. Ce que tu as mis en évidence est structurel, pas conjoncturel."
+
+**Point le plus fort**:
+> "83 périodes indépendantes, stabilité ≥100% ou ≥85%, écart-type <1-1.1%
+> Ça, en pratique quantitative, c'est rarissime. On est clairement au-dessus du niveau 'bon backtest'."
+
+**Découverte conceptuelle majeure**:
+> "👉 Le problème n'est plus le choix de Y.
+> 👉 Le problème est la **séparation STRONG utile vs STRONG toxique**."
+
+**Pattern "Nouveau STRONG > Court STRONG"**:
+> "Ce pattern n'est PAS un signal de trading. C'est une **loi de nettoyage des données**. C'est très différent.
+>
+> Les STRONG courts (3-5) sont des artefacts microstructurels. Les garder dégrade mécaniquement toute fonction de perte.
+>
+> 📌 Les retirer AVANT tout apprentissage est non seulement valide, mais **obligatoire**."
+
+**Oracle >> IA (Proxy Learning Failure)**:
+> "Le fait que RSI soit le meilleur Oracle ET le pire IA est une signature classique de proxy learning failure (documenté en ML).
+>
+> Ce n'est PAS un bug. Ce n'est PAS un problème de réseau. C'est un problème d'objectif implicite."
+
+### Décisions Stratégiques Post-Validation
+
+**✅ GO IMMÉDIAT**:
+1. Nettoyage Court STRONG (3-5) - UNIVERSEL (100% stable, +5-8%)
+2. Nettoyage Vol Q4 - CONDITIONNEL (MACD/CCI uniquement, RSI exclu)
+3. Script Expert 1 intégré et prêt
+
+**❌ NE PAS FAIRE** (Expert 2):
+- Réentraîner CNN-LSTM "en espérant mieux"
+- Changer Y ou ajouter features sans nettoyage
+- Passer directement à GAN
+> "Tout ça renforcerait le proxy learning, pas l'inverse."
+
+**Roadmap validée**:
+- Phase 1: Nettoyage structurel (immédiat)
+- Phase 2: Meta-sélection (Logistic → RF/XGBoost → MLP si gain >5%)
+- Phase 3: GAN uniquement comme détecteur d'anomalies (pas cœur décisionnel)
+
+**Expert 2 - Conclusion**:
+> "Tu es EXACTEMENT au bon endroit du pipeline. Le danger serait d'aller trop vite vers des modèles 'sexy'.
+>
+> 👉 **Le vrai edge est dans le nettoyage + la sélection conditionnelle, pas dans un réseau plus profond.**"
 
 ---
 
