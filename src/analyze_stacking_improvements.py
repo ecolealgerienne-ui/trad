@@ -120,29 +120,35 @@ def analyze_individual_improvements(
     """
     results = {}
 
-    # Prédictions Stacking globales
+    # Prédictions Stacking globales (prédit Y_meta qui vient de MACD)
     Y_stacking_pred = meta_model.predict(X_test)
-    stacking_acc = accuracy_score(Y_test.ravel(), Y_stacking_pred) * 100
-
-    # RÉFÉRENCE UNIQUE: Y_test (de MACD, le meilleur baseline)
-    Y_true_reference = Y_test.ravel().astype(int)
+    Y_meta_true = Y_test.ravel().astype(int)  # Y_meta (MACD)
+    stacking_acc_meta = accuracy_score(Y_meta_true, Y_stacking_pred) * 100
 
     logger.info(f"\n" + "="*80)
-    logger.info(f"📊 COMPARAISON BASELINE vs STACKING")
+    logger.info(f"📊 COMPARAISON BASELINE vs STACKING (Par Indicateur)")
     logger.info(f"="*80)
-    logger.info(f"\n⚠️  Utilisation de Y_test MACD comme référence unique pour tous les indicateurs")
+    logger.info(f"\n💡 Chaque indicateur comparé avec SON PROPRE Y_true (pas de référence unique)")
+    logger.info(f"   Stacking Accuracy (Y_meta): {stacking_acc_meta:.2f}%")
 
     for i, indicator in enumerate(['macd', 'rsi', 'cci']):
         # Baseline: prédictions de l'indicateur seul
         Y_baseline_pred_proba = raw_preds[indicator]['Y_pred'][:, 0]  # Direction probabilités
         Y_baseline_pred = (Y_baseline_pred_proba > 0.5).astype(int)  # Convertir en binaire
 
-        # Utiliser Y_true_reference (MACD) au lieu de Y_true propre à chaque indicateur
-        baseline_acc = accuracy_score(Y_true_reference, Y_baseline_pred) * 100
+        # Y_true de CET indicateur (son propre Kalman)
+        Y_true_indicator = raw_preds[indicator]['Y_true'][:, 0].astype(int)
+
+        # Baseline accuracy de cet indicateur
+        baseline_acc = accuracy_score(Y_true_indicator, Y_baseline_pred) * 100
+
+        # Stacking prédit Y_meta (MACD), pas Y_true_indicator
+        # Mais on peut comparer pour voir si Stacking aide cet indicateur
+        stacking_acc_for_indicator = accuracy_score(Y_true_indicator, Y_stacking_pred) * 100
 
         # Analyser où Stacking corrige les erreurs de baseline
-        baseline_errors = (Y_baseline_pred != Y_true_reference)
-        stacking_correct = (Y_stacking_pred == Y_true_reference)
+        baseline_errors = (Y_baseline_pred != Y_true_indicator)
+        stacking_correct = (Y_stacking_pred == Y_true_indicator)
 
         # Samples où Stacking corrige baseline
         corrected_by_stacking = baseline_errors & stacking_correct
@@ -157,12 +163,12 @@ def analyze_individual_improvements(
 
         # Gain net
         net_gain = n_corrected - n_new_errors
-        net_gain_pct = (net_gain / len(Y_true_reference)) * 100
+        net_gain_pct = (net_gain / len(Y_true_indicator)) * 100
 
         results[indicator] = {
             'baseline_acc': baseline_acc,
-            'stacking_acc': stacking_acc,
-            'delta': stacking_acc - baseline_acc,
+            'stacking_acc': stacking_acc_for_indicator,
+            'delta': stacking_acc_for_indicator - baseline_acc,
             'n_corrected': n_corrected,
             'pct_corrected': pct_corrected,
             'n_new_errors': n_new_errors,
@@ -174,9 +180,13 @@ def analyze_individual_improvements(
         logger.info(f"\n{'='*80}")
         logger.info(f"🎯 {indicator.upper()}")
         logger.info(f"{'='*80}")
-        logger.info(f"   Baseline Accuracy:  {baseline_acc:.2f}%")
-        logger.info(f"   Stacking Accuracy:  {stacking_acc:.2f}%")
-        logger.info(f"   Delta:              {stacking_acc - baseline_acc:+.2f}%")
+        logger.info(f"   Baseline Accuracy:  {baseline_acc:.2f}% (vs Y_true_{indicator.upper()})")
+        logger.info(f"   Stacking Accuracy:  {stacking_acc_for_indicator:.2f}% (vs Y_true_{indicator.upper()})")
+        logger.info(f"   Delta:              {stacking_acc_for_indicator - baseline_acc:+.2f}%")
+
+        if indicator != 'macd':
+            logger.info(f"\n   ⚠️  Note: Stacking prédit Y_meta (MACD), pas Y_true_{indicator.upper()}")
+            logger.info(f"       Cette comparaison montre si Stacking (MACD-like) aide {indicator.upper()}")
         logger.info(f"\n   Erreurs Baseline corrigées par Stacking:")
         logger.info(f"      Total corrigé:   {n_corrected:,} samples ({pct_corrected:.1f}% des erreurs)")
         logger.info(f"      Nouvelles erreurs: {n_new_errors:,} samples")
