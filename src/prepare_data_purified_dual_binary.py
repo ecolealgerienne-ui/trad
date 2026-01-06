@@ -26,18 +26,27 @@ Pipeline:
 2. Calculer TOUS les indicateurs (RSI, CCI, MACD)
 3. Calculer features Close-based ET Volatility-aware
 4. Pour CHAQUE indicateur:
-   - Appliquer Kalman dual (Position + Vélocité)
+   - Appliquer filtre dual (Kalman ou Octave) → Position + Vélocité
    - Calculer labels Direction + Force
    - Créer séquences avec features appropriées
    - Sauvegarder dataset séparé
 
 Usage:
+    # Avec filtre Kalman (défaut)
     python src/prepare_data_purified_dual_binary.py --assets BTC ETH BNB ADA LTC
 
-Génère 3 fichiers:
+    # Avec filtre Octave
+    python src/prepare_data_purified_dual_binary.py --assets BTC ETH BNB ADA LTC --filter octave
+
+Génère 3 fichiers (par exemple avec Kalman):
     - dataset_..._rsi_dual_binary_kalman.npz
     - dataset_..._macd_dual_binary_kalman.npz
     - dataset_..._cci_dual_binary_kalman.npz
+
+Ou avec Octave:
+    - dataset_..._rsi_dual_binary_octave20.npz
+    - dataset_..._macd_dual_binary_octave20.npz
+    - dataset_..._cci_dual_binary_octave20.npz
 """
 
 import numpy as np
@@ -48,6 +57,7 @@ import json
 from pathlib import Path
 from datetime import datetime
 from pykalman import KalmanFilter
+import scipy.signal as signal
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +85,59 @@ COLD_START_SKIP = 100
 
 # Configuration ATR
 ATR_PERIOD = 14
+
+# Configuration Octave
+OCTAVE_STEP = 0.20  # Paramètre du filtre Octave (0.20 recommandé)
+
+
+# =============================================================================
+# FILTRE OCTAVE (Butterworth + filtfilt) - NOUVEAU
+# =============================================================================
+
+def octave_filter_dual(data: np.ndarray,
+                       step: float = OCTAVE_STEP,
+                       order: int = 3) -> np.ndarray:
+    """
+    Applique le filtre Octave et calcule position + vélocité.
+
+    Contrairement à Kalman qui extrait position et vélocité simultanément,
+    Octave calcule d'abord la position filtrée, puis dérive la vélocité.
+
+    Args:
+        data: Signal à filtrer (np.ndarray)
+        step: Paramètre du filtre Butterworth (défaut: 0.20)
+        order: Ordre du filtre (défaut: 3)
+
+    Returns:
+        result: (N, 2) - [position, velocity]
+    """
+    valid_mask = ~np.isnan(data)
+    if valid_mask.sum() < 10:
+        result = np.full((len(data), 2), np.nan)
+        return result
+
+    # 1. Filtrer le signal (Butterworth + filtfilt)
+    B, A = signal.butter(order, step, output='ba')
+
+    # Appliquer filtfilt sur les données valides uniquement
+    valid_data = data[valid_mask]
+    filtered_valid = signal.filtfilt(B, A, valid_data)
+
+    # 2. Calculer la vélocité comme diff() de la position
+    # velocity[t] = position[t] - position[t-1]
+    velocity_valid = np.diff(filtered_valid, prepend=filtered_valid[0])
+
+    # 3. Reconstruire les arrays complets avec NaN
+    position = np.full(len(data), np.nan)
+    velocity = np.full(len(data), np.nan)
+
+    position[valid_mask] = filtered_valid
+    velocity[valid_mask] = velocity_valid
+
+    # 4. Combiner position + velocity
+    result = np.column_stack([position, velocity])
+
+    return result
 
 
 # =============================================================================
@@ -234,6 +297,7 @@ def add_pure_signal_features(df: pd.DataFrame, clip_value: float = 0.10) -> pd.D
 # =============================================================================
 
 def add_dual_labels_for_indicator(df: pd.DataFrame, indicator: str,
+                                   filter_type: str = 'kalman',
                                    z_score_window: int = Z_SCORE_WINDOW,
                                    force_threshold: float = FORCE_THRESHOLD) -> pd.DataFrame:
     """
@@ -241,6 +305,7 @@ def add_dual_labels_for_indicator(df: pd.DataFrame, indicator: str,
 
     Args:
         indicator: 'rsi', 'cci', ou 'macd'
+        filter_type: 'kalman' ou 'octave' (défaut: 'kalman')
 
     Returns:
         df avec colonnes ajoutées:
@@ -252,14 +317,20 @@ def add_dual_labels_for_indicator(df: pd.DataFrame, indicator: str,
     """
     df = df.copy()
 
-    logger.info(f"     Processing {indicator.upper()}...")
+    logger.info(f"     Processing {indicator.upper()} avec filtre {filter_type.upper()}...")
 
-    # 1. Kalman cinématique
+    # 1. Appliquer le filtre (Kalman ou Octave)
     raw_signal = df[indicator].values
-    kalman_output = kalman_filter_dual(raw_signal)
 
-    position = kalman_output[:, 0]
-    velocity = kalman_output[:, 1]
+    if filter_type == 'octave':
+        filter_output = octave_filter_dual(raw_signal, step=OCTAVE_STEP)
+    elif filter_type == 'kalman':
+        filter_output = kalman_filter_dual(raw_signal)
+    else:
+        raise ValueError(f"filter_type inconnu: {filter_type}. Choix: 'kalman', 'octave'")
+
+    position = filter_output[:, 0]
+    velocity = filter_output[:, 1]
 
     df[f'{indicator}_filtered'] = position
     df[f'{indicator}_velocity'] = velocity
@@ -379,7 +450,8 @@ def split_chronological(X: np.ndarray, Y: np.ndarray, indices: list,
 # =============================================================================
 
 def prepare_indicator_dataset(df: pd.DataFrame, asset_name: str, indicator: str,
-                              feature_cols: list, clip_value: float = 0.10) -> tuple:
+                              feature_cols: list, filter_type: str = 'kalman',
+                              clip_value: float = 0.10) -> tuple:
     """
     Prépare le dataset pour UN indicateur avec features purifiées.
 
@@ -387,14 +459,15 @@ def prepare_indicator_dataset(df: pd.DataFrame, asset_name: str, indicator: str,
         df: DataFrame avec OHLC + indicateurs calculés
         indicator: 'rsi', 'cci', ou 'macd'
         feature_cols: Colonnes features à utiliser
+        filter_type: 'kalman' ou 'octave'
 
     Returns:
         (X, Y, indices) pour cet indicateur
     """
-    logger.info(f"\n  {asset_name} - {indicator.upper()}: Préparation...")
+    logger.info(f"\n  {asset_name} - {indicator.upper()}: Préparation avec filtre {filter_type.upper()}...")
 
     # Calculer labels dual-binary pour cet indicateur
-    df = add_dual_labels_for_indicator(df, indicator)
+    df = add_dual_labels_for_indicator(df, indicator, filter_type=filter_type)
 
     # Créer séquences
     X, Y, indices = create_sequences_for_indicator(df, indicator, feature_cols)
@@ -408,9 +481,16 @@ def prepare_indicator_dataset(df: pd.DataFrame, asset_name: str, indicator: str,
 
 def prepare_and_save_all(assets: list = None,
                          output_dir: str = None,
+                         filter_type: str = 'kalman',
                          clip_value: float = 0.10) -> dict:
     """
     Prépare les 3 datasets (RSI, MACD, CCI) en une seule exécution.
+
+    Args:
+        assets: Liste des assets
+        output_dir: Répertoire de sortie
+        filter_type: 'kalman' ou 'octave'
+        clip_value: Valeur de clipping
 
     Returns:
         dict avec les chemins des 3 fichiers .npz générés
@@ -426,6 +506,7 @@ def prepare_and_save_all(assets: list = None,
     logger.info("PRÉPARATION MULTI-DATASETS (Pure Signal + Dual-Binary)")
     logger.info("="*80)
     logger.info(f"Assets: {', '.join(assets)}")
+    logger.info(f"Filtre: {filter_type.upper()}")
     logger.info(f"Génération de 3 datasets séparés:")
     logger.info(f"  1. RSI  - Features: c_ret (1)")
     logger.info(f"  2. MACD - Features: c_ret (1)")
@@ -476,7 +557,7 @@ def prepare_and_save_all(assets: list = None,
             ('cci', features_cci)       # 3 features: h_ret, l_ret, c_ret
         ]:
             X, Y, indices = prepare_indicator_dataset(
-                df, asset_name, indicator, feature_cols, clip_value
+                df, asset_name, indicator, feature_cols, filter_type=filter_type, clip_value=clip_value
             )
 
             # Split chronologique
@@ -524,7 +605,14 @@ def prepare_and_save_all(assets: list = None,
         output_dir.mkdir(parents=True, exist_ok=True)
 
         assets_str = '_'.join(assets).lower()
-        output_path = output_dir / f"dataset_{assets_str}_{indicator}_dual_binary_kalman.npz"
+
+        # Nom de fichier avec filtre
+        if filter_type == 'octave':
+            filter_suffix = f"octave{int(OCTAVE_STEP*100)}"
+        else:
+            filter_suffix = filter_type
+
+        output_path = output_dir / f"dataset_{assets_str}_{indicator}_dual_binary_{filter_suffix}.npz"
 
         # Features et metadata par indicateur
         if indicator == 'rsi':
@@ -543,18 +631,33 @@ def prepare_and_save_all(assets: list = None,
             feature_type = 'Pure Signal: h_ret, l_ret, c_ret (Typical Price)'
             justification = 'CCI utilise (H+L+C)/3 dans sa formule. High/Low justifiés.'
 
+        # Métadonnées du filtre
+        if filter_type == 'kalman':
+            filter_metadata = {
+                'kalman_params': {
+                    'process_var': KALMAN_PROCESS_VAR,
+                    'measure_var': KALMAN_MEASURE_VAR,
+                    'model': 'cinematic (position + velocity)'
+                }
+            }
+        else:  # octave
+            filter_metadata = {
+                'octave_params': {
+                    'step': OCTAVE_STEP,
+                    'order': 3,
+                    'method': 'Butterworth + filtfilt',
+                    'velocity': 'diff(filtered_position)'
+                }
+            }
+
         metadata = {
             'created_at': datetime.now().isoformat(),
             'version': 'pure_signal_dual_binary_v1',
             'architecture': 'Pure Signal + Dual-Binary Labels',
             'indicator': indicator.upper(),
             'assets': assets,
-            'filter_type': 'kalman',
-            'kalman_params': {
-                'process_var': KALMAN_PROCESS_VAR,
-                'measure_var': KALMAN_MEASURE_VAR,
-                'model': 'cinematic (position + velocity)'
-            },
+            'filter_type': filter_type,
+            **filter_metadata,
             'z_score_window': Z_SCORE_WINDOW,
             'force_threshold': FORCE_THRESHOLD,
             'cold_start_skip': COLD_START_SKIP,
@@ -636,8 +739,12 @@ Gains Attendus:
 - Convergence: Plus rapide et plus propre
 - Stabilité: Fonctionne sur tous les prix (10k$ ou 100k$)
 
-Exemple:
+Exemples:
+  # Avec filtre Kalman (défaut)
   python src/prepare_data_purified_dual_binary.py --assets BTC ETH BNB ADA LTC
+
+  # Avec filtre Octave
+  python src/prepare_data_purified_dual_binary.py --assets BTC ETH BNB ADA LTC --filter octave
 
 Assets disponibles: {', '.join(available_assets)}
         """
@@ -647,6 +754,9 @@ Assets disponibles: {', '.join(available_assets)}
                         default=DEFAULT_ASSETS,
                         choices=available_assets,
                         help='Assets à inclure')
+    parser.add_argument('--filter', '-f', type=str, default='kalman',
+                        choices=['kalman', 'octave'],
+                        help='Type de filtre (défaut: kalman)')
     parser.add_argument('--output-dir', '-o', type=str, default=None,
                         help='Répertoire de sortie')
     parser.add_argument('--clip', type=float, default=0.10,
@@ -659,6 +769,7 @@ Assets disponibles: {', '.join(available_assets)}
     output_paths = prepare_and_save_all(
         assets=args.assets,
         output_dir=args.output_dir,
+        filter_type=args.filter,
         clip_value=args.clip
     )
 
