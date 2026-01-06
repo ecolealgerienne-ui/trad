@@ -59,10 +59,16 @@ def load_model_and_predict(
 
     # Créer modèle
     n_features = X.shape[2]
+
+    # Retirer n_features et num_outputs de model_config s'ils existent
+    # (on les passe explicitement)
+    model_config_clean = {k: v for k, v in model_config.items()
+                          if k not in ['n_features', 'num_outputs']}
+
     model = create_model(
         n_features=n_features,
         num_outputs=2,  # Direction + Force
-        **model_config
+        **model_config_clean
     ).to(device)
 
     # Charger poids
