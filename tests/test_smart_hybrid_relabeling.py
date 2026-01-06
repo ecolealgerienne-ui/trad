@@ -16,12 +16,6 @@ import numpy as np
 import pandas as pd
 import argparse
 from pathlib import Path
-import sys
-
-# Ajouter src/ au path
-sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
-
-from data_utils import load_prepared_data
 
 
 def smart_hybrid_relabeling(X, Y, duration, vol_rolling):
@@ -200,9 +194,9 @@ def main():
     dataset_path = dataset_files[0]
     print(f"   Dataset: {dataset_path.name}")
 
-    splits = load_prepared_data(str(dataset_path))
-    X_test = splits['X_test']
-    Y_test = splits['Y_test']
+    data = np.load(str(dataset_path), allow_pickle=True)
+    X_test = data['X_test']
+    Y_test = data['Y_test']
 
     print(f"   Samples test: {len(X_test)}")
 

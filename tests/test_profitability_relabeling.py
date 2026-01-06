@@ -18,12 +18,6 @@ Avantage: Zéro hypothèse, nettoyage parfait, apprentissage optimal.
 import numpy as np
 import argparse
 from pathlib import Path
-import sys
-
-# Ajouter src/ au path
-sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
-
-from data_utils import load_prepared_data
 
 
 def profitability_relabeling(X, Y, prices, fees=0.002, horizon=12, min_return_threshold=None):
@@ -257,9 +251,9 @@ def main():
     dataset_path = dataset_files[0]
     print(f"   Dataset: {dataset_path.name}")
 
-    splits = load_prepared_data(str(dataset_path))
-    X_test = splits['X_test']
-    Y_test = splits['Y_test']
+    data = np.load(str(dataset_path), allow_pickle=True)
+    X_test = data['X_test']
+    Y_test = data['Y_test']
 
     print(f"   Samples test: {len(X_test)}")
 
