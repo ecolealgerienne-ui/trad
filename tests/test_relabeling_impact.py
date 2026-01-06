@@ -24,17 +24,8 @@ from pathlib import Path
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger(__name__)
 
-# Configuration relabeling (même que relabel_dataset_phase1.py)
-CONFIG = {
-    'universal': {
-        'trap_duration': [3, 4, 5]
-    },
-    'conditional': {
-        'macd': {'relabel_high_vol': True},
-        'cci':  {'relabel_high_vol': True},
-        'rsi':  {'relabel_high_vol': False}
-    }
-}
+# Configuration relabeling (ajustable via CLI)
+CONFIG = None  # Sera initialisé dans main()
 
 
 def load_dataset(indicator: str):
@@ -96,7 +87,11 @@ def apply_relabeling(X, Y, indicator):
         q4_threshold = np.percentile(vol[vol > 0], 75)
         mask_vol_trap = vol > q4_threshold
 
-    mask_trap = mask_duration_trap | mask_vol_trap
+    # Mode conditionnel: AND au lieu de OR
+    if CONFIG.get('vol_conditional', False):
+        mask_trap = mask_duration_trap & mask_vol_trap  # AND
+    else:
+        mask_trap = mask_duration_trap | mask_vol_trap  # OR
 
     # Relabeling
     relabeled_count = 0
@@ -232,6 +227,8 @@ def simulate_trading(Y_labels, X, indicator, name):
 
 
 def main():
+    global CONFIG
+
     parser = argparse.ArgumentParser(
         description='Test validation impact relabeling'
     )
@@ -241,13 +238,41 @@ def main():
         choices=['macd', 'rsi', 'cci'],
         help='Indicateur à tester (default: macd)'
     )
+    parser.add_argument(
+        '--duration-trap',
+        nargs='+',
+        type=int,
+        default=[3, 4, 5],
+        help='Durées STRONG à relabeler (default: 3 4 5). Ex: --duration-trap 3 pour test conservateur'
+    )
+    parser.add_argument(
+        '--vol-conditional',
+        action='store_true',
+        default=False,
+        help='Relabeler uniquement si Duration ET Vol Q4 (AND au lieu de OR)'
+    )
     args = parser.parse_args()
+
+    # Initialiser CONFIG
+    CONFIG = {
+        'universal': {
+            'trap_duration': args.duration_trap
+        },
+        'conditional': {
+            'macd': {'relabel_high_vol': True},
+            'cci':  {'relabel_high_vol': True},
+            'rsi':  {'relabel_high_vol': False}
+        },
+        'vol_conditional': args.vol_conditional
+    }
 
     logger.info("=" * 80)
     logger.info("TEST DE VALIDATION: Impact Relabeling sur Oracle")
     logger.info("=" * 80)
     logger.info(f"\nIndicateur: {args.indicator.upper()}")
     logger.info("Split: TEST uniquement (out-of-sample)")
+    logger.info(f"Durées relabelées: {args.duration_trap}")
+    logger.info(f"Mode: {'Vol AND Duration' if args.vol_conditional else 'Vol OR Duration'}")
     logger.info("")
 
     # 1. Charger données test
