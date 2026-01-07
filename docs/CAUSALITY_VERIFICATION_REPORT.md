@@ -259,13 +259,36 @@ means, _ = kf.filter(data)  # Causal (forward only)
 - Le modèle ML n'a jamais accès à ce processus
 - Le lag vient d'une différence algorithmique, pas d'un bias
 
-**GO POUR IMPLÉMENTATION** de `DualFilterSignalProcessor` avec:
-- RTS smooth = Early Warning System
-- Octave filtfilt = Confirmation System
+**✅ VIGILANCE #1 VALIDÉE - Pas de data leakage**
+
+**⏳ PROCHAINE ÉTAPE: VIGILANCE #2 (Expert 2)**
+
+> "Tester en PnL, pas seulement en WR. Certaines zones évitées peuvent être peu fréquentes mais très rentables."
+
+**Script créé**: `tests/compare_dual_filter_pnl.py`
+
+**Commande**:
+```bash
+# Tester tous les indicateurs
+for ind in rsi cci macd; do
+    python tests/compare_dual_filter_pnl.py --indicator $ind --split test
+done
+```
+
+**Métriques à analyser**:
+- Sharpe Ratio et Sortino Ratio (risque/rendement)
+- Distribution des gains (fat tails = gains rares mais très rentables)
+- MAE/MFE (Maximum Adverse/Favorable Excursion)
+- PnL dans zones de désaccord vs accord
+
+**Après validation Vigilance #2** → GO POUR IMPLÉMENTATION `DualFilterSignalProcessor`:
+- RTS smooth (Kalman) = Early Warning System
+- Octave filtfilt = Confirmation System (5min plus tard)
 - Lag -1 = Signal d'anticipation de 5min (exploitable)
+- Filtrage isolés (2+ périodes confirmation)
 
 ---
 
 **Créé par**: Claude Code
 **Dernière MAJ**: 2026-01-07
-**Version**: 1.0 - Rapport Causalité Complet
+**Version**: 1.1 - Rapport Causalité + Script Vigilance #2

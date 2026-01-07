@@ -1,11 +1,11 @@
 # Modele CNN-LSTM Multi-Output - Guide Complet
 
 **Date**: 2026-01-07
-**Statut**: ✅ **ARCHITECTURE DUAL-FILTER VALIDÉE - Niveau Desk Quant (Validation Unanime 2 Experts)**
-**Version**: 8.0 - OCTAVE VS KALMAN + TRI-PERSPECTIVE VALIDATION
+**Statut**: ✅ **VIGILANCE #1 VALIDÉE - Architecture Dual-Filter Sans Data Leakage**
+**Version**: 8.1 - OCTAVE VS KALMAN + VIGILANCE #1 COMPLÉTÉE
 **Models**: MACD 92.4%/86.9%, CCI 89.3%/83.3%, RSI 87.4%/80.7% (baseline pré-nettoyage)
-**Découvertes majeures**: Lag Kalman +1 (anticipation 5min), Isolés 78-89% bruit, MACD pivot 96.5%
-**Prochaine étape**: Audit causalité (Vigilance #1) + Implémentation DualFilterSignalProcessor
+**Découvertes majeures**: Les DEUX filtres non-causaux (RTS Smoother + filtfilt), Lag -1 = latence algorithmique
+**Prochaine étape**: Vigilance #2 (PnL vs Win Rate) → Script `compare_dual_filter_pnl.py` créé
 
 ---
 
@@ -144,20 +144,24 @@ Au lieu de **SUPPRIMER** les pièges → **RELABELER** Force=STRONG → Force=WE
 
 ### ⚠️ VIGILANCES CRITIQUES (Expert 2 - IMPÉRATIF)
 
-**Vigilance #1: Circularité Temporelle**
+**✅ Vigilance #1: Circularité Temporelle - COMPLÉTÉE**
 > "Bien vérifier que le lag +1 Kalman n'utilise aucune info future indirecte."
 
-**Action**: Auditer causalité stricte dans `prepare_data_purified_dual_binary.py`
+**Script créé**: `tests/verify_causality.py`
+**Résultats**: ✅ Pas de data leakage - Les DEUX filtres sont non-causaux (RTS Smoother + filtfilt) par design, utilisés pour labels uniquement
+**Rapport**: [docs/CAUSALITY_VERIFICATION_REPORT.md](docs/CAUSALITY_VERIFICATION_REPORT.md)
 
-**Vigilance #2: PnL vs Win Rate**
+**⏳ Vigilance #2: PnL vs Win Rate - EN COURS**
 > "Tester en PnL, pas seulement en WR. Certaines zones évitées peuvent être peu fréquentes mais très rentables."
 
-**Action**: Mesurer distribution gains, MAE/MFE, Sharpe Ratio (pas seulement Win Rate)
+**Script créé**: `tests/compare_dual_filter_pnl.py`
+**Métriques**: Sharpe Ratio, Sortino Ratio, Distribution gains (fat tails), MAE/MFE, Zones désaccord
+**Commande**: `python tests/compare_dual_filter_pnl.py --indicator {rsi,macd,cci} --split test`
 
-**Vigilance #3: Seuils Adaptatifs**
+**❌ Vigilance #3: Seuils Adaptatifs - PENDING**
 > "Le '2 périodes' doit rester un principe, pas une constante magique."
 
-**Action**: Implémenter seuils contextuels (f(volatilité, régime)), pas fixes
+**Action**: Implémenter seuils contextuels (f(volatilité, régime)), pas fixes (après Vigilance #2)
 
 ---
 
@@ -178,24 +182,39 @@ Au lieu de **SUPPRIMER** les pièges → **RELABELER** Force=STRONG → Force=WE
 
 ### Plan d'Action Consolidé (Vigilances Intégrées)
 
-**Phase 1 CRITIQUE**: Audit causalité Kalman lag +1 (Vigilance #1)
+**✅ Phase 1 CRITIQUE**: Audit causalité Kalman lag +1 (Vigilance #1) - COMPLÉTÉE
 ```bash
+# Script exécuté avec succès
 python tests/verify_causality.py \
-    --data-kalman .../_kalman.npz \
-    --data-octave .../_octave20.npz
+    --data-kalman data/prepared/dataset_btc_eth_bnb_ada_ltc_rsi_dual_binary_kalman.npz \
+    --data-octave data/prepared/dataset_btc_eth_bnb_ada_ltc_rsi_dual_binary_octave20.npz
 ```
+**Résultat**: ✅ Pas de data leakage détecté - Architecture valide
 
-**Phase 2**: Implémentation `DualFilterSignalProcessor` (4 niveaux)
+**⏳ Phase 1.5 EN COURS**: Validation PnL Octave vs Kalman (Vigilance #2)
+```bash
+# Tester tous les indicateurs (Labels Oracle)
+for ind in rsi cci macd; do
+    python tests/compare_dual_filter_pnl.py --indicator $ind --split test
+done
 
-**Phase 3**: Backtest complet PnL (Vigilance #2)
-- Mesurer PnL cumulé, distribution gains, MAE/MFE
-- Sharpe Ratio (pas seulement Win Rate)
+# Avec prédictions modèle (si disponibles)
+python tests/compare_dual_filter_pnl.py --indicator macd --split test --use-predictions
+```
+**Métriques**: Sharpe, Sortino, Distribution, MAE/MFE, Zones désaccord
 
-**Phase 4**: Seuils adaptatifs (Vigilance #3)
+**Phase 2**: Implémentation `DualFilterSignalProcessor` (4 niveaux) - APRÈS Vigilance #2
+- Niveau 1: Kalman/RTS anticipation (Early Warning)
+- Niveau 2: Octave confirmation (5min plus tard)
+- Niveau 3: Filtrage isolés (2+ confirmations)
+- Niveau 4: MACD pivot decision
+
+**Phase 3**: Seuils adaptatifs (Vigilance #3)
 - f(volatilité, régime) vs fixes
 - Walk-forward analysis
+- Implémenter règles conditionnelles
 
-**Phase 5**: Production deployment avec monitoring temps réel
+**Phase 4**: Production deployment avec monitoring temps réel
 
 ---
 
