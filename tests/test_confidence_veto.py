@@ -327,16 +327,18 @@ def backtest_with_confidence_veto(
 
         # SORTIE - 3 cas possibles
         exit_signal = False
+        exit_reason = None
 
         if position != Position.FLAT:
-            # Cas 1: Retournement direction (bypass holding, toujours prioritaire)
-            if (position == Position.LONG and macd_dir == 0) or \
-               (position == Position.SHORT and macd_dir == 1):
+            # Cas 1: Force=WEAK ET holding minimum atteint
+            if macd_force == 0 and trade_duration >= holding_min:
                 exit_signal = True
+                exit_reason = "FORCE_WEAK"
 
-            # Cas 2: Force=WEAK ET holding minimum atteint
-            elif macd_force == 0 and trade_duration >= holding_min:
+            # Cas 2: Retournement direction (bypass holding, toujours prioritaire)
+            elif target != Position.FLAT and target != position:
                 exit_signal = True
+                exit_reason = "DIRECTION_FLIP"
 
         # Enregistrer trade si sortie
         if exit_signal:
@@ -350,11 +352,20 @@ def backtest_with_confidence_veto(
                 'win': pnl > 0
             })
 
-            position = Position.FLAT
-            current_pnl = 0.0  # ✅ Reset!
+            # Gérer sortie selon la raison
+            if exit_reason == "FORCE_WEAK":
+                # Sortie complète → FLAT
+                position = Position.FLAT
+                current_pnl = 0.0
+
+            elif exit_reason == "DIRECTION_FLIP":
+                # Flip immédiat → nouvelle position SANS passer par FLAT!
+                position = target
+                entry_time = i
+                current_pnl = 0.0
 
         # ENTRÉE si FLAT et signal valide (pas de veto)
-        if position == Position.FLAT and target != Position.FLAT:
+        elif position == Position.FLAT and target != Position.FLAT:
             position = target
             entry_time = i
             current_pnl = 0.0  # ✅ Reset à l'entrée aussi!
