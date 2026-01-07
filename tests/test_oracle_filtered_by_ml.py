@@ -122,27 +122,33 @@ def load_all_datasets(split: str = 'test') -> Dict:
 def backtest_oracle_filtered_by_ml(
     data: Dict,
     fees: float = 0.001,
-    filter_mode: str = 'consensus'
+    filter_mode: str = 'consensus',
+    min_agreement: int = 6
 ) -> StrategyResult:
     """
-    Backtest Oracle filtré par consensus ML.
+    Backtest Oracle filtré par consensus ML paramétrable.
 
     Args:
         data: Dict retourné par load_all_datasets()
         fees: Frais par side
         filter_mode: 'consensus' ou 'disagreement'
-            - 'consensus': Trade UNIQUEMENT si ML a consensus (tous 6 d'accord)
-            - 'disagreement': Trade UNIQUEMENT si ML n'a PAS consensus
+            - 'consensus': Trade UNIQUEMENT si >= min_agreement signaux d'accord
+            - 'disagreement': Trade UNIQUEMENT si < min_agreement signaux d'accord
+        min_agreement: Nombre minimum de signaux devant être d'accord (1-6)
+            - 6: Tous d'accord (consensus total)
+            - 5: Au moins 5/6 d'accord
+            - 4: Au moins 4/6 d'accord
+            - etc.
 
     Returns:
         StrategyResult
 
     Logique:
-        1. Vérifier consensus ML sur predictions
-        2. SI condition filtre OK:
-           - Utiliser Oracle labels pour décider direction
-           - Trade avec vérité terrain
-        3. SINON: FLAT
+        1. Compter combien de signaux ML sont UP ou DOWN
+        2. SI >= min_agreement dans même direction:
+           - ML a "consensus" (selon seuil)
+        3. Appliquer filtre selon mode
+        4. Trader avec Oracle labels si autorisé
     """
     returns = data['returns']
     n_samples = len(returns)
@@ -193,11 +199,15 @@ def backtest_oracle_filtered_by_ml(
         # === ÉTAPE 1: Vérifier consensus ML (prédictions) ===
         pred_directions = [predictions[key][i] for key in available_signals]
 
-        # Consensus ML: tous UP ou tous DOWN
-        ml_has_consensus = (
-            all(d == 1 for d in pred_directions) or  # Tous UP
-            all(d == 0 for d in pred_directions)     # Tous DOWN
-        )
+        # Compter signaux UP et DOWN
+        n_up = sum(d == 1 for d in pred_directions)
+        n_down = sum(d == 0 for d in pred_directions)
+        n_total = len(pred_directions)
+
+        # Consensus ML selon seuil min_agreement
+        # Consensus UP: au moins min_agreement signaux UP
+        # Consensus DOWN: au moins min_agreement signaux DOWN
+        ml_has_consensus = (n_up >= min_agreement) or (n_down >= min_agreement)
 
         if ml_has_consensus:
             n_consensus_zones += 1
@@ -206,10 +216,10 @@ def backtest_oracle_filtered_by_ml(
 
         # === ÉTAPE 2: Appliquer filtre selon mode ===
         if filter_mode == 'consensus':
-            # Trade UNIQUEMENT si ML a consensus
+            # Trade UNIQUEMENT si >= min_agreement signaux d'accord
             trade_allowed = ml_has_consensus
         elif filter_mode == 'disagreement':
-            # Trade UNIQUEMENT si ML n'a PAS consensus
+            # Trade UNIQUEMENT si < min_agreement signaux d'accord
             trade_allowed = not ml_has_consensus
         else:
             raise ValueError(f"Mode inconnu: {filter_mode}")
@@ -387,6 +397,9 @@ def main():
                         help='Split à tester (défaut: test)')
     parser.add_argument('--fees', type=float, default=0.001,
                         help='Frais par side en % (défaut: 0.1%)')
+    parser.add_argument('--min-agreement', type=int, default=5,
+                        choices=[1, 2, 3, 4, 5, 6],
+                        help='Nombre minimum de signaux d\'accord pour consensus (défaut: 5/6)')
 
     args = parser.parse_args()
 
@@ -395,8 +408,9 @@ def main():
     logger.info("="*100)
     logger.info(f"Split: {args.split}")
     logger.info(f"Frais: {args.fees*100:.2f}% par side ({args.fees*2*100:.2f}% round-trip)")
+    logger.info(f"Seuil consensus: {args.min_agreement}/6 signaux minimum")
     logger.info("\nObjectif: Mesurer où le modèle ML se trompe")
-    logger.info("   Test 1: Oracle SI prédictions ML consensus")
+    logger.info(f"   Test 1: Oracle SI >= {args.min_agreement}/6 signaux ML d'accord (consensus)")
     logger.info("   Test 2: Oracle SI prédictions ML désaccord")
     logger.info("="*100 + "\n")
 
@@ -409,14 +423,18 @@ def main():
     # On pourrait le recalculer, mais on garde juste les métriques pour comparaison
 
     # Test 1: Oracle filtré par CONSENSUS ML
-    logger.info("\n🧪 TEST 1: Oracle UNIQUEMENT sur zones CONSENSUS ML")
+    logger.info(f"\n🧪 TEST 1: Oracle UNIQUEMENT sur zones CONSENSUS ML (>= {args.min_agreement}/6)")
     logger.info("-"*100)
-    test1_result = backtest_oracle_filtered_by_ml(data, args.fees, filter_mode='consensus')
+    test1_result = backtest_oracle_filtered_by_ml(
+        data, args.fees, filter_mode='consensus', min_agreement=args.min_agreement
+    )
 
     # Test 2: Oracle filtré par DÉSACCORD ML
-    logger.info("\n🧪 TEST 2: Oracle UNIQUEMENT sur zones DÉSACCORD ML")
+    logger.info(f"\n🧪 TEST 2: Oracle UNIQUEMENT sur zones DÉSACCORD ML (< {args.min_agreement}/6)")
     logger.info("-"*100)
-    test2_result = backtest_oracle_filtered_by_ml(data, args.fees, filter_mode='disagreement')
+    test2_result = backtest_oracle_filtered_by_ml(
+        data, args.fees, filter_mode='disagreement', min_agreement=args.min_agreement
+    )
 
     # Créer baseline fictif pour comparaison (utiliser métriques du test précédent)
     # Pour l'instant, on compare juste Test 1 vs Test 2
