@@ -396,7 +396,7 @@ def main():
                         choices=['train', 'val', 'test'],
                         help='Split à tester (défaut: test)')
     parser.add_argument('--fees', type=float, default=0.001,
-                        help='Frais par side en % (défaut: 0.1%)')
+                        help='Frais par side en décimal (défaut: 0.001 = 0.1%)')
     parser.add_argument('--min-agreement', type=int, default=5,
                         choices=[1, 2, 3, 4, 5, 6],
                         help='Nombre minimum de signaux d\'accord pour consensus (défaut: 5/6)')
