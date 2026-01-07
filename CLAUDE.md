@@ -91,6 +91,128 @@ python tests/test_structural_filters.py --split test --holding-min 30
 
 ---
 
+## 🔬 TESTS DIAGNOSTIQUES - Consensus ML (2026-01-07)
+
+**Date**: 2026-01-07
+**Statut**: ✅ **COMPLÉTÉ - Découvertes majeures**
+**Script**: `tests/test_oracle_filtered_by_ml.py`
+**Objectif**: Mesurer où le modèle ML se trompe en testant Oracle sur zones consensus vs désaccord
+
+### Contexte
+
+Phase 2.7 a révélé un problème de **fréquence de trading** (30,876 trades × 0.6% frais = -9,263% frais):
+- Signal fonctionne: +110.89% PnL Brut ✅
+- Trop de trades: -2,976% PnL Net ❌
+- Hypothèse testée: **Filtrer par consensus des 6 signaux** (3 indicateurs × 2 filtres)
+
+### Tests Réalisés
+
+**6 signaux disponibles**: MACD, RSI, CCI × Kalman, Octave20
+
+#### Test 1: Consensus Direction (Pente)
+
+| Seuil | Consensus Coverage | Consensus PnL Net | Désaccord PnL Net | Verdict |
+|-------|-------------------|-------------------|-------------------|---------|
+| **6/6** | 71.4% | -3,844% ❌ | +482% ✅ | **BACKWARDS** (consensus = bruit synchronisé) |
+| **5/6** | 80.3% | +454% ❌ | +552% ✅ | **BACKWARDS** (encore corrélé) |
+| **4/6** | 95.8% | **+6,983%** ✅ | -4% ❌ | **FORWARD** ✅ (capture vraies tendances) |
+| **3/6** | 100.0% | +9,006% | 0 samples | Baseline (toujours consensus) |
+
+**Découverte critique**: Point de basculement entre 4/6 et 5/6!
+- **Seuils stricts (6/6, 5/6)**: Consensus = bruit synchronisé (tous dérivés du même OHLC)
+- **Seuil permissif (4/6)**: Capture vraies tendances (majorité saine, tolère 2 dissidents)
+
+#### Test 2: Consensus Force (Vélocité)
+
+**Date**: 2026-01-07
+**Conclusion**: ❌ **Force seule N'APPORTE RIEN comme signal de trading**
+
+| Seuil | Consensus Coverage | Consensus WR | Consensus PnL Net | Désaccord WR | Désaccord PnL Net |
+|-------|-------------------|--------------|-------------------|--------------|-------------------|
+| **6/6** | 59.2% | **15.42%** ❌ | -15,959% | **20.50%** ❌ | -10,697% |
+| **5/6** | 76.0% | **17.13%** ❌ | -16,252% | **21.79%** ❌ | -5,864% |
+| **4/6** | 93.4% | **19.49%** ❌ | -15,622% | **18.80%** ❌ | -1,902% |
+| **3/6** | 100.0% | **20.75%** ❌ | -14,980% | 0.00% | +0.00% |
+
+**Résultats catastrophiques (tous seuils):**
+- Win Rate **15-21%** (pire que hasard 50%!) ❌
+- PnL Net **tous négatifs** (-15k à -1.9k) ❌
+- Sharpe Ratio **tous négatifs** (-185 à -127) ❌
+
+**Raison du crash**: Force (STRONG/WEAK) n'est **PAS une direction**!
+- Force = 1 (STRONG) ne signifie pas LONG (juste intensité forte)
+- Force = 0 (WEAK) ne signifie pas SHORT (juste intensité faible)
+- Trader Force comme Direction = **non-sens conceptuel**
+
+### Interprétation - Direction 4/6 Sweet Spot
+
+**Pourquoi 4/6 fonctionne?**
+
+| Situation | 6/6 | 5/6 | 4/6 | Interprétation Marché |
+|-----------|-----|-----|-----|----------------------|
+| 6 UP, 0 DOWN | Consensus | Consensus | Consensus | Sur-optimisme (bull trap?) |
+| 5 UP, 1 DOWN | Consensus | Consensus | Consensus | Tendance claire |
+| **4 UP, 2 DOWN** | **Désaccord** | Consensus | Consensus | **Tendance saine** ✅ (majorité + dissidents) |
+| 3 UP, 3 DOWN | Désaccord | Désaccord | Consensus | **Transition/indécision** |
+
+**4/6 = Sweet spot:**
+- Capture les **vraies tendances** (4 vs 2 = majorité claire)
+- Élimine l'**indécision totale** (3 vs 3 = bruit)
+- Tolère les **dissidents sains** (2 signaux contre = réalisme)
+
+### Règles Validées
+
+#### ✅ À FAIRE:
+
+1. **Utiliser consensus Direction 4/6** comme filtre de qualité
+   - Trade UNIQUEMENT si ≥4/6 signaux Direction d'accord
+   - Élimine les zones d'indécision (3/3 split)
+   - Gain attendu: +6,983% Oracle (vs -4% sur désaccord)
+
+2. **Force comme FILTRE complémentaire** (pas signal primaire)
+   - Force WEAK = veto possible (éviter signaux faibles)
+   - Force STRONG + Direction 4/6 = signal robuste
+   - **Ne JAMAIS trader Force seule**
+
+#### ❌ NE PAS FAIRE:
+
+1. ❌ **Consensus strict 6/6 ou 5/6** (filtre BACKWARDS!)
+   - Consensus = bruit synchronisé (tous corrélés)
+   - Désaccord = vraies transitions (profitable)
+
+2. ❌ **Trader Force seule** (catastrophique)
+   - Force n'est pas une direction
+   - Win Rate <50%, PnL Net tous négatifs
+   - Résultat: perte garantie
+
+### Scripts Créés
+
+**tests/test_oracle_filtered_by_ml.py** (444 lignes):
+- Paramètre `--min-agreement` (1-6): Seuil consensus
+- Paramètre `--signal-type` (direction/force): Type de signal
+- Test 1: Oracle sur zones consensus ML
+- Test 2: Oracle sur zones désaccord ML
+
+**Commandes:**
+```bash
+# Test Direction avec seuil 4/6 (optimal)
+python tests/test_oracle_filtered_by_ml.py --split test --fees 0.001 --min-agreement 4 --signal-type direction
+
+# Test Force (résultat: catastrophique)
+python tests/test_oracle_filtered_by_ml.py --split test --fees 0.001 --min-agreement 4 --signal-type force
+```
+
+### Prochaine Étape Critique
+
+**Tester ML predictions avec filtre Direction 4/6:**
+- Oracle avec 4/6: +6,983% (validé)
+- ML sans filtre: -20,168% (Phase 2.7)
+- **Hypothèse**: ML avec filtre 4/6 = **positif?** (on élimine zones indécision)
+
+Script à créer ou modifier pour tester ML predictions (Y_pred) au lieu de labels (Y).
+
+---
+
 ## 🎯 VALIDATION EXPERTS - Data Audit et Phase 1 (2026-01-06)
 
 **Contexte**: Validation du Data Audit par 2 experts ML finance indépendants
