@@ -149,14 +149,15 @@ def backtest_multi_indicator(
     pred_rsi: np.ndarray,
     pred_cci: np.ndarray,
     returns: np.ndarray,
-    combo: FilterCombo
+    combo: FilterCombo,
+    decider: str = 'macd'
 ) -> StrategyResult:
     """
-    Backtest avec MACD décideur + RSI/CCI filtres.
+    Backtest avec un indicateur décideur + 2 autres filtres.
 
     Règles:
-    1. MACD décide Direction et Force
-    2. RSI/CCI peuvent veto (si désaccord fort)
+    1. Décideur (macd/rsi/cci) décide Direction et Force
+    2. Les 2 autres peuvent veto (si désaccord fort)
     3. Holding minimum 5 périodes
     4. Retournement → sortie immédiate
     """
@@ -177,15 +178,24 @@ def backtest_multi_indicator(
     n_short = 0
 
     for i in range(n_samples):
-        # MACD = Décideur
+        # Extraire tous les indicateurs
         macd_dir = int(macd_bin[i, 0])
         macd_force = int(macd_bin[i, 1])
-
-        # RSI/CCI = Témoins
         rsi_dir = int(rsi_bin[i, 0])
         rsi_force = int(rsi_bin[i, 1])
         cci_dir = int(cci_bin[i, 0])
         cci_force = int(cci_bin[i, 1])
+
+        # Sélectionner décideur
+        if decider == 'macd':
+            decider_dir = macd_dir
+            decider_force = macd_force
+        elif decider == 'rsi':
+            decider_dir = rsi_dir
+            decider_force = rsi_force
+        else:  # cci
+            decider_dir = cci_dir
+            decider_force = cci_force
 
         ret = returns[i]
 
@@ -199,17 +209,17 @@ def backtest_multi_indicator(
         # Durée trade actuel
         trade_duration = i - entry_time if position != Position.FLAT else 0
 
-        # DÉTECTION RETOURNEMENT MACD
+        # DÉTECTION RETOURNEMENT DÉCIDEUR
         direction_flip = False
-        if prev_macd_dir is not None and macd_dir != prev_macd_dir:
+        if prev_macd_dir is not None and decider_dir != prev_macd_dir:
             direction_flip = True
 
-        prev_macd_dir = macd_dir
+        prev_macd_dir = decider_dir
 
-        # DÉCISION TARGET (basée sur MACD)
-        if macd_dir == 1 and macd_force == 1:
+        # DÉCISION TARGET (basée sur DÉCIDEUR)
+        if decider_dir == 1 and decider_force == 1:
             target = Position.LONG
-        elif macd_dir == 0 and macd_force == 1:
+        elif decider_dir == 0 and decider_force == 1:
             target = Position.SHORT
         else:
             target = Position.FLAT
@@ -432,12 +442,17 @@ def main():
     parser.add_argument('--max-samples', type=int, default=None,
                         help='Limiter le nombre de samples (défaut: tous)')
 
+    parser.add_argument('--decider', type=str, default='macd',
+                        choices=['macd', 'rsi', 'cci'],
+                        help='Indicateur décideur (défaut: macd)')
+
     args = parser.parse_args()
 
     logger.info("="*120)
     logger.info("TEST MULTI-INDICATEURS - FILTRES CROISÉS")
     logger.info("="*120)
     logger.info(f"Split: {args.split}")
+    logger.info(f"Décideur: {args.decider.upper()}")
     logger.info(f"Holding minimum: {MIN_HOLDING} périodes (fixe)")
     logger.info(f"Fees: {FEES*100:.2f}% par side ({FEES*2*100:.2f}% round-trip)")
     logger.info("="*120 + "\n")
@@ -492,7 +507,7 @@ def main():
 
         # Backtest
         result = backtest_multi_indicator(
-            pred_macd, pred_rsi, pred_cci, returns, combo
+            pred_macd, pred_rsi, pred_cci, returns, combo, decider=args.decider
         )
         results.append(result)
 
