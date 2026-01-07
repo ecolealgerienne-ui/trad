@@ -506,7 +506,7 @@ def main():
     logger.info("="*120)
     logger.info(f"\n⚙️  CONFIGURATION:")
     logger.info(f"  Split: {args.split}")
-    logger.add_argument('--filter', type=str, default='kalman')
+    logger.info(f"  Filter: {args.filter}")
     logger.info(f"  Holding Min: {args.holding_min}p")
     logger.info(f"  Frais: {args.fees}%")
     logger.info(f"\n🎯 RÈGLES ACTIVÉES:")
