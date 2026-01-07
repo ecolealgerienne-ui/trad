@@ -82,10 +82,21 @@ class FilterCombo:
         """Nom court (ex: KKK, OKO)."""
         return f"{self.macd_filter[0].upper()}{self.rsi_filter[0].upper()}{self.cci_filter[0].upper()}"
 
-    @property
-    def full_name(self):
-        """Nom complet."""
-        return f"MACD-{self.macd_filter.capitalize()}_RSI-{self.rsi_filter.capitalize()}_CCI-{self.cci_filter.capitalize()}"
+    def full_name(self, decider: str = 'macd'):
+        """Nom complet avec décideur marqué."""
+        macd_label = f"MACD-{self.macd_filter.capitalize()}"
+        rsi_label = f"RSI-{self.rsi_filter.capitalize()}"
+        cci_label = f"CCI-{self.cci_filter.capitalize()}"
+
+        # Marquer le décideur avec *
+        if decider == 'macd':
+            macd_label += "*"
+        elif decider == 'rsi':
+            rsi_label += "*"
+        else:
+            cci_label += "*"
+
+        return f"{macd_label}_{rsi_label}_{cci_label}"
 
 
 @dataclass
@@ -373,12 +384,22 @@ def compute_stats(
 # AFFICHAGE
 # =============================================================================
 
-def print_results(results: List[StrategyResult]):
+def print_results(results: List[StrategyResult], decider: str):
     """Affiche résultats comparatifs."""
     logger.info("\n" + "="*120)
-    logger.info("COMPARAISON COMBINAISONS DE FILTRES (Holding 5p)")
+    logger.info(f"COMPARAISON COMBINAISONS DE FILTRES (Holding 5p) - Décideur: {decider.upper()}")
     logger.info("="*120)
-    logger.info(f"{'Combo':<8} {'MACD':<10} {'RSI':<10} {'CCI':<10} {'Trades':>8} {'Win Rate':>9} {'PnL Brut':>10} {'PnL Net':>10} {'Sharpe':>8} {'Avg Dur':>8}")
+
+    # Colonnes selon décideur
+    if decider == 'macd':
+        col1, col2, col3 = "MACD*", "RSI", "CCI"
+    elif decider == 'rsi':
+        col1, col2, col3 = "MACD", "RSI*", "CCI"
+    else:  # cci
+        col1, col2, col3 = "MACD", "RSI", "CCI*"
+
+    logger.info(f"{'Combo':<8} {col1:<10} {col2:<10} {col3:<10} {'Trades':>8} {'Win Rate':>9} {'PnL Brut':>10} {'PnL Net':>10} {'Sharpe':>8} {'Avg Dur':>8}")
+    logger.info(f"* = Décideur (les autres sont témoins, actuellement NON utilisés)")
     logger.info("-"*120)
 
     for r in results:
@@ -395,7 +416,7 @@ def print_results(results: List[StrategyResult]):
     sorted_results = sorted(results, key=lambda r: r.sharpe_ratio, reverse=True)
 
     for i, r in enumerate(sorted_results[:3], 1):
-        logger.info(f"\n{i}. {r.combo.full_name}")
+        logger.info(f"\n{i}. {r.combo.full_name(decider)}")
         logger.info(f"   Trades: {r.n_trades:,} (LONG: {r.n_long:,}, SHORT: {r.n_short:,})")
         logger.info(f"   Win Rate: {r.win_rate*100:.2f}%")
         logger.info(f"   Profit Factor: {r.profit_factor:.3f}")
@@ -410,7 +431,7 @@ def print_results(results: List[StrategyResult]):
     # Meilleure combinaison
     best = sorted_results[0]
 
-    logger.info(f"\n✅ MEILLEURE COMBINAISON: {best.combo.full_name}")
+    logger.info(f"\n✅ MEILLEURE COMBINAISON: {best.combo.full_name(decider)}")
     logger.info(f"   Code: {best.combo.name}")
     logger.info(f"   Sharpe Ratio: {best.sharpe_ratio:.3f}")
     logger.info(f"   PnL Net: {best.total_pnl_after_fees*100:+.2f}%")
@@ -420,6 +441,12 @@ def print_results(results: List[StrategyResult]):
         logger.info("\n🎉 COMBINAISON RENTABLE TROUVÉE!")
     else:
         logger.info("\n⚠️  Toutes combinaisons négatives.")
+
+    # Note importante
+    logger.info("\n⚠️  NOTE IMPORTANTE:")
+    logger.info("Les témoins (indicateurs NON décideurs) ne sont actuellement PAS utilisés comme filtres.")
+    logger.info("C'est pourquoi toutes les combinaisons avec le même filtre décideur donnent des résultats identiques.")
+    logger.info("Pour activer le filtrage par témoins, il faut implémenter la logique de veto dans backtest_multi_indicator().")
 
     logger.info("\n" + "="*120 + "\n")
 
@@ -512,7 +539,7 @@ def main():
         results.append(result)
 
     # Afficher résultats
-    print_results(results)
+    print_results(results, decider=args.decider)
 
 
 if __name__ == '__main__':
