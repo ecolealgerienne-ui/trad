@@ -1,10 +1,11 @@
 # Modele CNN-LSTM Multi-Output - Guide Complet
 
-**Date**: 2026-01-06
-**Statut**: ✅ **PHASE 1 VALIDÉE - Nettoyage Structurel Approuvé par 2 Experts**
-**Version**: 7.2 - DATA AUDIT + EXPERT VALIDATION
+**Date**: 2026-01-07
+**Statut**: ✅ **ARCHITECTURE DUAL-FILTER VALIDÉE - Niveau Desk Quant (Validation Unanime 2 Experts)**
+**Version**: 8.0 - OCTAVE VS KALMAN + TRI-PERSPECTIVE VALIDATION
 **Models**: MACD 92.4%/86.9%, CCI 89.3%/83.3%, RSI 87.4%/80.7% (baseline pré-nettoyage)
-**Prochaine étape**: Nettoyage structurel (gain attendu: +5-8% accuracy Oracle)
+**Découvertes majeures**: Lag Kalman +1 (anticipation 5min), Isolés 78-89% bruit, MACD pivot 96.5%
+**Prochaine étape**: Audit causalité (Vigilance #1) + Implémentation DualFilterSignalProcessor
 
 ---
 
@@ -92,6 +93,127 @@ Au lieu de **SUPPRIMER** les pièges → **RELABELER** Force=STRONG → Force=WE
 > "Tu es EXACTEMENT au bon endroit du pipeline. Le danger serait d'aller trop vite vers des modèles 'sexy'.
 >
 > 👉 **Le vrai edge est dans le nettoyage + la sélection conditionnelle, pas dans un réseau plus profond.**"
+
+---
+
+## 🔬 VALIDATION EXPERTS - Octave vs Kalman Dual-Filter (2026-01-07)
+
+**Contexte**: Validation de l'architecture dual-filter (Kalman + Octave) par 2 experts indépendants
+**Verdict**: ✅ **VALIDÉ UNANIMEMENT - Architecture Multi-Capteurs Temporelle Niveau Desk Quant**
+**Rapport complet**: [docs/EXPERT_VALIDATION_SYNTHESIS.md](docs/EXPERT_VALIDATION_SYNTHESIS.md)
+
+### Expert 1 (Traitement du Signal): "Architecture Hybride Temporel-Fréquentiel"
+
+> "Vous combinez la **Vitesse du domaine temporel** (Kalman) et la **Robustesse du domaine fréquentiel** (Octave). C'est une architecture de Traitement du Signal Adaptatif."
+
+**Validations clés**:
+- ✅ **Lag Kalman +1 = Validité ABSOLUE** (retard de phase physique filtre fréquentiel)
+- ✅ **78-89% isolés = Bruit de microstructure** (Flickering, Churning = ruine algos HF)
+- ✅ **MACD pivot = Architecture logique** (filtre passe-bas naturel, moins bruyant)
+- ✅ **Blocs désaccord = Détection de régime** (Dysphasie = marché en transition)
+
+**Recommandation immédiate**:
+> "Implémentez 'Pre-Alert' (Kalman) → 'Confirmation' (Octave 5min plus tard). **C'est là que réside votre Alpha**."
+
+---
+
+### Expert 2 (Finance Quantitative): "Architecture Multi-Capteurs Niveau Desk Quant"
+
+> "Ce que tu as construit est une **architecture multi-capteurs temporelle**, pas un 'stack d'indicateurs'. C'est très rare de voir ça formalisé aussi clairement."
+
+**Validations académiques**:
+- ✅ **Lag +1 = Kalman prédit par construction** (estimateur d'état latent, Kalman 1960)
+- ✅ **Isolés = Market microstructure noise** (López de Prado 2018, Bouchaud 2009)
+- ✅ **MACD = Momentum lourd plus persistant** (Jegadeesh & Titman 1993, Moskowitz 2012)
+- ✅ **Blocs = Regime transition** (Chan 2009, zones choppy markets)
+
+**Architecture équivalente desk quant**:
+| Niveau | Équivalent Pro | Rôle |
+|--------|---------------|------|
+| Kalman précoce | **Early Warning System** | Radar longue portée |
+| Octave confirmation | **Signal de référence** | Capteur haute précision |
+| Filtrage isolés | **Noise Suppression** | Debouncing temporel |
+| MACD pivot | **Regime Anchor** | Ancrage structurel |
+
+**Gains attendus (verdict)**: ✅ **"Optimiste mais crédible"**
+- Trades -78% à -92% ✅
+- Win Rate +9-15% ✅
+- Réduire turnover = **levier #1 performance nette** ✅
+
+---
+
+### ⚠️ VIGILANCES CRITIQUES (Expert 2 - IMPÉRATIF)
+
+**Vigilance #1: Circularité Temporelle**
+> "Bien vérifier que le lag +1 Kalman n'utilise aucune info future indirecte."
+
+**Action**: Auditer causalité stricte dans `prepare_data_purified_dual_binary.py`
+
+**Vigilance #2: PnL vs Win Rate**
+> "Tester en PnL, pas seulement en WR. Certaines zones évitées peuvent être peu fréquentes mais très rentables."
+
+**Action**: Mesurer distribution gains, MAE/MFE, Sharpe Ratio (pas seulement Win Rate)
+
+**Vigilance #3: Seuils Adaptatifs**
+> "Le '2 périodes' doit rester un principe, pas une constante magique."
+
+**Action**: Implémenter seuils contextuels (f(volatilité, régime)), pas fixes
+
+---
+
+### Convergence Tri-Perspective (Claude + Expert 1 + Expert 2)
+
+**Consensus absolu sur les 4 découvertes**:
+
+| Découverte | Empirique (Claude) | Théorique (Expert 1) | Académique (Expert 2) |
+|------------|-------------------|----------------------|----------------------|
+| **#1 Lag Kalman +1** | ✅ 93-95% fiable | ✅ ABSOLUE (physique) | ✅ SOLIDE (Kalman 1960) |
+| **#2 Isolés 78-89%** | ✅ Division ÷5-9 | ✅ CONFIRMÉE (microstructure) | ✅ EXTRÊMEMENT ROBUSTE |
+| **#3 MACD pivot** | ✅ 96.5% concordance | ✅ LOGIQUE (passe-bas) | ✅ TRÈS FORTE (momentum) |
+| **#4 Blocs transition** | ✅ 11-22% zones | ✅ DÉTECTION RÉGIME | ✅ TRÈS FORTE (regime switch) |
+
+**Verdict unanime**: ✅ **Architecture validée sur 3 axes indépendants complémentaires**
+
+---
+
+### Plan d'Action Consolidé (Vigilances Intégrées)
+
+**Phase 1 CRITIQUE**: Audit causalité Kalman lag +1 (Vigilance #1)
+```bash
+python tests/verify_causality.py \
+    --data-kalman .../_kalman.npz \
+    --data-octave .../_octave20.npz
+```
+
+**Phase 2**: Implémentation `DualFilterSignalProcessor` (4 niveaux)
+
+**Phase 3**: Backtest complet PnL (Vigilance #2)
+- Mesurer PnL cumulé, distribution gains, MAE/MFE
+- Sharpe Ratio (pas seulement Win Rate)
+
+**Phase 4**: Seuils adaptatifs (Vigilance #3)
+- f(volatilité, régime) vs fixes
+- Walk-forward analysis
+
+**Phase 5**: Production deployment avec monitoring temps réel
+
+---
+
+### Références Académiques Consolidées
+
+**Traitement du Signal**:
+- John Ehlers - "Cybernetic Analysis for Stocks and Futures"
+- Marcos López de Prado - "Advances in Financial ML"
+
+**Finance Quantitative**:
+- Kalman (1960) - "A New Approach to Linear Filtering"
+- Bar-Shalom - "Estimation with Applications to Tracking"
+- Haykin - "Adaptive Filter Theory"
+- López de Prado (2018) - "Advances in Financial ML"
+- Bouchaud et al. (2009) - Market Microstructure
+- Jegadeesh & Titman (1993) - Momentum Persistence
+- Moskowitz et al. (2012) - Time-Series Momentum
+- Chan (2009) - Mean-Reversion, Regime Transition
 
 ---
 
