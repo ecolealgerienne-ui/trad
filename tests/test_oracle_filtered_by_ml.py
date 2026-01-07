@@ -126,7 +126,8 @@ def backtest_oracle_filtered_by_ml(
     min_agreement: int = 6,
     signal_type: str = 'direction',
     indicator: str = None,
-    use_force_filter: bool = False
+    use_force_filter: bool = False,
+    force_threshold: str = 'strong'
 ) -> StrategyResult:
     """
     Backtest Oracle filtré par consensus ML paramétrable.
@@ -146,8 +147,11 @@ def backtest_oracle_filtered_by_ml(
         indicator: Indicateur unique à tester (None, 'macd', 'rsi', 'cci')
             - None: Tous les indicateurs (6 signaux)
             - 'macd'/'rsi'/'cci': Un seul indicateur (2 signaux)
-        use_force_filter: Si True, ajoute filtre Force STRONG (nécessite signal_type='direction')
-            - Trade UNIQUEMENT si Direction consensus ET Force STRONG
+        use_force_filter: Si True, ajoute filtre Force (nécessite signal_type='direction')
+            - Trade UNIQUEMENT si Direction consensus ET Force consensus
+        force_threshold: Seuil Force à utiliser ('strong' ou 'weak')
+            - 'strong': Trade si Force STRONG (1) - zones de sur-extension
+            - 'weak': Trade si Force WEAK (0) - zones de consolidation
 
     Returns:
         StrategyResult
@@ -235,11 +239,17 @@ def backtest_oracle_filtered_by_ml(
         # === ÉTAPE 2: Vérifier Force si demandé ===
         force_ok = True
         if use_force_filter:
-            # Force: UNIQUEMENT si consensus STRONG (1)
             pred_forces = [predictions_force[key][i] for key in available_signals]
-            n_strong = sum(f == 1 for f in pred_forces)
-            # Force OK si au moins min_agreement signaux STRONG
-            force_ok = (n_strong >= min_agreement)
+
+            if force_threshold == 'strong':
+                # Force STRONG (1): Zones de sur-extension
+                n_target = sum(f == 1 for f in pred_forces)
+            else:  # 'weak'
+                # Force WEAK (0): Zones de consolidation
+                n_target = sum(f == 0 for f in pred_forces)
+
+            # Force OK si au moins min_agreement signaux sur seuil
+            force_ok = (n_target >= min_agreement)
 
         # === ÉTAPE 3: Appliquer filtre selon mode ===
         if filter_mode == 'consensus':
@@ -433,7 +443,10 @@ def main():
                         choices=['macd', 'rsi', 'cci'],
                         help='Indicateur unique à tester (défaut: None = tous les 6 signaux)')
     parser.add_argument('--use-force-filter', action='store_true',
-                        help='Ajouter filtre Force STRONG (nécessite --signal-type direction)')
+                        help='Ajouter filtre Force (nécessite --signal-type direction)')
+    parser.add_argument('--force-threshold', type=str, default='strong',
+                        choices=['strong', 'weak'],
+                        help='Seuil Force: strong (sur-extension) ou weak (consolidation). Défaut: strong')
 
     args = parser.parse_args()
 
@@ -449,7 +462,7 @@ def main():
     # Déterminer nombre total de signaux
     n_signals = 2 if args.indicator else 6
     indicator_str = args.indicator.upper() if args.indicator else "TOUS (MACD+RSI+CCI)"
-    force_str = " + Force STRONG filter" if args.use_force_filter else ""
+    force_str = f" + Force {args.force_threshold.upper()} filter" if args.use_force_filter else ""
 
     logger.info("="*100)
     logger.info(f"Split: {args.split}")
@@ -457,6 +470,9 @@ def main():
     logger.info(f"Indicateur: {indicator_str} ({n_signals} signaux)")
     logger.info(f"Seuil consensus: {args.min_agreement}/{n_signals} signaux minimum")
     logger.info(f"Signal type: Direction{force_str}")
+    if args.use_force_filter:
+        logic_desc = "sur-extension" if args.force_threshold == 'strong' else "consolidation"
+        logger.info(f"   Force {args.force_threshold.upper()}: Trade sur zones {logic_desc}")
     logger.info("\nObjectif: Mesurer où le modèle ML se trompe")
     logger.info(f"   Test 1: Oracle SI >= {args.min_agreement}/{n_signals} signaux ML d'accord (consensus)")
     logger.info("   Test 2: Oracle SI prédictions ML désaccord")
@@ -475,7 +491,8 @@ def main():
     logger.info("-"*100)
     test1_result = backtest_oracle_filtered_by_ml(
         data, args.fees, filter_mode='consensus', min_agreement=args.min_agreement,
-        signal_type='direction', indicator=args.indicator, use_force_filter=args.use_force_filter
+        signal_type='direction', indicator=args.indicator, use_force_filter=args.use_force_filter,
+        force_threshold=args.force_threshold
     )
 
     # Test 2: Oracle filtré par DÉSACCORD ML
@@ -483,7 +500,8 @@ def main():
     logger.info("-"*100)
     test2_result = backtest_oracle_filtered_by_ml(
         data, args.fees, filter_mode='disagreement', min_agreement=args.min_agreement,
-        signal_type='direction', indicator=args.indicator, use_force_filter=args.use_force_filter
+        signal_type='direction', indicator=args.indicator, use_force_filter=args.use_force_filter,
+        force_threshold=args.force_threshold
     )
 
     # Créer baseline fictif pour comparaison (utiliser métriques du test précédent)
