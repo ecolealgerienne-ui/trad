@@ -1,11 +1,11 @@
 # Modele CNN-LSTM Multi-Output - Guide Complet
 
 **Date**: 2026-01-07
-**Statut**: ✅ **VIGILANCE #1 VALIDÉE - Architecture Dual-Filter Sans Data Leakage**
-**Version**: 8.1 - OCTAVE VS KALMAN + VIGILANCE #1 COMPLÉTÉE
-**Models**: MACD 92.4%/86.9%, CCI 89.3%/83.3%, RSI 87.4%/80.7% (baseline pré-nettoyage)
-**Découvertes majeures**: Les DEUX filtres non-causaux (RTS Smoother + filtfilt), Lag -1 = latence algorithmique
-**Prochaine étape**: Vigilance #2 (PnL vs Win Rate) → Script `compare_dual_filter_pnl.py` créé
+**Statut**: ⚠️ **VIGILANCE #2 COMPLÉTÉE - Échec Proxy Learning Découvert**
+**Version**: 8.2 - VIGILANCE #1 + #2 COMPLÉTÉES (Oracle +6,644%, ML -14,000%)
+**Models**: Oracle Kalman FONCTIONNE (+6,644% PnL, Sharpe 18.5) | ML ÉCHOUE (-14k à -19k% PnL, WR 11-15%)
+**Découverte critique**: Proxy Learning Failure validé - Le modèle ML (86.8% accuracy) prédit le passé, pas le futur
+**Action Requise**: Pivot vers Meta-Labeling (Expert 2) ou Oracle direct (fallback)
 
 ---
 
@@ -151,12 +151,21 @@ Au lieu de **SUPPRIMER** les pièges → **RELABELER** Force=STRONG → Force=WE
 **Résultats**: ✅ Pas de data leakage - Les DEUX filtres sont non-causaux (RTS Smoother + filtfilt) par design, utilisés pour labels uniquement
 **Rapport**: [docs/CAUSALITY_VERIFICATION_REPORT.md](docs/CAUSALITY_VERIFICATION_REPORT.md)
 
-**⏳ Vigilance #2: PnL vs Win Rate - EN COURS**
+**⚠️ Vigilance #2: PnL vs Win Rate - COMPLÉTÉE (ÉCHEC ML DÉCOUVERT)**
 > "Tester en PnL, pas seulement en WR. Certaines zones évitées peuvent être peu fréquentes mais très rentables."
 
 **Script créé**: `tests/compare_dual_filter_pnl.py`
-**Métriques**: Sharpe Ratio, Sortino Ratio, Distribution gains (fat tails), MAE/MFE, Zones désaccord
-**Commande**: `python tests/compare_dual_filter_pnl.py --indicator {rsi,macd,cci} --split test`
+**Tests**: 3 indicateurs (MACD, RSI, CCI) × 2 filtres (Octave, Kalman) × 2 modes (Oracle, Prédictions)
+**Rapport complet**: [docs/VIGILANCE2_ML_FAILURE_REPORT.md](docs/VIGILANCE2_ML_FAILURE_REPORT.md)
+
+**Résultats Critiques**:
+- ✅ **Oracle Kalman: +6,644% PnL, Sharpe 18.5** (signal EXISTE et fonctionne!)
+- ❌ **Prédictions ML: -14,000% à -19,000% PnL, Win Rate 11-15%** (catastrophique)
+- ⚠️ **Proxy Learning Failure Confirmé**: Le modèle prédit le passé, pas le futur
+- ✅ **Fat Tails Validées**: Kurtosis 151-644 (gains rares existent dans Oracle)
+
+**Découverte Majeure**: Architecture ML actuelle inutilisable (86.8% accuracy ≠ edge trading)
+**Action Requise**: Pivot vers **Meta-Labeling** (Expert 2 recommandation validée)
 
 **❌ Vigilance #3: Seuils Adaptatifs - PENDING**
 > "Le '2 périodes' doit rester un principe, pas une constante magique."
@@ -191,25 +200,39 @@ python tests/verify_causality.py \
 ```
 **Résultat**: ✅ Pas de data leakage détecté - Architecture valide
 
-**⏳ Phase 1.5 EN COURS**: Validation PnL Octave vs Kalman (Vigilance #2)
+**✅ Phase 1.5 COMPLÉTÉE**: Validation PnL Octave vs Kalman (Vigilance #2)
 ```bash
-# Tester tous les indicateurs (Labels Oracle)
-for ind in rsi cci macd; do
-    python tests/compare_dual_filter_pnl.py --indicator $ind --split test
-done
-
-# Avec prédictions modèle (si disponibles)
+# Tests exécutés (3 indicateurs × 2 modes)
+python tests/compare_dual_filter_pnl.py --indicator macd --split test
 python tests/compare_dual_filter_pnl.py --indicator macd --split test --use-predictions
+python tests/compare_dual_filter_pnl.py --indicator rsi --split test --use-predictions
+python tests/compare_dual_filter_pnl.py --indicator cci --split test --use-predictions
 ```
-**Métriques**: Sharpe, Sortino, Distribution, MAE/MFE, Zones désaccord
+**Résultats**: ✅ Oracle +6,644% | ❌ ML -14,000% à -19,000% (Proxy Learning Failure)
+**Rapport**: [docs/VIGILANCE2_ML_FAILURE_REPORT.md](docs/VIGILANCE2_ML_FAILURE_REPORT.md)
 
-**Phase 2**: Implémentation `DualFilterSignalProcessor` (4 niveaux) - APRÈS Vigilance #2
-- Niveau 1: Kalman/RTS anticipation (Early Warning)
-- Niveau 2: Octave confirmation (5min plus tard)
-- Niveau 3: Filtrage isolés (2+ confirmations)
-- Niveau 4: MACD pivot decision
+**⚠️ Phase 2 CRITIQUE**: PIVOT Architecture ML - 3 OPTIONS STRATÉGIQUES
 
-**Phase 3**: Seuils adaptatifs (Vigilance #3)
+**Option A: Meta-Labeling** (Expert 2 - RECOMMANDÉ):
+- Abandonner prédiction Direction/Force directe
+- Target Y_meta = probability_of_success (SI agir, pas QUELLE direction)
+- Oracle Kalman génère Direction (+6,644% prouvé)
+- Meta-modèle filtre signaux (confiance > 0.6)
+- Triple Barrier Method: Stop Loss -2%, Take Profit +3%, Time Exit 20p
+- Gain attendu: Win Rate 49.87% → 55-60%, Sharpe 18.5 → 25+
+
+**Option B: Oracle Direct + Règles** (Fallback rapide):
+- Utiliser labels Kalman directement (+6,644% prouvé)
+- Filtrage Expert 1: Confirmation 2+ périodes, Ignorer isolés, MACD pivot
+- Pas de ML (simple mais fonctionne)
+- Délai: 1 jour (vs 2-3 jours Meta-Labeling)
+
+**Option C: Features Orthogonales** (Risqué):
+- Bannir c_ret, h_ret, l_ret (trop corrélés target)
+- Ajouter Volume, ATR, Prix relatif, RSI/MACD/CCI raw
+- Risque: Peut ne pas suffire si target reste non-causal
+
+**Phase 3**: Seuils adaptatifs (Vigilance #3) - APRÈS choix Option A/B/C
 - f(volatilité, régime) vs fixes
 - Walk-forward analysis
 - Implémenter règles conditionnelles
