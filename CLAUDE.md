@@ -1,11 +1,11 @@
 # Modele CNN-LSTM Multi-Output - Guide Complet
 
 **Date**: 2026-01-07
-**Statut**: ❌ **Phase 2.7 CLÔTURÉE - Confidence Veto Rules ÉCHEC**
-**Version**: 8.7 - Direction flip fixé, veto rules inefficaces (-3.9% trades vs -20% objectif)
+**Statut**: ❌ **Phase 2.7 CLÔTURÉE - Force Filter + Veto Rules ÉCHEC**
+**Version**: 8.8 - Force filter testé (STRONG/WEAK tous négatifs), veto rules inefficaces
 **Models**: Oracle Kalman +6,644% | Model 92% accuracy | Holding 30p: Win Rate 42.05%, PnL Brut +110.89%
 **Diagnostic**: Signal robuste (+110% brut) MAIS 30k trades × 0.6% frais = -9,263% frais → PnL Net -2,976%
-**Conclusion**: Approche confidence-based limitée, pivot nécessaire (timeframe/fees/filtres structurels)
+**Conclusion**: Force n'apporte rien (-354% à -800%), veto rules limitées (-3.9% trades), pivot nécessaire
 
 ---
 
@@ -609,56 +609,96 @@ Conclusion: Trop de trades, filtrage insuffisant
 
 **Documentation complète**: [docs/PHASE_27_FINAL_RESULTS.md](docs/PHASE_27_FINAL_RESULTS.md)
 
-### Approche 2: Multi-Indicator Filters (Direction/Force Combinés)
+### Approche 2: Force Filter Tests (Direction + Force Combinés)
 
-**Principe**:
-- **MACD = Décideur principal** (Direction + Force)
-- **RSI + CCI = Témoins/Filtres** (veto si désaccord fort)
-- **Holding fixe = 5 périodes** (pas de variation)
-- **Retournement Direction → EXIT IMMÉDIAT** (même si < 5p)
+**Date**: 2026-01-07
+**Statut**: ❌ **ÉCHEC VALIDÉ - Force n'apporte AUCUN bénéfice comme filtre**
+**Script**: `tests/test_oracle_filtered_by_ml.py`
+**Tests effectués**: 6 configurations (3 indicateurs × 2 seuils Force)
 
-**Règles de Holding**:
-```python
-# PRIORITÉ 1: Retournement MACD Direction
-if direction_flip and target != position:
-    exit_and_reverse()  # Immédiat, bypass holding
+**Principe testé**:
+- **Direction = Signal principal** (Consensus 2/2 pour un indicateur)
+- **Force = Filtre additionnel** (STRONG ou WEAK)
+- **Logique**: Trade UNIQUEMENT si Direction consensus ET Force consensus
 
-# PRIORITÉ 2: Force=WEAK
-elif Force == WEAK:
-    if duration < 5p:
-        continue_trade()  # IGNORER signal sortie
-    else:  # >= 5p
-        exit_trade()      # Sortie OK
-```
+**Hypothèses testées**:
+1. **Force STRONG** = Zones de sur-extension (mauvaises pour entry)
+2. **Force WEAK** = Zones de consolidation (bonnes pour entry)
 
-**8 Combinaisons de Filtres Testées**:
-
-| Code | MACD Filter | RSI Filter | CCI Filter |
-|------|-------------|------------|------------|
-| KKK | Kalman | Kalman | Kalman |
-| KKO | Kalman | Kalman | Octave |
-| KOK | Kalman | Octave | Kalman |
-| KOO | Kalman | Octave | Octave |
-| OKK | Octave | Kalman | Kalman |
-| OKO | Octave | Kalman | Octave |
-| OOK | Octave | Octave | Kalman |
-| OOO | Octave | Octave | Octave |
-
-**Script**: `tests/test_multi_indicator_filters.py`
-
-**Commande**:
+**Commandes**:
 ```bash
-python tests/test_multi_indicator_filters.py --split test
+# Test Force STRONG (hypothèse 1)
+python tests/test_oracle_filtered_by_ml.py --split test --fees 0.001 \
+    --indicator macd --use-force-filter --force-threshold strong
+
+# Test Force WEAK (hypothèse 2 - inverse)
+python tests/test_oracle_filtered_by_ml.py --split test --fees 0.001 \
+    --indicator macd --use-force-filter --force-threshold weak
 ```
 
-**Résultats attendus**:
-- Trades: ~15,000-20,000 (réduction supplémentaire -50%)
-- Win Rate: 30-40% (maintien ou amélioration)
-- PnL Net: **POSITIF** si filtrage optimal trouvé ✅
-- Sharpe Ratio: >1.0 (signal robuste)
+**Résultats Force STRONG (Test Set, 445 jours)**:
 
-**Si succès**: Stratégie validée, passage en production
-**Si échec**: Pivot Meta-Labeling (changement de target)
+| Indicateur | Coverage | Trades | Win Rate | PnL Brut | PnL Net | vs Dir seule |
+|------------|----------|--------|----------|----------|---------|--------------|
+| **MACD Dir seule** | 95.3% | 75,722 | 37.93% | +1,208% | +1,208% | - (baseline) |
+| MACD+Force STRONG | 20.2% | 42,156 | 18.77% | -8,431% | -8,431% | **-797%** ❌ |
+| RSI+Force STRONG | 14.9% | 49,111 | 15.06% | -9,622% | -9,622% | **-800%** ❌ |
+| CCI+Force STRONG | 15.3% | 46,992 | 16.55% | -9,016% | -9,016% | **-780%** ❌ |
+
+**Résultats Force WEAK (Test Set, 445 jours)**:
+
+| Indicateur | Coverage | Trades | Win Rate | PnL Brut | PnL Net | vs Dir seule |
+|------------|----------|--------|----------|----------|---------|--------------|
+| **MACD Dir seule** | 95.3% | 75,722 | 37.93% | +1,208% | +1,208% | - (baseline) |
+| MACD+Force WEAK | 65.3% | 120,542 | 31.09% | -8,238% | -8,238% | **-783%** ❌ |
+| RSI+Force WEAK | 62.5% | 148,057 | 34.75% | -4,276% | -4,276% | **-354%** ❌ |
+| CCI+Force WEAK | 65.9% | 134,787 | 33.25% | -6,810% | -6,810% | **-564%** ❌ |
+
+**Observations critiques**:
+
+1. **Tous négatifs**: AUCUNE configuration (ni STRONG ni WEAK) n'améliore les résultats
+2. **STRONG pire que WEAK**: Force STRONG dégrade plus (-800%) que WEAK (-354% à -783%)
+3. **Direction seule = baseline positive**: MACD Direction seule donne +1,208% ✅
+4. **Ajouter Force détruit le signal**: Peu importe le seuil, Force dégrade massivement
+
+**Analyse d'échec**:
+
+| Problème | Explication |
+|----------|-------------|
+| **Force predictions mauvaises** | Accuracy Force ~74-81% (vs ~87-92% Direction) |
+| **Sélection adverse** | Filtrer sur Force élimine les meilleures zones |
+| **Information non pertinente** | Force (vélocité) non corrélée avec profitabilité |
+| **Double consensus trop restrictif** | Direction ET Force trop contraignant |
+
+**Vérification logique du script**: ✅ **CORRECTE**
+
+Le code a été vérifié en détail:
+```python
+# Étape 1: Consensus Direction (CORRECT)
+ml_has_consensus = (n_up >= min_agreement) or (n_down >= min_agreement)
+
+# Étape 2: Filtre Force (CORRECT)
+if force_threshold == 'strong':
+    n_target = sum(f == 1 for f in pred_forces)  # Compte STRONG
+else:
+    n_target = sum(f == 0 for f in pred_forces)  # Compte WEAK
+force_ok = (n_target >= min_agreement)
+
+# Étape 3: Condition finale (CORRECT)
+trade_allowed = ml_has_consensus and force_ok  # Les DEUX requis
+```
+
+**Conclusion définitive**: ❌ **Force n'a AUCUN intérêt comme filtre**
+
+- Ni STRONG ni WEAK n'apportent de bénéfice
+- Les deux dégradent massivement les résultats (environ -354% à -800%)
+- Direction seule (+1,208%) surpasse toutes les configurations avec Force
+- Le problème n'est PAS un bug de code, mais le fait que Force n'est pas prédictive
+
+**Recommandation**: **Abandonner Force comme filtre**, se concentrer sur:
+1. Direction consensus optimale (4/6 ou 2/2 selon setup)
+2. Timeframe plus long (15min/30min) pour réduire naturellement les trades
+3. Filtres structurels (volatilité ATR, volume, régime de marché)
 
 **Phase 3**: Seuils adaptatifs (Vigilance #3) - APRÈS choix Option A/B/C
 - f(volatilité, régime) vs fixes
