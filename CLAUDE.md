@@ -1,11 +1,215 @@
 # Modele CNN-LSTM Multi-Output - Guide Complet
 
 **Date**: 2026-01-07
-**Statut**: ❌ **Phase 2.7 CLÔTURÉE - Confidence Veto Rules ÉCHEC**
-**Version**: 8.7 - Direction flip fixé, veto rules inefficaces (-3.9% trades vs -20% objectif)
-**Models**: Oracle Kalman +6,644% | Model 92% accuracy | Holding 30p: Win Rate 42.05%, PnL Brut +110.89%
-**Diagnostic**: Signal robuste (+110% brut) MAIS 30k trades × 0.6% frais = -9,263% frais → PnL Net -2,976%
-**Conclusion**: Approche confidence-based limitée, pivot nécessaire (timeframe/fees/filtres structurels)
+**Statut**: ✅ **Phase 2.8 COMPLÉTÉE - Direction-Only Validé**
+**Version**: 8.9 - Direction-Only confirmé stable (+0.1-0.9%), Force abandonné définitivement
+**Models**: MACD Kalman 92.5% | CCI Kalman 90.2% (+0.9%) | RSI Kalman 87.6% - Tous stables/améliorés
+**Découverte**: Kalman > Octave systématiquement (-1.1% à -4.0% gap) - CCI meilleur gain Direction-Only
+**Prochaine Étape**: ATR Structural Filter - Réduire trades 30k → 15k pour atteindre PnL Net positif
+
+---
+
+## ⚠️ RÈGLES CRITIQUES POUR CLAUDE (À RESPECTER PENDANT TOUTE SESSION)
+
+### 1. 🔁 RÉUTILISER L'EXISTANT (Ne JAMAIS réinventer la roue)
+
+**Principe**: Avant d'écrire du nouveau code, TOUJOURS chercher si la logique existe déjà.
+
+**Exemples validés**:
+- ✅ Calcul PnL: Copié de `test_holding_strategy.py` → commit `8ec2610` (succès)
+- ❌ Direction flip: Réécrit au lieu de copié → bug critique (commit `e51a691` fix)
+
+**Ordre de recherche**:
+1. Scripts existants dans `tests/` et `src/`
+2. Fonctions utilitaires communes
+3. Seulement si VRAIMENT nouveau → écrire
+
+**Coût d'une violation**: Bug critique, +25% trades, PnL détruit (validation empirique Phase 2.7)
+
+### 2. 🔧 FONCTIONS COMMUNES ET PARTAGÉES
+
+**Principe**: "Mutualisé les fonctions, c'est très importante cette règle" (quote utilisateur)
+
+**Actions requises**:
+- Si une logique est utilisée >1 fois → extraction dans `src/utils.py` ou module dédié
+- Si modification d'une fonction partagée → vérifier impact sur TOUS les scripts
+- Documenter les paramètres et comportement (docstrings obligatoires)
+
+**Exemples à mutualiser**:
+```python
+# src/trading_utils.py (à créer si besoin)
+def calculate_pnl(returns, fees):
+    """Calcul PnL standardisé (validé Phase 2.6)"""
+    pass
+
+def detect_direction_flip(position, target):
+    """Détection flip LONG↔SHORT (logique prouvée)"""
+    pass
+
+def apply_holding_minimum(trade_duration, holding_min):
+    """Filtre holding minimum (validé Phase 2.6)"""
+    pass
+```
+
+**Bénéfices**:
+- Cohérence entre scripts
+- Réduction bugs (1 seule source de vérité)
+- Maintenance simplifiée
+
+### 3. 🚫 NE JAMAIS LANCER DE SCRIPTS (Claude n'a pas les données)
+
+**Principe**: Claude Code ne possède PAS les datasets locaux (data_trad/, data/prepared/).
+
+**Actions INTERDITES**:
+- ❌ Exécuter `python src/train.py`
+- ❌ Exécuter `python tests/test_*.py`
+- ❌ Lire les fichiers .npz ou .csv de données
+
+**Actions AUTORISÉES**:
+- ✅ Lire les scripts Python (.py)
+- ✅ Lire la documentation (.md)
+- ✅ Écrire/modifier du code
+- ✅ Fournir les commandes à exécuter pour l'utilisateur
+
+**Template de réponse**:
+```bash
+# COMMANDE À EXÉCUTER (par l'utilisateur):
+python tests/test_structural_filters.py --split test --holding-min 30
+
+# RÉSULTATS ATTENDUS:
+# - Trades: ~15,000 (-50%)
+# - PnL Brut: ~+100% (maintenu)
+# - PnL Net: Positif si ATR filtre efficace
+```
+
+**Workflow validé**:
+1. Claude écrit/modifie le code
+2. Claude fournit la commande d'exécution
+3. **Utilisateur exécute** sur sa machine (avec GPU + données)
+4. Utilisateur partage les résultats
+5. Claude analyse et propose prochaine étape
+
+---
+
+## 🔬 TESTS DIAGNOSTIQUES - Consensus ML (2026-01-07)
+
+**Date**: 2026-01-07
+**Statut**: ✅ **COMPLÉTÉ - Découvertes majeures**
+**Script**: `tests/test_oracle_filtered_by_ml.py`
+**Objectif**: Mesurer où le modèle ML se trompe en testant Oracle sur zones consensus vs désaccord
+
+### Contexte
+
+Phase 2.7 a révélé un problème de **fréquence de trading** (30,876 trades × 0.6% frais = -9,263% frais):
+- Signal fonctionne: +110.89% PnL Brut ✅
+- Trop de trades: -2,976% PnL Net ❌
+- Hypothèse testée: **Filtrer par consensus des 6 signaux** (3 indicateurs × 2 filtres)
+
+### Tests Réalisés
+
+**6 signaux disponibles**: MACD, RSI, CCI × Kalman, Octave20
+
+#### Test 1: Consensus Direction (Pente)
+
+| Seuil | Consensus Coverage | Consensus PnL Net | Désaccord PnL Net | Verdict |
+|-------|-------------------|-------------------|-------------------|---------|
+| **6/6** | 71.4% | -3,844% ❌ | +482% ✅ | **BACKWARDS** (consensus = bruit synchronisé) |
+| **5/6** | 80.3% | +454% ❌ | +552% ✅ | **BACKWARDS** (encore corrélé) |
+| **4/6** | 95.8% | **+6,983%** ✅ | -4% ❌ | **FORWARD** ✅ (capture vraies tendances) |
+| **3/6** | 100.0% | +9,006% | 0 samples | Baseline (toujours consensus) |
+
+**Découverte critique**: Point de basculement entre 4/6 et 5/6!
+- **Seuils stricts (6/6, 5/6)**: Consensus = bruit synchronisé (tous dérivés du même OHLC)
+- **Seuil permissif (4/6)**: Capture vraies tendances (majorité saine, tolère 2 dissidents)
+
+#### Test 2: Consensus Force (Vélocité)
+
+**Date**: 2026-01-07
+**Conclusion**: ❌ **Force seule N'APPORTE RIEN comme signal de trading**
+
+| Seuil | Consensus Coverage | Consensus WR | Consensus PnL Net | Désaccord WR | Désaccord PnL Net |
+|-------|-------------------|--------------|-------------------|--------------|-------------------|
+| **6/6** | 59.2% | **15.42%** ❌ | -15,959% | **20.50%** ❌ | -10,697% |
+| **5/6** | 76.0% | **17.13%** ❌ | -16,252% | **21.79%** ❌ | -5,864% |
+| **4/6** | 93.4% | **19.49%** ❌ | -15,622% | **18.80%** ❌ | -1,902% |
+| **3/6** | 100.0% | **20.75%** ❌ | -14,980% | 0.00% | +0.00% |
+
+**Résultats catastrophiques (tous seuils):**
+- Win Rate **15-21%** (pire que hasard 50%!) ❌
+- PnL Net **tous négatifs** (-15k à -1.9k) ❌
+- Sharpe Ratio **tous négatifs** (-185 à -127) ❌
+
+**Raison du crash**: Force (STRONG/WEAK) n'est **PAS une direction**!
+- Force = 1 (STRONG) ne signifie pas LONG (juste intensité forte)
+- Force = 0 (WEAK) ne signifie pas SHORT (juste intensité faible)
+- Trader Force comme Direction = **non-sens conceptuel**
+
+### Interprétation - Direction 4/6 Sweet Spot
+
+**Pourquoi 4/6 fonctionne?**
+
+| Situation | 6/6 | 5/6 | 4/6 | Interprétation Marché |
+|-----------|-----|-----|-----|----------------------|
+| 6 UP, 0 DOWN | Consensus | Consensus | Consensus | Sur-optimisme (bull trap?) |
+| 5 UP, 1 DOWN | Consensus | Consensus | Consensus | Tendance claire |
+| **4 UP, 2 DOWN** | **Désaccord** | Consensus | Consensus | **Tendance saine** ✅ (majorité + dissidents) |
+| 3 UP, 3 DOWN | Désaccord | Désaccord | Consensus | **Transition/indécision** |
+
+**4/6 = Sweet spot:**
+- Capture les **vraies tendances** (4 vs 2 = majorité claire)
+- Élimine l'**indécision totale** (3 vs 3 = bruit)
+- Tolère les **dissidents sains** (2 signaux contre = réalisme)
+
+### Règles Validées
+
+#### ✅ À FAIRE:
+
+1. **Utiliser consensus Direction 4/6** comme filtre de qualité
+   - Trade UNIQUEMENT si ≥4/6 signaux Direction d'accord
+   - Élimine les zones d'indécision (3/3 split)
+   - Gain attendu: +6,983% Oracle (vs -4% sur désaccord)
+
+2. **Force comme FILTRE complémentaire** (pas signal primaire)
+   - Force WEAK = veto possible (éviter signaux faibles)
+   - Force STRONG + Direction 4/6 = signal robuste
+   - **Ne JAMAIS trader Force seule**
+
+#### ❌ NE PAS FAIRE:
+
+1. ❌ **Consensus strict 6/6 ou 5/6** (filtre BACKWARDS!)
+   - Consensus = bruit synchronisé (tous corrélés)
+   - Désaccord = vraies transitions (profitable)
+
+2. ❌ **Trader Force seule** (catastrophique)
+   - Force n'est pas une direction
+   - Win Rate <50%, PnL Net tous négatifs
+   - Résultat: perte garantie
+
+### Scripts Créés
+
+**tests/test_oracle_filtered_by_ml.py** (444 lignes):
+- Paramètre `--min-agreement` (1-6): Seuil consensus
+- Paramètre `--signal-type` (direction/force): Type de signal
+- Test 1: Oracle sur zones consensus ML
+- Test 2: Oracle sur zones désaccord ML
+
+**Commandes:**
+```bash
+# Test Direction avec seuil 4/6 (optimal)
+python tests/test_oracle_filtered_by_ml.py --split test --fees 0.001 --min-agreement 4 --signal-type direction
+
+# Test Force (résultat: catastrophique)
+python tests/test_oracle_filtered_by_ml.py --split test --fees 0.001 --min-agreement 4 --signal-type force
+```
+
+### Prochaine Étape Critique
+
+**Tester ML predictions avec filtre Direction 4/6:**
+- Oracle avec 4/6: +6,983% (validé)
+- ML sans filtre: -20,168% (Phase 2.7)
+- **Hypothèse**: ML avec filtre 4/6 = **positif?** (on élimine zones indécision)
+
+Script à créer ou modifier pour tester ML predictions (Y_pred) au lieu de labels (Y).
 
 ---
 
@@ -405,56 +609,209 @@ Conclusion: Trop de trades, filtrage insuffisant
 
 **Documentation complète**: [docs/PHASE_27_FINAL_RESULTS.md](docs/PHASE_27_FINAL_RESULTS.md)
 
-### Approche 2: Multi-Indicator Filters (Direction/Force Combinés)
+## ⚠️ Phase 2.8: Direction-Only Architecture (2026-01-07)
 
-**Principe**:
-- **MACD = Décideur principal** (Direction + Force)
-- **RSI + CCI = Témoins/Filtres** (veto si désaccord fort)
-- **Holding fixe = 5 périodes** (pas de variation)
-- **Retournement Direction → EXIT IMMÉDIAT** (même si < 5p)
+**Date**: 2026-01-07
+**Statut**: ✅ **VALIDÉ - Direction-Only stable/amélioré sur tous indicateurs**
+**Script**: `src/prepare_data_direction_only.py`
+**Objectif**: Simplifier de 2 outputs (Direction+Force) à 1 output (Direction seule)
 
-**Règles de Holding**:
+### Motivation
+
+Phase 2.7 a prouvé que Force n'apporte **AUCUN** bénéfice:
+- Force STRONG filter: -797% à -800% dégradation
+- Force WEAK filter: -354% à -783% dégradation
+- Veto rules: -3.9% trades (insuffisant)
+
+**Hypothèse**: En supprimant Force, le modèle peut mieux se concentrer sur Direction → amélioration possible.
+
+### Résultats - 6 Modèles (Test Set)
+
+| Indicateur | Filtre | Dual-Binary | Direction-Only | Delta | Verdict |
+|-----------|--------|-------------|----------------|-------|---------|
+| **MACD** | Kalman | 92.4% 🥇 | **92.5%** 🥇 | **+0.1%** | ✅ Stable |
+| **MACD** | Octave | - | **91.4%** 🥈 | - | ✅ Excellent |
+| **RSI** | Kalman | 87.4% 🥉 | **87.6%** 🥉 | **+0.2%** | ✅ Stable |
+| **RSI** | Octave | - | **84.3%** | - | ✅ Bon |
+| **CCI** | Kalman | 89.3% 🥈 | **90.2%** 🥈 | **+0.9%** 🎯 | ✅ **Meilleur gain!** |
+| **CCI** | Octave | - | **86.2%** | - | ✅ Bon |
+
+### Découvertes Majeures
+
+#### ✅ 1. Direction-Only N'A PAS Dégradé les Performances
+
+Tous les modèles Kalman **stables ou améliorés**:
+- MACD: +0.1% (92.5%)
+- RSI: +0.2% (87.6%)
+- CCI: **+0.9%** (90.2%) 🎯
+
+**Conclusion**: Retirer Force libère de la capacité pour mieux prédire Direction.
+
+#### 🏆 2. Kalman > Octave (Systématique)
+
+| Indicateur | Kalman | Octave | Gap |
+|-----------|--------|--------|-----|
+| MACD | 92.5% 🥇 | 91.4% | **-1.1%** |
+| RSI | 87.6% | 84.3% | **-3.3%** |
+| CCI | 90.2% | 86.2% | **-4.0%** |
+
+**Pattern clair**: Kalman surpasse Octave de **1.1% à 4.0%** selon l'indicateur.
+
+**Explication**: Kalman (filtre bayésien) produit labels plus stables que Octave (filtre fréquentiel).
+
+#### 🎯 3. CCI Bénéficie le Plus du Direction-Only
+
+CCI a le **meilleur gain** en Direction-Only (+0.9%), suggérant que:
+- La prédiction de Force CCI était la plus bruitée en Dual-Binary
+- CCI profite le plus du focus single-task sur Direction
+
+### Architecture Direction-Only
+
+**Script**: `src/prepare_data_direction_only.py`
+
+**Modifications vs Dual-Binary**:
 ```python
-# PRIORITÉ 1: Retournement MACD Direction
-if direction_flip and target != position:
-    exit_and_reverse()  # Immédiat, bypass holding
+# Dual-Binary (ancien)
+Y: (n, 2) - [direction, force]
+label_cols = [f'{indicator}_dir', f'{indicator}_force']
 
-# PRIORITÉ 2: Force=WEAK
-elif Force == WEAK:
-    if duration < 5p:
-        continue_trade()  # IGNORER signal sortie
-    else:  # >= 5p
-        exit_trade()      # Sortie OK
+# Direction-Only (nouveau)
+Y: (n, 1) - [direction]
+label_cols = [f'{indicator}_dir']
 ```
 
-**8 Combinaisons de Filtres Testées**:
+**Dataset outputs**:
+```
+data/prepared/dataset_btc_eth_bnb_ada_ltc_macd_direction_only_kalman.npz
+data/prepared/dataset_btc_eth_bnb_ada_ltc_rsi_direction_only_kalman.npz
+data/prepared/dataset_btc_eth_bnb_ada_ltc_cci_direction_only_kalman.npz
+(+ versions Octave20)
+```
 
-| Code | MACD Filter | RSI Filter | CCI Filter |
-|------|-------------|------------|------------|
-| KKK | Kalman | Kalman | Kalman |
-| KKO | Kalman | Kalman | Octave |
-| KOK | Kalman | Octave | Kalman |
-| KOO | Kalman | Octave | Octave |
-| OKK | Octave | Kalman | Kalman |
-| OKO | Octave | Kalman | Octave |
-| OOK | Octave | Octave | Kalman |
-| OOO | Octave | Octave | Octave |
+### Commandes
 
-**Script**: `tests/test_multi_indicator_filters.py`
-
-**Commande**:
+**1. Génération datasets**:
 ```bash
-python tests/test_multi_indicator_filters.py --split test
+python src/prepare_data_direction_only.py --assets BTC ETH BNB ADA LTC
 ```
 
-**Résultats attendus**:
-- Trades: ~15,000-20,000 (réduction supplémentaire -50%)
-- Win Rate: 30-40% (maintien ou amélioration)
-- PnL Net: **POSITIF** si filtrage optimal trouvé ✅
-- Sharpe Ratio: >1.0 (signal robuste)
+**2. Entraînement** (automatique - détecte 1 output):
+```bash
+python src/train.py --data data/prepared/dataset_*_direction_only_kalman.npz --epochs 50
+```
 
-**Si succès**: Stratégie validée, passage en production
-**Si échec**: Pivot Meta-Labeling (changement de target)
+**3. Tests rapides** (avec échantillon):
+```bash
+python src/prepare_data_direction_only.py --assets BTC --max-samples 10000
+```
+
+### Conclusion Phase 2.8
+
+✅ **Direction-Only VALIDÉ comme architecture optimale**:
+- Aucune dégradation (pire cas: stable)
+- Gains légers (+0.1% à +0.9%)
+- Plus simple (1 output vs 2)
+- Force confirmé comme inutile (empiriquement)
+
+✅ **Kalman confirmé comme filtre optimal**:
+- Surpasse Octave systématiquement
+- Labels plus stables pour ML
+- Meilleure généralisation
+
+**Prochaine étape critique**: ATR Structural Filter pour réduire trades de 30k → 15k.
+
+---
+
+### Approche 2: Force Filter Tests (Direction + Force Combinés)
+
+**Date**: 2026-01-07
+**Statut**: ❌ **ÉCHEC VALIDÉ - Force n'apporte AUCUN bénéfice comme filtre**
+**Script**: `tests/test_oracle_filtered_by_ml.py`
+**Tests effectués**: 6 configurations (3 indicateurs × 2 seuils Force)
+
+**Principe testé**:
+- **Direction = Signal principal** (Consensus 2/2 pour un indicateur)
+- **Force = Filtre additionnel** (STRONG ou WEAK)
+- **Logique**: Trade UNIQUEMENT si Direction consensus ET Force consensus
+
+**Hypothèses testées**:
+1. **Force STRONG** = Zones de sur-extension (mauvaises pour entry)
+2. **Force WEAK** = Zones de consolidation (bonnes pour entry)
+
+**Commandes**:
+```bash
+# Test Force STRONG (hypothèse 1)
+python tests/test_oracle_filtered_by_ml.py --split test --fees 0.001 \
+    --indicator macd --use-force-filter --force-threshold strong
+
+# Test Force WEAK (hypothèse 2 - inverse)
+python tests/test_oracle_filtered_by_ml.py --split test --fees 0.001 \
+    --indicator macd --use-force-filter --force-threshold weak
+```
+
+**Résultats Force STRONG (Test Set, 445 jours)**:
+
+| Indicateur | Coverage | Trades | Win Rate | PnL Brut | PnL Net | vs Dir seule |
+|------------|----------|--------|----------|----------|---------|--------------|
+| **MACD Dir seule** | 95.3% | 75,722 | 37.93% | +1,208% | +1,208% | - (baseline) |
+| MACD+Force STRONG | 20.2% | 42,156 | 18.77% | -8,431% | -8,431% | **-797%** ❌ |
+| RSI+Force STRONG | 14.9% | 49,111 | 15.06% | -9,622% | -9,622% | **-800%** ❌ |
+| CCI+Force STRONG | 15.3% | 46,992 | 16.55% | -9,016% | -9,016% | **-780%** ❌ |
+
+**Résultats Force WEAK (Test Set, 445 jours)**:
+
+| Indicateur | Coverage | Trades | Win Rate | PnL Brut | PnL Net | vs Dir seule |
+|------------|----------|--------|----------|----------|---------|--------------|
+| **MACD Dir seule** | 95.3% | 75,722 | 37.93% | +1,208% | +1,208% | - (baseline) |
+| MACD+Force WEAK | 65.3% | 120,542 | 31.09% | -8,238% | -8,238% | **-783%** ❌ |
+| RSI+Force WEAK | 62.5% | 148,057 | 34.75% | -4,276% | -4,276% | **-354%** ❌ |
+| CCI+Force WEAK | 65.9% | 134,787 | 33.25% | -6,810% | -6,810% | **-564%** ❌ |
+
+**Observations critiques**:
+
+1. **Tous négatifs**: AUCUNE configuration (ni STRONG ni WEAK) n'améliore les résultats
+2. **STRONG pire que WEAK**: Force STRONG dégrade plus (-800%) que WEAK (-354% à -783%)
+3. **Direction seule = baseline positive**: MACD Direction seule donne +1,208% ✅
+4. **Ajouter Force détruit le signal**: Peu importe le seuil, Force dégrade massivement
+
+**Analyse d'échec**:
+
+| Problème | Explication |
+|----------|-------------|
+| **Force predictions mauvaises** | Accuracy Force ~74-81% (vs ~87-92% Direction) |
+| **Sélection adverse** | Filtrer sur Force élimine les meilleures zones |
+| **Information non pertinente** | Force (vélocité) non corrélée avec profitabilité |
+| **Double consensus trop restrictif** | Direction ET Force trop contraignant |
+
+**Vérification logique du script**: ✅ **CORRECTE**
+
+Le code a été vérifié en détail:
+```python
+# Étape 1: Consensus Direction (CORRECT)
+ml_has_consensus = (n_up >= min_agreement) or (n_down >= min_agreement)
+
+# Étape 2: Filtre Force (CORRECT)
+if force_threshold == 'strong':
+    n_target = sum(f == 1 for f in pred_forces)  # Compte STRONG
+else:
+    n_target = sum(f == 0 for f in pred_forces)  # Compte WEAK
+force_ok = (n_target >= min_agreement)
+
+# Étape 3: Condition finale (CORRECT)
+trade_allowed = ml_has_consensus and force_ok  # Les DEUX requis
+```
+
+**Conclusion définitive**: ❌ **Force n'a AUCUN intérêt comme filtre**
+
+- Ni STRONG ni WEAK n'apportent de bénéfice
+- Les deux dégradent massivement les résultats (environ -354% à -800%)
+- Direction seule (+1,208%) surpasse toutes les configurations avec Force
+- Le problème n'est PAS un bug de code, mais le fait que Force n'est pas prédictive
+
+**Recommandation**: **Abandonner Force comme filtre**, se concentrer sur:
+1. Direction consensus optimale (4/6 ou 2/2 selon setup)
+2. Timeframe plus long (15min/30min) pour réduire naturellement les trades
+3. Filtres structurels (volatilité ATR, volume, régime de marché)
 
 **Phase 3**: Seuils adaptatifs (Vigilance #3) - APRÈS choix Option A/B/C
 - f(volatilité, régime) vs fixes
