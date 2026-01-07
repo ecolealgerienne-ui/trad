@@ -429,6 +429,9 @@ def main():
                         choices=['train', 'val', 'test'],
                         help='Split (défaut: test)')
 
+    parser.add_argument('--max-samples', type=int, default=None,
+                        help='Limiter le nombre de samples (défaut: tous)')
+
     args = parser.parse_args()
 
     logger.info("="*120)
@@ -451,6 +454,17 @@ def main():
 
     # Extraire returns (identique pour tous)
     returns = extract_c_ret(datasets['macd_kalman']['X'], 'macd')
+
+    # Limiter samples si demandé
+    if args.max_samples is not None and args.max_samples < len(returns):
+        logger.info(f"\n  ⚠️  Limitation à {args.max_samples:,} samples (sur {len(returns):,} disponibles)")
+        returns = returns[:args.max_samples]
+        # Limiter aussi tous les datasets
+        for key in datasets:
+            datasets[key]['X'] = datasets[key]['X'][:args.max_samples]
+            datasets[key]['Y'] = datasets[key]['Y'][:args.max_samples]
+            if datasets[key]['Y_pred'] is not None:
+                datasets[key]['Y_pred'] = datasets[key]['Y_pred'][:args.max_samples]
 
     logger.info(f"\n  Samples: {len(returns):,}\n")
 
