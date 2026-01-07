@@ -282,40 +282,43 @@ def backtest_with_confidence_veto(
         else:
             target = Position.FLAT
 
-        # === Appliquer règles de veto ===
+        # === Appliquer règles de veto (SEULEMENT si on essaie d'entrer!) ===
 
         veto = False
 
-        # Règle #1: Zone Grise MACD
-        if enable_rule1 and macd_conf_dir < 0.20:
-            veto = True
-            rule1_blocks += 1
+        # Les règles s'appliquent UNIQUEMENT si position FLAT et signal d'entrée
+        if position == Position.FLAT and target != Position.FLAT:
 
-        # Règle #2: Veto Ultra-Fort (si pas déjà veto par règle 1)
-        if not veto and enable_rule2 and macd_conf_dir < 0.20:
-            # RSI ultra-confiant contredit MACD faible
-            if rsi_conf_dir > 0.70 and rsi_dir != macd_dir:
+            # Règle #1: Zone Grise MACD (vérifier FORCE car signal utilise force==1)
+            if enable_rule1 and (macd_conf_dir < 0.20 or macd_conf_force < 0.20):
                 veto = True
-                rule2_blocks += 1
-            # CCI ultra-confiant contredit MACD faible
-            elif cci_conf_dir > 0.70 and cci_dir != macd_dir:
-                veto = True
-                rule2_blocks += 1
+                rule1_blocks += 1
 
-        # Règle #3: Confirmation Requise (si pas déjà veto)
-        if not veto and enable_rule3 and 0.20 <= macd_conf_dir < 0.40:
-            # Au moins un témoin doit confirmer avec conf >0.50
-            has_confirmation = (
-                (rsi_conf_dir > 0.50 and rsi_dir == macd_dir) or
-                (cci_conf_dir > 0.50 and cci_dir == macd_dir)
-            )
-            if not has_confirmation:
-                veto = True
-                rule3_blocks += 1
+            # Règle #2: Veto Ultra-Fort (si pas déjà veto par règle 1)
+            if not veto and enable_rule2 and macd_conf_force < 0.20:
+                # RSI ultra-confiant contredit MACD faible
+                if rsi_conf_dir > 0.70 and rsi_dir != macd_dir:
+                    veto = True
+                    rule2_blocks += 1
+                # CCI ultra-confiant contredit MACD faible
+                elif cci_conf_dir > 0.70 and cci_dir != macd_dir:
+                    veto = True
+                    rule2_blocks += 1
 
-        # Appliquer veto
-        if veto:
-            target = Position.FLAT
+            # Règle #3: Confirmation Requise (si pas déjà veto)
+            if not veto and enable_rule3 and 0.20 <= macd_conf_force < 0.40:
+                # Au moins un témoin doit confirmer avec conf >0.50
+                has_confirmation = (
+                    (rsi_conf_dir > 0.50 and rsi_dir == macd_dir) or
+                    (cci_conf_dir > 0.50 and cci_dir == macd_dir)
+                )
+                if not has_confirmation:
+                    veto = True
+                    rule3_blocks += 1
+
+            # Appliquer veto
+            if veto:
+                target = Position.FLAT
 
         # === Gestion position ===
 
