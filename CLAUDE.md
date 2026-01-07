@@ -1,11 +1,11 @@
 # Modele CNN-LSTM Multi-Output - Guide Complet
 
 **Date**: 2026-01-07
-**Statut**: ⚠️ **Phase 2.7 EN COURS - Multi-Indicateurs Filtres Croisés**
-**Version**: 8.6 - Holding 30p: Signal FONCTIONNE (+110.89% brut), problème = trop de trades
-**Models**: Oracle Kalman +6,644% | Model 92% accuracy | Holding 30p: Win Rate 29.59%, PnL Brut +110.89%
-**Diagnostic**: Signal valide (PnL Brut positif) MAIS 30k trades × frais 0.3% = -9,262% frais
-**Action en cours**: Test 8 combinaisons filtres (MACD décideur + RSI/CCI témoins) pour réduire trades
+**Statut**: ❌ **Phase 2.7 CLÔTURÉE - Confidence Veto Rules ÉCHEC**
+**Version**: 8.7 - Direction flip fixé, veto rules inefficaces (-3.9% trades vs -20% objectif)
+**Models**: Oracle Kalman +6,644% | Model 92% accuracy | Holding 30p: Win Rate 42.05%, PnL Brut +110.89%
+**Diagnostic**: Signal robuste (+110% brut) MAIS 30k trades × 0.6% frais = -9,263% frais → PnL Net -2,976%
+**Conclusion**: Approche confidence-based limitée, pivot nécessaire (timeframe/fees/filtres structurels)
 
 ---
 
@@ -370,9 +370,40 @@ python tests/test_confidence_veto.py --split test --max-samples 20000 --enable-a
 python tests/test_confidence_veto.py --split test --enable-all --holding-min 30
 ```
 
-**Résultats Attendus APRÈS Fix**:
-- Baseline: ~30,876 trades, +110% PnL Brut (comme Phase 2.6)
-- Avec veto: ~25,000 trades (-20%), +110% brut maintenu, **+102% PnL Net** ✅ POSITIF!
+**Résultats Finaux Full Dataset (Test Set, holding_min=30p)**:
+
+| Stratégie | Trades | Réduction | Win Rate | PnL Brut | PnL Net | Blocages |
+|-----------|--------|-----------|----------|----------|---------|----------|
+| **Baseline** | 30,876 | - | 42.05% | **+110.89%** ✅ | -2,976% | - |
+| **R1+R2+R3** | 29,673 | **-3.9%** ❌ | 42.07% | +85.52% | -2,881% | 4837/0/8 |
+
+**Validation Fix Direction Flip**: ✅ **PARFAIT**
+- 30,876 trades (exactement Phase 2.6) ✅
+- +110.89% PnL Brut (signal intact) ✅
+- Win Rate 42.05% (vs 29.59% Phase 2.6, +12.46%!) ✅
+
+**Conclusion Veto Rules**: ❌ **ÉCHEC VALIDÉ**
+- Réduction -3.9% (vs -20% objectif) → Insuffisant
+- PnL Brut dégradé -25% (filtre aussi bons trades)
+- Confidence score inadéquat (abs(prob-0.5)×2 trop simple)
+- Approche confidence-based fondamentalement limitée
+
+**Diagnostic Final**:
+```
+Signal: +110.89% PnL Brut ✅ (le signal FONCTIONNE!)
+Trades: 30,876 = 48 trades/jour/asset ❌
+Frais: -9,263% (83× le PnL brut!) 💥
+Edge/trade: +0.36% - 0.6% frais = -0.24% ❌
+
+Conclusion: Trop de trades, filtrage insuffisant
+```
+
+**Recommandation**: ❌ **ABANDONNER Phase 2.7**, pivoter vers:
+1. Timeframe 15min/30min (réduction naturelle -50-67%)
+2. Maker fees 0.02% (frais ÷10)
+3. Filtres structurels (volatilité, volume, régime)
+
+**Documentation complète**: [docs/PHASE_27_FINAL_RESULTS.md](docs/PHASE_27_FINAL_RESULTS.md)
 
 ### Approche 2: Multi-Indicator Filters (Direction/Force Combinés)
 
