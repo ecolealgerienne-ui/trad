@@ -1,11 +1,11 @@
 # Modele CNN-LSTM Multi-Output - Guide Complet
 
 **Date**: 2026-01-07
-**Statut**: ⚠️ **Phase 2.6 EN COURS - Holding Minimum (Dernier Test avant Meta-Labeling)**
-**Version**: 8.5 - Kill Signatures échoué (erreurs aléatoires), test durée minimale trade
-**Models**: Oracle Kalman +6,644% | Model 92% accuracy MAIS Win Rate 14% (-14k% PnL)
-**Diagnostic**: Erreurs non prédictibles par Force/Désaccord → Hypothèse sorties trop précoces
-**Action en cours**: Test holding minimum (ignorer Force=WEAK si duration < seuil)
+**Statut**: ⚠️ **Phase 2.7 EN COURS - Multi-Indicateurs Filtres Croisés**
+**Version**: 8.6 - Holding 30p: Signal FONCTIONNE (+110.89% brut), problème = trop de trades
+**Models**: Oracle Kalman +6,644% | Model 92% accuracy | Holding 30p: Win Rate 29.59%, PnL Brut +110.89%
+**Diagnostic**: Signal valide (PnL Brut positif) MAIS 30k trades × frais 0.3% = -9,262% frais
+**Action en cours**: Test 8 combinaisons filtres (MACD décideur + RSI/CCI témoins) pour réduire trades
 
 ---
 
@@ -281,9 +281,79 @@ if position != FLAT and Force == WEAK:
 python tests/test_holding_strategy.py --indicator macd --split test
 ```
 
+**Résultats Holding Minimum (Test Set MACD)**:
+
+| Holding | Trades | Réduction | Win Rate | PnL Brut | PnL Net | Avg Dur | Verdict |
+|---------|--------|-----------|----------|----------|---------|---------|---------|
+| **0p (Baseline)** | 46,920 | 0% | 14.00% | -443.09% | **-14,129%** | 5.6p | ❌ Référence |
+| 10p | 42,560 | -9% | 18.36% | -189.34% | -12,579% | 10.3p | ❌ |
+| 15p | 39,284 | -16% | 22.73% | -31.18% | -11,754% | 13.1p | ❌ |
+| 20p | 35,762 | -24% | 25.94% | +29.93% | -10,69% | 15.6p | ⚠️ Brut positif! |
+| **30p** | **30,876** | **-34%** | **29.59%** | **+110.89%** ✅ | **-9,152%** | **18.5p** | 🎯 **Signal fonctionne!** |
+
+**DÉCOUVERTE CRITIQUE**:
+- ✅ **PnL Brut +110.89%** à Holding 30p → **LE SIGNAL FONCTIONNE!**
+- ⚠️ Problème = Trop de trades (30,876) × frais 0.3% = -9,262% frais
+- ✅ Win Rate progression: 14% → 29.59% (+15.59%)
+- ✅ Holding augmente la qualité des trades
+
+**Diagnostic final**:
+- ❌ Ce n'est PAS un problème de modèle ML (92% accuracy valide)
+- ❌ Ce n'est PAS un problème de signal (PnL Brut prouve que ça marche)
+- ✅ C'est un problème de **FRÉQUENCE DE TRADING** (trop de trades détruisent le PnL net)
+
+**⚠️ Phase 2.7 EN COURS**: MULTI-INDICATEURS FILTRES CROISÉS
+
+**Objectif**: Réduire encore les trades (30k → 15-20k) en utilisant RSI+CCI comme témoins/filtres
+
+**Principe**:
+- **MACD = Décideur principal** (Direction + Force)
+- **RSI + CCI = Témoins/Filtres** (veto si désaccord fort)
+- **Holding fixe = 5 périodes** (pas de variation)
+- **Retournement Direction → EXIT IMMÉDIAT** (même si < 5p)
+
+**Règles de Holding**:
+```python
+# PRIORITÉ 1: Retournement MACD Direction
+if direction_flip and target != position:
+    exit_and_reverse()  # Immédiat, bypass holding
+
+# PRIORITÉ 2: Force=WEAK
+elif Force == WEAK:
+    if duration < 5p:
+        continue_trade()  # IGNORER signal sortie
+    else:  # >= 5p
+        exit_trade()      # Sortie OK
+```
+
+**8 Combinaisons de Filtres Testées**:
+
+| Code | MACD Filter | RSI Filter | CCI Filter |
+|------|-------------|------------|------------|
+| KKK | Kalman | Kalman | Kalman |
+| KKO | Kalman | Kalman | Octave |
+| KOK | Kalman | Octave | Kalman |
+| KOO | Kalman | Octave | Octave |
+| OKK | Octave | Kalman | Kalman |
+| OKO | Octave | Kalman | Octave |
+| OOK | Octave | Octave | Kalman |
+| OOO | Octave | Octave | Octave |
+
+**Script**: `tests/test_multi_indicator_filters.py`
+
+**Commande**:
+```bash
+python tests/test_multi_indicator_filters.py --split test
+```
+
 **Résultats attendus**:
-- Si MIN_HOLDING optimal trouvé → Win Rate 14% → 50%+, PnL POSITIF ✅
-- Si échec → Pivot Meta-Labeling (changement target)
+- Trades: ~15,000-20,000 (réduction supplémentaire -50%)
+- Win Rate: 30-40% (maintien ou amélioration)
+- PnL Net: **POSITIF** si filtrage optimal trouvé ✅
+- Sharpe Ratio: >1.0 (signal robuste)
+
+**Si succès**: Stratégie validée, passage en production
+**Si échec**: Pivot Meta-Labeling (changement de target)
 
 **Phase 3**: Seuils adaptatifs (Vigilance #3) - APRÈS choix Option A/B/C
 - f(volatilité, régime) vs fixes
