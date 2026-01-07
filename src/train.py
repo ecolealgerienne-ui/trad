@@ -649,6 +649,7 @@ def main():
     # Détecter si dual-binary depuis metadata
     is_dual_binary = False
     indicator_for_metrics = None
+    filter_type_metadata = None
 
     if metadata:
         # Détection dual-binary
@@ -657,6 +658,10 @@ def main():
             # Extraire nom indicateur (ex: ['rsi_dir', 'rsi_force'] -> 'rsi')
             label_name = metadata['label_names'][0]
             indicator_for_metrics = label_name.split('_')[0].upper()
+
+        # Détecter le type de filtre depuis les métadonnées
+        if 'filter_type' in metadata:
+            filter_type_metadata = metadata['filter_type']
 
         # Log architecture détectée
         logger.info(f"\n🔍 Architecture détectée:")
@@ -668,6 +673,9 @@ def main():
             logger.info(f"  Labels: Direction + Force")
         else:
             logger.info(f"  Type: SINGLE-OUTPUT")
+
+        if filter_type_metadata:
+            logger.info(f"  Filtre: {filter_type_metadata.upper()}")
 
     # Filtrer les labels si mode single-output (ancien pipeline)
     if single_indicator and not is_dual_binary:
@@ -821,7 +829,7 @@ def main():
                 detected_indicator = ind
                 break
 
-        # Détecter filtre depuis le nom du fichier
+        # Détecter filtre depuis le nom du fichier (fallback si pas dans metadata)
         for filt in ['kalman', 'octave20', 'octave', 'decycler']:
             if filt in data_name:
                 detected_filter = filt
@@ -831,7 +839,10 @@ def main():
     if is_dual_binary and indicator_for_metrics:
         detected_indicator = indicator_for_metrics.lower()
 
-    if args.filter:
+    # Priorité pour le filtre: metadata > CLI argument > filename
+    if filter_type_metadata:
+        detected_filter = filter_type_metadata
+    elif args.filter:
         detected_filter = args.filter
 
     # Fallback sur CLI pour ancien pipeline
