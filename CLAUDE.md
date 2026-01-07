@@ -1,11 +1,11 @@
 # Modele CNN-LSTM Multi-Output - Guide Complet
 
 **Date**: 2026-01-07
-**Statut**: ⚠️ **Phase 2.5 EN COURS - Kill Signatures (Analyse Faux Positifs)**
-**Version**: 8.4 - Dual-Filter échoué (concordance 96.51%), pivot vers analyse erreurs
+**Statut**: ⚠️ **Phase 2.6 EN COURS - Holding Minimum (Dernier Test avant Meta-Labeling)**
+**Version**: 8.5 - Kill Signatures échoué (erreurs aléatoires), test durée minimale trade
 **Models**: Oracle Kalman +6,644% | Model 92% accuracy MAIS Win Rate 14% (-14k% PnL)
-**Diagnostic**: Accuracy labels (pente instantanée) ≠ Win Rate trading (durée variable)
-**Action en cours**: Analyse "Kill Signatures" pour identifier patterns qui tuent signaux MACD
+**Diagnostic**: Erreurs non prédictibles par Force/Désaccord → Hypothèse sorties trop précoces
+**Action en cours**: Test holding minimum (ignorer Force=WEAK si duration < seuil)
 
 ---
 
@@ -231,36 +231,59 @@ python tests/compare_dual_filter_pnl.py --indicator cci --split test --use-predi
 - Trading = durée variable (3-20 périodes)
 - Pente change plusieurs fois pendant trade → micro-sorties
 
-**⚠️ Phase 2.5 EN COURS**: KILL SIGNATURES (Analyse Faux Positifs MACD)
-
-**Objectif**: Identifier configurations techniques qui tuent signaux MACD
-
-**Méthodologie "Autopsie"**:
-1. **Faux Positif** = MACD=UP mais PnL_brut < 0 (jusqu'au flip)
-2. **Lift univarié**: P(Variable=X | Erreur) / P(Variable=X | Tout)
-3. Split découverte/validation (20k + 620k)
-
-**Patterns hypothèses**:
-- **Pattern A**: MACD=UP mais Octave_Force=WEAK (divergence inertie)
-- **Pattern B**: MACD=UP mais RSI_Dir=DOWN (conflit temporel) - Nécessite multi-indicateurs
-- **Pattern C**: Kalman_Dir ≠ Octave_Dir (dissonance) - Coverage 3.49% max
+**❌ Phase 2.5 COMPLÉTÉE**: KILL SIGNATURES - ÉCHEC (Tous Patterns Invalidés)
 
 **Script**: `tests/analyze_kill_signatures.py`
-**Guide**: [docs/KILL_SIGNATURES_GUIDE.md](docs/KILL_SIGNATURES_GUIDE.md)
+**Résultats Discovery (20k samples)**:
+- Pattern A (Octave Force=WEAK): Lift 1.07×, Precision **17.3%** ❌
+- Pattern C (Disagreement): Lift 1.43×, Recall **5.1%** ❌
+- Taux erreur: 16.1% (3,221/20,000)
 
-**Commandes**:
+**Diagnostic critique**:
+- Force=WEAK présent dans **69.6%** des signaux (pas discriminant)
+- Precision 17% = 83% de bons signaux bloqués à tort
+- **Les erreurs MACD sont ALÉATOIRES** (non prédictibles par Force/Désaccord)
+
+**Découverte inverse**:
+- MACD_Octave_Dir=DOWN (Lift 0.10×): Quand Octave contredit DOWN, presque **JAMAIS** erreur!
+
+**⚠️ Phase 2.6 EN COURS**: HOLDING MINIMUM (Durée Minimale de Trade)
+
+**Hypothèse**: Les erreurs viennent de **SORTIES TROP PRÉCOCES**, pas de mauvaises entrées
+
+**Principe**:
+- Entrée: MACD Direction=UP & Force=STRONG (inchangé)
+- Sortie: Force=WEAK **UNIQUEMENT SI** trade_duration >= MIN_HOLDING
+- Sinon: IGNORER signal sortie, continuer trade
+
+**Logique**:
+```python
+if position != FLAT and Force == WEAK:
+    if trade_duration < MIN_HOLDING:
+        # IGNORER sortie, continuer
+        continue
+    else:
+        # Sortie OK
+        exit_trade()
+```
+
+**Script**: `tests/test_holding_strategy.py`
+
+**Tests**:
+- MIN_HOLDING = 0 (baseline, sortie immédiate)
+- MIN_HOLDING = 10 périodes (~50 min)
+- MIN_HOLDING = 15 périodes (~75 min)
+- MIN_HOLDING = 20 périodes (~100 min)
+- MIN_HOLDING = 30 périodes (~150 min)
+
+**Commande**:
 ```bash
-# Phase 1: Découverte (20k samples BTC)
-python tests/analyze_kill_signatures.py --indicator macd --n-discovery 20000
-
-# Phase 2: Validation (620k samples restants)
-python tests/analyze_kill_signatures.py --indicator macd --validate
+python tests/test_holding_strategy.py --indicator macd --split test
 ```
 
 **Résultats attendus**:
-- Pattern A Lift: 1.5-2.5× (MACD inertie vs Octave faiblesse)
-- Recall: 30-50% (détection erreurs MACD)
-- Impact PnL: -14,000% → potentiellement POSITIF si Lift > 2.0
+- Si MIN_HOLDING optimal trouvé → Win Rate 14% → 50%+, PnL POSITIF ✅
+- Si échec → Pivot Meta-Labeling (changement target)
 
 **Phase 3**: Seuils adaptatifs (Vigilance #3) - APRÈS choix Option A/B/C
 - f(volatilité, régime) vs fixes
