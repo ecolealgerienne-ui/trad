@@ -79,6 +79,30 @@ def compute_confidence(prob: float) -> float:
     return abs(prob - 0.5) * 2.0
 
 
+def extract_c_ret(X: np.ndarray, indicator: str) -> np.ndarray:
+    """
+    Extrait c_ret (Close return) de X.
+
+    Args:
+        X: Features (n_samples, sequence_length, n_features)
+        indicator: 'rsi', 'macd', ou 'cci'
+
+    Returns:
+        c_ret pour chaque sample (n_samples,)
+        Utilise la dernière valeur de la séquence (t=-1)
+    """
+    if indicator in ['rsi', 'macd']:
+        # 1 feature (c_ret) → index 0
+        c_ret = X[:, -1, 0]  # Shape: (n_samples,)
+    elif indicator == 'cci':
+        # 3 features (h_ret, l_ret, c_ret) → c_ret à index 2
+        c_ret = X[:, -1, 2]  # Shape: (n_samples,)
+    else:
+        raise ValueError(f"Indicateur inconnu: {indicator}")
+
+    return c_ret
+
+
 def load_multi_indicator_data(
     split: str = 'test',
     filter_type: str = 'kalman',
@@ -94,7 +118,7 @@ def load_multi_indicator_data(
 
     Returns:
         Dict avec:
-        - returns: Rendements close
+        - returns: Rendements close (extraits de X_macd)
         - macd: {Y_oracle, Y_pred_probs}
         - rsi: {Y_oracle, Y_pred_probs}
         - cci: {Y_oracle, Y_pred_probs}
@@ -127,6 +151,7 @@ def load_multi_indicator_data(
         data = np.load(indicator_file, allow_pickle=True)
 
         # Extraire données du split
+        X = data[f'X_{split}']  # (n, seq_len, n_features)
         Y_oracle = data[f'Y_{split}']  # (n, 2) [direction, force]
         Y_pred = data.get(f'Y_{split}_pred', None)  # (n, 2) probabilités brutes
 
@@ -135,6 +160,7 @@ def load_multi_indicator_data(
 
         # Limiter samples si demandé
         if max_samples is not None and max_samples < len(Y_oracle):
+            X = X[:max_samples]
             Y_oracle = Y_oracle[:max_samples]
             Y_pred = Y_pred[:max_samples]
 
@@ -143,11 +169,9 @@ def load_multi_indicator_data(
             'Y_pred_probs': Y_pred  # PROBABILITÉS BRUTES [0.0, 1.0]
         }
 
-        # Charger returns (une seule fois)
-        if returns is None:
-            returns = data[f'returns_{split}']
-            if max_samples is not None and max_samples < len(returns):
-                returns = returns[:max_samples]
+        # Extraire returns (une seule fois, depuis MACD)
+        if returns is None and indicator == 'macd':
+            returns = extract_c_ret(X, indicator)
 
     n_samples = len(returns)
     logger.info(f"\n📊 Données chargées:")
