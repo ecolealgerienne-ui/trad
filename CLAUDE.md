@@ -1,11 +1,11 @@
 # Modele CNN-LSTM Multi-Output - Guide Complet
 
 **Date**: 2026-01-07
-**Statut**: ⚠️ **VIGILANCE #2 COMPLÉTÉE - Échec Proxy Learning Découvert**
-**Version**: 8.2 - VIGILANCE #1 + #2 COMPLÉTÉES (Oracle +6,644%, ML -14,000%)
-**Models**: Oracle Kalman FONCTIONNE (+6,644% PnL, Sharpe 18.5) | ML ÉCHOUE (-14k à -19k% PnL, WR 11-15%)
-**Découverte critique**: Proxy Learning Failure validé - Le modèle ML (86.8% accuracy) prédit le passé, pas le futur
-**Action Requise**: Pivot vers Meta-Labeling (Expert 2) ou Oracle direct (fallback)
+**Statut**: ⚠️ **VIGILANCE #2 COMPLÉTÉE - Problème Micro-Sorties Identifié**
+**Version**: 8.3 - Tests Stratégie Filtrage Dual-Filter en cours
+**Models**: Oracle Kalman FONCTIONNE (+6,644% PnL, Sharpe 18.5) | Model ~90% accuracy MAIS micro-sorties (-14k% PnL)
+**Découverte critique**: Le modèle FONCTIONNE (90% acc) mais 10% erreurs = MICRO-SORTIES qui détruisent PnL
+**Action en cours**: Stratégie de filtrage dual-filter (Octave + Kalman) pour éliminer micro-sorties
 
 ---
 
@@ -151,7 +151,7 @@ Au lieu de **SUPPRIMER** les pièges → **RELABELER** Force=STRONG → Force=WE
 **Résultats**: ✅ Pas de data leakage - Les DEUX filtres sont non-causaux (RTS Smoother + filtfilt) par design, utilisés pour labels uniquement
 **Rapport**: [docs/CAUSALITY_VERIFICATION_REPORT.md](docs/CAUSALITY_VERIFICATION_REPORT.md)
 
-**⚠️ Vigilance #2: PnL vs Win Rate - COMPLÉTÉE (ÉCHEC ML DÉCOUVERT)**
+**⚠️ Vigilance #2: PnL vs Win Rate - COMPLÉTÉE (Problème Micro-Sorties Identifié)**
 > "Tester en PnL, pas seulement en WR. Certaines zones évitées peuvent être peu fréquentes mais très rentables."
 
 **Script créé**: `tests/compare_dual_filter_pnl.py`
@@ -161,11 +161,17 @@ Au lieu de **SUPPRIMER** les pièges → **RELABELER** Force=STRONG → Force=WE
 **Résultats Critiques**:
 - ✅ **Oracle Kalman: +6,644% PnL, Sharpe 18.5** (signal EXISTE et fonctionne!)
 - ❌ **Prédictions ML: -14,000% à -19,000% PnL, Win Rate 11-15%** (catastrophique)
-- ⚠️ **Proxy Learning Failure Confirmé**: Le modèle prédit le passé, pas le futur
 - ✅ **Fat Tails Validées**: Kurtosis 151-644 (gains rares existent dans Oracle)
 
-**Découverte Majeure**: Architecture ML actuelle inutilisable (86.8% accuracy ≠ edge trading)
-**Action Requise**: Pivot vers **Meta-Labeling** (Expert 2 recommandation validée)
+**DIAGNOSTIC CORRECT** (correction 2026-01-07):
+- ✅ Le modèle FONCTIONNE (~90% accuracy sur MACD)
+- ⚠️ Le problème = **10% d'erreurs créent des MICRO-SORTIES**
+- ⚠️ Micro-sorties × Frais 0.3% round-trip = PnL fond
+- ✅ Oracle +6,644% prouve que le **signal existe et fonctionne**
+
+**RAPPEL IMPORTANT**: L'Oracle ne connaît pas le futur! Il utilise les labels (pente t-2 vs t-3) à 100% d'accuracy pour tester le potentiel maximum du signal.
+
+**Action en cours**: Stratégie de **filtrage dual-filter** pour éliminer les 10% de micro-sorties
 
 **❌ Vigilance #3: Seuils Adaptatifs - PENDING**
 > "Le '2 périodes' doit rester un principe, pas une constante magique."
@@ -208,29 +214,43 @@ python tests/compare_dual_filter_pnl.py --indicator macd --split test --use-pred
 python tests/compare_dual_filter_pnl.py --indicator rsi --split test --use-predictions
 python tests/compare_dual_filter_pnl.py --indicator cci --split test --use-predictions
 ```
-**Résultats**: ✅ Oracle +6,644% | ❌ ML -14,000% à -19,000% (Proxy Learning Failure)
+**Résultats**: ✅ Oracle +6,644% | ❌ ML -14,000% à -19,000% (Micro-sorties)
 **Rapport**: [docs/VIGILANCE2_ML_FAILURE_REPORT.md](docs/VIGILANCE2_ML_FAILURE_REPORT.md)
 
-**⚠️ Phase 2 CRITIQUE**: PIVOT Architecture ML - 3 OPTIONS STRATÉGIQUES
+**⚠️ Phase 2 EN COURS**: STRATÉGIE DE FILTRAGE DUAL-FILTER (Élimination Micro-Sorties)
 
-**Option A: Meta-Labeling** (Expert 2 - RECOMMANDÉ):
-- Abandonner prédiction Direction/Force directe
-- Target Y_meta = probability_of_success (SI agir, pas QUELLE direction)
-- Oracle Kalman génère Direction (+6,644% prouvé)
-- Meta-modèle filtre signaux (confiance > 0.6)
-- Triple Barrier Method: Stop Loss -2%, Take Profit +3%, Time Exit 20p
-- Gain attendu: Win Rate 49.87% → 55-60%, Sharpe 18.5 → 25+
+**Objectif**: Éliminer les 10% de micro-sorties du modèle qui fonctionne à ~90%
 
-**Option B: Oracle Direct + Règles** (Fallback rapide):
-- Utiliser labels Kalman directement (+6,644% prouvé)
-- Filtrage Expert 1: Confirmation 2+ périodes, Ignorer isolés, MACD pivot
-- Pas de ML (simple mais fonctionne)
-- Délai: 1 jour (vs 2-3 jours Meta-Labeling)
+**Outils de filtrage**:
+1. **2 Filtres** (Octave + Kalman) → 2 estimations indépendantes
+2. **3 Indicateurs** (RSI, MACD, CCI) → Diversification
+3. **Direction + Force** → Ne trader que signaux STRONG
+4. **Confirmation 2+ périodes** → Éviter flips isolés
 
-**Option C: Features Orthogonales** (Risqué):
-- Bannir c_ret, h_ret, l_ret (trop corrélés target)
-- Ajouter Volume, ATR, Prix relatif, RSI/MACD/CCI raw
-- Risque: Peut ne pas suffire si target reste non-causal
+**Script de test**: `tests/test_dual_filter_strategy.py`
+**Guide complet**: [docs/DUAL_FILTER_STRATEGY_TESTS.md](docs/DUAL_FILTER_STRATEGY_TESTS.md)
+
+**Stratégies testées**:
+1. **Baseline**: Kalman seul (attendu: -14,000% comme Vigilance #2)
+2. **Direction filter**: Octave ET Kalman d'accord sur Direction
+3. **Direction+Force filter**: Accord + au moins 1 filtre dit STRONG
+4. **Full filter**: Direction + Force + Confirmation 2+ périodes
+
+**Attendu Full Filter**:
+- Réduction trades: 70-85%
+- PnL Net: POSITIF (ramener vers Oracle +6,644%)
+- Win Rate: >50%
+- Sharpe Ratio: >1.0
+
+**Commandes de test**:
+```bash
+# Test MACD (priorité 1 - Oracle +6,644% le plus fort)
+python tests/test_dual_filter_strategy.py --indicator macd --split test
+
+# Test RSI et CCI
+python tests/test_dual_filter_strategy.py --indicator rsi --split test
+python tests/test_dual_filter_strategy.py --indicator cci --split test
+```
 
 **Phase 3**: Seuils adaptatifs (Vigilance #3) - APRÈS choix Option A/B/C
 - f(volatilité, régime) vs fixes
