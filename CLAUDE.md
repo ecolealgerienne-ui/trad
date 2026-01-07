@@ -1,11 +1,11 @@
 # Modele CNN-LSTM Multi-Output - Guide Complet
 
 **Date**: 2026-01-07
-**Statut**: ❌ **Phase 2.7 CLÔTURÉE - Force Filter + Veto Rules ÉCHEC**
-**Version**: 8.8 - Force filter testé (STRONG/WEAK tous négatifs), veto rules inefficaces
-**Models**: Oracle Kalman +6,644% | Model 92% accuracy | Holding 30p: Win Rate 42.05%, PnL Brut +110.89%
-**Diagnostic**: Signal robuste (+110% brut) MAIS 30k trades × 0.6% frais = -9,263% frais → PnL Net -2,976%
-**Conclusion**: Force n'apporte rien (-354% à -800%), veto rules limitées (-3.9% trades), pivot nécessaire
+**Statut**: ✅ **Phase 2.8 COMPLÉTÉE - Direction-Only Validé**
+**Version**: 8.9 - Direction-Only confirmé stable (+0.1-0.9%), Force abandonné définitivement
+**Models**: MACD Kalman 92.5% | CCI Kalman 90.2% (+0.9%) | RSI Kalman 87.6% - Tous stables/améliorés
+**Découverte**: Kalman > Octave systématiquement (-1.1% à -4.0% gap) - CCI meilleur gain Direction-Only
+**Prochaine Étape**: ATR Structural Filter - Réduire trades 30k → 15k pour atteindre PnL Net positif
 
 ---
 
@@ -608,6 +608,119 @@ Conclusion: Trop de trades, filtrage insuffisant
 3. Filtres structurels (volatilité, volume, régime)
 
 **Documentation complète**: [docs/PHASE_27_FINAL_RESULTS.md](docs/PHASE_27_FINAL_RESULTS.md)
+
+## ⚠️ Phase 2.8: Direction-Only Architecture (2026-01-07)
+
+**Date**: 2026-01-07
+**Statut**: ✅ **VALIDÉ - Direction-Only stable/amélioré sur tous indicateurs**
+**Script**: `src/prepare_data_direction_only.py`
+**Objectif**: Simplifier de 2 outputs (Direction+Force) à 1 output (Direction seule)
+
+### Motivation
+
+Phase 2.7 a prouvé que Force n'apporte **AUCUN** bénéfice:
+- Force STRONG filter: -797% à -800% dégradation
+- Force WEAK filter: -354% à -783% dégradation
+- Veto rules: -3.9% trades (insuffisant)
+
+**Hypothèse**: En supprimant Force, le modèle peut mieux se concentrer sur Direction → amélioration possible.
+
+### Résultats - 6 Modèles (Test Set)
+
+| Indicateur | Filtre | Dual-Binary | Direction-Only | Delta | Verdict |
+|-----------|--------|-------------|----------------|-------|---------|
+| **MACD** | Kalman | 92.4% 🥇 | **92.5%** 🥇 | **+0.1%** | ✅ Stable |
+| **MACD** | Octave | - | **91.4%** 🥈 | - | ✅ Excellent |
+| **RSI** | Kalman | 87.4% 🥉 | **87.6%** 🥉 | **+0.2%** | ✅ Stable |
+| **RSI** | Octave | - | **84.3%** | - | ✅ Bon |
+| **CCI** | Kalman | 89.3% 🥈 | **90.2%** 🥈 | **+0.9%** 🎯 | ✅ **Meilleur gain!** |
+| **CCI** | Octave | - | **86.2%** | - | ✅ Bon |
+
+### Découvertes Majeures
+
+#### ✅ 1. Direction-Only N'A PAS Dégradé les Performances
+
+Tous les modèles Kalman **stables ou améliorés**:
+- MACD: +0.1% (92.5%)
+- RSI: +0.2% (87.6%)
+- CCI: **+0.9%** (90.2%) 🎯
+
+**Conclusion**: Retirer Force libère de la capacité pour mieux prédire Direction.
+
+#### 🏆 2. Kalman > Octave (Systématique)
+
+| Indicateur | Kalman | Octave | Gap |
+|-----------|--------|--------|-----|
+| MACD | 92.5% 🥇 | 91.4% | **-1.1%** |
+| RSI | 87.6% | 84.3% | **-3.3%** |
+| CCI | 90.2% | 86.2% | **-4.0%** |
+
+**Pattern clair**: Kalman surpasse Octave de **1.1% à 4.0%** selon l'indicateur.
+
+**Explication**: Kalman (filtre bayésien) produit labels plus stables que Octave (filtre fréquentiel).
+
+#### 🎯 3. CCI Bénéficie le Plus du Direction-Only
+
+CCI a le **meilleur gain** en Direction-Only (+0.9%), suggérant que:
+- La prédiction de Force CCI était la plus bruitée en Dual-Binary
+- CCI profite le plus du focus single-task sur Direction
+
+### Architecture Direction-Only
+
+**Script**: `src/prepare_data_direction_only.py`
+
+**Modifications vs Dual-Binary**:
+```python
+# Dual-Binary (ancien)
+Y: (n, 2) - [direction, force]
+label_cols = [f'{indicator}_dir', f'{indicator}_force']
+
+# Direction-Only (nouveau)
+Y: (n, 1) - [direction]
+label_cols = [f'{indicator}_dir']
+```
+
+**Dataset outputs**:
+```
+data/prepared/dataset_btc_eth_bnb_ada_ltc_macd_direction_only_kalman.npz
+data/prepared/dataset_btc_eth_bnb_ada_ltc_rsi_direction_only_kalman.npz
+data/prepared/dataset_btc_eth_bnb_ada_ltc_cci_direction_only_kalman.npz
+(+ versions Octave20)
+```
+
+### Commandes
+
+**1. Génération datasets**:
+```bash
+python src/prepare_data_direction_only.py --assets BTC ETH BNB ADA LTC
+```
+
+**2. Entraînement** (automatique - détecte 1 output):
+```bash
+python src/train.py --data data/prepared/dataset_*_direction_only_kalman.npz --epochs 50
+```
+
+**3. Tests rapides** (avec échantillon):
+```bash
+python src/prepare_data_direction_only.py --assets BTC --max-samples 10000
+```
+
+### Conclusion Phase 2.8
+
+✅ **Direction-Only VALIDÉ comme architecture optimale**:
+- Aucune dégradation (pire cas: stable)
+- Gains légers (+0.1% à +0.9%)
+- Plus simple (1 output vs 2)
+- Force confirmé comme inutile (empiriquement)
+
+✅ **Kalman confirmé comme filtre optimal**:
+- Surpasse Octave systématiquement
+- Labels plus stables pour ML
+- Meilleure généralisation
+
+**Prochaine étape critique**: ATR Structural Filter pour réduire trades de 30k → 15k.
+
+---
 
 ### Approche 2: Force Filter Tests (Direction + Force Combinés)
 
