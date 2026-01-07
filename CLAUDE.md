@@ -9,6 +9,88 @@
 
 ---
 
+## ⚠️ RÈGLES CRITIQUES POUR CLAUDE (À RESPECTER PENDANT TOUTE SESSION)
+
+### 1. 🔁 RÉUTILISER L'EXISTANT (Ne JAMAIS réinventer la roue)
+
+**Principe**: Avant d'écrire du nouveau code, TOUJOURS chercher si la logique existe déjà.
+
+**Exemples validés**:
+- ✅ Calcul PnL: Copié de `test_holding_strategy.py` → commit `8ec2610` (succès)
+- ❌ Direction flip: Réécrit au lieu de copié → bug critique (commit `e51a691` fix)
+
+**Ordre de recherche**:
+1. Scripts existants dans `tests/` et `src/`
+2. Fonctions utilitaires communes
+3. Seulement si VRAIMENT nouveau → écrire
+
+**Coût d'une violation**: Bug critique, +25% trades, PnL détruit (validation empirique Phase 2.7)
+
+### 2. 🔧 FONCTIONS COMMUNES ET PARTAGÉES
+
+**Principe**: "Mutualisé les fonctions, c'est très importante cette règle" (quote utilisateur)
+
+**Actions requises**:
+- Si une logique est utilisée >1 fois → extraction dans `src/utils.py` ou module dédié
+- Si modification d'une fonction partagée → vérifier impact sur TOUS les scripts
+- Documenter les paramètres et comportement (docstrings obligatoires)
+
+**Exemples à mutualiser**:
+```python
+# src/trading_utils.py (à créer si besoin)
+def calculate_pnl(returns, fees):
+    """Calcul PnL standardisé (validé Phase 2.6)"""
+    pass
+
+def detect_direction_flip(position, target):
+    """Détection flip LONG↔SHORT (logique prouvée)"""
+    pass
+
+def apply_holding_minimum(trade_duration, holding_min):
+    """Filtre holding minimum (validé Phase 2.6)"""
+    pass
+```
+
+**Bénéfices**:
+- Cohérence entre scripts
+- Réduction bugs (1 seule source de vérité)
+- Maintenance simplifiée
+
+### 3. 🚫 NE JAMAIS LANCER DE SCRIPTS (Claude n'a pas les données)
+
+**Principe**: Claude Code ne possède PAS les datasets locaux (data_trad/, data/prepared/).
+
+**Actions INTERDITES**:
+- ❌ Exécuter `python src/train.py`
+- ❌ Exécuter `python tests/test_*.py`
+- ❌ Lire les fichiers .npz ou .csv de données
+
+**Actions AUTORISÉES**:
+- ✅ Lire les scripts Python (.py)
+- ✅ Lire la documentation (.md)
+- ✅ Écrire/modifier du code
+- ✅ Fournir les commandes à exécuter pour l'utilisateur
+
+**Template de réponse**:
+```bash
+# COMMANDE À EXÉCUTER (par l'utilisateur):
+python tests/test_structural_filters.py --split test --holding-min 30
+
+# RÉSULTATS ATTENDUS:
+# - Trades: ~15,000 (-50%)
+# - PnL Brut: ~+100% (maintenu)
+# - PnL Net: Positif si ATR filtre efficace
+```
+
+**Workflow validé**:
+1. Claude écrit/modifie le code
+2. Claude fournit la commande d'exécution
+3. **Utilisateur exécute** sur sa machine (avec GPU + données)
+4. Utilisateur partage les résultats
+5. Claude analyse et propose prochaine étape
+
+---
+
 ## 🎯 VALIDATION EXPERTS - Data Audit et Phase 1 (2026-01-06)
 
 **Contexte**: Validation du Data Audit par 2 experts ML finance indépendants
