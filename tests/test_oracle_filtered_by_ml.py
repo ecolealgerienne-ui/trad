@@ -124,7 +124,9 @@ def backtest_oracle_filtered_by_ml(
     fees: float = 0.001,
     filter_mode: str = 'consensus',
     min_agreement: int = 6,
-    signal_type: str = 'direction'
+    signal_type: str = 'direction',
+    indicator: str = None,
+    use_force_filter: bool = False
 ) -> StrategyResult:
     """
     Backtest Oracle filtré par consensus ML paramétrable.
@@ -135,46 +137,57 @@ def backtest_oracle_filtered_by_ml(
         filter_mode: 'consensus' ou 'disagreement'
             - 'consensus': Trade UNIQUEMENT si >= min_agreement signaux d'accord
             - 'disagreement': Trade UNIQUEMENT si < min_agreement signaux d'accord
-        min_agreement: Nombre minimum de signaux devant être d'accord (1-6)
-            - 6: Tous d'accord (consensus total)
-            - 5: Au moins 5/6 d'accord
-            - 4: Au moins 4/6 d'accord
-            - etc.
+        min_agreement: Nombre minimum de signaux devant être d'accord
+            - Si indicator=None: 1-6 (6 signaux = 3 indicateurs × 2 filtres)
+            - Si indicator='macd': 1-2 (2 signaux = 1 indicateur × 2 filtres)
         signal_type: Type de signal à tester ('direction' ou 'force')
             - 'direction': Colonne 0 (pente UP/DOWN)
             - 'force': Colonne 1 (vélocité WEAK/STRONG)
+        indicator: Indicateur unique à tester (None, 'macd', 'rsi', 'cci')
+            - None: Tous les indicateurs (6 signaux)
+            - 'macd'/'rsi'/'cci': Un seul indicateur (2 signaux)
+        use_force_filter: Si True, ajoute filtre Force STRONG (nécessite signal_type='direction')
+            - Trade UNIQUEMENT si Direction consensus ET Force STRONG
 
     Returns:
         StrategyResult
 
     Logique:
-        1. Compter combien de signaux ML sont UP ou DOWN (ou STRONG/WEAK)
-        2. SI >= min_agreement dans même direction:
-           - ML a "consensus" (selon seuil)
-        3. Appliquer filtre selon mode
+        1. Charger signaux selon indicator (None=tous, ou indicateur unique)
+        2. Compter consensus Direction
+        3. Si use_force_filter: Vérifier Force STRONG aussi
         4. Trader avec Oracle labels si autorisé
     """
     returns = data['returns']
     n_samples = len(returns)
 
     # Extraire prédictions ET labels (Oracle)
-    predictions = {}
-    labels = {}
+    predictions_dir = {}  # Direction
+    predictions_force = {}  # Force (si use_force_filter)
+    labels_dir = {}  # Direction Oracle
     available_signals = []
 
-    # Choisir colonne selon signal_type
-    col_idx = 0 if signal_type == 'direction' else 1
+    # Déterminer quels indicateurs charger
+    if indicator is None:
+        indicators_to_load = ['macd', 'rsi', 'cci']
+    else:
+        indicators_to_load = [indicator]
 
-    for indicator in ['macd', 'rsi', 'cci']:
+    # Charger Direction (toujours)
+    for ind in indicators_to_load:
         for filter_type in ['kalman', 'octave20']:
-            key = f'{indicator}_{filter_type}'
+            key = f'{ind}_{filter_type}'
             if data.get(key) is not None and data[key]['Y_pred'] is not None:
-                # Prédictions ML (pour filtrer)
+                # Direction: Prédictions ML (pour filtrer)
                 pred = data[key]['Y_pred']
-                predictions[key] = (pred[:, col_idx] > 0.5).astype(int)
+                predictions_dir[key] = (pred[:, 0] > 0.5).astype(int)
 
-                # Labels Oracle (pour trader)
-                labels[key] = data[key]['Y'][:, col_idx].astype(int)
+                # Direction: Labels Oracle (pour trader)
+                labels_dir[key] = data[key]['Y'][:, 0].astype(int)
+
+                # Force: Charger si demandé
+                if use_force_filter:
+                    predictions_force[key] = (pred[:, 1] > 0.5).astype(int)
 
                 available_signals.append(key)
 
@@ -203,17 +216,15 @@ def backtest_oracle_filtered_by_ml(
         # Accumuler PnL
         current_pnl = compute_pnl_step(position, ret, current_pnl)
 
-        # === ÉTAPE 1: Vérifier consensus ML (prédictions) ===
-        pred_directions = [predictions[key][i] for key in available_signals]
+        # === ÉTAPE 1: Vérifier consensus Direction ML ===
+        pred_directions = [predictions_dir[key][i] for key in available_signals]
 
         # Compter signaux UP et DOWN
         n_up = sum(d == 1 for d in pred_directions)
         n_down = sum(d == 0 for d in pred_directions)
         n_total = len(pred_directions)
 
-        # Consensus ML selon seuil min_agreement
-        # Consensus UP: au moins min_agreement signaux UP
-        # Consensus DOWN: au moins min_agreement signaux DOWN
+        # Consensus Direction ML selon seuil min_agreement
         ml_has_consensus = (n_up >= min_agreement) or (n_down >= min_agreement)
 
         if ml_has_consensus:
@@ -221,22 +232,31 @@ def backtest_oracle_filtered_by_ml(
         else:
             n_disagreement_zones += 1
 
-        # === ÉTAPE 2: Appliquer filtre selon mode ===
+        # === ÉTAPE 2: Vérifier Force si demandé ===
+        force_ok = True
+        if use_force_filter:
+            # Force: UNIQUEMENT si consensus STRONG (1)
+            pred_forces = [predictions_force[key][i] for key in available_signals]
+            n_strong = sum(f == 1 for f in pred_forces)
+            # Force OK si au moins min_agreement signaux STRONG
+            force_ok = (n_strong >= min_agreement)
+
+        # === ÉTAPE 3: Appliquer filtre selon mode ===
         if filter_mode == 'consensus':
-            # Trade UNIQUEMENT si >= min_agreement signaux d'accord
-            trade_allowed = ml_has_consensus
+            # Trade si Direction consensus ET Force OK
+            trade_allowed = ml_has_consensus and force_ok
         elif filter_mode == 'disagreement':
-            # Trade UNIQUEMENT si < min_agreement signaux d'accord
-            trade_allowed = not ml_has_consensus
+            # Trade si Direction désaccord ET Force OK
+            trade_allowed = (not ml_has_consensus) and force_ok
         else:
             raise ValueError(f"Mode inconnu: {filter_mode}")
 
-        # === ÉTAPE 3: Décider direction avec ORACLE si autorisé ===
+        # === ÉTAPE 4: Décider direction avec ORACLE si autorisé ===
         if trade_allowed:
             n_trades_in_zone += 1
 
-            # Vérifier consensus ORACLE (labels)
-            oracle_directions = [labels[key][i] for key in available_signals]
+            # Vérifier consensus ORACLE Direction (labels)
+            oracle_directions = [labels_dir[key][i] for key in available_signals]
 
             if all(d == 1 for d in oracle_directions):
                 target = Position.LONG
@@ -404,24 +424,41 @@ def main():
                         help='Split à tester (défaut: test)')
     parser.add_argument('--fees', type=float, default=0.001,
                         help='Frais par side en décimal (défaut: 0.001 = 0.1%)')
-    parser.add_argument('--min-agreement', type=int, default=5,
-                        choices=[1, 2, 3, 4, 5, 6],
-                        help='Nombre minimum de signaux d\'accord pour consensus (défaut: 5/6)')
+    parser.add_argument('--min-agreement', type=int, default=None,
+                        help='Nombre minimum de signaux d\'accord (défaut: auto selon indicateur)')
     parser.add_argument('--signal-type', type=str, default='direction',
                         choices=['direction', 'force'],
                         help='Type de signal à tester (défaut: direction = pente, force = vélocité)')
+    parser.add_argument('--indicator', type=str, default=None,
+                        choices=['macd', 'rsi', 'cci'],
+                        help='Indicateur unique à tester (défaut: None = tous les 6 signaux)')
+    parser.add_argument('--use-force-filter', action='store_true',
+                        help='Ajouter filtre Force STRONG (nécessite --signal-type direction)')
 
     args = parser.parse_args()
 
+    # Ajuster min_agreement selon mode
+    if args.min_agreement is None:
+        if args.indicator is None:
+            args.min_agreement = 4  # 4/6 (sweet spot découvert)
+        else:
+            args.min_agreement = 2  # 2/2 (consensus total pour indicateur unique)
+
     logger.info("="*100)
     logger.info("TEST DIAGNOSTIQUE - Oracle Filtré par Consensus ML")
+    # Déterminer nombre total de signaux
+    n_signals = 2 if args.indicator else 6
+    indicator_str = args.indicator.upper() if args.indicator else "TOUS (MACD+RSI+CCI)"
+    force_str = " + Force STRONG filter" if args.use_force_filter else ""
+
     logger.info("="*100)
     logger.info(f"Split: {args.split}")
     logger.info(f"Frais: {args.fees*100:.2f}% par side ({args.fees*2*100:.2f}% round-trip)")
-    logger.info(f"Seuil consensus: {args.min_agreement}/6 signaux minimum")
-    logger.info(f"Signal type: {args.signal_type} (colonne {'0=Direction' if args.signal_type == 'direction' else '1=Force'})")
+    logger.info(f"Indicateur: {indicator_str} ({n_signals} signaux)")
+    logger.info(f"Seuil consensus: {args.min_agreement}/{n_signals} signaux minimum")
+    logger.info(f"Signal type: Direction{force_str}")
     logger.info("\nObjectif: Mesurer où le modèle ML se trompe")
-    logger.info(f"   Test 1: Oracle SI >= {args.min_agreement}/6 signaux ML d'accord (consensus)")
+    logger.info(f"   Test 1: Oracle SI >= {args.min_agreement}/{n_signals} signaux ML d'accord (consensus)")
     logger.info("   Test 2: Oracle SI prédictions ML désaccord")
     logger.info("="*100 + "\n")
 
@@ -434,19 +471,19 @@ def main():
     # On pourrait le recalculer, mais on garde juste les métriques pour comparaison
 
     # Test 1: Oracle filtré par CONSENSUS ML
-    logger.info(f"\n🧪 TEST 1: Oracle UNIQUEMENT sur zones CONSENSUS ML (>= {args.min_agreement}/6)")
+    logger.info(f"\n🧪 TEST 1: Oracle UNIQUEMENT sur zones CONSENSUS ML (>= {args.min_agreement}/{n_signals})")
     logger.info("-"*100)
     test1_result = backtest_oracle_filtered_by_ml(
         data, args.fees, filter_mode='consensus', min_agreement=args.min_agreement,
-        signal_type=args.signal_type
+        signal_type='direction', indicator=args.indicator, use_force_filter=args.use_force_filter
     )
 
     # Test 2: Oracle filtré par DÉSACCORD ML
-    logger.info(f"\n🧪 TEST 2: Oracle UNIQUEMENT sur zones DÉSACCORD ML (< {args.min_agreement}/6)")
+    logger.info(f"\n🧪 TEST 2: Oracle UNIQUEMENT sur zones DÉSACCORD ML (< {args.min_agreement}/{n_signals})")
     logger.info("-"*100)
     test2_result = backtest_oracle_filtered_by_ml(
         data, args.fees, filter_mode='disagreement', min_agreement=args.min_agreement,
-        signal_type=args.signal_type
+        signal_type='direction', indicator=args.indicator, use_force_filter=args.use_force_filter
     )
 
     # Créer baseline fictif pour comparaison (utiliser métriques du test précédent)
