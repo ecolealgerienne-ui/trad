@@ -338,23 +338,41 @@ python tests/test_holding_strategy.py --indicator macd --split test
 - ⚠️ PnL encore négatif (-99.17%) mais meilleur que baseline (-118.76%)
 - ℹ️ Règle #1 (Zone Grise) domine: 737 blocages sur 739 total
 
-**Prochains Tests**:
+**🐛 Bug Critique Identifié et Corrigé (2026-01-07)**:
 
-```bash
-# Test 1: Combiner veto + holding_min=30p (attendu: PnL Net positif)
-python tests/test_confidence_veto.py --split test --max-samples 20000 --enable-all --holding-min 30
+**Symptôme**: Tests holding_min=30p donnaient 38,573 trades (vs 30,876 attendu) et PnL Brut -8.76% (vs +110.89%)
 
-# Test 2: Full dataset (stabilité)
-python tests/test_confidence_veto.py --split test --enable-all --holding-min 30
+**Cause**: Direction flip créait 2 trades au lieu de 1 (LONG→FLAT→SHORT au lieu de LONG→SHORT)
+- test_confidence_veto.py mettait `position = Position.FLAT` après sortie
+- test_holding_strategy.py faisait `position = target` (flip immédiat)
+- Impact: +25% trades, double frais sur flips, PnL détruit
 
-# Test 3: Seuils plus agressifs (0.30 au lieu de 0.20)
-# Modifier les seuils dans le code puis tester
+**Fix (commit e51a691)**:
+```python
+if exit_reason == "DIRECTION_FLIP":
+    position = target  # Flip immédiat SANS passer par FLAT!
+    entry_time = i
+    current_pnl = 0.0
 ```
 
-**Hypothèse**: Veto rules + holding_min=30p devrait donner:
-- Trades: 30,876 → ~25,000 (-20% grâce veto)
-- PnL Brut: +110.89% maintenu (filtrage préserve signal)
-- PnL Net: Positif si frais × 25k < PnL Brut
+**Documentation complète**: [docs/BUG_DIRECTION_FLIP_ANALYSIS.md](docs/BUG_DIRECTION_FLIP_ANALYSIS.md)
+
+**Tests à Réexécuter**:
+
+```bash
+# Test 1: Baseline (validation fix) - Attendu: ~1,160 trades, +5-7% PnL Brut
+python tests/test_confidence_veto.py --split test --max-samples 20000 --holding-min 30
+
+# Test 2: Avec veto (objectif) - Attendu: ~950 trades, PnL Net meilleur
+python tests/test_confidence_veto.py --split test --max-samples 20000 --enable-all --holding-min 30
+
+# Test 3: Full dataset - Attendu: ~25k trades, +110% brut, +100% net ✅
+python tests/test_confidence_veto.py --split test --enable-all --holding-min 30
+```
+
+**Résultats Attendus APRÈS Fix**:
+- Baseline: ~30,876 trades, +110% PnL Brut (comme Phase 2.6)
+- Avec veto: ~25,000 trades (-20%), +110% brut maintenu, **+102% PnL Net** ✅ POSITIF!
 
 ### Approche 2: Multi-Indicator Filters (Direction/Force Combinés)
 
