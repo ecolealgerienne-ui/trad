@@ -233,18 +233,24 @@ def backtest_with_confidence_veto(
 
     # Variables trading
     position = Position.FLAT
-    entry_price = 0.0
-    entry_step = 0
+    entry_time = 0
+    current_pnl = 0.0  # ✅ Accumule les returns!
     trades = []
-    equity_curve = [1.0]
 
     # Compteurs blocages
     rule1_blocks = 0
     rule2_blocks = 0
     rule3_blocks = 0
 
-    for i in range(1, n_samples):
-        current_price = 1.0 + returns[i]
+    for i in range(n_samples):
+        ret = returns[i]
+
+        # === Accumuler PnL (comme test_holding_strategy.py) ===
+        if position != Position.FLAT:
+            if position == Position.LONG:
+                current_pnl += ret
+            else:  # SHORT
+                current_pnl -= ret
 
         # === Calculer confiances et directions ===
 
@@ -313,64 +319,54 @@ def backtest_with_confidence_veto(
 
         # === Gestion position ===
 
-        # Sortie sur retournement direction (bypass holding)
+        # Calculer durée trade
+        trade_duration = i - entry_time if position != Position.FLAT else 0
+
+        # SORTIE - 3 cas possibles
+        exit_signal = False
+
         if position != Position.FLAT:
+            # Cas 1: Retournement direction (bypass holding, toujours prioritaire)
             if (position == Position.LONG and macd_dir == 0) or \
                (position == Position.SHORT and macd_dir == 1):
-                # Retournement direction → EXIT immédiat
-                pnl = (current_price / entry_price - 1.0) if position == Position.LONG else (entry_price / current_price - 1.0)
-                pnl -= fees / 100.0
+                exit_signal = True
 
-                trades.append({
-                    'entry': entry_step,
-                    'exit': i,
-                    'duration': i - entry_step,
-                    'pnl': pnl,
-                    'win': pnl > 0
-                })
+            # Cas 2: Force=WEAK ET holding minimum atteint
+            elif macd_force == 0 and trade_duration >= holding_min:
+                exit_signal = True
 
-                equity_curve.append(equity_curve[-1] * (1 + pnl))
-                position = Position.FLAT
+        # Enregistrer trade si sortie
+        if exit_signal:
+            pnl = current_pnl - (fees / 100.0)  # ✅ Utilise PnL accumulé!
 
-        # Sortie sur Force=WEAK après holding minimum
-        if position != Position.FLAT and macd_force == 0:
-            duration = i - entry_step
-            if duration >= holding_min:
-                # Exit OK
-                pnl = (current_price / entry_price - 1.0) if position == Position.LONG else (entry_price / current_price - 1.0)
-                pnl -= fees / 100.0
+            trades.append({
+                'entry': entry_time,
+                'exit': i,
+                'duration': trade_duration,
+                'pnl': pnl,
+                'win': pnl > 0
+            })
 
-                trades.append({
-                    'entry': entry_step,
-                    'exit': i,
-                    'duration': duration,
-                    'pnl': pnl,
-                    'win': pnl > 0
-                })
+            position = Position.FLAT
+            current_pnl = 0.0  # ✅ Reset!
 
-                equity_curve.append(equity_curve[-1] * (1 + pnl))
-                position = Position.FLAT
-
-        # Entrée si FLAT et signal valide (pas de veto)
+        # ENTRÉE si FLAT et signal valide (pas de veto)
         if position == Position.FLAT and target != Position.FLAT:
             position = target
-            entry_price = current_price
-            entry_step = i
+            entry_time = i
+            current_pnl = 0.0  # ✅ Reset à l'entrée aussi!
 
     # Fermer position finale si ouverte
     if position != Position.FLAT:
-        current_price = 1.0 + returns[-1]
-        pnl = (current_price / entry_price - 1.0) if position == Position.LONG else (entry_price / current_price - 1.0)
-        pnl -= fees / 100.0
+        pnl = current_pnl - (fees / 100.0)  # ✅ Utilise PnL accumulé!
 
         trades.append({
-            'entry': entry_step,
+            'entry': entry_time,
             'exit': n_samples - 1,
-            'duration': n_samples - 1 - entry_step,
+            'duration': n_samples - 1 - entry_time,
             'pnl': pnl,
             'win': pnl > 0
         })
-        equity_curve.append(equity_curve[-1] * (1 + pnl))
 
     # === Calcul métriques ===
 
@@ -405,7 +401,10 @@ def backtest_with_confidence_veto(
     else:
         sharpe = 0.0
 
-    # Max Drawdown
+    # Max Drawdown (reconstruire equity curve depuis trades)
+    equity_curve = [1.0]
+    for t in trades:
+        equity_curve.append(equity_curve[-1] * (1 + t['pnl']))
     equity = np.array(equity_curve)
     running_max = np.maximum.accumulate(equity)
     drawdown = (equity - running_max) / running_max
