@@ -196,9 +196,9 @@ def calculate_force_labels(velocity: np.ndarray,
 # CHARGEMENT DONNÉES
 # =============================================================================
 
-def load_data_with_index(file_path: str, asset_name: str = "Asset") -> pd.DataFrame:
+def load_data_with_index(file_path: str, asset_name: str = "Asset", max_samples: int = None) -> pd.DataFrame:
     """Charge les données CSV avec DatetimeIndex."""
-    df = pd.read_csv(file_path)
+    df = pd.read_csv(file_path, nrows=max_samples)
 
     date_col = None
     for col in ['date', 'datetime', 'time', 'timestamp', 'Date', 'Datetime']:
@@ -485,7 +485,8 @@ def prepare_indicator_dataset(df: pd.DataFrame, asset_name: str, indicator: str,
 def prepare_and_save_all(assets: list = None,
                          output_dir: str = None,
                          filter_type: str = 'kalman',
-                         clip_value: float = 0.10) -> dict:
+                         clip_value: float = 0.10,
+                         max_samples: int = None) -> dict:
     """
     Prépare les 3 datasets (RSI, MACD, CCI) en une seule exécution.
 
@@ -494,6 +495,7 @@ def prepare_and_save_all(assets: list = None,
         output_dir: Répertoire de sortie
         filter_type: 'kalman' ou 'octave'
         clip_value: Valeur de clipping
+        max_samples: Nombre max de lignes par asset (None = toutes)
 
     Returns:
         dict avec les chemins des 3 fichiers .npz générés
@@ -506,16 +508,18 @@ def prepare_and_save_all(assets: list = None,
         raise ValueError(f"Assets invalides: {invalid_assets}")
 
     logger.info("="*80)
-    logger.info("PRÉPARATION MULTI-DATASETS (Pure Signal + Dual-Binary)")
+    logger.info("PRÉPARATION MULTI-DATASETS (Pure Signal + Direction-Only)")
     logger.info("="*80)
     logger.info(f"Assets: {', '.join(assets)}")
     logger.info(f"Filtre: {filter_type.upper()}")
+    if max_samples:
+        logger.info(f"⚠️  MODE TEST: {max_samples} lignes max par asset")
     logger.info(f"Génération de 3 datasets séparés:")
     logger.info(f"  1. RSI  - Features: c_ret (1)")
     logger.info(f"  2. MACD - Features: c_ret (1)")
     logger.info(f"  3. CCI  - Features: h_ret, l_ret, c_ret (3)")
-    logger.info(f"Labels: Direction + Force (2 par indicateur)")
-    logger.info(f"Architecture: Pure Signal (zéro bruit toxique)")
+    logger.info(f"Labels: Direction SEULEMENT (1 par indicateur)")
+    logger.info(f"Architecture: Pure Signal (Force supprimée car inutile)")
 
     # Stockage par indicateur
     datasets = {
@@ -538,8 +542,11 @@ def prepare_and_save_all(assets: list = None,
         file_path = AVAILABLE_ASSETS_5M[asset_name]
 
         # 1. Charger
-        df = load_data_with_index(file_path, asset_name)
-        logger.info(f"     Chargé: {len(df)} lignes")
+        df = load_data_with_index(file_path, asset_name, max_samples=max_samples)
+        if max_samples:
+            logger.info(f"     Chargé: {len(df)} lignes (limité à {max_samples})")
+        else:
+            logger.info(f"     Chargé: {len(df)} lignes")
 
         # 2. Indicateurs
         df = add_indicators_to_df(df)
@@ -592,12 +599,11 @@ def prepare_and_save_all(assets: list = None,
         logger.info(f"   Val:   X={X_val.shape}, Y={Y_val.shape}")
         logger.info(f"   Test:  X={X_test.shape}, Y={Y_test.shape}")
 
-        # Stats labels
+        # Stats labels (Direction-only)
         logger.info(f"\n   Balance labels:")
         for split_name, Y_split in [('Train', Y_train), ('Val', Y_val), ('Test', Y_test)]:
             dir_pct = Y_split[:, 0].mean() * 100
-            force_pct = Y_split[:, 1].mean() * 100
-            logger.info(f"     {split_name}: Direction {dir_pct:.1f}% UP, Force {force_pct:.1f}% STRONG")
+            logger.info(f"     {split_name}: Direction {dir_pct:.1f}% UP")
 
         # Sauvegarder
         if output_dir is None:
@@ -765,6 +771,8 @@ Assets disponibles: {', '.join(available_assets)}
                         help='Répertoire de sortie')
     parser.add_argument('--clip', type=float, default=0.10,
                         help='Valeur de clipping')
+    parser.add_argument('--max-samples', type=int, default=None,
+                        help='Nombre max de lignes par asset (pour tests rapides)')
 
     args = parser.parse_args()
 
@@ -774,7 +782,8 @@ Assets disponibles: {', '.join(available_assets)}
         assets=args.assets,
         output_dir=args.output_dir,
         filter_type=args.filter,
-        clip_value=args.clip
+        clip_value=args.clip,
+        max_samples=args.max_samples
     )
 
     print(f"\n{'='*80}")
