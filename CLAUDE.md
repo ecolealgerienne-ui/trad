@@ -1,11 +1,11 @@
 # Modele CNN-LSTM Multi-Output - Guide Complet
 
 **Date**: 2026-01-07
-**Statut**: ⚠️ **VIGILANCE #2 COMPLÉTÉE - Problème Micro-Sorties Identifié**
-**Version**: 8.3 - Tests Stratégie Filtrage Dual-Filter en cours
-**Models**: Oracle Kalman FONCTIONNE (+6,644% PnL, Sharpe 18.5) | Model ~90% accuracy MAIS micro-sorties (-14k% PnL)
-**Découverte critique**: Le modèle FONCTIONNE (90% acc) mais 10% erreurs = MICRO-SORTIES qui détruisent PnL
-**Action en cours**: Stratégie de filtrage dual-filter (Octave + Kalman) pour éliminer micro-sorties
+**Statut**: ⚠️ **Phase 2.5 EN COURS - Kill Signatures (Analyse Faux Positifs)**
+**Version**: 8.4 - Dual-Filter échoué (concordance 96.51%), pivot vers analyse erreurs
+**Models**: Oracle Kalman +6,644% | Model 92% accuracy MAIS Win Rate 14% (-14k% PnL)
+**Diagnostic**: Accuracy labels (pente instantanée) ≠ Win Rate trading (durée variable)
+**Action en cours**: Analyse "Kill Signatures" pour identifier patterns qui tuent signaux MACD
 
 ---
 
@@ -217,40 +217,50 @@ python tests/compare_dual_filter_pnl.py --indicator cci --split test --use-predi
 **Résultats**: ✅ Oracle +6,644% | ❌ ML -14,000% à -19,000% (Micro-sorties)
 **Rapport**: [docs/VIGILANCE2_ML_FAILURE_REPORT.md](docs/VIGILANCE2_ML_FAILURE_REPORT.md)
 
-**⚠️ Phase 2 EN COURS**: STRATÉGIE DE FILTRAGE DUAL-FILTER (Élimination Micro-Sorties)
+**❌ Phase 2 COMPLÉTÉE**: STRATÉGIE DUAL-FILTER - ÉCHEC (Concordance 96.51%)
 
-**Objectif**: Éliminer les 10% de micro-sorties du modèle qui fonctionne à ~90%
+**Script**: `tests/test_dual_filter_strategy.py`
+**Résultats MACD**:
+- Direction filter: -0.01% trades (désaccords seulement 3.49%)
+- Full filter: +16% trades (meilleur Sharpe mais toujours -11,926%)
+- **Diagnostic**: Octave et Kalman trop corrélés (96.51% accord labels)
 
-**Outils de filtrage**:
-1. **2 Filtres** (Octave + Kalman) → 2 estimations indépendantes
-2. **3 Indicateurs** (RSI, MACD, CCI) → Diversification
-3. **Direction + Force** → Ne trader que signaux STRONG
-4. **Confirmation 2+ périodes** → Éviter flips isolés
+**Problème fondamental identifié**:
+- Accuracy labels 92.42% ≠ Win Rate trading 14%
+- Labels = pente instantanée (t-2 vs t-3)
+- Trading = durée variable (3-20 périodes)
+- Pente change plusieurs fois pendant trade → micro-sorties
 
-**Script de test**: `tests/test_dual_filter_strategy.py`
-**Guide complet**: [docs/DUAL_FILTER_STRATEGY_TESTS.md](docs/DUAL_FILTER_STRATEGY_TESTS.md)
+**⚠️ Phase 2.5 EN COURS**: KILL SIGNATURES (Analyse Faux Positifs MACD)
 
-**Stratégies testées**:
-1. **Baseline**: Kalman seul (attendu: -14,000% comme Vigilance #2)
-2. **Direction filter**: Octave ET Kalman d'accord sur Direction
-3. **Direction+Force filter**: Accord + au moins 1 filtre dit STRONG
-4. **Full filter**: Direction + Force + Confirmation 2+ périodes
+**Objectif**: Identifier configurations techniques qui tuent signaux MACD
 
-**Attendu Full Filter**:
-- Réduction trades: 70-85%
-- PnL Net: POSITIF (ramener vers Oracle +6,644%)
-- Win Rate: >50%
-- Sharpe Ratio: >1.0
+**Méthodologie "Autopsie"**:
+1. **Faux Positif** = MACD=UP mais PnL_brut < 0 (jusqu'au flip)
+2. **Lift univarié**: P(Variable=X | Erreur) / P(Variable=X | Tout)
+3. Split découverte/validation (20k + 620k)
 
-**Commandes de test**:
+**Patterns hypothèses**:
+- **Pattern A**: MACD=UP mais Octave_Force=WEAK (divergence inertie)
+- **Pattern B**: MACD=UP mais RSI_Dir=DOWN (conflit temporel) - Nécessite multi-indicateurs
+- **Pattern C**: Kalman_Dir ≠ Octave_Dir (dissonance) - Coverage 3.49% max
+
+**Script**: `tests/analyze_kill_signatures.py`
+**Guide**: [docs/KILL_SIGNATURES_GUIDE.md](docs/KILL_SIGNATURES_GUIDE.md)
+
+**Commandes**:
 ```bash
-# Test MACD (priorité 1 - Oracle +6,644% le plus fort)
-python tests/test_dual_filter_strategy.py --indicator macd --split test
+# Phase 1: Découverte (20k samples BTC)
+python tests/analyze_kill_signatures.py --indicator macd --n-discovery 20000
 
-# Test RSI et CCI
-python tests/test_dual_filter_strategy.py --indicator rsi --split test
-python tests/test_dual_filter_strategy.py --indicator cci --split test
+# Phase 2: Validation (620k samples restants)
+python tests/analyze_kill_signatures.py --indicator macd --validate
 ```
+
+**Résultats attendus**:
+- Pattern A Lift: 1.5-2.5× (MACD inertie vs Octave faiblesse)
+- Recall: 30-50% (détection erreurs MACD)
+- Impact PnL: -14,000% → potentiellement POSITIF si Lift > 2.0
 
 **Phase 3**: Seuils adaptatifs (Vigilance #3) - APRÈS choix Option A/B/C
 - f(volatilité, régime) vs fixes
