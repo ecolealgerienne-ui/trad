@@ -111,11 +111,12 @@ def compute_concordance(y1: np.ndarray, y2: np.ndarray, lag: int = 0) -> float:
     """
     # Appliquer le lag
     if lag < 0:
-        # y1 en avance: comparer y1[:-lag] avec y2[lag:]
-        y1_shifted = y1[:-lag]
+        # y1 en avance: comparer y1[0:n-abs(lag)] avec y2[abs(lag):n]
+        # Python: y1[:lag] quand lag=-2 devient y1[:-2]
+        y1_shifted = y1[:lag]
         y2_shifted = y2[-lag:]
     elif lag > 0:
-        # y1 en retard: comparer y1[lag:] avec y2[:-lag]
+        # y1 en retard: comparer y1[lag:n] avec y2[0:n-lag]
         y1_shifted = y1[lag:]
         y2_shifted = y2[:-lag]
     else:
