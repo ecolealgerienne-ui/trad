@@ -817,6 +817,11 @@ def prepare_and_save_all(assets: list = None,
 
     logger.info(f"\n✅ Tous les assets traités ({len(assets)} assets, {n_jobs} jobs parallèles)")
 
+    # Features par indicateur (Architecture "Pure Signal")
+    features_rsi = ['c_ret']  # 1 feature: Close uniquement
+    features_macd = ['c_ret']  # 1 feature: Close uniquement
+    features_cci = ['h_ret', 'l_ret', 'c_ret']  # 3 features: High, Low, Close
+
     # Concaténer et sauvegarder chaque indicateur
     output_paths = {}
 
