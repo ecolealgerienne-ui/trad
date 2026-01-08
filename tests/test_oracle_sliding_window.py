@@ -8,32 +8,49 @@ Phase 2.11 Analysis - Test du signal maximum avec labels parfaits (Oracle).
 Ce script teste le potentiel maximum du signal en appliquant le filtre Kalman
 sur une fenêtre glissante (window=50) et en tradant avec les labels parfaits.
 
+Pipeline CORRECT:
+-----------------
+1. Charger CSV brut (OHLC)
+2. Calculer indicateur technique (RSI/MACD/CCI) - valeurs BRUTES
+3. Appliquer Kalman glissant sur ces valeurs
+4. Calculer labels Oracle
+5. Extraire returns (close.pct_change())
+6. Backtest
+
 Tests:
 ------
 1. Test 1: Label = filtered[t-2] > filtered[t-3]
 2. Test 2: Label = filtered[t-3] > filtered[t-4]
 
-Inspiré de: test_holding_strategy.py, compare_dual_filter_pnl.py
-
 Usage:
 ------
-# Test standard (200 samples, start=50, window=50)
-python tests/test_oracle_sliding_window.py --indicator macd --split test
+# Test standard (1000 samples, start=100, window=100)
+python tests/test_oracle_sliding_window.py --indicator macd --split test --n-samples 1000 --window 100
 
-# Test personnalisé
-python tests/test_oracle_sliding_window.py --indicator macd --split test \\
-    --window 50 --lag1 2 --lag2 3 --start-idx 50 --n-samples 200 --fees 0.001
+# Test RSI
+python tests/test_oracle_sliding_window.py --indicator rsi --split test --n-samples 1000 --window 100
+
+# Test CCI
+python tests/test_oracle_sliding_window.py --indicator cci --split test --n-samples 1000 --window 100
 """
 
 import argparse
 import logging
+import sys
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import List, Tuple
 
 import numpy as np
+import pandas as pd
 from pykalman import KalmanFilter
+
+# Ajouter src au path
+sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
+
+from constants import AVAILABLE_ASSETS_5M, RSI_PERIOD, CCI_PERIOD, MACD_FAST, MACD_SLOW, MACD_SIGNAL
+from indicators import calculate_rsi, calculate_cci, calculate_macd
 
 # =============================================================================
 # LOGGING
@@ -91,89 +108,78 @@ class OracleResult:
 
 
 # =============================================================================
-# CHARGEMENT DONNÉES
+# CHARGEMENT DONNÉES BRUTES
 # =============================================================================
 
-def load_dataset(indicator: str, split: str) -> dict:
+def load_csv_data(asset: str = 'BTC') -> pd.DataFrame:
     """
-    Charge dataset direction-only.
+    Charge CSV brut (OHLC).
 
-    Inspiré de test_holding_strategy.py:load_dataset()
+    Args:
+        asset: Asset à charger (BTC, ETH, etc.)
+
+    Returns:
+        DataFrame avec colonnes: timestamp, open, high, low, close, volume
     """
-    prepared_dir = Path("data/prepared")
+    if asset not in AVAILABLE_ASSETS_5M:
+        raise ValueError(f"Asset inconnu: {asset}. Disponibles: {list(AVAILABLE_ASSETS_5M.keys())}")
 
-    # Chercher dataset direction-only (baseline, pas _wt)
-    pattern = f"*_{indicator}_direction_only_kalman.npz"
-    matching_files = list(prepared_dir.glob(pattern))
+    csv_path = AVAILABLE_ASSETS_5M[asset]
+    logger.info(f"\n📂 Chargement CSV: {csv_path}")
 
-    if not matching_files:
-        raise FileNotFoundError(f"Aucun dataset trouvé: {pattern}")
+    df = pd.read_csv(csv_path)
 
-    dataset_path = matching_files[0]
-    logger.info(f"\n📂 Chargement: {dataset_path.name}")
+    # Standardiser les noms de colonnes (minuscules)
+    df.columns = df.columns.str.lower()
 
-    data = np.load(dataset_path, allow_pickle=True)
+    logger.info(f"  Shape: {df.shape}")
+    logger.info(f"  Colonnes: {list(df.columns)}")
+    logger.info(f"  Période: {df['timestamp'].iloc[0]} → {df['timestamp'].iloc[-1]}")
 
-    # Extraire split
-    X = data[f'X_{split}']
-    Y = data[f'Y_{split}']
-
-    logger.info(f"  Split: {split}")
-    logger.info(f"  Shape X: {X.shape}")
-    logger.info(f"  Shape Y: {Y.shape}")
-    logger.info(f"  Direction UP: {Y[:, 0].mean()*100:.1f}%")
-
-    return {
-        'X': X,
-        'Y': Y,
-        'indicator': indicator
-    }
+    return df
 
 
-def extract_c_ret(X: np.ndarray, indicator: str) -> np.ndarray:
+def calculate_indicator(df: pd.DataFrame, indicator: str) -> np.ndarray:
     """
-    Extrait c_ret des features.
+    Calcule indicateur technique à partir du DataFrame OHLC.
 
-    Inspiré de test_holding_strategy.py:extract_c_ret()
+    Args:
+        df: DataFrame avec OHLC
+        indicator: 'rsi', 'macd', ou 'cci'
 
-    Architecture Direction-Only:
-    - RSI/MACD: 1 feature (c_ret)
-    - CCI: 3 features (h_ret, l_ret, c_ret)
+    Returns:
+        Valeurs de l'indicateur (shape: n,)
     """
-    if indicator in ['rsi', 'macd']:
-        # 1 feature: c_ret
-        returns = X[:, -1, 0]  # Dernier timestep, canal 0
+    logger.info(f"\n🔧 Calcul indicateur: {indicator.upper()}")
+
+    if indicator == 'rsi':
+        values = calculate_rsi(df['close'], period=RSI_PERIOD)
+        logger.info(f"  Période: {RSI_PERIOD}")
+        logger.info(f"  Min: {np.nanmin(values):.2f}")
+        logger.info(f"  Max: {np.nanmax(values):.2f}")
+        logger.info(f"  Mean: {np.nanmean(values):.2f}")
+
+    elif indicator == 'macd':
+        macd_data = calculate_macd(df['close'], fast_period=MACD_FAST, slow_period=MACD_SLOW, signal_period=MACD_SIGNAL)
+        values = macd_data['macd']  # MACD line (pas histogram)
+        logger.info(f"  Périodes: {MACD_FAST}/{MACD_SLOW}/{MACD_SIGNAL}")
+        logger.info(f"  Min: {np.nanmin(values):.4f}")
+        logger.info(f"  Max: {np.nanmax(values):.4f}")
+        logger.info(f"  Mean: {np.nanmean(values):.4f}")
+
     elif indicator == 'cci':
-        # 3 features: c_ret est le canal 2
-        returns = X[:, -1, 2]  # Dernier timestep, canal 2
+        values = calculate_cci(df['high'], df['low'], df['close'], period=CCI_PERIOD)
+        logger.info(f"  Période: {CCI_PERIOD}")
+        logger.info(f"  Min: {np.nanmin(values):.2f}")
+        logger.info(f"  Max: {np.nanmax(values):.2f}")
+        logger.info(f"  Mean: {np.nanmean(values):.2f}")
+
     else:
         raise ValueError(f"Indicateur inconnu: {indicator}")
 
-    logger.info(f"  Returns shape: {returns.shape}")
-    logger.info(f"  Returns mean: {returns.mean()*100:.4f}%")
-    logger.info(f"  Returns std: {returns.std()*100:.4f}%\n")
-
-    return returns
-
-
-def extract_indicator_values(X: np.ndarray, indicator: str) -> np.ndarray:
-    """
-    Reconstruit les valeurs d'indicateur à partir des features (returns).
-
-    Note: On part de l'hypothèse que les features sont des returns (différences).
-    Pour appliquer Kalman, on a besoin des valeurs absolues de l'indicateur.
-
-    Stratégie: Reconstruire par cumsum des returns (approximation).
-    """
-    returns = extract_c_ret(X, indicator)
-
-    # Cumsum pour reconstruire valeurs (en commençant à 50 arbitrairement)
-    values = 50.0 + np.cumsum(returns * 100)  # *100 pour avoir des valeurs visibles
-
-    logger.info(f"  Indicateur reconstruit:")
-    logger.info(f"    Min: {values.min():.2f}")
-    logger.info(f"    Max: {values.max():.2f}")
-    logger.info(f"    Mean: {values.mean():.2f}\n")
+    # Vérifier NaN
+    n_nan = np.isnan(values).sum()
+    logger.info(f"  NaN: {n_nan} ({n_nan/len(values)*100:.1f}%)\n")
 
     return values
 
@@ -204,7 +210,7 @@ def apply_sliding_kalman(
     logger.info(f"  Window: {window}")
     logger.info(f"  Start index: {start_idx}")
     logger.info(f"  N samples: {n_samples}")
-    logger.info(f"  End index: {start_idx + n_samples}\n")
+    logger.info(f"  End index: {start_idx + n_samples}")
 
     # Vérifier qu'on a assez de données
     required_length = start_idx + n_samples
@@ -214,11 +220,26 @@ def apply_sliding_kalman(
             f"Disponible: {len(values)}"
         )
 
+    # Vérifier NaN dans la zone d'intérêt
+    segment = values[start_idx - window + 1 : start_idx + n_samples]
+    n_nan = np.isnan(segment).sum()
+    if n_nan > 0:
+        logger.warning(f"  ⚠️  {n_nan} NaN détectés dans le segment!")
+        logger.info(f"  → Remplissage par forward-fill\n")
+        # Forward fill des NaN
+        df_temp = pd.DataFrame({'values': values})
+        df_temp['values'] = df_temp['values'].fillna(method='ffill').fillna(method='bfill')
+        values = df_temp['values'].values
+
     # Initialiser Kalman (config standard du projet)
+    # On prend la première valeur non-NaN comme initial state
+    first_valid_idx = np.where(~np.isnan(values))[0][0]
+    initial_state = values[first_valid_idx]
+
     kf = KalmanFilter(
         transition_matrices=[[1]],
         observation_matrices=[[1]],
-        initial_state_mean=values[start_idx],
+        initial_state_mean=initial_state,
         initial_state_covariance=1.0,
         observation_covariance=1.0,
         transition_covariance=1e-5
@@ -242,7 +263,10 @@ def apply_sliding_kalman(
         # Prendre dernière valeur filtrée
         filtered[i] = state_means[-1, 0]
 
-    logger.info(f"✅ Kalman appliqué sur {n_samples} fenêtres\n")
+    logger.info(f"✅ Kalman appliqué sur {n_samples} fenêtres")
+    logger.info(f"  Filtered min: {filtered.min():.4f}")
+    logger.info(f"  Filtered max: {filtered.max():.4f}")
+    logger.info(f"  Filtered mean: {filtered.mean():.4f}\n")
 
     return filtered
 
@@ -302,11 +326,6 @@ def backtest_oracle(
 ) -> OracleResult:
     """
     Backtest avec labels Oracle parfaits.
-
-    Simplifié vs test_holding_strategy car:
-    - Pas de Force/Direction matrix
-    - Signal binaire: 1=LONG, 0=SHORT
-    - Pas de holding minimum (Oracle optimale)
 
     Args:
         labels: Labels Oracle (1=UP, 0=DOWN)
@@ -538,22 +557,23 @@ def print_results(results: List[OracleResult]):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Test Oracle avec Kalman en fenêtre glissante',
+        description='Test Oracle avec Kalman en fenêtre glissante (données brutes)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__
     )
 
     parser.add_argument('--indicator', type=str, default='macd',
+                        choices=['rsi', 'macd', 'cci'],
                         help='Indicateur (défaut: macd)')
-    parser.add_argument('--split', type=str, default='test',
-                        choices=['train', 'val', 'test'],
-                        help='Split (défaut: test)')
-    parser.add_argument('--window', type=int, default=50,
-                        help='Taille fenêtre Kalman (défaut: 50)')
-    parser.add_argument('--start-idx', type=int, default=50,
-                        help='Index de départ (défaut: 50)')
-    parser.add_argument('--n-samples', type=int, default=200,
-                        help='Nombre de samples (défaut: 200)')
+    parser.add_argument('--asset', type=str, default='BTC',
+                        choices=list(AVAILABLE_ASSETS_5M.keys()),
+                        help='Asset (défaut: BTC)')
+    parser.add_argument('--window', type=int, default=100,
+                        help='Taille fenêtre Kalman (défaut: 100)')
+    parser.add_argument('--start-idx', type=int, default=100,
+                        help='Index de départ (défaut: 100)')
+    parser.add_argument('--n-samples', type=int, default=1000,
+                        help='Nombre de samples (défaut: 1000)')
     parser.add_argument('--fees', type=float, default=0.001,
                         help='Frais par side (défaut: 0.001)')
 
@@ -572,43 +592,41 @@ def main():
     args = parser.parse_args()
 
     logger.info("="*100)
-    logger.info(f"TEST ORACLE SLIDING WINDOW - {args.indicator.upper()}")
+    logger.info(f"TEST ORACLE SLIDING WINDOW - {args.indicator.upper()} ({args.asset})")
     logger.info("="*100)
     logger.info(f"Indicateur: {args.indicator}")
-    logger.info(f"Split: {args.split}")
+    logger.info(f"Asset: {args.asset}")
     logger.info(f"Kalman window: {args.window}")
     logger.info(f"Start index: {args.start_idx}")
     logger.info(f"N samples: {args.n_samples}")
     logger.info(f"Fees: {args.fees*100:.2f}% par side ({args.fees*2*100:.2f}% round-trip)")
     logger.info("="*100)
 
-    # Charger données
-    data = load_dataset(args.indicator, args.split)
-    returns_full = extract_c_ret(data['X'], args.indicator)
-    values_full = extract_indicator_values(data['X'], args.indicator)
+    # 1. Charger CSV brut
+    df = load_csv_data(args.asset)
 
-    # Extraire segment pour le test
-    segment_start = args.start_idx
-    segment_end = args.start_idx + args.n_samples
+    # 2. Calculer indicateur
+    indicator_values = calculate_indicator(df, args.indicator)
 
-    values_segment = values_full[:segment_end]  # Inclure historique pour Kalman
-    returns_segment = returns_full[segment_start:segment_end]
+    # 3. Extraire returns
+    returns_full = df['close'].pct_change().values
+    logger.info(f"📊 Returns calculés:")
+    logger.info(f"  Mean: {np.nanmean(returns_full)*100:.4f}%")
+    logger.info(f"  Std: {np.nanstd(returns_full)*100:.4f}%\n")
 
-    logger.info(f"📦 Segment extrait:")
-    logger.info(f"  Valeurs indicateur: 0 → {segment_end} ({segment_end} samples)")
-    logger.info(f"  Returns: {segment_start} → {segment_end} ({args.n_samples} samples)\n")
-
-    # Appliquer Kalman glissant
+    # 4. Appliquer Kalman glissant
     filtered = apply_sliding_kalman(
-        values_segment,
+        indicator_values,
         args.window,
         args.start_idx,
         args.n_samples
     )
 
+    # 5. Extraire segment returns pour backtest
+    returns_segment = returns_full[args.start_idx:args.start_idx + args.n_samples]
+
     # Déterminer tests à exécuter
     if args.lag1 is not None and args.lag2 is not None:
-        # Custom lags
         tests = [(args.lag1, args.lag2)]
         logger.info(f"🔧 Test custom: lag {args.lag1} vs {args.lag2}\n")
     elif args.test1_only:
@@ -618,7 +636,6 @@ def main():
         tests = [(3, 4)]
         logger.info(f"🔧 Test 2 uniquement: t-3 vs t-4\n")
     else:
-        # Par défaut: les deux tests
         tests = [(2, 3), (3, 4)]
         logger.info(f"🔧 Exécution des 2 tests:\n")
         logger.info(f"  Test 1: t-2 vs t-3")
