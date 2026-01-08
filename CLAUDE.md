@@ -1,11 +1,12 @@
 # Modele CNN-LSTM Multi-Output - Guide Complet
 
-**Date**: 2026-01-07
-**Statut**: ✅ **Phase 2.8 COMPLÉTÉE - Direction-Only Validé**
-**Version**: 8.9 - Direction-Only confirmé stable (+0.1-0.9%), Force abandonné définitivement
-**Models**: MACD Kalman 92.5% | CCI Kalman 90.2% (+0.9%) | RSI Kalman 87.6% - Tous stables/améliorés
-**Découverte**: Kalman > Octave systématiquement (-1.1% à -4.0% gap) - CCI meilleur gain Direction-Only
-**Prochaine Étape**: ATR Structural Filter - Réduire trades 30k → 15k pour atteindre PnL Net positif
+**Date**: 2026-01-08
+**Statut**: ❌ **Tests Oracle Sliding Window COMPLÉTÉS - Kalman ET Octave: Échec Total**
+**Version**: 9.2 - Octave Glissant: -37% à -116% (PIRE que Kalman: -19% à -30%) | Global: +6,644%
+**Models**: MACD Kalman 92.5% | CCI Kalman 90.2% | RSI Kalman 87.6% - Direction-Only validés
+**Découverte Critique**: Octave Sliding Window génère **3-5× PLUS de trades** que Kalman (apocalypse RSI: -116%)
+**Hiérarchie Filtres**: Kalman GLOBAL (+6,644%) > Kalman Sliding (-19%) > **Octave Sliding (-37% à -116%)**
+**Prochaine Étape**: Timeframe 15min/30min (Kalman GLOBAL uniquement) - ABANDONNER tous sliding windows
 
 ---
 
@@ -819,6 +820,780 @@ trade_allowed = ml_has_consensus and force_ok  # Les DEUX requis
 - Implémenter règles conditionnelles
 
 **Phase 4**: Production deployment avec monitoring temps réel
+
+---
+
+## ❌ Phase 2.9: Filtres ATR - Échec Complet (2026-01-08)
+
+**Date**: 2026-01-08
+**Statut**: ❌ **ÉCHEC VALIDÉ - Les deux approches ATR inefficaces**
+**Scripts**: `tests/test_atr_structural_filter.py`, `tests/test_atr_ml_aware_filter.py`
+**Objectif**: Réduire trades 30k → 15k en filtrant par volatilité (ATR)
+
+### Motivation
+
+Phase 2.8 Direction-Only a validé les modèles (92.5% MACD), mais le problème de fréquence de trading persiste:
+- **30,876 trades** (Phase 2.6 Holding 30p)
+- **+110.89% PnL Brut** ✅ (le signal fonctionne!)
+- **-2,976% PnL Net** ❌ (frais détruisent tout)
+- **Edge/trade**: +0.36% - 0.6% frais = **-0.24%** ❌
+
+**Hypothèse**: Filtrer par volatilité ATR (López de Prado 2018) pour ne trader que les zones optimales.
+
+### Approche 1: ATR Structural (Volatilité Brute)
+
+**Date**: 2026-01-08
+**Script**: `tests/test_atr_structural_filter.py`
+**Principe**: Filtrer par percentiles ATR normalisé (Q20-Q80, Q30-Q70)
+
+**Résultats (MACD Kalman, Test Set)**:
+
+| Config | Trades | Réduction | Win Rate | PnL Net | Verdict |
+|--------|--------|-----------|----------|---------|---------|
+| **Baseline** | 88,113 | - | 9.90% | -523% | - |
+| **Q30-Q70** | 44,138 | **-50%** ✅ | **7.94%** ❌ | -263% | Réduction OK, WR dégradé |
+| Q20-Q80 | 52,873 | -40% | 8.54% | -315% | Pareil |
+| Q10-Q90 | 70,551 | -20% | 9.34% | -419% | Pareil |
+
+**Problème identifié**: ❌ **Win Rate se dégrade proportionnellement**
+- Objectif: -50% trades, Win Rate stable
+- Réalité: -50% trades, **Win Rate -2%** (9.90% → 7.94%)
+- Résultat: PnL Net toujours négatif (-263% vs -523%)
+
+**Diagnostic**: Direction-Only sans Force génère trop de signaux low-quality. ATR filtre la quantité mais pas la qualité.
+
+### Approche 2: ATR ML-Aware (Désaccords Kalman/Octave)
+
+**Date**: 2026-01-08
+**Script**: `tests/test_atr_ml_aware_filter.py`
+**Principe**: Pondérer ATR par désaccord Kalman/Octave (zones d'incertitude ML)
+
+**Formule (fournie par utilisateur)**:
+```python
+TR = True Range standard
+difficulty = (Kalman_dir != Octave_dir) + prolonged_disagreement(2+ périodes)
+w = 1 + lambda * difficulty
+ATR_ML = EMA(TR * w, n)
+```
+
+**Tests**: 36 configurations (4 windows × 3 lambdas × 3 percentiles)
+
+**Résultats (MACD Kalman, Test Set)**:
+
+| Config | Trades | Réduction | Win Rate | PnL Net | Coverage ATR |
+|--------|--------|-----------|----------|---------|--------------|
+| **Baseline** | 88,992 | - | 31.02% | -83.42% | 100% |
+| **Meilleur (n=5, λ=0.5, Q30-Q70)** | 88,657 | **-0.4%** ❌ | 31.06% | -82.83% | 40% |
+| n=6, λ=1.5, Q30-Q70 | 88,635 | -0.4% | 31.05% | -82.81% | 40% |
+| n=8, λ=1.5, Q30-Q70 | 88,618 | -0.4% | 31.05% | -82.86% | 40% |
+
+**Observations critiques**:
+
+1. **Coverage vs Reduction Incohérent** 🔍
+   ```
+   Q30-Q70 = 40% ATR Coverage → Devrait filtrer 60% des entrées
+   Mais trades réduits: -0.4% seulement!
+   ```
+
+2. **Direction Flips Dominant** 💥
+   ```
+   Direction Flips: 87,215 / 88,992 = 98.0% des trades
+   Time exits: 1,777 = 2.0% seulement
+   ```
+
+3. **Problème Fondamental**: Le masque ATR est appliqué aux **ENTRÉES**, mais 98% des trades viennent de **DIRECTION_FLIP** (changements d'avis en cours de trade), pas de nouvelles entrées.
+
+**Diagnostic**: Filtrer les entrées ne sert à rien si 98% des trades sont créés par flickering pendant les trades existants.
+
+### Comparaison ATR Structural vs ATR ML-Aware
+
+| Métrique | ATR Structural | ATR ML-Aware | Objectif |
+|----------|----------------|--------------|----------|
+| **Réduction trades** | -50% ✅ | **-0.4%** ❌ | -50% |
+| **Impact Win Rate** | **-2%** ❌ | +0.04% | Stable |
+| **PnL Net** | Toujours négatif | Toujours négatif | Positif |
+| **Flickering** | Non mesuré | **98%** des trades | <50% |
+
+**Conclusion**: Les deux approches échouent pour des raisons différentes:
+- **ATR Structural**: Réduit trades mais dégrade Win Rate (filtre sans discriminer)
+- **ATR ML-Aware**: Ne réduit presque rien car flickering domine
+
+### Problème Racine Identifié: Flickering
+
+**Définition**: Le modèle change d'avis **constamment** pendant les trades existants.
+
+| Observation | Valeur | Impact |
+|-------------|--------|--------|
+| Direction Flips | 87,215 / 88,992 | **98.0%** des trades |
+| Time exits (20p) | 1,777 | **2.0%** seulement |
+| Avg Duration | 7.2 périodes | ~36 minutes |
+| Avg Confidence | 0.612 | Pas sur-confiant (baseline) |
+
+**Gap Accuracy vs Win Rate**:
+- **Labels**: 92.5% accuracy (pente t-2 vs t-3, instantané)
+- **Trading**: 31% Win Rate (durée 7 périodes, direction change plusieurs fois)
+
+**Explication**: Les labels capturent la pente sur 1 période, mais les trades durent plusieurs périodes où la direction change → micro-sorties → PnL détruit.
+
+### Conclusion - Abandonner Filtres ATR
+
+**❌ Échec validé des deux approches ATR**:
+1. Filtrer par volatilité brute (ATR Structural): Réduit trades mais dégrade qualité
+2. Filtrer par incertitude ML (ATR ML-Aware): Inefficace car flickering bypass le filtre
+
+**Raison fondamentale**: Filtrer les ENTRÉES ne résout rien si 98% des trades viennent de FLIPS pendant les trades.
+
+### Recommandations Post-ATR
+
+**Option 1: Timeframe 15min/30min** ⭐ (Recommandé)
+- Réduction naturelle -50% à -67%
+- Moins de bruit haute fréquence
+- Signaux plus stables
+- Pas de modification du modèle
+
+**Option 2: Consensus Multi-Indicateurs**
+- Entrer UNIQUEMENT si MACD + RSI + CCI d'accord
+- Phase 2.7 tests consensus: validé empiriquement (4/6 = sweet spot)
+
+**Option 3: Debug Modèle** (Fondamental)
+- Pourquoi 92.5% accuracy labels → 31% Win Rate trading?
+- Labels = 1 période vs Trades = plusieurs périodes
+- Besoin d'un objectif d'apprentissage plus long-terme
+
+**Scripts créés**:
+- `tests/test_atr_structural_filter.py` (627 lignes) - Commit f8da433
+- `tests/test_atr_ml_aware_filter.py` (643 lignes) - Commit 5476ebb
+
+**Prochaine action**: Pivoter vers Timeframe 15min ou Consensus Multi-Indicateurs.
+
+---
+
+## 🎯 Phase 2.10: Analyse des Transitions - Problème Fondamental Identifié (2026-01-08)
+
+**Date**: 2026-01-08
+**Statut**: ✅ **DIAGNOSTIC COMPLET - Cause Racine du Gap 92% → 34% Identifiée**
+**Script**: `tests/test_transition_sync.py`
+**Objectif**: Mesurer si le modèle détecte les retournements au même moment que l'Oracle
+
+### Question Critique
+
+**Si l'Oracle change d'avis (UP→DOWN ou DOWN→UP), est-ce que le modèle change aussi AU MÊME MOMENT?**
+
+```python
+# Test exact
+Pour chaque timestep t où Oracle transition (label[t] != label[t-1]):
+    Est-ce que Model transition aussi? (pred[t] != pred[t-1])
+```
+
+### Motivation
+
+Phase 2.9 a montré:
+- Accuracy globale: 92.5% (excellent)
+- Win Rate trading: 34% (médiocre)
+- Gap: **58.5%** inexpliqué
+
+**Hypothèse**: Le modèle est peut-être bon en **continuation** mais mauvais en **retournement** (les entrées critiques en trading).
+
+### Résultats - 3 Indicateurs Testés
+
+#### MACD Kalman (Test Set, 640k samples)
+
+| Métrique | Valeur | Interprétation |
+|----------|--------|----------------|
+| **Global Accuracy** | 92.54% | ✅ Excellent |
+| **Transition Accuracy** | **58.04%** | ❌ **Rate 42% des retournements!** |
+| **Gap** | **+34.50%** | 💥 Différence massive |
+| **Oracle Transitions** | 68,912 | ~10.8% du dataset |
+| **Model Synced (correct)** | 39,994 (58.04%) | Détectées au bon moment |
+| **Model NOT Synced** | 28,014 (40.65%) | **RATÉES complètement** |
+| **Model Wrong (opposé)** | 904 (1.31%) | Opposé (pire) |
+| **Latence Moyenne** | +0.14 périodes | Quasi-synchrone |
+| **Synchro (0)** | 59.3% | Quand détecté, timing OK |
+| **Retard (+1 à +3)** | 27.0% | Légèrement tard |
+
+#### RSI Kalman (Test Set, 640k samples)
+
+| Métrique | Valeur | Interprétation |
+|----------|--------|----------------|
+| **Global Accuracy** | 87.62% | ✅ Bon |
+| **Transition Accuracy** | **52.37%** | ❌ **Rate 48% des retournements!** |
+| **Gap** | **+35.25%** | 💥 Encore pire que MACD |
+| **Oracle Transitions** | 96,876 | ~15.1% du dataset (plus nerveux) |
+| **Model Synced (correct)** | 50,734 (52.37%) | Détectées |
+| **Model NOT Synced** | 44,479 (45.91%) | **RATÉES** |
+| **Model Wrong (opposé)** | 1,663 (1.72%) | Opposé |
+| **Latence Moyenne** | +0.23 périodes | Légèrement plus tard |
+| **Retard (+1 à +3)** | 33.7% | Plus en retard que MACD |
+
+#### CCI Kalman (Test Set, 640k samples)
+
+| Métrique | Valeur | Interprétation |
+|----------|--------|----------------|
+| **Global Accuracy** | 90.15% | ✅ Très bon |
+| **Transition Accuracy** | **56.63%** | ❌ **Rate 43% des retournements!** |
+| **Gap** | **+33.52%** | 💥 Pattern confirmé |
+| **Oracle Transitions** | 82,395 | ~12.9% du dataset |
+| **Model Synced (correct)** | 46,664 (56.63%) | Détectées |
+| **Model NOT Synced** | 34,616 (42.01%) | **RATÉES** |
+| **Model Wrong (opposé)** | 1,115 (1.35%) | Opposé |
+| **Latence Moyenne** | +0.12 périodes | Quasi-synchrone |
+| **Retard (+1 à +3)** | 27.1% | Comparable MACD |
+
+### Hiérarchie Validée
+
+| Indicateur | Transition Acc | Global Acc | Gap | Nature | Verdict |
+|------------|----------------|------------|-----|--------|---------|
+| **MACD** 🥇 | **58.04%** | 92.54% | +34.50% | Tendance lourde | **Meilleur pour entrées** |
+| **CCI** 🥈 | 56.63% | 90.15% | +33.52% | Oscillateur déviation | Intermédiaire |
+| **RSI** 🥉 | 52.37% | 87.62% | +35.25% | Oscillateur vitesse | Pire pour entrées |
+
+**MACD confirme sa position de pilote** pour les décisions d'entrée.
+
+### Diagnostic Critique
+
+#### Le Modèle Est Excellent en Continuation, Mauvais en Retournement
+
+```
+Accuracy Globale 92.54% mesure:
+  - ~90% continuations (direction stable) → Modèle PARFAIT
+  - ~10% transitions (retournements)      → Modèle MAUVAIS (58%)
+
+Résultat Global: 92.54% ✅ (dominé par les continuations)
+
+Mais en Trading:
+  - Continuations = tenir position (pas critique pour PnL)
+  - Transitions = ENTRÉES (CRITIQUE pour PnL!)
+
+Si modèle rate 42% des entrées:
+  → Entre en retard ou rate complètement
+  → Win Rate effondré (34%)
+  → Explique TOUT le gap 92% → 34%
+```
+
+#### Scénario Typique (42% du Temps)
+
+```
+Oracle (labels):
+t=0   UP    → Continuation (modèle prédit UP ✅)
+t=1   UP    → Continuation (modèle prédit UP ✅)
+t=2   UP    → Continuation (modèle prédit UP ✅)
+t=3   DOWN  → 🚨 TRANSITION (opportunité d'entrée SHORT)
+t=4   DOWN  → Continuation (modèle prédit DOWN ✅)
+
+Modèle (42% du temps):
+t=0   UP    ✅ Correct (continuation)
+t=1   UP    ✅ Correct (continuation)
+t=2   UP    ✅ Correct (continuation)
+t=3   UP    ❌ RATE la transition! (continue UP)
+t=4   DOWN  ✅ Détecte enfin (1 période en retard)
+
+Résultat:
+  - Accuracy globale: 4/5 = 80% (bon!)
+  - Transition accuracy: 0/1 = 0% (raté!)
+  - En trading: Entre 1 période tard → rate le meilleur prix → perte
+```
+
+### Pourquoi La Latence Est Correcte Mais Insuffisante
+
+| Métrique | MACD | RSI | CCI | Observation |
+|----------|------|-----|-----|-------------|
+| **Latence moyenne** | +0.14p | +0.23p | +0.12p | Quasi-synchrone ✅ |
+| **Synchro (0)** | 59.3% | 54.1% | 58.0% | Majorité parfait |
+
+**Interprétation:**
+- **Quand le modèle détecte** une transition, il est au bon moment (latence ~0)
+- **Mais** il ne détecte que 52-58% des transitions!
+- Les 42-48% restants ne sont **jamais détectés** comme transitions
+
+Le problème n'est PAS le timing (quand), c'est la **détection** (si).
+
+### Implications pour le Trading
+
+#### Pourquoi Entry-Focused a Échoué
+
+**Phase 2.8 Entry-Focused (ML pour entrées, ignore ML pour sorties):**
+- Résultat: 21,316 trades, Win Rate 33.92%, PnL Net -6,279%
+- **Explication**: Le modèle rate 42% des bonnes entrées (transitions Oracle)
+- Les entrées restantes (58%) ne suffisent pas à compenser les frais
+
+#### Pourquoi Holding Minimum a Montré un Signal
+
+**Phase 2.6 Holding 30p:**
+- PnL Brut: +110.89% ✅ (le signal existe!)
+- PnL Net: -2,976% ❌ (trop de trades)
+
+**Explication:**
+- Le modèle détecte QUAND MÊME 58% des transitions (suffisant pour signal brut positif)
+- Mais les 42% ratés + flickering = trop de trades (30,876)
+- Frais × Volume détruisent le signal
+
+### Conclusion Fondamentale
+
+**Le gap 92.5% accuracy → 34% Win Rate est expliqué:**
+
+1. ✅ Modèle excellent sur **continuations** (90% du dataset) → 92.5% accuracy
+2. ❌ Modèle mauvais sur **transitions** (10% du dataset) → 52-58% accuracy
+3. 💡 En trading, seules les **transitions comptent** (entrées) → Win Rate effondré
+
+**Ce n'est PAS:**
+- ❌ Un problème de timing (latence ~0 quand détecté)
+- ❌ Un problème d'overfitting (validation/test similaires)
+- ❌ Un problème de signal (Oracle +6,644%, signal existe)
+
+**C'est:**
+- ✅ Un problème de **détection des retournements** (rate 42-48%)
+- ✅ Le modèle a appris la **continuité**, pas le **changement**
+
+### Solutions Possibles
+
+#### Option 1: Weighted Loss (Privilégier Transitions) ⭐
+
+```python
+# Donner plus de poids aux transitions dans la loss
+loss = (1 - alpha) * loss_continuations + alpha * loss_transitions
+# Avec alpha = 0.6-0.8
+```
+
+**Gain attendu:**
+- Transition Accuracy: 58% → 75-80%
+- Global Accuracy: 92.5% → 88-90% (dégradation acceptable)
+- Win Rate Trading: 34% → 45-50%
+
+#### Option 2: Features de Détection Retournements
+
+Ajouter features spécialisées:
+- Momentum divergence (prix monte, momentum baisse)
+- Volume spike (changement brusque)
+- Volatility expansion (début mouvement)
+- Rate of change (accélération/décélération)
+
+#### Option 3: Modèle Dual-Task
+
+```
+Modèle 1: Prédire Direction (actuel)
+Modèle 2: Détecter Transitions (nouveau)
+
+Trading:
+  - Modèle 2 dit "transition" → ENTRER
+  - Modèle 1 dit direction → LONG ou SHORT
+```
+
+#### Option 4: Confirmation Multi-Période (Compensation)
+
+Accepter que le modèle est mauvais sur transitions et compenser:
+
+```python
+# N'entrer QUE si signal stable N périodes
+if model_agrees_for_N_periods(3-5):
+    ENTER  # Signal confirmé
+```
+
+**Inconvénient:** Entre 3-5 périodes tard
+**Avantage:** Seulement vrais retournements (pas faux signaux)
+
+#### Option 5: Timeframe 15min/30min
+
+- Moins de transitions (÷3 à ÷6)
+- Transitions plus longues et stables
+- Plus faciles à détecter pour le modèle
+
+### Scripts et Commandes
+
+**Script créé**: `tests/test_transition_sync.py`
+
+**Commandes de test:**
+```bash
+# MACD (92.5% global, 58% transitions)
+python tests/test_transition_sync.py --indicator macd --split test
+
+# RSI (87.6% global, 52% transitions)
+python tests/test_transition_sync.py --indicator rsi --split test
+
+# CCI (90.2% global, 57% transitions)
+python tests/test_transition_sync.py --indicator cci --split test
+```
+
+**Commits:**
+- Test transition sync: 0945b9a
+- Fix latency O(n²) → O(n log n): 8999d26
+
+### Prochaine Étape Recommandée
+
+**Priorité 1:** Réentraîner avec **Weighted Loss** (privilégier transitions)
+- Impact direct sur le problème identifié
+- Pas besoin de nouvelles données
+- Gain attendu: +15-20% transition accuracy
+
+**Priorité 2:** Timeframe 15min/30min
+- Réduction naturelle transitions (plus stables)
+- Pas de modification modèle
+- Gain attendu: Detection accuracy +10-15%
+
+**Priorité 3:** Features retournements + Dual-Task model
+- Plus complexe, mais potentiel gain maximal
+- Nécessite réarchitecture
+
+---
+
+## ❌ TEST ORACLE - KALMAN SLIDING WINDOW (2026-01-08)
+
+**Date**: 2026-01-08
+**Statut**: ❌ **ÉCHEC VALIDÉ - Kalman Glissant DÉTRUIT le signal**
+**Script**: `tests/test_oracle_sliding_window.py`
+**Objectif**: Tester le potentiel maximum du signal avec Kalman appliqué en fenêtre glissante
+
+### Contexte
+
+Suite à Phase 2.11 (Weighted Loss échec: -6.5% transition accuracy), test Oracle pour valider si le signal existe avec Kalman glissant.
+
+**Hypothèse**: Appliquer Kalman sur fenêtre glissante (window=100) + labels Oracle devrait donner PnL positif si le signal existe.
+
+### Pipeline Correct (après correction bug)
+
+**🐛 Bug Initial Identifié:**
+```python
+# ❌ INCORRECT (bug commit 0c733b4)
+returns = extract_c_ret(X, indicator)  # Extrait c_ret du dataset
+values = 50.0 + np.cumsum(returns * 100)  # cumsum = reconstruction PRIX!
+# Résultat: RSI et MACD donnaient MÊMES résultats (tous deux = cumsum du prix)
+```
+
+**✅ Pipeline Correct (commit 165721f):**
+1. Charger **CSV brut** (OHLC) depuis `data_trad/BTCUSD_all_5m.csv`
+2. Calculer **indicateur brut** (RSI/MACD/CCI) avec `calculate_rsi()`, `calculate_macd()`, `calculate_cci()`
+3. Appliquer **Kalman glissant** sur valeurs brutes (window=100)
+4. Calculer **labels Oracle**: `filtered[t-2] > filtered[t-3]` ou `filtered[t-3] > filtered[t-4]`
+5. Extraire **returns**: `df['close'].pct_change()`
+6. **Backtest** avec labels parfaits
+
+### Résultats - 3 Indicateurs (N=1000 samples, window=100)
+
+| Indicateur | Trades | Win Rate (T1/T2) | PnL Net (T1) | PnL Net (T2) | Avg Duration | Frais | Verdict |
+|------------|--------|------------------|--------------|--------------|--------------|-------|---------|
+| **MACD** 🥇 | **47** | **27.7% / 29.8%** | **-19.06%** | **-13.89%** | **21.2p (~1h45)** | 9.4% | **Moins pire** |
+| **RSI** 🥉 | **121** | 25.6% / 24.0% | -21.96% | **-30.62%** | 8.2p (~40min) | **24.2%** | **Pire** |
+| **CCI** 🥈 | **135** | 26.7% / 28.2% | **-27.19%** | -25.97% | 7.4p (~35min) | **27.0%** | **Très pire** |
+
+**Observation critique**: T1 = `filtered[t-2] > filtered[t-3]`, T2 = `filtered[t-3] > filtered[t-4]`
+
+### Analyse Détaillée
+
+#### 1. TOUS les indicateurs ÉCHOUENT
+
+- ❌ **Win Rate < 30%** (pire que hasard 50%)
+- ❌ **PnL Net tous négatifs** (-13% à -30%)
+- ❌ **Profit Factor < 0.6** (< 1.0 = perdant garanti)
+- ❌ **Sharpe Ratio tous négatifs** (-52 à -99)
+
+#### 2. Plus de trades = Pire performance
+
+```
+MACD (stable):      47 trades →  9.4% frais → -19% PnL Net  ← Moins pire
+RSI (nerveux):     121 trades → 24.2% frais → -30% PnL Net  ← Pire (-57% vs MACD)
+CCI (très nerveux): 135 trades → 27.0% frais → -27% PnL Net  ← Très pire (-43% vs MACD)
+```
+
+**Pattern clair**: Les indicateurs nerveux (oscillateurs) overtrading massif → frais détruisent le PnL.
+
+#### 3. MACD = Indicateur le plus robuste
+
+**Pourquoi MACD survit mieux (même s'il échoue) :**
+- MACD = Indicateur de **tendance lourde** (double EMA)
+- Naturellement plus stable que RSI/CCI (oscillateurs de vitesse)
+- Moins de transitions détectées (47 vs 121-135)
+- Trades 3× plus longs (21.2p vs 7-8p)
+- Frais 2.5-3× plus bas (9.4% vs 24-27%)
+
+**Hiérarchie validée**:
+```
+MACD (tendance) > CCI (déviation) > RSI (vitesse)
+   -19%              -27%             -30%
+```
+
+#### 4. Comparaison avec Phase 2.10 (Kalman GLOBAL)
+
+| Test | Méthode | PnL Oracle | Conclusion |
+|------|---------|------------|------------|
+| **Phase 2.10** | Kalman **GLOBAL** | **+6,644%** ✅ | Signal EXISTE |
+| **Ce test** | Kalman **GLISSANT (W=100)** | **-19% à -30%** ❌ | Kalman glissant DÉTRUIT signal |
+
+**Différence critique**:
+```
+Kalman GLOBAL (Phase 2.10):
+  - Appliqué sur TOUT l'historique (~640k samples)
+  - Labels stables (100% concordance)
+  - Aucun LAG/RETARD
+  → Oracle: +6,644% (signal fonctionne!)
+
+Kalman GLISSANT (ce test):
+  - Appliqué sur fenêtres de 100 samples
+  - Labels instables/retardés
+  - LAG énorme (50-100 périodes)
+  → Oracle: -19% à -30% (signal détruit)
+```
+
+### Diagnostic : Pourquoi Kalman Glissant Échoue
+
+#### Problème 1: LAG/RETARD massif
+
+```
+Kalman window=100 + label lag (t-2 vs t-3) = Signal TRÈS retardé
+
+Quand Kalman détecte une hausse (t-2 > t-3):
+  → Le marché est DÉJÀ en train de redescendre
+  → Trading à contretemps
+  → Win Rate 22-30% (pire que hasard)
+```
+
+#### Problème 2: Labels instables
+
+- Kalman sur fenêtre courte (100) → labels changent selon la fenêtre
+- Concordance avec global: probablement 85-90% (vs 100% avec global)
+- 10-15% de désaccords → transitions aléatoires → overtrading
+
+#### Problème 3: Oscillateurs amplifiés
+
+RSI/CCI déjà nerveux × Kalman instable = Catastrophe:
+- RSI: 121 trades (2.5× MACD)
+- CCI: 135 trades (2.9× MACD)
+- Frais 24-27% détruisent tout
+
+### Scripts et Commandes
+
+**Script créé**: `tests/test_oracle_sliding_window.py`
+
+**Commandes:**
+```bash
+# Test MACD (meilleur des 3)
+python tests/test_oracle_sliding_window.py --indicator macd --asset BTC --n-samples 1000 --window 100
+
+# Test RSI (pire)
+python tests/test_oracle_sliding_window.py --indicator rsi --asset BTC --n-samples 1000 --window 100
+
+# Test CCI (très pire)
+python tests/test_oracle_sliding_window.py --indicator cci --asset BTC --n-samples 1000 --window 100
+```
+
+**Commits:**
+- Script initial (bugué): 0c733b4
+- Fix pipeline (CSV brut → indicateur): 165721f
+
+### Conclusion Finale
+
+#### ❌ ABANDONNER DÉFINITIVEMENT:
+
+1. **Kalman glissant** pour labels/trading
+2. Toute approche de **filtrage sur fenêtre courte** (≤ 100-200)
+3. Utilisation de RSI/CCI comme **indicateurs principaux** (trop nerveux)
+
+**Raisons empiriques**:
+- 3/3 indicateurs échouent avec Oracle (labels parfaits!)
+- Win Rate < 30% = signal anti-prédictif
+- PnL -19% à -30% = frais détruisent tout
+- Comparaison Phase 2.10: Kalman global +6,644% vs glissant -19% à -30%
+
+#### ✅ CONTINUER AVEC:
+
+1. **Kalman GLOBAL** (validé: +6,644% Oracle en Phase 2.10)
+2. **MACD comme pivot** (confirmé comme le plus stable)
+3. Approches alternatives:
+   - Timeframe 15/30min (réduction naturelle trades)
+   - Consensus multi-indicateurs (Phase 2.7: Direction 4/6)
+   - Filtres structurels (ATR, volume, régime)
+
+#### 📋 Leçon Apprise
+
+> **"Sliding Window Kalman ≠ Global Kalman"**
+>
+> Le Kalman glissant introduit un LAG/RETARD qui détruit complètement le signal, même avec des labels Oracle parfaits. Seul le Kalman GLOBAL (appliqué sur tout l'historique) fonctionne.
+
+**Ne JAMAIS retester cette approche sans raison fondamentale.**
+
+---
+
+## ❌ TEST ORACLE - OCTAVE SLIDING WINDOW (2026-01-08)
+
+**Date**: 2026-01-08
+**Statut**: ❌ **ÉCHEC VALIDÉ - Octave Glissant ENCORE PIRE que Kalman**
+**Script**: `tests/test_oracle_sliding_window.py` (avec `--filter-type octave`)
+**Objectif**: Tester le filtre Octave (Butterworth + filtfilt) en fenêtre glissante vs Kalman
+
+### Motivation
+
+Suite aux tests Kalman sliding window (échec: -19% à -30%), tester le filtre Octave pour comparaison.
+
+**Hypothèse**: Octave (filtre fréquentiel) pourrait mieux gérer les fenêtres courtes que Kalman (filtre bayésien).
+
+### Résultats - 3 Indicateurs (N=1000 samples, window=100)
+
+| Indicateur | Trades | Win Rate (T1/T2) | PnL Net (T1) | PnL Net (T2) | Avg Duration | Frais | Verdict |
+|------------|--------|------------------|--------------|--------------|--------------|-------|---------|
+| **MACD** 🥇 | **221** | **28.05% / 30.77%** | **-37.13%** | **-42.61%** | **4.5p (~22min)** | 44.2% | **Catastrophe** |
+| **RSI** 🥉 | **489** | 24.13% / 25.15% | **-115.53%** | -105.72% | **2.0p (~10min)** | **97.8%** | **Apocalypse** |
+| **CCI** 🥈 | **439** | 28.47% / 27.33% | -63.97% | **-80.97%** | **2.3p (~11min)** | **87.8%** | **Désastre** |
+
+**Observation critique**: T1 = `filtered[t-2] > filtered[t-3]`, T2 = `filtered[t-3] > filtered[t-4]`
+
+### 💥 Comparaison Critique: Octave vs Kalman
+
+| Indicateur | **Kalman Trades** | **Octave Trades** | **Multiplication** | Kalman PnL | Octave PnL | **Différence** |
+|------------|-------------------|-------------------|-------------------|------------|------------|----------------|
+| **MACD** 🥇 | 47 | **221** | **×4.7** 💥 | -19.06% | **-37.13%** | **-95% pire** |
+| **RSI** 🥉 | 121 | **489** | **×4.0** 💥 | -21.96% | **-115.53%** | **-426% pire** |
+| **CCI** 🥈 | 135 | **439** | **×3.3** 💥 | -27.19% | **-63.97%** | **-135% pire** |
+
+**Découverte CHOC**: Octave génère **3-5× PLUS de trades** que Kalman!
+
+### Analyse Catastrophique
+
+#### 1. Octave = Overtrading Massif
+
+```
+MACD Kalman:   47 trades, 21.2p durée,  9.4% frais → -19% PnL
+MACD Octave:  221 trades,  4.5p durée, 44.2% frais → -37% PnL
+
+Octave produit:
+  → 4.7× PLUS de trades
+  → 4.7× MOINS de durée par trade
+  → 4.7× PLUS de frais
+  → 95% PIRE PnL
+```
+
+#### 2. Durée moyenne effondrée
+
+| Indicateur | Kalman Durée | Octave Durée | Réduction |
+|------------|--------------|--------------|-----------|
+| MACD | 21.2p (~1h45) | **4.5p (~22min)** | **÷4.7** 💥 |
+| RSI | 8.2p (~40min) | **2.0p (~10min)** | **÷4.1** 💥 |
+| CCI | 7.4p (~35min) | **2.3p (~11min)** | **÷3.2** 💥 |
+
+**Interprétation**: Octave produit des **micro-sorties** ultra-fréquentes.
+
+#### 3. Frais détruisent TOUT
+
+```
+RSI Octave:
+  - 489 trades × 0.2% frais = 97.8% de frais!
+  - PnL Brut: -17.73%
+  - Frais: -97.8%
+  → PnL Net: -115.53% (frais 5.5× le signal)
+
+CCI Octave:
+  - 439 trades × 0.2% frais = 87.8% de frais!
+  - PnL Brut: +23.83% (signal positif!)
+  - Frais: -87.8%
+  → PnL Net: -63.97% (frais 3.7× le signal)
+```
+
+**Pattern mortel**: Même quand signal brut positif (CCI +23%), frais massacrent le PnL.
+
+#### 4. Hiérarchie préservée (MACD > CCI > RSI)
+
+Même avec Octave catastrophique, l'ordre reste:
+```
+MACD (tendance lourde):  221 trades → -37% (moins pire)
+CCI (oscillateur):       439 trades → -64% (pire)
+RSI (oscillateur rapide): 489 trades → -116% (apocalypse)
+```
+
+**MACD confirmé comme seul indicateur utilisable** (même s'il échoue).
+
+### Diagnostic: Pourquoi Octave est PIRE que Kalman
+
+#### Différence Fondamentale Kalman vs Octave
+
+| Aspect | Kalman | Octave (Butterworth) |
+|--------|--------|---------------------|
+| **Nature** | Filtre bayésien | Filtre fréquentiel |
+| **Lissage** | Adaptatif (variance-aware) | Fixe (step=0.25) |
+| **Stabilité fenêtre courte** | Moyenne | **Mauvaise** 💥 |
+| **Transitions détectées** | Modérées | **Très nombreuses** 💥 |
+| **Résultat** | 47-135 trades | **221-489 trades** |
+
+**Problème clé**: Butterworth avec `step=0.25` est **MOINS lissant** que Kalman.
+→ Plus de variations détectées
+→ Plus de changements de labels
+→ Overtrading massif
+
+#### Formule du Désastre
+
+```
+Signal Octave instable
+  × Fenêtre courte (100)
+  × Oscillateurs nerveux (RSI/CCI)
+  × Frais 0.2%
+= APOCALYPSE (-64% à -116%)
+```
+
+### Comparaison 3-Way: Global vs Kalman Sliding vs Octave Sliding
+
+| Test | Méthode | MACD PnL | RSI PnL | CCI PnL | Conclusion |
+|------|---------|----------|---------|---------|------------|
+| **Phase 2.10** | Kalman **GLOBAL** | **+6,644%** ✅ | - | - | Signal EXISTE |
+| **Kalman Sliding** | Window 100 | **-19%** ❌ | -22% | -27% | Kalman glissant détruit |
+| **Octave Sliding** | Window 100 | **-37%** ❌ | **-116%** | -64% | **Octave PIRE que Kalman** |
+
+**Verdict**: Octave sliding window est **95-426% PIRE** que Kalman sliding window.
+
+### Scripts et Commandes
+
+**Script modifié**: `tests/test_oracle_sliding_window.py` (commit 885e811)
+
+**Nouveau paramètre**: `--filter-type {kalman, octave}`
+
+**Commandes:**
+```bash
+# Test Octave MACD (moins pire)
+python tests/test_oracle_sliding_window.py --indicator macd --filter-type octave --n-samples 1000 --window 100
+
+# Test Octave RSI (apocalypse)
+python tests/test_oracle_sliding_window.py --indicator rsi --filter-type octave --n-samples 1000 --window 100
+
+# Test Octave CCI (désastre)
+python tests/test_oracle_sliding_window.py --indicator cci --filter-type octave --n-samples 1000 --window 100
+
+# Paramètres optionnels Octave
+python tests/test_oracle_sliding_window.py --indicator macd --filter-type octave --octave-step 0.3 --octave-order 4
+```
+
+**Commits:**
+- Ajout support Octave: 885e811
+
+### Conclusion Finale
+
+#### ❌ ABANDONNER DÉFINITIVEMENT:
+
+1. **Octave sliding window** (pire que Kalman)
+2. **Tous filtres en fenêtre glissante** ≤ 200 samples
+3. **RSI/CCI comme indicateurs principaux** (catastrophe confirmée)
+
+**Raisons empiriques**:
+- Octave 3-5× plus de trades que Kalman
+- Octave 95-426% pire PnL que Kalman
+- Win Rate < 30% = signal anti-prédictif
+- Frais détruisent TOUT (44% à 98%)
+
+#### ✅ CONTINUER AVEC:
+
+1. **Kalman GLOBAL uniquement** (validé: +6,644% Oracle)
+2. **MACD comme pivot EXCLUSIF** (seul indicateur acceptable)
+3. **Approches structurelles**:
+   - Timeframe 15/30min (÷3 à ÷6 trades naturellement)
+   - Consensus multi-indicateurs (validé Phase 2.7)
+   - Filtres régime de marché
+
+#### 📋 Leçon Critique Apprise
+
+> **"Octave Sliding < Kalman Sliding < Kalman Global"**
+>
+> **Hiérarchie des filtres en fenêtre glissante:**
+> 1. Kalman GLOBAL: +6,644% (seul qui fonctionne)
+> 2. Kalman SLIDING (W=100): -19% à -30% (détruit signal)
+> 3. **Octave SLIDING (W=100): -37% à -116% (apocalypse)**
+>
+> **Le filtre Octave (Butterworth step=0.25) est trop sensible pour les fenêtres courtes.**
+
+**Ne JAMAIS utiliser de filtre sliding window sans fenêtre ≥ plusieurs milliers de samples.**
 
 ---
 

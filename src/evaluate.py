@@ -23,7 +23,7 @@ from constants import (
 )
 from model import create_model, compute_metrics
 from train import IndicatorDataset
-from prepare_data import load_prepared_data
+from prepare_data import load_prepared_data, filter_by_assets
 from data_utils import normalize_labels_for_single_output
 from utils import log_dataset_metadata
 
@@ -55,7 +55,14 @@ def evaluate_model(
     all_targets = []
 
     with torch.no_grad():
-        for X_batch, Y_batch in dataloader:
+        for batch in dataloader:
+            # Unpacking flexible: (X, Y) ou (X, Y, T)
+            if len(batch) == 3:
+                X_batch, Y_batch, T_batch = batch
+                # T_batch non utilisé en évaluation (seulement pour training loss)
+            else:
+                X_batch, Y_batch = batch
+
             # Déplacer sur device
             X_batch = X_batch.to(device)
             Y_batch = Y_batch.to(device)
@@ -171,6 +178,11 @@ def parse_args():
                         help='Nom du filtre utilisé (ex: octave20, kalman). '
                              'Utilisé pour trouver le modèle automatiquement.')
 
+    # Assets filtering
+    parser.add_argument('--assets', type=str, nargs='+', default=None,
+                        help='Assets à utiliser (ex: --assets BTC ETH). '
+                             'Si non spécifié, utilise tous les assets du dataset.')
+
     return parser.parse_args()
 
 
@@ -201,18 +213,7 @@ def main():
     logger.info("ÉVALUATION DU MODÈLE CNN-LSTM")
     logger.info("="*80)
 
-    # Déterminer mode (multi-output ou single-output)
-    single_indicator = args.indicator != 'all'
-    if single_indicator:
-        indicator_idx = INDICATOR_INDEX[args.indicator]  # None pour close, macd40, etc.
-        indicator_name = INDICATOR_NAMES[args.indicator]
-        num_outputs = 1
-        logger.info(f"\n🎯 Mode SINGLE-OUTPUT: {indicator_name}")
-    else:
-        indicator_idx = None
-        indicator_name = None
-        num_outputs = 3
-        logger.info(f"\n🎯 Mode MULTI-OUTPUT: RSI, CCI, MACD")
+    # NOTE: Mode sera déterminé APRÈS détection auto de l'indicateur depuis le nom du fichier
 
     # Device
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -237,6 +238,16 @@ def main():
     # =========================================================================
     if args.model:
         model_path = args.model
+        # Si modèle spécifié manuellement, déterminer mode depuis args.indicator
+        single_indicator = args.indicator != 'all'
+        if single_indicator:
+            indicator_idx = INDICATOR_INDEX[args.indicator]
+            indicator_name = INDICATOR_NAMES[args.indicator]
+            logger.info(f"\n🎯 Mode SINGLE-OUTPUT: {indicator_name}")
+        else:
+            indicator_idx = None
+            indicator_name = None
+            logger.info(f"\n🎯 Mode MULTI-OUTPUT: RSI, CCI, MACD")
     else:
         # Détecter l'indicateur et le filtre depuis le nom du fichier dataset
         detected_indicator = None
@@ -267,6 +278,28 @@ def main():
         elif args.filter:
             detected_filter = args.filter
 
+        # =========================================================================
+        # DÉTERMINER MODE (single vs multi) APRÈS détection indicateur
+        # =========================================================================
+        # Si indicateur détecté (filename) OU CLI != 'all' → SINGLE-OUTPUT
+        single_indicator = detected_indicator is not None or args.indicator != 'all'
+
+        if single_indicator:
+            if detected_indicator:
+                indicator_idx = INDICATOR_INDEX.get(detected_indicator)
+                indicator_name = INDICATOR_NAMES.get(detected_indicator, detected_indicator.upper())
+            else:
+                indicator_idx = INDICATOR_INDEX[args.indicator]
+                indicator_name = INDICATOR_NAMES[args.indicator]
+            num_outputs = 1
+            logger.info(f"\n🎯 Mode SINGLE-OUTPUT: {indicator_name}")
+            logger.info(f"   Indicateur détecté: {detected_indicator or args.indicator}")
+        else:
+            indicator_idx = None
+            indicator_name = None
+            num_outputs = 3
+            logger.info(f"\n🎯 Mode MULTI-OUTPUT: RSI, CCI, MACD")
+
         # Construire le nom du modèle
         suffix_parts = []
         if detected_indicator:
@@ -275,8 +308,13 @@ def main():
             suffix_parts.append(detected_filter)
 
         # Détecter si c'est dual-binary depuis le nom du fichier
-        if args.data and 'dual_binary' in Path(args.data).stem.lower():
+        data_name_lower = Path(args.data).stem.lower()
+        if args.data and 'dual_binary' in data_name_lower:
             suffix_parts.append('dual_binary')
+
+        # Phase 2.11: Détecter si c'est un dataset avec transitions (_wt)
+        if args.data and '_wt' in data_name_lower:
+            suffix_parts.append('wt')
 
         if suffix_parts:
             suffix = '_'.join(suffix_parts)
@@ -307,22 +345,49 @@ def main():
     # Charger données préparées (même dataset que l'entraînement)
     logger.info(f"\n1. Chargement des données préparées: {args.data}")
     prepared = load_prepared_data(args.data)
-    X_test, Y_test = prepared['test']
+
+    # Unpacking flexible: (X, Y) ou (X, Y, T)
+    if len(prepared['test']) == 3:
+        X_test, Y_test, T_test = prepared['test']
+        has_transitions = True
+        logger.info("  ✅ Dataset avec transitions détecté (Phase 2.11)")
+    else:
+        X_test, Y_test = prepared['test']
+        T_test = None
+        has_transitions = False
+
     metadata = prepared['metadata']
     log_dataset_metadata(metadata, logger)
+
+    # FILTRAGE PAR ASSETS (optionnel)
+    if args.assets:
+        logger.info(f"\n🔍 Filtrage des assets...")
+
+        # Charger OHLCV depuis le fichier .npz pour le filtrage
+        data_npz = np.load(args.data, allow_pickle=True)
+
+        # Filtrer test
+        X_test, Y_test, T_test, _ = filter_by_assets(
+            X_test, Y_test, T_test, data_npz['OHLCV_test'],
+            args.assets, metadata
+        )
+
+        logger.info(f"  ✅ Filtrage terminé pour {len(args.assets)} asset(s)")
 
     # Filtrer les labels si mode single-output
     if single_indicator:
         Y_test = normalize_labels_for_single_output(Y_test, indicator_idx, indicator_name)
 
     logger.info(f"  Test: X={X_test.shape}, Y={Y_test.shape}")
+    if has_transitions:
+        logger.info(f"        T={T_test.shape} (transitions: {T_test.mean()*100:.1f}%)")
 
     # =========================================================================
     # 3. CRÉER DATALOADER
     # =========================================================================
     logger.info("\n3. Création du DataLoader...")
 
-    test_dataset = IndicatorDataset(X_test, Y_test)
+    test_dataset = IndicatorDataset(X_test, Y_test, T_test)
     test_loader = DataLoader(
         test_dataset,
         batch_size=BATCH_SIZE,

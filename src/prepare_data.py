@@ -303,20 +303,150 @@ def load_prepared_data(path: str = None) -> dict:
             }
             logger.warning(f"  ⚠️ Pas de metadata trouvé, utilisation de valeurs par défaut")
 
-    result = {
-        'train': (data['X_train'], data['Y_train']),
-        'val': (data['X_val'], data['Y_val']),
-        'test': (data['X_test'], data['Y_test']),
-        'metadata': metadata
-    }
+    # Vérifier si les transitions sont présentes (Phase 2.11 - Weighted Loss)
+    has_transitions = 'T_train' in data.files
 
-    logger.info(f"  ✅ Données chargées:")
-    logger.info(f"     Train: {data['X_train'].shape}")
-    logger.info(f"     Val:   {data['X_val'].shape}")
-    logger.info(f"     Test:  {data['X_test'].shape}")
+    # =========================================================================
+    # DÉTECTION FORMAT DIRECTION-ONLY
+    # =========================================================================
+    # Nouveau format: X, Y et T ont 3 colonnes avec [timestamp, asset_id, data]
+    # X: (n, 25, 3) avec colonne 2 = feature (c_ret)
+    # Y: (n, 3) avec colonne 2 = label
+    # T: (n, 3) avec colonne 2 = is_transition
+    # Ancien format: Y et T ont 1-2 colonnes [label] ou [label1, label2]
+    is_direction_only = False
+    if data['Y_train'].ndim == 2 and data['Y_train'].shape[1] == 3:
+        is_direction_only = True
+        logger.info(f"  🎯 Format Direction-Only détecté (Y shape: {data['Y_train'].shape})")
+
+        # Extraire seulement la colonne feature (colonne 2) de X
+        X_train = data['X_train'][:, :, 2:3]  # (n, 25, 3) → (n, 25, 1)
+        X_val = data['X_val'][:, :, 2:3]
+        X_test = data['X_test'][:, :, 2:3]
+
+        # Extraire seulement la colonne label (colonne 2) de Y
+        Y_train = data['Y_train'][:, 2:3]  # (n, 1)
+        Y_val = data['Y_val'][:, 2:3]
+        Y_test = data['Y_test'][:, 2:3]
+
+        if has_transitions:
+            # T a aussi 3 colonnes, extraire colonne 2
+            T_train = data['T_train'][:, 2:3]  # (n, 1)
+            T_val = data['T_val'][:, 2:3]
+            T_test = data['T_test'][:, 2:3]
+
+        logger.info(f"     → Extraction colonne feature (colonne 2):")
+        logger.info(f"     Train: X={X_train.shape}, Y={Y_train.shape}, T={T_train.shape if has_transitions else 'N/A'}")
+        logger.info(f"     Val:   X={X_val.shape}, Y={Y_val.shape}, T={T_val.shape if has_transitions else 'N/A'}")
+        logger.info(f"     Test:  X={X_test.shape}, Y={Y_test.shape}, T={T_test.shape if has_transitions else 'N/A'}")
+    else:
+        # Ancien format - utiliser tel quel
+        X_train = data['X_train']
+        X_val = data['X_val']
+        X_test = data['X_test']
+
+        Y_train = data['Y_train']
+        Y_val = data['Y_val']
+        Y_test = data['Y_test']
+
+        if has_transitions:
+            T_train = data['T_train']
+            T_val = data['T_val']
+            T_test = data['T_test']
+
+    # =========================================================================
+    # CONSTRUIRE RÉSULTAT
+    # =========================================================================
+    if has_transitions:
+        # Inclure les transitions dans les tuples
+        result = {
+            'train': (X_train, Y_train, T_train),
+            'val': (X_val, Y_val, T_val),
+            'test': (X_test, Y_test, T_test),
+            'metadata': metadata
+        }
+        logger.info(f"  ✅ Données chargées (avec transitions):")
+        logger.info(f"     Train: X={X_train.shape}, Y={Y_train.shape}, T={T_train.shape}")
+        logger.info(f"     Val:   X={X_val.shape}, Y={Y_val.shape}, T={T_val.shape}")
+        logger.info(f"     Test:  X={X_test.shape}, Y={Y_test.shape}, T={T_test.shape}")
+
+        # Stats transitions (prendre colonne 0 si (n,1), sinon moyenne)
+        trans_train_pct = (T_train[:, 0].mean() if T_train.shape[1] == 1 else T_train.mean()) * 100
+        trans_val_pct = (T_val[:, 0].mean() if T_val.shape[1] == 1 else T_val.mean()) * 100
+        trans_test_pct = (T_test[:, 0].mean() if T_test.shape[1] == 1 else T_test.mean()) * 100
+        logger.info(f"     Transitions: Train {trans_train_pct:.1f}%, Val {trans_val_pct:.1f}%, Test {trans_test_pct:.1f}%")
+    else:
+        # Backward compatibility - sans transitions
+        result = {
+            'train': (X_train, Y_train),
+            'val': (X_val, Y_val),
+            'test': (X_test, Y_test),
+            'metadata': metadata
+        }
+        logger.info(f"  ✅ Données chargées:")
+        logger.info(f"     Train: X={X_train.shape}, Y={Y_train.shape}")
+        logger.info(f"     Val:   X={X_val.shape}, Y={Y_val.shape}")
+        logger.info(f"     Test:  X={X_test.shape}, Y={Y_test.shape}")
+
     log_dataset_metadata(metadata, logger)
 
     return result
+
+
+def filter_by_assets(X: np.ndarray, Y: np.ndarray, T: np.ndarray, OHLCV: np.ndarray,
+                     assets: list, metadata: dict) -> tuple:
+    """
+    Filtre les données pour ne garder que les assets spécifiés.
+
+    Args:
+        X: Features (n, seq_length, n_features+2) - colonnes 0,1 = timestamp, asset_id
+        Y: Labels (n, 1) - après extraction de la colonne 2
+        T: Transitions (n, 1) - après extraction de la colonne 2 (ou None)
+        OHLCV: (n, 7) - colonne 1 = asset_id
+        assets: Liste des assets à garder (ex: ['BTC', 'ETH'])
+        metadata: Métadonnées du dataset
+
+    Returns:
+        (X_filtered, Y_filtered, T_filtered, OHLCV_filtered)
+    """
+    # Créer mapping asset_name → asset_id (0-indexed comme dans le dataset!)
+    # L'ordre doit correspondre à celui de prepare_data_direction_only.py
+    if 'assets' in metadata:
+        all_assets = metadata['assets']
+        asset_id_map = {name: idx for idx, name in enumerate(all_assets, start=0)}
+    else:
+        # Fallback: ordre par défaut (0-indexed)
+        default_order = ['BTC', 'ETH', 'BNB', 'ADA', 'LTC']
+        asset_id_map = {name: idx for idx, name in enumerate(default_order, start=0)}
+
+    # Convertir assets en asset_ids
+    asset_ids = []
+    for asset in assets:
+        if asset in asset_id_map:
+            asset_ids.append(float(asset_id_map[asset]))
+        else:
+            logger.warning(f"⚠️  Asset {asset} non trouvé dans metadata, ignoré")
+
+    if not asset_ids:
+        raise ValueError(f"Aucun asset valide trouvé dans {assets}")
+
+    logger.info(f"  🎯 Filtrage pour assets: {assets}")
+    logger.info(f"     Asset IDs: {asset_ids}")
+
+    # Filtrer par asset_id depuis OHLCV (colonne 1)
+    # Note: X peut avoir seulement 1 feature après extraction Direction-Only,
+    # donc on utilise OHLCV[:, 1] qui contient toujours l'asset_id
+    asset_mask = np.isin(OHLCV[:, 1], asset_ids)
+
+    X_filtered = X[asset_mask]
+    Y_filtered = Y[asset_mask]
+    T_filtered = T[asset_mask] if T is not None else None
+    OHLCV_filtered = OHLCV[asset_mask]
+
+    logger.info(f"     Avant filtrage: {len(X)} séquences")
+    logger.info(f"     Après filtrage: {len(X_filtered)} séquences ({len(X_filtered)/len(X)*100:.1f}%)")
+
+    return X_filtered, Y_filtered, T_filtered, OHLCV_filtered
 
 
 def list_prepared_datasets():

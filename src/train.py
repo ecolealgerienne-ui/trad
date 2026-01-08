@@ -37,7 +37,7 @@ from constants import (
 )
 from indicators import prepare_datasets
 from model import create_model, compute_metrics
-from prepare_data import load_prepared_data
+from prepare_data import load_prepared_data, filter_by_assets
 from data_utils import normalize_labels_for_single_output
 from utils import log_dataset_metadata
 from datetime import datetime
@@ -50,17 +50,26 @@ class IndicatorDataset(Dataset):
     Args:
         X: Features (n_sequences, sequence_length, n_indicators)
         Y: Labels (n_sequences, n_outputs)
+        T: Transition indicators (n_sequences,) - optionnel (Phase 2.11)
+            - 1.0 si transition (label[i] != label[i-1])
+            - 0.0 si continuation
     """
 
-    def __init__(self, X: np.ndarray, Y: np.ndarray):
+    def __init__(self, X: np.ndarray, Y: np.ndarray, T: np.ndarray = None):
         self.X = torch.FloatTensor(X)
         self.Y = torch.FloatTensor(Y)
+        self.T = torch.FloatTensor(T) if T is not None else None
+        self.has_transitions = (T is not None)
 
     def __len__(self) -> int:
         return len(self.X)
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        return self.X[idx], self.Y[idx]
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, ...]:
+        if self.has_transitions:
+            return self.X[idx], self.Y[idx], self.T[idx]
+        else:
+            # Backward compatibility - return only X, Y
+            return self.X[idx], self.Y[idx]
 
 
 class EarlyStopping:
@@ -142,7 +151,15 @@ def train_epoch(
     all_predictions = []
     all_targets = []
 
-    for X_batch, Y_batch in dataloader:
+    for batch in dataloader:
+        # Unpacking flexible: (X, Y) ou (X, Y, T)
+        if len(batch) == 3:
+            X_batch, Y_batch, T_batch = batch
+            T_batch = T_batch.to(device)
+        else:
+            X_batch, Y_batch = batch
+            T_batch = None
+
         # Déplacer sur device
         X_batch = X_batch.to(device)
         Y_batch = Y_batch.to(device)
@@ -151,8 +168,11 @@ def train_epoch(
         optimizer.zero_grad()
         outputs = model(X_batch)
 
-        # Loss
-        loss = loss_fn(outputs, Y_batch)
+        # Loss (passer transitions si WeightedTransitionBCELoss)
+        if T_batch is not None:
+            loss = loss_fn(outputs, Y_batch, T_batch)
+        else:
+            loss = loss_fn(outputs, Y_batch)
 
         # Backward
         loss.backward()
@@ -202,7 +222,15 @@ def validate_epoch(
     all_targets = []
 
     with torch.no_grad():
-        for X_batch, Y_batch in dataloader:
+        for batch in dataloader:
+            # Unpacking flexible: (X, Y) ou (X, Y, T)
+            if len(batch) == 3:
+                X_batch, Y_batch, T_batch = batch
+                T_batch = T_batch.to(device)
+            else:
+                X_batch, Y_batch = batch
+                T_batch = None
+
             # Déplacer sur device
             X_batch = X_batch.to(device)
             Y_batch = Y_batch.to(device)
@@ -210,8 +238,11 @@ def validate_epoch(
             # Forward
             outputs = model(X_batch)
 
-            # Loss
-            loss = loss_fn(outputs, Y_batch)
+            # Loss (passer transitions si WeightedTransitionBCELoss)
+            if T_batch is not None:
+                loss = loss_fn(outputs, Y_batch, T_batch)
+            else:
+                loss = loss_fn(outputs, Y_batch)
 
             # Accumuler
             total_loss += loss.item() * X_batch.size(0)
@@ -407,6 +438,11 @@ def parse_args():
     parser.add_argument('--filter', '-f', type=str, default=None,
                         help='Nom du filtre utilisé (ex: octave20, kalman). Inclus dans le nom du modèle.')
 
+    # Assets filtering
+    parser.add_argument('--assets', type=str, nargs='+', default=None,
+                        help='Assets à utiliser (ex: --assets BTC ETH). '
+                             'Si non spécifié, utilise tous les assets du dataset.')
+
     # Autres
     parser.add_argument('--seed', type=int, default=RANDOM_SEED,
                         help='Random seed pour reproductibilité')
@@ -587,19 +623,8 @@ def main():
         device = args.device
     logger.info(f"\nDevice: {device}")
 
-    # Afficher hyperparamètres
-    # Déterminer mode (multi-output ou single-output)
-    single_indicator = args.indicator != 'all'
-    if single_indicator:
-        indicator_idx = INDICATOR_INDEX[args.indicator]  # None pour close, macd40, etc.
-        indicator_name = INDICATOR_NAMES[args.indicator]
-        num_outputs = 1
-        logger.info(f"\n🎯 Mode SINGLE-OUTPUT: {indicator_name}")
-    else:
-        indicator_idx = None
-        indicator_name = None
-        num_outputs = 3
-        logger.info(f"\n🎯 Mode MULTI-OUTPUT: RSI, CCI, MACD")
+    # NOTE: Mode (single vs multi) sera déterminé APRÈS le chargement des données
+    # pour permettre la détection automatique de l'indicateur depuis le nom du fichier
 
     logger.info(f"\n⚙️ Hyperparamètres d'entraînement:")
     logger.info(f"  Batch size: {args.batch_size}")
@@ -623,11 +648,56 @@ def main():
         # Charger données préparées (rapide)
         logger.info(f"\n1. Chargement des données préparées: {args.data}")
         prepared = load_prepared_data(args.data)
-        X_train, Y_train = prepared['train']
-        X_val, Y_val = prepared['val']
-        X_test, Y_test = prepared['test']
+
+        # Unpacking avec détection automatique des transitions (Phase 2.11)
+        if len(prepared['train']) == 3:
+            # Nouveau format: (X, Y, T) avec transitions
+            X_train, Y_train, T_train = prepared['train']
+            X_val, Y_val, T_val = prepared['val']
+            X_test, Y_test, T_test = prepared['test']
+            has_transitions = True
+            logger.info(f"  ✅ Dataset avec transitions détecté (Phase 2.11 - Weighted Loss)")
+        else:
+            # Ancien format: (X, Y) sans transitions
+            X_train, Y_train = prepared['train']
+            X_val, Y_val = prepared['val']
+            X_test, Y_test = prepared['test']
+            T_train = T_val = T_test = None
+            has_transitions = False
+            logger.info(f"  ℹ️ Dataset sans transitions (backward compatibility)")
+
         metadata = prepared['metadata']
         log_dataset_metadata(metadata, logger)
+
+        # =====================================================================
+        # FILTRAGE PAR ASSETS (optionnel)
+        # =====================================================================
+        if args.assets:
+            logger.info(f"\n🔍 Filtrage des assets...")
+
+            # Charger OHLCV depuis le fichier .npz pour le filtrage
+            data_npz = np.load(args.data, allow_pickle=True)
+
+            # Filtrer train
+            X_train, Y_train, T_train, _ = filter_by_assets(
+                X_train, Y_train, T_train, data_npz['OHLCV_train'],
+                args.assets, metadata
+            )
+
+            # Filtrer val
+            X_val, Y_val, T_val, _ = filter_by_assets(
+                X_val, Y_val, T_val, data_npz['OHLCV_val'],
+                args.assets, metadata
+            )
+
+            # Filtrer test
+            X_test, Y_test, T_test, _ = filter_by_assets(
+                X_test, Y_test, T_test, data_npz['OHLCV_test'],
+                args.assets, metadata
+            )
+
+            logger.info(f"  ✅ Filtrage terminé pour {len(args.assets)} asset(s)")
+
     else:
         # Données préparées requises (ancienne méthode avait du data leakage)
         logger.error("❌ Argument --data requis!")
@@ -677,6 +747,63 @@ def main():
         if filter_type_metadata:
             logger.info(f"  Filtre: {filter_type_metadata.upper()}")
 
+    # =========================================================================
+    # AUTO-DÉTECTION INDICATEUR (depuis filename ou metadata)
+    # =========================================================================
+    detected_indicator = None
+    detected_filter = None
+
+    if args.data:
+        data_name = Path(args.data).stem.lower()  # dataset_btc_macd_direction_only_kalman_wt
+
+        # Détecter indicateur depuis le nom du fichier
+        for ind in ['rsi', 'cci', 'macd', 'close']:
+            if f'_{ind}_' in data_name or data_name.endswith(f'_{ind}'):
+                detected_indicator = ind
+                break
+
+        # Détecter filtre depuis le nom du fichier (fallback si pas dans metadata)
+        for filt in ['kalman', 'octave20', 'octave', 'decycler']:
+            if filt in data_name:
+                detected_filter = filt
+                break
+
+    # Priorité: metadata > filename > CLI
+    if is_dual_binary and indicator_for_metrics:
+        detected_indicator = indicator_for_metrics.lower()
+
+    # Priorité pour le filtre: metadata > CLI argument > filename
+    if filter_type_metadata:
+        detected_filter = filter_type_metadata
+    elif args.filter:
+        detected_filter = args.filter
+
+    # Fallback sur CLI pour ancien pipeline (si aucune détection)
+    if not detected_indicator and args.indicator != 'all':
+        detected_indicator = args.indicator
+
+    # =========================================================================
+    # DÉTERMINER MODE (single vs multi) APRÈS détection indicateur
+    # =========================================================================
+    # Si indicateur détecté (filename/metadata) OU CLI != 'all' → SINGLE-OUTPUT
+    single_indicator = detected_indicator is not None or args.indicator != 'all'
+
+    if single_indicator:
+        if detected_indicator:
+            indicator_idx = INDICATOR_INDEX.get(detected_indicator)
+            indicator_name = INDICATOR_NAMES.get(detected_indicator, detected_indicator.upper())
+        else:
+            indicator_idx = INDICATOR_INDEX[args.indicator]
+            indicator_name = INDICATOR_NAMES[args.indicator]
+        num_outputs = 1
+        logger.info(f"\n🎯 Mode SINGLE-OUTPUT: {indicator_name}")
+        logger.info(f"   Indicateur détecté: {detected_indicator or args.indicator}")
+    else:
+        indicator_idx = None
+        indicator_name = None
+        num_outputs = 3
+        logger.info(f"\n🎯 Mode MULTI-OUTPUT: RSI, CCI, MACD")
+
     # Filtrer les labels si mode single-output (ancien pipeline)
     if single_indicator and not is_dual_binary:
         # Ancien pipeline (3 outputs -> 1)
@@ -694,8 +821,9 @@ def main():
     # =========================================================================
     logger.info("\n2. Création des DataLoaders...")
 
-    train_dataset = IndicatorDataset(X_train, Y_train)
-    val_dataset = IndicatorDataset(X_val, Y_val)
+    # Passer les transitions si disponibles (Phase 2.11)
+    train_dataset = IndicatorDataset(X_train, Y_train, T_train)
+    val_dataset = IndicatorDataset(X_val, Y_val, T_val)
 
     train_loader = DataLoader(
         train_dataset,
@@ -759,19 +887,47 @@ def main():
     logger.info(f"  num_features={n_features_detected}, num_outputs={num_outputs_final}")
     logger.info(f"  use_layer_norm={use_layer_norm}, use_bce_with_logits={use_bce_with_logits}")
 
-    model, loss_fn = create_model(
-        device=device,
-        num_indicators=n_features_detected,
-        num_outputs=num_outputs_final,
-        cnn_filters=args.cnn_filters,
-        lstm_hidden_size=args.lstm_hidden,
-        lstm_num_layers=args.lstm_layers,
-        lstm_dropout=args.lstm_dropout,
-        dense_hidden_size=args.dense_hidden,
-        dense_dropout=args.dense_dropout,
-        use_layer_norm=use_layer_norm,
-        use_bce_with_logits=use_bce_with_logits
-    )
+    # Phase 2.11: Utiliser WeightedTransitionBCELoss si transitions disponibles
+    if has_transitions:
+        logger.info(f"  🎯 Phase 2.11: WeightedTransitionBCELoss ACTIVÉ (transition_weight=5.0×)")
+        from model import WeightedTransitionBCELoss
+
+        # Créer le modèle (sans loss, on la remplace)
+        model, _ = create_model(
+            device=device,
+            num_indicators=n_features_detected,
+            num_outputs=num_outputs_final,
+            cnn_filters=args.cnn_filters,
+            lstm_hidden_size=args.lstm_hidden,
+            lstm_num_layers=args.lstm_layers,
+            lstm_dropout=args.lstm_dropout,
+            dense_hidden_size=args.dense_hidden,
+            dense_dropout=args.dense_dropout,
+            use_layer_norm=use_layer_norm,
+            use_bce_with_logits=use_bce_with_logits
+        )
+
+        # Remplacer par WeightedTransitionBCELoss
+        loss_fn = WeightedTransitionBCELoss(
+            num_outputs=num_outputs_final,
+            transition_weight=5.0,  # 5× poids pour les transitions
+            use_bce_with_logits=use_bce_with_logits
+        )
+    else:
+        # Backward compatibility: loss classique
+        model, loss_fn = create_model(
+            device=device,
+            num_indicators=n_features_detected,
+            num_outputs=num_outputs_final,
+            cnn_filters=args.cnn_filters,
+            lstm_hidden_size=args.lstm_hidden,
+            lstm_num_layers=args.lstm_layers,
+            lstm_dropout=args.lstm_dropout,
+            dense_hidden_size=args.dense_hidden,
+            dense_dropout=args.dense_dropout,
+            use_layer_norm=use_layer_norm,
+            use_bce_with_logits=use_bce_with_logits
+        )
 
     # Optimizer
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
@@ -810,44 +966,9 @@ def main():
     }
 
     # =========================================================================
-    # NOMMAGE AUTOMATIQUE DU MODÈLE (détection intelligente)
+    # NOMMAGE AUTOMATIQUE DU MODÈLE
     # =========================================================================
-    # Détecter l'indicateur depuis:
-    # 1. Les metadata (dual-binary: indicator_for_metrics)
-    # 2. Le nom du fichier (ex: dataset_..._rsi_dual_binary_kalman.npz → 'rsi')
-    # 3. L'argument CLI --indicator (fallback ancien pipeline)
-
-    detected_indicator = None
-    detected_filter = None
-
-    if args.data:
-        data_name = Path(args.data).stem.lower()  # dataset_btc_eth_bnb_ada_ltc_rsi_dual_binary_kalman
-
-        # Détecter indicateur depuis le nom du fichier
-        for ind in ['rsi', 'cci', 'macd', 'close']:
-            if f'_{ind}_' in data_name or data_name.endswith(f'_{ind}'):
-                detected_indicator = ind
-                break
-
-        # Détecter filtre depuis le nom du fichier (fallback si pas dans metadata)
-        for filt in ['kalman', 'octave20', 'octave', 'decycler']:
-            if filt in data_name:
-                detected_filter = filt
-                break
-
-    # Priorité: metadata > filename > CLI
-    if is_dual_binary and indicator_for_metrics:
-        detected_indicator = indicator_for_metrics.lower()
-
-    # Priorité pour le filtre: metadata > CLI argument > filename
-    if filter_type_metadata:
-        detected_filter = filter_type_metadata
-    elif args.filter:
-        detected_filter = args.filter
-
-    # Fallback sur CLI pour ancien pipeline
-    if not detected_indicator and single_indicator:
-        detected_indicator = args.indicator
+    # detected_indicator et detected_filter ont été détectés plus tôt (lignes 715-748)
 
     # Construire le nom du modèle
     suffix_parts = []
@@ -857,6 +978,9 @@ def main():
         suffix_parts.append(detected_filter)
     if is_dual_binary:
         suffix_parts.append('dual_binary')
+    # Phase 2.11: Ajouter _wt si transitions (ne pas écraser modèles existants)
+    if has_transitions:
+        suffix_parts.append('wt')
 
     if suffix_parts:
         suffix = '_'.join(suffix_parts)
@@ -867,6 +991,8 @@ def main():
     logger.info(f"\n💾 Modèle sauvegardé:")
     logger.info(f"  Indicateur détecté: {detected_indicator or 'aucun'}")
     logger.info(f"  Filtre détecté: {detected_filter or 'aucun'}")
+    if has_transitions:
+        logger.info(f"  ✅ Weighted Transitions: OUI (suffixe _wt ajouté)")
 
     logger.info(f"  Modèle sera sauvegardé: {save_path}")
 

@@ -420,6 +420,114 @@ class MultiOutputBCELoss(nn.Module):
         return weighted_loss
 
 
+class WeightedTransitionBCELoss(nn.Module):
+    """
+    Loss BCE avec pondération augmentée sur les transitions.
+
+    **Principe (Phase 2.11):**
+    - Continuations (label[i] == label[i-1]): Poids = 1.0
+    - Transitions (label[i] != label[i-1]): Poids = transition_weight (défaut: 5.0)
+
+    **Objectif:**
+    Forcer le modèle à mieux apprendre les retournements de marché (transitions),
+    qui représentent seulement ~10% des samples mais sont critiques pour le trading.
+
+    **Résultats attendus:**
+    - Transition Accuracy: 52-58% → 75-80%
+    - Gap 92% Global → 34% Win Rate réduit
+
+    Args:
+        num_outputs: Nombre de sorties (1 pour direction-only, 2 pour dual-binary)
+        transition_weight: Poids pour les transitions (défaut: 5.0)
+        use_bce_with_logits: Utiliser BCEWithLogitsLoss (True) ou BCELoss (False)
+        output_weights: Poids optionnels par output (pour multi-output)
+    """
+
+    def __init__(
+        self,
+        num_outputs: int = 1,
+        transition_weight: float = 5.0,
+        use_bce_with_logits: bool = False,
+        output_weights: Tuple[float, ...] = None
+    ):
+        super(WeightedTransitionBCELoss, self).__init__()
+
+        self.num_outputs = num_outputs
+        self.transition_weight = transition_weight
+        self.use_bce_with_logits = use_bce_with_logits
+
+        # Poids par output (pour multi-output)
+        if output_weights is None:
+            output_weights = tuple([1.0] * num_outputs)
+        self.output_weights = torch.tensor(output_weights[:num_outputs], dtype=torch.float32)
+
+        # BCE avec ou sans logits
+        if use_bce_with_logits:
+            self.bce = nn.BCEWithLogitsLoss(reduction='none')
+            loss_type = "BCEWithLogitsLoss"
+        else:
+            self.bce = nn.BCELoss(reduction='none')
+            loss_type = "BCELoss"
+
+        logger.info(f"✅ Loss avec pondération transitions créée ({loss_type}):")
+        logger.info(f"  Num outputs: {num_outputs}")
+        logger.info(f"  Transition weight: {transition_weight}×")
+        logger.info(f"  Continuations weight: 1.0×")
+        if num_outputs > 1:
+            logger.info(f"  Output weights: {output_weights}")
+
+    def forward(
+        self,
+        predictions: torch.Tensor,
+        targets: torch.Tensor,
+        is_transition: torch.Tensor = None
+    ) -> torch.Tensor:
+        """
+        Calcule la loss BCE avec pondération augmentée sur transitions.
+
+        Args:
+            predictions: Prédictions (batch, num_outputs)
+                - Si use_bce_with_logits=True: logits bruts
+                - Si use_bce_with_logits=False: probabilités [0,1]
+            targets: Labels (batch, num_outputs)
+            is_transition: Indicateur binaire transitions (batch,) - optionnel
+                - 1.0 si transition (label[i] != label[i-1])
+                - 0.0 si continuation (label[i] == label[i-1])
+                - Si None: assume tous continuations (poids = 1.0)
+
+        Returns:
+            Loss scalaire (moyenne pondérée)
+        """
+        # Déplacer weights sur le même device
+        if self.output_weights.device != predictions.device:
+            self.output_weights = self.output_weights.to(predictions.device)
+
+        # BCE pour chaque sample et output: (batch, num_outputs)
+        bce_per_sample = self.bce(predictions, targets.float())
+
+        # Calculer poids par sample: (batch, 1)
+        if is_transition is not None:
+            # is_transition: (batch,) → (batch, 1)
+            is_transition = is_transition.view(-1, 1).float()
+            # Poids: 1.0 + (transition_weight - 1.0) * is_transition
+            # → Continuations: 1.0, Transitions: transition_weight
+            sample_weights = 1.0 + (self.transition_weight - 1.0) * is_transition
+        else:
+            # Si pas fourni: assume tous continuations
+            sample_weights = torch.ones((predictions.size(0), 1), device=predictions.device)
+
+        # Appliquer poids par sample: (batch, num_outputs)
+        weighted_bce = bce_per_sample * sample_weights
+
+        # Moyenne sur batch: (num_outputs,)
+        bce_mean = weighted_bce.mean(dim=0)
+
+        # Pondération par output: scalaire
+        weighted_loss = (bce_mean * self.output_weights).sum() / self.output_weights.sum()
+
+        return weighted_loss
+
+
 def create_model(
     device: str = 'cpu',
     num_indicators: int = NUM_INDICATORS,
