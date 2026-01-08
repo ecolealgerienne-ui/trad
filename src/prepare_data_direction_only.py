@@ -521,10 +521,14 @@ def create_sequences_for_indicator(df: pd.DataFrame,
     combined[:, 2:] = features  # float32 → float64 (cast automatique)
 
     # Étape 2: Appliquer sliding_window_view (opération instantanée, pas de copie !)
-    # Note: sliding_window_view sur array 2D retourne directement shape 3D
+    # Note: sliding_window_view avec axis=0 met la dimension window à la FIN
     # Input: (n_samples, n_features+2)
-    # Output: (n_samples - seq_length + 1, seq_length, n_features+2)
+    # Output BRUT: (n_samples - seq_length + 1, n_features+2, seq_length)  ← window à la fin!
+    # On doit transposer pour obtenir: (n_windows, seq_length, n_features+2)
     X_all_windows = sliding_window_view(combined, window_shape=seq_length, axis=0)
+    # Shape actuelle: (n_windows, n_features+2, seq_length)
+    # Transposer pour: (n_windows, seq_length, n_features+2)
+    X_all_windows = X_all_windows.transpose(0, 2, 1)  # Échange axes 1 et 2
 
     # Étape 3: Appliquer cold start (skip premiers start_index)
     # Alignement fenêtre/label :
