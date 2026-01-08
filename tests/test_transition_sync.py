@@ -45,11 +45,27 @@ def load_predictions_and_labels(indicator: str, filter_type: str, split: str, we
     """
     # Phase 2.11: Ajouter suffixe _wt si weighted=True
     suffix = "_wt" if weighted else ""
-    dataset_pattern = f"dataset_btc_eth_bnb_ada_ltc_{indicator}_direction_only_{filter_type}{suffix}.npz"
-    dataset_path = Path("data/prepared") / dataset_pattern
 
-    if not dataset_path.exists():
-        raise FileNotFoundError(f"Dataset introuvable: {dataset_path}")
+    # Chercher le fichier avec glob (assets variables)
+    prepared_dir = Path("data/prepared")
+    pattern = f"*_{indicator}_direction_only_{filter_type}{suffix}.npz"
+
+    matching_files = list(prepared_dir.glob(pattern))
+
+    if not matching_files:
+        raise FileNotFoundError(
+            f"Aucun dataset trouvé avec le pattern: {pattern}\n"
+            f"Cherché dans: {prepared_dir}"
+        )
+
+    if len(matching_files) > 1:
+        print(f"⚠️ Plusieurs datasets trouvés:")
+        for f in matching_files:
+            print(f"  - {f.name}")
+        print(f"Utilisation du premier: {matching_files[0].name}")
+        print()
+
+    dataset_path = matching_files[0]
 
     print(f"📂 Chargement: {dataset_path}")
     data = np.load(dataset_path, allow_pickle=True)
