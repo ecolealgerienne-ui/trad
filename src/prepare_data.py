@@ -433,9 +433,10 @@ def filter_by_assets(X: np.ndarray, Y: np.ndarray, T: np.ndarray, OHLCV: np.ndar
     logger.info(f"  🎯 Filtrage pour assets: {assets}")
     logger.info(f"     Asset IDs: {asset_ids}")
 
-    # Filtrer par asset_id (colonne 1 de X et OHLCV)
-    # X[:, 0, 1] = asset_id de la première timestep (constant pour toute la séquence)
-    asset_mask = np.isin(X[:, 0, 1], asset_ids)
+    # Filtrer par asset_id depuis OHLCV (colonne 1)
+    # Note: X peut avoir seulement 1 feature après extraction Direction-Only,
+    # donc on utilise OHLCV[:, 1] qui contient toujours l'asset_id
+    asset_mask = np.isin(OHLCV[:, 1], asset_ids)
 
     X_filtered = X[asset_mask]
     Y_filtered = Y[asset_mask]
