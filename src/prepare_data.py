@@ -381,6 +381,61 @@ def load_prepared_data(path: str = None) -> dict:
     return result
 
 
+def filter_by_assets(X: np.ndarray, Y: np.ndarray, T: np.ndarray, OHLCV: np.ndarray,
+                     assets: list, metadata: dict) -> tuple:
+    """
+    Filtre les données pour ne garder que les assets spécifiés.
+
+    Args:
+        X: Features (n, seq_length, n_features+2) - colonnes 0,1 = timestamp, asset_id
+        Y: Labels (n, 1) - après extraction de la colonne 2
+        T: Transitions (n, 1) - après extraction de la colonne 2 (ou None)
+        OHLCV: (n, 7) - colonne 1 = asset_id
+        assets: Liste des assets à garder (ex: ['BTC', 'ETH'])
+        metadata: Métadonnées du dataset
+
+    Returns:
+        (X_filtered, Y_filtered, T_filtered, OHLCV_filtered)
+    """
+    # Créer mapping asset_name → asset_id
+    # L'ordre doit correspondre à celui de prepare_data_direction_only.py
+    if 'assets' in metadata:
+        all_assets = metadata['assets']
+        asset_id_map = {name: idx for idx, name in enumerate(all_assets, start=1)}
+    else:
+        # Fallback: ordre par défaut
+        default_order = ['BTC', 'ETH', 'BNB', 'ADA', 'LTC']
+        asset_id_map = {name: idx for idx, name in enumerate(default_order, start=1)}
+
+    # Convertir assets en asset_ids
+    asset_ids = []
+    for asset in assets:
+        if asset in asset_id_map:
+            asset_ids.append(float(asset_id_map[asset]))
+        else:
+            logger.warning(f"⚠️  Asset {asset} non trouvé dans metadata, ignoré")
+
+    if not asset_ids:
+        raise ValueError(f"Aucun asset valide trouvé dans {assets}")
+
+    logger.info(f"  🎯 Filtrage pour assets: {assets}")
+    logger.info(f"     Asset IDs: {asset_ids}")
+
+    # Filtrer par asset_id (colonne 1 de X et OHLCV)
+    # X[:, 0, 1] = asset_id de la première timestep (constant pour toute la séquence)
+    asset_mask = np.isin(X[:, 0, 1], asset_ids)
+
+    X_filtered = X[asset_mask]
+    Y_filtered = Y[asset_mask]
+    T_filtered = T[asset_mask] if T is not None else None
+    OHLCV_filtered = OHLCV[asset_mask]
+
+    logger.info(f"     Avant filtrage: {len(X)} séquences")
+    logger.info(f"     Après filtrage: {len(X_filtered)} séquences ({len(X_filtered)/len(X)*100:.1f}%)")
+
+    return X_filtered, Y_filtered, T_filtered, OHLCV_filtered
+
+
 def list_prepared_datasets():
     """Liste tous les datasets préparés disponibles."""
     prepared_dir = Path(PREPARED_DATA_DIR)

@@ -23,7 +23,7 @@ from constants import (
 )
 from model import create_model, compute_metrics
 from train import IndicatorDataset
-from prepare_data import load_prepared_data
+from prepare_data import load_prepared_data, filter_by_assets
 from data_utils import normalize_labels_for_single_output
 from utils import log_dataset_metadata
 
@@ -177,6 +177,11 @@ def parse_args():
     parser.add_argument('--filter', '-f', type=str, default=None,
                         help='Nom du filtre utilisé (ex: octave20, kalman). '
                              'Utilisé pour trouver le modèle automatiquement.')
+
+    # Assets filtering
+    parser.add_argument('--assets', type=str, nargs='+', default=None,
+                        help='Assets à utiliser (ex: --assets BTC ETH). '
+                             'Si non spécifié, utilise tous les assets du dataset.')
 
     return parser.parse_args()
 
@@ -353,6 +358,21 @@ def main():
 
     metadata = prepared['metadata']
     log_dataset_metadata(metadata, logger)
+
+    # FILTRAGE PAR ASSETS (optionnel)
+    if args.assets:
+        logger.info(f"\n🔍 Filtrage des assets...")
+
+        # Charger OHLCV depuis le fichier .npz pour le filtrage
+        data_npz = np.load(args.data, allow_pickle=True)
+
+        # Filtrer test
+        X_test, Y_test, T_test, _ = filter_by_assets(
+            X_test, Y_test, T_test, data_npz['OHLCV_test'],
+            args.assets, metadata
+        )
+
+        logger.info(f"  ✅ Filtrage terminé pour {len(args.assets)} asset(s)")
 
     # Filtrer les labels si mode single-output
     if single_indicator:

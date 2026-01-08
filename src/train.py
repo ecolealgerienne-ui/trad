@@ -37,7 +37,7 @@ from constants import (
 )
 from indicators import prepare_datasets
 from model import create_model, compute_metrics
-from prepare_data import load_prepared_data
+from prepare_data import load_prepared_data, filter_by_assets
 from data_utils import normalize_labels_for_single_output
 from utils import log_dataset_metadata
 from datetime import datetime
@@ -438,6 +438,11 @@ def parse_args():
     parser.add_argument('--filter', '-f', type=str, default=None,
                         help='Nom du filtre utilisé (ex: octave20, kalman). Inclus dans le nom du modèle.')
 
+    # Assets filtering
+    parser.add_argument('--assets', type=str, nargs='+', default=None,
+                        help='Assets à utiliser (ex: --assets BTC ETH). '
+                             'Si non spécifié, utilise tous les assets du dataset.')
+
     # Autres
     parser.add_argument('--seed', type=int, default=RANDOM_SEED,
                         help='Random seed pour reproductibilité')
@@ -663,6 +668,36 @@ def main():
 
         metadata = prepared['metadata']
         log_dataset_metadata(metadata, logger)
+
+        # =====================================================================
+        # FILTRAGE PAR ASSETS (optionnel)
+        # =====================================================================
+        if args.assets:
+            logger.info(f"\n🔍 Filtrage des assets...")
+
+            # Charger OHLCV depuis le fichier .npz pour le filtrage
+            data_npz = np.load(args.data, allow_pickle=True)
+
+            # Filtrer train
+            X_train, Y_train, T_train, _ = filter_by_assets(
+                X_train, Y_train, T_train, data_npz['OHLCV_train'],
+                args.assets, metadata
+            )
+
+            # Filtrer val
+            X_val, Y_val, T_val, _ = filter_by_assets(
+                X_val, Y_val, T_val, data_npz['OHLCV_val'],
+                args.assets, metadata
+            )
+
+            # Filtrer test
+            X_test, Y_test, T_test, _ = filter_by_assets(
+                X_test, Y_test, T_test, data_npz['OHLCV_test'],
+                args.assets, metadata
+            )
+
+            logger.info(f"  ✅ Filtrage terminé pour {len(args.assets)} asset(s)")
+
     else:
         # Données préparées requises (ancienne méthode avait du data leakage)
         logger.error("❌ Argument --data requis!")
