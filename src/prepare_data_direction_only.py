@@ -321,6 +321,9 @@ def add_indicators_to_df(df: pd.DataFrame) -> pd.DataFrame:
     signal_line = macd_line.ewm(span=MACD_SIGNAL, adjust=False).mean()
     df['macd'] = macd_line - signal_line
 
+    # NaN → 0 après calcul des indicateurs
+    df = df.fillna(0)
+
     return df
 
 
@@ -437,6 +440,9 @@ def add_dual_labels_for_indicator(df: pd.DataFrame, indicator: str,
         force_strong_pct = df[f'{indicator}_force'].sum() / n_valid * 100
         logger.info(f"       Direction: {dir_up_pct:.1f}% UP")
         logger.info(f"       Force: {force_strong_pct:.1f}% STRONG")
+
+    # NaN → 0 après calcul des labels (Kalman + Direction + Force)
+    df = df.fillna(0)
 
     return df
 
@@ -652,6 +658,15 @@ def prepare_indicator_dataset(df: pd.DataFrame, asset_name: str, indicator: str,
         df, indicator, feature_cols, asset_name, asset_id
     )
 
+    # TRIM edges: Supprimer X premières + X dernières séquences sur TOUTES les matrices
+    # CRITIQUE: Faire sur X, Y, T, OHLCV EN MÊME TEMPS pour éviter décalage d'index!
+    logger.info(f"     Avant TRIM: {len(X)} séquences")
+    X = X[TRIM_EDGES:-TRIM_EDGES]
+    Y = Y[TRIM_EDGES:-TRIM_EDGES]
+    T = T[TRIM_EDGES:-TRIM_EDGES]
+    OHLCV = OHLCV[TRIM_EDGES:-TRIM_EDGES]
+    logger.info(f"     Après TRIM ±{TRIM_EDGES}: {len(X)} séquences")
+
     return X, Y, T, OHLCV
 
 
@@ -704,9 +719,7 @@ def process_single_asset(asset_name: str,
     df = add_pure_signal_features(df, clip_value)
     logger.info(f"     Features Pure Signal: 3 canaux (h_ret, l_ret, c_ret)")
 
-    # 4. TRIM edges
-    df = df.iloc[TRIM_EDGES:-TRIM_EDGES]
-    logger.info(f"     Après trim ±{TRIM_EDGES}: {len(df)} lignes")
+    # Note: TRIM edges sera fait APRÈS création des séquences (sur X, Y, T, OHLCV ensemble)
 
     # Résultat pour cet asset
     asset_results = {
