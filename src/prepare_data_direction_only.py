@@ -57,11 +57,15 @@ import pandas as pd
 import argparse
 import logging
 import json
+import os
 from pathlib import Path
 from datetime import datetime
 from pykalman import KalmanFilter
 import scipy.signal as signal
 import gc  # Pour nettoyage mémoire explicite
+from numpy.lib.stride_tricks import sliding_window_view  # Vectorisation x50
+from joblib import Parallel, delayed  # Parallélisation multi-core
+import psutil  # Détection RAM disponible
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +105,48 @@ ASSET_ID_MAP = {
     'ADA': 3,
     'LTC': 4
 }
+
+
+# =============================================================================
+# PARALLÉLISATION INTELLIGENTE
+# =============================================================================
+
+def get_safe_n_jobs(n_assets: int, ram_per_asset_gb: float = 4.0) -> int:
+    """
+    Calcule le nombre de jobs parallèles selon la RAM disponible.
+
+    Évite les crashes WSL en limitant le parallélisme selon la RAM.
+
+    Args:
+        n_assets: Nombre total d'assets à traiter
+        ram_per_asset_gb: RAM peak estimée par asset (GB)
+
+    Returns:
+        Nombre de jobs sûrs (1 à min(n_assets, n_cores))
+    """
+    try:
+        # RAM disponible (GB)
+        available_ram_gb = psutil.virtual_memory().available / (1024**3)
+
+        # Limite par RAM
+        max_by_ram = max(1, int(available_ram_gb / ram_per_asset_gb))
+
+        # Limite par CPU (laisser 1 core libre pour l'OS)
+        n_cores = os.cpu_count() or 1
+        max_by_cpu = max(1, n_cores - 1)
+
+        # Prendre le minimum des contraintes
+        n_jobs = min(max_by_ram, max_by_cpu, n_assets)
+
+        logger.info(f"Parallélisation: {n_jobs} assets simultanés")
+        logger.info(f"  RAM disponible: {available_ram_gb:.1f} GB")
+        logger.info(f"  RAM par asset: {ram_per_asset_gb:.1f} GB")
+        logger.info(f"  Cores CPU: {n_cores} ({max_by_cpu} utilisables)")
+
+        return n_jobs
+    except Exception as e:
+        logger.warning(f"Erreur détection parallélisme: {e}, fallback n_jobs=1")
+        return 1
 
 
 # =============================================================================
@@ -446,37 +492,49 @@ def create_sequences_for_indicator(df: pd.DataFrame,
     logger.info(f"     Cold Start: skip premiers {cold_start_skip} samples")
     logger.info(f"     Start index: {start_index}")
 
-    # Pré-allouer les arrays (évite copies multiples)
-    n_sequences = len(features) - start_index
+    # ========================================================================
+    # VECTORISATION avec sliding_window_view (x30-50 plus rapide) 🚀
+    # ========================================================================
+    n_samples = len(features)
     n_features = features.shape[1]
 
-    # Utiliser float64 pour tout (timestamps int64 s'intègrent sans perte)
-    X = np.zeros((n_sequences, seq_length, n_features + 2), dtype=np.float64)
-    Y = np.zeros((n_sequences, 3), dtype=np.float64)  # [timestamp, asset_id, direction]
-    T = np.zeros((n_sequences, 3), dtype=np.float64)  # [timestamp, asset_id, is_transition]
-    OHLCV = np.zeros((n_sequences, 7), dtype=np.float64)  # [timestamp, asset_id, O, H, L, C, V]
+    # Étape 1: Créer array combiné [timestamp, asset_id, features] pour TOUT le dataset
+    # Shape: (n_samples, n_features+2)
+    combined = np.zeros((n_samples, n_features + 2), dtype=np.float64)
+    combined[:, 0] = timestamps.astype(np.float64)
+    combined[:, 1] = float(asset_id)
+    combined[:, 2:] = features  # float32 → float64 (cast automatique)
 
-    for idx, i in enumerate(range(start_index, len(features))):
-        # === X: Features avec timestamp et asset_id intégrés ===
-        for t_idx, t in enumerate(range(i - seq_length, i)):
-            X[idx, t_idx, 0] = float(timestamps[t])  # timestamp
-            X[idx, t_idx, 1] = float(asset_id)       # asset_id
-            X[idx, t_idx, 2:] = features[t]          # features
+    # Étape 2: Appliquer sliding_window_view (opération instantanée, pas de copie !)
+    # Shape: (n_windows, seq_length, n_features+2)
+    # Note: sliding_window_view retourne une vue, pas une copie → économie RAM
+    X_all_windows = sliding_window_view(combined, window_shape=seq_length, axis=0)
+    # Reshape pour avoir la bonne structure (bug de sliding_window_view avec 2D)
+    X_all_windows = X_all_windows[:, 0, :, :]  # (n_windows, seq_length, n_features+2)
 
-        # === Y: Labels avec timestamp et asset_id ===
-        Y[idx, 0] = float(timestamps[i])   # timestamp
-        Y[idx, 1] = float(asset_id)        # asset_id
-        Y[idx, 2] = labels[i, 0]           # direction
+    # Étape 3: Appliquer cold start (skip premiers start_index)
+    X = X_all_windows[start_index - seq_length:].copy()  # .copy() pour libérer la vue
 
-        # === T: Transitions avec timestamp et asset_id ===
-        T[idx, 0] = float(timestamps[i])   # timestamp
-        T[idx, 1] = float(asset_id)        # asset_id
-        T[idx, 2] = float(transitions[i])  # is_transition
+    # Étape 4: Y, T, OHLCV (vectorisé sans boucle)
+    n_sequences = len(X)
 
-        # === OHLCV: Prix bruts avec timestamp et asset_id ===
-        OHLCV[idx, 0] = float(timestamps[i])  # timestamp
-        OHLCV[idx, 1] = float(asset_id)       # asset_id
-        OHLCV[idx, 2:] = ohlcv[i]             # O, H, L, C, V
+    # Y: [timestamp, asset_id, direction]
+    Y = np.zeros((n_sequences, 3), dtype=np.float64)
+    Y[:, 0] = timestamps[start_index:start_index + n_sequences].astype(np.float64)
+    Y[:, 1] = float(asset_id)
+    Y[:, 2] = labels[start_index:start_index + n_sequences, 0]
+
+    # T: [timestamp, asset_id, is_transition]
+    T = np.zeros((n_sequences, 3), dtype=np.float64)
+    T[:, 0] = timestamps[start_index:start_index + n_sequences].astype(np.float64)
+    T[:, 1] = float(asset_id)
+    T[:, 2] = transitions[start_index:start_index + n_sequences].astype(np.float64)
+
+    # OHLCV: [timestamp, asset_id, O, H, L, C, V]
+    OHLCV = np.zeros((n_sequences, 7), dtype=np.float64)
+    OHLCV[:, 0] = timestamps[start_index:start_index + n_sequences].astype(np.float64)
+    OHLCV[:, 1] = float(asset_id)
+    OHLCV[:, 2:] = ohlcv[start_index:start_index + n_sequences]
 
     # Stats transitions dans les séquences créées
     n_transitions_seqs = T[:, 2].sum()  # Colonne 2 = is_transition
@@ -573,7 +631,95 @@ def prepare_indicator_dataset(df: pd.DataFrame, asset_name: str, indicator: str,
 
 
 # =============================================================================
-# PRÉPARATION ET SAUVEGARDE MULTI-INDICATEURS
+# TRAITEMENT D'UN ASSET (Pour parallélisation)
+# =============================================================================
+
+def process_single_asset(asset_name: str,
+                         filter_type: str,
+                         clip_value: float,
+                         max_samples: int = None) -> dict:
+    """
+    Traite UN asset pour les 3 indicateurs (RSI, MACD, CCI).
+
+    Fonction wrapper pour la parallélisation avec joblib.
+
+    Args:
+        asset_name: Nom de l'asset ('BTC', 'ETH', etc.)
+        filter_type: 'kalman' ou 'octave'
+        clip_value: Valeur de clipping
+        max_samples: Limite de lignes (None = toutes)
+
+    Returns:
+        dict avec les splits (train, val, test) pour chaque indicateur
+    """
+    logger.info(f"\n{'='*80}")
+    logger.info(f"ASSET: {asset_name}")
+    logger.info('='*80)
+
+    file_path = AVAILABLE_ASSETS_5M[asset_name]
+    asset_id = ASSET_ID_MAP[asset_name]
+
+    # Features par indicateur (Architecture "Pure Signal")
+    features_rsi = ['c_ret']  # 1 feature: Close uniquement
+    features_macd = ['c_ret']  # 1 feature: Close uniquement
+    features_cci = ['h_ret', 'l_ret', 'c_ret']  # 3 features: High, Low, Close
+
+    # 1. Charger
+    df = load_data_with_index(file_path, asset_name, max_samples=max_samples)
+    if max_samples:
+        logger.info(f"  {asset_name}: {len(df)} lignes, {df.index[0]} → {df.index[-1]} (limité à {max_samples})")
+    else:
+        logger.info(f"  {asset_name}: {len(df)} lignes, {df.index[0]} → {df.index[-1]}")
+
+    # 2. Indicateurs
+    df = add_indicators_to_df(df)
+    logger.info(f"     Indicateurs: RSI, CCI, MACD")
+
+    # 3. Features Pure Signal (h_ret, l_ret, c_ret)
+    df = add_pure_signal_features(df, clip_value)
+    logger.info(f"     Features Pure Signal: 3 canaux (h_ret, l_ret, c_ret)")
+
+    # 4. TRIM edges
+    df = df.iloc[TRIM_EDGES:-TRIM_EDGES]
+    logger.info(f"     Après trim ±{TRIM_EDGES}: {len(df)} lignes")
+
+    # Résultat pour cet asset
+    asset_results = {
+        'rsi': {'train': None, 'val': None, 'test': None},
+        'macd': {'train': None, 'val': None, 'test': None},
+        'cci': {'train': None, 'val': None, 'test': None}
+    }
+
+    # 5. Préparer pour chaque indicateur
+    for indicator, feature_cols in [
+        ('rsi', features_rsi),      # 1 feature: c_ret
+        ('macd', features_macd),    # 1 feature: c_ret
+        ('cci', features_cci)       # 3 features: h_ret, l_ret, c_ret
+    ]:
+        X, Y, T, OHLCV = prepare_indicator_dataset(
+            df, asset_name, indicator, feature_cols, filter_type=filter_type, clip_value=clip_value
+        )
+
+        # Split chronologique (avec transitions + OHLCV)
+        splits = split_chronological(X, Y, T, OHLCV)
+
+        # Stocker les splits
+        asset_results[indicator] = splits
+
+        logger.info(f"     Split: Train={len(splits['train'][0])}, "
+                   f"Val={len(splits['val'][0])}, Test={len(splits['test'][0])}")
+
+        # Nettoyage mémoire immédiat après stockage
+        del X, Y, T, OHLCV, splits
+        gc.collect()
+
+    logger.info(f"  ✅ {asset_name} traité")
+
+    return asset_results
+
+
+# =============================================================================
+# PRÉPARATION ET SAUVEGARDE MULTI-INDICATEURS (AVEC PARALLÉLISATION)
 # =============================================================================
 
 def prepare_and_save_all(assets: list = None,
@@ -615,67 +761,35 @@ def prepare_and_save_all(assets: list = None,
     logger.info(f"Labels: Direction SEULEMENT (1 par indicateur)")
     logger.info(f"Architecture: Pure Signal (Force supprimée car inutile)")
 
-    # Stockage par indicateur
+    # ========================================================================
+    # PARALLÉLISATION MULTI-CORE (x2-4 selon RAM/CPU) 🚀
+    # ========================================================================
+
+    # Calculer n_jobs selon RAM disponible
+    n_jobs = get_safe_n_jobs(len(assets), ram_per_asset_gb=4.0)
+
+    logger.info(f"\n🚀 TRAITEMENT PARALLÈLE: {n_jobs} asset(s) simultané(s)")
+
+    # Traiter les assets en parallèle
+    all_results = Parallel(n_jobs=n_jobs, verbose=10)(
+        delayed(process_single_asset)(
+            asset_name, filter_type, clip_value, max_samples
+        ) for asset_name in assets
+    )
+
+    # Réorganiser les résultats par indicateur
     datasets = {
         'rsi': {'train': [], 'val': [], 'test': []},
         'macd': {'train': [], 'val': [], 'test': []},
         'cci': {'train': [], 'val': [], 'test': []}
     }
 
-    # Features par indicateur (Architecture "Pure Signal")
-    features_rsi = ['c_ret']  # 1 feature: Close uniquement
-    features_macd = ['c_ret']  # 1 feature: Close uniquement
-    features_cci = ['h_ret', 'l_ret', 'c_ret']  # 3 features: High, Low, Close
-
-    # Préparer chaque asset
-    for asset_name in assets:
-        logger.info(f"\n{'='*80}")
-        logger.info(f"ASSET: {asset_name}")
-        logger.info('='*80)
-
-        file_path = AVAILABLE_ASSETS_5M[asset_name]
-
-        # 1. Charger
-        df = load_data_with_index(file_path, asset_name, max_samples=max_samples)
-        if max_samples:
-            logger.info(f"     Chargé: {len(df)} lignes (limité à {max_samples})")
-        else:
-            logger.info(f"     Chargé: {len(df)} lignes")
-
-        # 2. Indicateurs
-        df = add_indicators_to_df(df)
-        logger.info(f"     Indicateurs: RSI, CCI, MACD")
-
-        # 3. Features Pure Signal (h_ret, l_ret, c_ret)
-        df = add_pure_signal_features(df, clip_value)
-        logger.info(f"     Features Pure Signal: 3 canaux (h_ret, l_ret, c_ret)")
-
-        # 4. TRIM edges
-        df = df.iloc[TRIM_EDGES:-TRIM_EDGES]
-        logger.info(f"     Après trim ±{TRIM_EDGES}: {len(df)} lignes")
-
-        # 5. Préparer pour chaque indicateur
-        for indicator, feature_cols in [
-            ('rsi', features_rsi),      # 1 feature: c_ret
-            ('macd', features_macd),    # 1 feature: c_ret
-            ('cci', features_cci)       # 3 features: h_ret, l_ret, c_ret
-        ]:
-            X, Y, T, OHLCV = prepare_indicator_dataset(
-                df, asset_name, indicator, feature_cols, filter_type=filter_type, clip_value=clip_value
-            )
-
-            # Split chronologique (avec transitions + OHLCV)
-            splits = split_chronological(X, Y, T, OHLCV)
-
+    for asset_results in all_results:
+        for indicator in ['rsi', 'macd', 'cci']:
             for split_name in ['train', 'val', 'test']:
-                datasets[indicator][split_name].append(splits[split_name])
+                datasets[indicator][split_name].append(asset_results[indicator][split_name])
 
-            logger.info(f"     Split: Train={len(splits['train'][0])}, "
-                       f"Val={len(splits['val'][0])}, Test={len(splits['test'][0])}")
-
-            # Nettoyage mémoire immédiat après stockage
-            del X, Y, T, OHLCV, splits
-            gc.collect()
+    logger.info(f"\n✅ Tous les assets traités ({len(assets)} assets, {n_jobs} jobs parallèles)")
 
     # Concaténer et sauvegarder chaque indicateur
     output_paths = {}
