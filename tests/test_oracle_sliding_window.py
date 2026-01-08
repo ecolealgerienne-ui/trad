@@ -1,37 +1,44 @@
 #!/usr/bin/env python3
 """
-Test Oracle avec Filtre en Fenêtre Glissante (Kalman ou Octave)
-=================================================================
+Test Oracle avec Filtre Kalman (Sliding Window ou Global) ou Octave
+====================================================================
 
 Phase 2.11 Analysis - Test du signal maximum avec labels parfaits (Oracle).
 
 Ce script teste le potentiel maximum du signal en appliquant un filtre
-(Kalman ou Octave) sur une fenêtre glissante et en tradant avec les labels parfaits.
+(Kalman GLOBAL, Kalman Sliding, ou Octave Sliding) et en tradant avec les labels parfaits.
 
 Pipeline CORRECT:
 -----------------
 1. Charger CSV brut (OHLC)
 2. Calculer indicateur technique (RSI/MACD/CCI) - valeurs BRUTES
-3. Appliquer filtre glissant (Kalman OU Octave) sur ces valeurs
+3. Appliquer filtre:
+   - Kalman GLOBAL: filtre sur tout l'historique (validé Phase 2.10: +6,644%)
+   - Kalman Sliding: filtre sur fenêtre glissante (échec: -19% à -30%)
+   - Octave Sliding: filtre Butterworth sur fenêtre glissante (catastrophe: -37% à -116%)
 4. Calculer labels Oracle
 5. Extraire returns (close.pct_change())
 6. Backtest
 
 Tests:
 ------
-1. Test 1: Label = filtered[t-2] > filtered[t-3]
+1. Test 1: Label = filtered[t-2] > filtered[t-3] (défaut)
 2. Test 2: Label = filtered[t-3] > filtered[t-4]
+3. Custom: --lag1 N --lag2 M (ex: t-3 vs t-4)
 
 Usage:
 ------
-# Test Kalman (défaut)
-python tests/test_oracle_sliding_window.py --indicator macd --filter-type kalman --n-samples 1000 --window 100
+# Test Kalman GLOBAL (RECOMMANDÉ - Phase 2.10 validé)
+python tests/test_oracle_sliding_window.py --indicator macd --mode global --n-samples 1000
 
-# Test Octave
-python tests/test_oracle_sliding_window.py --indicator macd --filter-type octave --n-samples 1000 --window 100
+# Test Kalman GLOBAL avec lags différents (t-3 vs t-4)
+python tests/test_oracle_sliding_window.py --indicator macd --mode global --lag1 3 --lag2 4
 
-# Test RSI avec Octave
-python tests/test_oracle_sliding_window.py --indicator rsi --filter-type octave --n-samples 1000 --window 100
+# Test Kalman Sliding Window (pour comparaison)
+python tests/test_oracle_sliding_window.py --indicator macd --mode sliding --window 100 --n-samples 1000
+
+# Test Octave Sliding Window
+python tests/test_oracle_sliding_window.py --indicator macd --filter-type octave --mode sliding --n-samples 1000
 """
 
 import argparse
@@ -270,6 +277,80 @@ def apply_sliding_kalman(
     logger.info(f"  Filtered mean: {filtered.mean():.4f}\n")
 
     return filtered
+
+
+# =============================================================================
+# KALMAN GLOBAL (TOUT L'HISTORIQUE)
+# =============================================================================
+
+def apply_global_kalman(
+    values: np.ndarray,
+    start_idx: int,
+    n_samples: int
+) -> np.ndarray:
+    """
+    Applique filtre Kalman sur TOUT l'historique (mode GLOBAL).
+
+    Phase 2.10 validé: +6,644% Oracle PnL (vs -19% à -30% sliding window).
+
+    Args:
+        values: Valeurs indicateur complètes (shape: n,)
+        start_idx: Index de départ pour extraction segment
+        n_samples: Nombre de samples à extraire
+
+    Returns:
+        Segment filtré (shape: n_samples,)
+    """
+    logger.info(f"🔧 Application Kalman GLOBAL:")
+    logger.info(f"  Dataset complet: {len(values)} samples")
+    logger.info(f"  Extraction segment: [{start_idx}:{start_idx + n_samples}]")
+
+    # Vérifier qu'on a assez de données
+    required_length = start_idx + n_samples
+    if len(values) < required_length:
+        raise ValueError(
+            f"Pas assez de données! Requis: {required_length}, "
+            f"Disponible: {len(values)}"
+        )
+
+    # Vérifier NaN dans TOUT le dataset
+    n_nan = np.isnan(values).sum()
+    if n_nan > 0:
+        logger.warning(f"  ⚠️  {n_nan} NaN détectés dans le dataset complet!")
+        logger.info(f"  → Remplissage par forward-fill\n")
+        # Forward fill des NaN
+        df_temp = pd.DataFrame({'values': values})
+        df_temp['values'] = df_temp['values'].fillna(method='ffill').fillna(method='bfill')
+        values = df_temp['values'].values
+
+    # Initialiser Kalman (config standard du projet)
+    first_valid_idx = np.where(~np.isnan(values))[0][0]
+    initial_state = values[first_valid_idx]
+
+    kf = KalmanFilter(
+        transition_matrices=[[1]],
+        observation_matrices=[[1]],
+        initial_state_mean=initial_state,
+        initial_state_covariance=1.0,
+        observation_covariance=1.0,
+        transition_covariance=1e-5
+    )
+
+    # ✅ FILTRE GLOBAL: Appliquer sur TOUT l'historique (une seule fois)
+    logger.info(f"  Filtrage de {len(values)} samples (GLOBAL)...")
+    state_means, _ = kf.filter(values)
+    filtered_full = state_means[:, 0]
+
+    # Extraire segment d'intérêt
+    filtered_segment = filtered_full[start_idx:start_idx + n_samples]
+
+    logger.info(f"✅ Kalman GLOBAL appliqué")
+    logger.info(f"  Segment extrait: {len(filtered_segment)} samples")
+    logger.info(f"  Filtered min: {filtered_segment.min():.4f}")
+    logger.info(f"  Filtered max: {filtered_segment.max():.4f}")
+    logger.info(f"  Filtered mean: {filtered_segment.mean():.4f}\n")
+
+    return filtered_segment
 
 
 # =============================================================================
@@ -586,10 +667,11 @@ def compute_stats(
 # AFFICHAGE
 # =============================================================================
 
-def print_results(results: List[OracleResult], filter_type: str):
+def print_results(results: List[OracleResult], filter_type: str, mode: str):
     """Affiche résultats comparatifs."""
+    mode_display = "GLOBAL" if mode == "global" else "SLIDING WINDOW"
     logger.info("\n" + "="*100)
-    logger.info(f"RÉSULTATS TESTS ORACLE - {filter_type.upper()} SLIDING WINDOW")
+    logger.info(f"RÉSULTATS TESTS ORACLE - {filter_type.upper()} {mode_display}")
     logger.info("="*100)
     logger.info(
         f"{'Test':<25} {'Trades':>8} {'Win Rate':>9} "
@@ -659,11 +741,14 @@ def main():
     parser.add_argument('--asset', type=str, default='BTC',
                         choices=list(AVAILABLE_ASSETS_5M.keys()),
                         help='Asset (défaut: BTC)')
+    parser.add_argument('--mode', type=str, default='sliding',
+                        choices=['sliding', 'global'],
+                        help='Mode filtre: sliding (fenêtre glissante) ou global (tout historique) - défaut: sliding')
     parser.add_argument('--filter-type', type=str, default='kalman',
                         choices=['kalman', 'octave'],
                         help='Type de filtre (défaut: kalman)')
     parser.add_argument('--window', type=int, default=100,
-                        help='Taille fenêtre (défaut: 100)')
+                        help='Taille fenêtre pour mode sliding (défaut: 100, ignoré si mode=global)')
     parser.add_argument('--start-idx', type=int, default=100,
                         help='Index de départ (défaut: 100)')
     parser.add_argument('--n-samples', type=int, default=1000,
@@ -691,16 +776,28 @@ def main():
 
     args = parser.parse_args()
 
+    # Validation: Octave n'est disponible qu'en mode sliding
+    if args.filter_type == 'octave' and args.mode == 'global':
+        logger.error("❌ ERREUR: Octave n'est disponible qu'en mode SLIDING!")
+        logger.error("  → Utilisez --mode sliding avec --filter-type octave")
+        logger.error("  → OU utilisez --mode global avec --filter-type kalman (recommandé)")
+        sys.exit(1)
+
+    mode_display = "GLOBAL" if args.mode == "global" else "SLIDING WINDOW"
     logger.info("="*100)
-    logger.info(f"TEST ORACLE SLIDING WINDOW - {args.indicator.upper()} ({args.asset}) - {args.filter_type.upper()}")
+    logger.info(f"TEST ORACLE {mode_display} - {args.indicator.upper()} ({args.asset}) - {args.filter_type.upper()}")
     logger.info("="*100)
     logger.info(f"Indicateur: {args.indicator}")
     logger.info(f"Asset: {args.asset}")
+    logger.info(f"Mode: {args.mode}")
     logger.info(f"Filtre: {args.filter_type}")
     if args.filter_type == 'octave':
         logger.info(f"  Octave step: {args.octave_step}")
         logger.info(f"  Octave order: {args.octave_order}")
-    logger.info(f"Window: {args.window}")
+    if args.mode == 'sliding':
+        logger.info(f"Window: {args.window}")
+    else:
+        logger.info(f"Window: N/A (mode GLOBAL, filtre sur tout l'historique)")
     logger.info(f"Start index: {args.start_idx}")
     logger.info(f"N samples: {args.n_samples}")
     logger.info(f"Fees: {args.fees*100:.2f}% par side ({args.fees*2*100:.2f}% round-trip)")
@@ -718,25 +815,40 @@ def main():
     logger.info(f"  Mean: {np.nanmean(returns_full)*100:.4f}%")
     logger.info(f"  Std: {np.nanstd(returns_full)*100:.4f}%\n")
 
-    # 4. Appliquer filtre glissant (Kalman ou Octave)
-    if args.filter_type == 'kalman':
-        filtered = apply_sliding_kalman(
+    # 4. Appliquer filtre (Global ou Sliding)
+    if args.mode == 'global':
+        # Mode GLOBAL: Kalman uniquement (validé Phase 2.10)
+        if args.filter_type != 'kalman':
+            raise ValueError(f"Mode GLOBAL supporté uniquement avec Kalman (filter_type=kalman)")
+
+        filtered = apply_global_kalman(
             indicator_values,
-            args.window,
             args.start_idx,
             args.n_samples
         )
-    elif args.filter_type == 'octave':
-        filtered = apply_sliding_octave(
-            indicator_values,
-            args.window,
-            args.start_idx,
-            args.n_samples,
-            step=args.octave_step,
-            order=args.octave_order
-        )
+
+    elif args.mode == 'sliding':
+        # Mode SLIDING: Kalman ou Octave
+        if args.filter_type == 'kalman':
+            filtered = apply_sliding_kalman(
+                indicator_values,
+                args.window,
+                args.start_idx,
+                args.n_samples
+            )
+        elif args.filter_type == 'octave':
+            filtered = apply_sliding_octave(
+                indicator_values,
+                args.window,
+                args.start_idx,
+                args.n_samples,
+                step=args.octave_step,
+                order=args.octave_order
+            )
+        else:
+            raise ValueError(f"Type de filtre inconnu: {args.filter_type}")
     else:
-        raise ValueError(f"Type de filtre inconnu: {args.filter_type}")
+        raise ValueError(f"Mode inconnu: {args.mode}")
 
     # 5. Extraire segment returns pour backtest
     returns_segment = returns_full[args.start_idx:args.start_idx + args.n_samples]
@@ -773,7 +885,7 @@ def main():
         results.append(result)
 
     # Afficher résultats
-    print_results(results, args.filter_type)
+    print_results(results, args.filter_type, args.mode)
 
 
 if __name__ == '__main__':
