@@ -318,7 +318,7 @@ Lorsque vous utilisez `--assets`, vous verrez ces informations:
 ```
 🔍 Filtrage des assets...
   🎯 Filtrage pour assets: ['BTC', 'ETH']
-     Asset IDs: [1.0, 2.0]
+     Asset IDs: [0.0, 1.0]
      Avant filtrage: 615474 séquences
      Après filtrage: 246189 séquences (40.0%)
   ✅ Filtrage terminé pour 2 asset(s)
@@ -326,15 +326,15 @@ Lorsque vous utilisez `--assets`, vous verrez ces informations:
 
 ### Asset ID Mapping
 
-Les cryptos sont indexées dans cet ordre (1-indexed):
+⚠️ **IMPORTANT**: Les cryptos sont indexées en **0-indexed** (commence à 0):
 
 | Asset | ID |
 |-------|----|
-| BTC | 1 |
-| ETH | 2 |
-| BNB | 3 |
-| ADA | 4 |
-| LTC | 5 |
+| BTC | 0 |
+| ETH | 1 |
+| BNB | 2 |
+| ADA | 3 |
+| LTC | 4 |
 
 ### Avantages
 

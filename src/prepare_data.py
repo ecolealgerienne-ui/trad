@@ -397,15 +397,15 @@ def filter_by_assets(X: np.ndarray, Y: np.ndarray, T: np.ndarray, OHLCV: np.ndar
     Returns:
         (X_filtered, Y_filtered, T_filtered, OHLCV_filtered)
     """
-    # Créer mapping asset_name → asset_id
+    # Créer mapping asset_name → asset_id (0-indexed comme dans le dataset!)
     # L'ordre doit correspondre à celui de prepare_data_direction_only.py
     if 'assets' in metadata:
         all_assets = metadata['assets']
-        asset_id_map = {name: idx for idx, name in enumerate(all_assets, start=1)}
+        asset_id_map = {name: idx for idx, name in enumerate(all_assets, start=0)}
     else:
-        # Fallback: ordre par défaut
+        # Fallback: ordre par défaut (0-indexed)
         default_order = ['BTC', 'ETH', 'BNB', 'ADA', 'LTC']
-        asset_id_map = {name: idx for idx, name in enumerate(default_order, start=1)}
+        asset_id_map = {name: idx for idx, name in enumerate(default_order, start=0)}
 
     # Convertir assets en asset_ids
     asset_ids = []
