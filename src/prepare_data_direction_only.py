@@ -525,11 +525,13 @@ def create_sequences_for_indicator(df: pd.DataFrame,
     # - Pour prédire label[i], on utilise la fenêtre combined[i-seq_length:i]
     # - X_all_windows[j] = fenêtre combined[j:j+seq_length]
     # - Donc fenêtre combined[i-seq_length:i] = X_all_windows[i-seq_length]
-    # - Pour label[start_index], on veut X_all_windows[start_index-seq_length]
-    # - Pour label[n-1], on veut X_all_windows[n-1-seq_length]
-    # Donc: X = X_all_windows[start_index-seq_length:]
+    # - Les labels valides vont de start_index à n_samples-1 (inclus)
+    # - Premier label: label[start_index] → X_all_windows[start_index-seq_length]
+    # - Dernier label: label[n_samples-1] → X_all_windows[n_samples-1-seq_length]
+    # Donc: X = X_all_windows[start_index-seq_length : n_samples-seq_length]
     window_start_idx = start_index - seq_length
-    X = X_all_windows[window_start_idx:].copy()  # .copy() pour libérer la vue
+    window_end_idx = n_samples - seq_length  # Index EXCLUSIF (slice Python)
+    X = X_all_windows[window_start_idx:window_end_idx].copy()  # .copy() pour libérer la vue
 
     # Étape 4: Y, T, OHLCV (vectorisé sans boucle)
     # Les labels correspondent aux indices [start_index, start_index+1, ..., n-1]
