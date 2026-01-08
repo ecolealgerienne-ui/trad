@@ -8,12 +8,19 @@ Vérifie:
 3. Distributions (Direction ~50%, Transitions ~15%)
 4. Alignement timestamps entre X, Y, T, OHLCV
 5. Métadonnées présentes
+6. Intégrité OHLCV (comparaison avec CSV brut)
 """
 
 import numpy as np
+import pandas as pd
 import json
 import argparse
+import sys
 from pathlib import Path
+
+# Ajouter src/ au path pour importer constants
+sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
+from constants import AVAILABLE_ASSETS_5M
 
 
 def validate_dataset(npz_path: str, verbose: bool = True):
@@ -243,6 +250,113 @@ def validate_dataset(npz_path: str, verbose: bool = True):
 
         if not missing_meta:
             print("\n✅ Métadonnées complètes")
+
+    # ========================================================================
+    # 7. VALIDATION INTÉGRITÉ OHLCV (Comparaison avec CSV brut)
+    # ========================================================================
+    print(f"\n{'─'*80}")
+    print("INTÉGRITÉ OHLCV (vs CSV brut)")
+    print('─'*80)
+
+    # Récupérer l'asset depuis les métadonnées
+    if metadata and 'assets' in metadata:
+        assets = metadata['assets']
+        if not assets:
+            warnings.append("Pas d'assets dans métadonnées, skip validation OHLCV")
+        else:
+            # Prendre le premier asset (pour BTC uniquement par exemple)
+            asset_name = assets[0]
+
+            # Trouver le fichier CSV brut
+            if asset_name not in AVAILABLE_ASSETS_5M:
+                warnings.append(f"Asset {asset_name} non trouvé dans AVAILABLE_ASSETS_5M")
+            else:
+                csv_path = AVAILABLE_ASSETS_5M[asset_name]
+
+                try:
+                    # Charger CSV brut
+                    df_raw = pd.read_csv(csv_path, parse_dates=['timestamp'])
+                    df_raw.set_index('timestamp', inplace=True)
+
+                    # Vérifier qu'on a assez de lignes (> 1000)
+                    if len(df_raw) < 1000:
+                        warnings.append(f"CSV brut trop petit ({len(df_raw)} lignes), skip validation OHLCV")
+                    else:
+                        print(f"\nAsset: {asset_name}")
+                        print(f"CSV brut: {len(df_raw)} lignes")
+
+                        # Prendre 5 timestamps aléatoires (index > 1000)
+                        np.random.seed(42)  # Reproductible
+                        valid_indices = np.arange(1000, len(df_raw))
+                        sample_indices = np.random.choice(valid_indices, size=5, replace=False)
+                        sample_indices = sorted(sample_indices)  # Trier pour affichage
+
+                        print(f"Échantillons testés: {sample_indices}")
+
+                        # Pour chaque split, vérifier les 5 timestamps
+                        for split in ['train', 'val', 'test']:
+                            OHLCV_split = data[f'OHLCV_{split}']
+
+                            # Timestamps du split (colonne 0)
+                            ts_split = OHLCV_split[:, 0].astype('datetime64[ns]')
+
+                            found_count = 0
+                            mismatches = []
+
+                            for idx in sample_indices:
+                                # Valeurs brutes
+                                ts_raw = df_raw.index[idx]
+                                ohlcv_raw = df_raw.iloc[idx][['open', 'high', 'low', 'close', 'volume']].values
+
+                                # Chercher dans le split par timestamp
+                                # Convertir ts_raw en int64 (nanosecondes)
+                                ts_raw_int64 = pd.Timestamp(ts_raw).value
+
+                                # Trouver l'index dans le split
+                                matches = np.where(OHLCV_split[:, 0] == ts_raw_int64)[0]
+
+                                if len(matches) == 0:
+                                    # Pas trouvé (probablement à cause du TRIM)
+                                    continue
+
+                                found_count += 1
+                                match_idx = matches[0]
+
+                                # Valeurs traitées (colonnes 2-6 = O, H, L, C, V)
+                                ohlcv_processed = OHLCV_split[match_idx, 2:]
+
+                                # Comparer avec tolérance
+                                if not np.allclose(ohlcv_raw, ohlcv_processed, rtol=1e-6):
+                                    mismatches.append({
+                                        'idx': idx,
+                                        'timestamp': ts_raw,
+                                        'raw': ohlcv_raw,
+                                        'processed': ohlcv_processed
+                                    })
+
+                            # Afficher résultats
+                            if found_count == 0:
+                                warnings.append(f"{split}: Aucun timestamp trouvé (probablement tous TRIMés)")
+                                print(f"  {split.upper()}: ⚠️  0/5 timestamps trouvés (TRIMés?)")
+                            elif mismatches:
+                                errors.append(f"{split}: {len(mismatches)}/{found_count} valeurs OHLCV différentes!")
+                                print(f"  {split.upper()}: ❌ {len(mismatches)}/{found_count} différences")
+                                if verbose:
+                                    for mm in mismatches[:2]:  # Afficher max 2 exemples
+                                        print(f"    Idx {mm['idx']}: {mm['timestamp']}")
+                                        print(f"      Raw:       {mm['raw']}")
+                                        print(f"      Processed: {mm['processed']}")
+                            else:
+                                print(f"  {split.upper()}: ✅ {found_count}/5 OK (valeurs identiques)")
+
+                        if not mismatches:
+                            print("\n✅ Intégrité OHLCV validée")
+
+                except Exception as e:
+                    warnings.append(f"Erreur chargement CSV {csv_path}: {e}")
+                    print(f"⚠️  Erreur: {e}")
+    else:
+        warnings.append("Pas de métadonnées, skip validation OHLCV")
 
     # ========================================================================
     # RÉSUMÉ
