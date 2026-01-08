@@ -146,21 +146,23 @@ Fichier: data/prepared/dataset_btc_eth_bnb_ada_ltc_rsi_direction_only_kalman_wt.
 ### 3. Entraîner le modèle
 
 ```bash
-# RSI (1 feature)
+# RSI (1 feature) - Tous les assets
 python src/train.py \
     --data data/prepared/dataset_btc_eth_bnb_ada_ltc_rsi_direction_only_kalman_wt.npz \
     --epochs 50 \
     --batch-size 128
 
-# MACD (1 feature)
+# MACD (1 feature) - Filtrer pour BTC et ETH uniquement
 python src/train.py \
     --data data/prepared/dataset_btc_eth_bnb_ada_ltc_macd_direction_only_kalman_wt.npz \
+    --assets BTC ETH \
     --epochs 50 \
     --batch-size 128
 
-# CCI (3 features)
+# CCI (3 features) - Filtrer pour 3 assets
 python src/train.py \
     --data data/prepared/dataset_btc_eth_bnb_ada_ltc_cci_direction_only_kalman_wt.npz \
+    --assets BTC ETH BNB \
     --epochs 50 \
     --batch-size 128
 ```
@@ -181,18 +183,22 @@ models/best_model_cci_kalman_direction_only_wt.pth
 ### 4. Évaluer le modèle
 
 ```bash
-# RSI
+# RSI - Tous les assets
 python src/evaluate.py \
     --data data/prepared/dataset_btc_eth_bnb_ada_ltc_rsi_direction_only_kalman_wt.npz
 
-# MACD
+# MACD - Filtrer pour BTC et ETH uniquement
 python src/evaluate.py \
-    --data data/prepared/dataset_btc_eth_bnb_ada_ltc_macd_direction_only_kalman_wt.npz
+    --data data/prepared/dataset_btc_eth_bnb_ada_ltc_macd_direction_only_kalman_wt.npz \
+    --assets BTC ETH
 
-# CCI
+# CCI - Filtrer pour 3 assets
 python src/evaluate.py \
-    --data data/prepared/dataset_btc_eth_bnb_ada_ltc_cci_direction_only_kalman_wt.npz
+    --data data/prepared/dataset_btc_eth_bnb_ada_ltc_cci_direction_only_kalman_wt.npz \
+    --assets BTC ETH BNB
 ```
+
+**Note**: Si vous utilisez `--assets` lors de l'entraînement, utilisez les mêmes assets lors de l'évaluation pour une comparaison cohérente.
 
 **Métriques attendues**:
 ```
@@ -269,3 +275,70 @@ La détection se fait automatiquement dans `load_prepared_data()`.
 | `tests/test_load_direction_only.py` | ✅ **CRÉÉ** | Validation chargement |
 
 **Tous les scripts sont prêts pour le format Direction-Only!**
+
+---
+
+## Filtrage Multi-Assets
+
+### Fonctionnalité
+
+Les scripts `train.py` et `evaluate.py` supportent maintenant le filtrage par cryptomonnaie avec le paramètre `--assets`.
+
+### Principe
+
+1. **Dataset complet**: Généré avec tous les assets (BTC, ETH, BNB, ADA, LTC)
+2. **Filtrage à l'entraînement**: Sélectionner les assets souhaités avec `--assets`
+3. **Utilisation de asset_id**: Filtre basé sur la colonne `asset_id` dans X et OHLCV
+
+### Exemples d'Utilisation
+
+```bash
+# Entraîner sur Bitcoin uniquement
+python src/train.py \
+    --data dataset_btc_eth_bnb_ada_ltc_rsi_direction_only_kalman_wt.npz \
+    --assets BTC \
+    --epochs 50
+
+# Entraîner sur les 3 principales cryptos
+python src/train.py \
+    --data dataset_btc_eth_bnb_ada_ltc_macd_direction_only_kalman_wt.npz \
+    --assets BTC ETH BNB \
+    --epochs 50
+
+# Évaluer avec les mêmes assets
+python src/evaluate.py \
+    --data dataset_btc_eth_bnb_ada_ltc_macd_direction_only_kalman_wt.npz \
+    --assets BTC ETH BNB
+```
+
+### Logs de Filtrage
+
+Lorsque vous utilisez `--assets`, vous verrez ces informations:
+
+```
+🔍 Filtrage des assets...
+  🎯 Filtrage pour assets: ['BTC', 'ETH']
+     Asset IDs: [1.0, 2.0]
+     Avant filtrage: 615474 séquences
+     Après filtrage: 246189 séquences (40.0%)
+  ✅ Filtrage terminé pour 2 asset(s)
+```
+
+### Asset ID Mapping
+
+Les cryptos sont indexées dans cet ordre (1-indexed):
+
+| Asset | ID |
+|-------|----|
+| BTC | 1 |
+| ETH | 2 |
+| BNB | 3 |
+| ADA | 4 |
+| LTC | 5 |
+
+### Avantages
+
+✅ **Un seul dataset à générer**: Préparer une seule fois avec tous les assets
+✅ **Flexibilité à l'entraînement**: Tester différentes combinaisons sans regénérer
+✅ **Comparaisons cohérentes**: Même preprocessing pour tous les tests
+✅ **Économie de stockage**: Pas besoin de datasets séparés par asset
