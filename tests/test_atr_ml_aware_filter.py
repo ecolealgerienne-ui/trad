@@ -341,9 +341,11 @@ def load_predictions_and_ohlcv(
     indicator: str,
     filter_type: str,
     split: str = 'test'
-) -> Tuple[np.ndarray, np.ndarray, Dict[str, pd.DataFrame]]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, pd.DataFrame]]:
     """
-    Charge prédictions Direction et DataFrames OHLCV.
+    Charge prédictions Direction, X (pour returns), et DataFrames OHLCV.
+
+    RÉUTILISE: Logique validée de test_atr_structural_filter.py.
 
     Args:
         indicator: 'macd', 'rsi', 'cci'
@@ -351,10 +353,11 @@ def load_predictions_and_ohlcv(
         split: 'train', 'val', 'test'
 
     Returns:
-        (predictions, returns, ohlcv_dfs)
+        (predictions, X, returns, ohlcv_dfs)
         - predictions: Probabilités Direction (0-1)
-        - returns: Returns réels (%)
-        - ohlcv_dfs: Dict {asset: DataFrame OHLCV}
+        - X: Features brutes (pour extraire c_ret)
+        - returns: Returns réels (%) extraits de X
+        - ohlcv_dfs: Dict {asset: DataFrame OHLCV avec atr_norm}
     """
     dataset_pattern = f"dataset_btc_eth_bnb_ada_ltc_{indicator}_direction_only_{filter_type}.npz"
     dataset_path = Path("data/prepared") / dataset_pattern
@@ -364,19 +367,16 @@ def load_predictions_and_ohlcv(
 
     data = np.load(dataset_path, allow_pickle=True)
 
-    # Sélection split
+    # Sélection split (PAS de metadata dans Direction-Only!)
     if split == 'train':
         X = data['X_train']
         Y = data['Y_train']
-        metadata = data['metadata_train']
     elif split == 'val':
         X = data['X_val']
         Y = data['Y_val']
-        metadata = data['metadata_val']
     else:
         X = data['X_test']
         Y = data['Y_test']
-        metadata = data['metadata_test']
 
     # Charger modèle et prédire
     model_name = f"best_model_{indicator}_{filter_type}_direction_only.pth"
@@ -401,15 +401,13 @@ def load_predictions_and_ohlcv(
 
     predictions = outputs  # Déjà en [0,1] (sigmoid dans forward)
 
-    # Calculer returns
-    returns = []
-    for i in range(len(X)):
-        seq = X[i]
-        last_close_ret = seq[-1, 0]  # c_ret (dernière période)
-        returns.append(last_close_ret)
-    returns = np.array(returns)
+    # Extraire returns (c_ret de X - logique validée!)
+    c_ret = X[:, :, 0]  # Feature 0 = c_ret
+    returns = c_ret[:, -1]  # Dernier timestep
 
-    # Charger OHLCV
+    # Charger OHLCV avec ATR (réutilise structural_filters.py)
+    from structural_filters import compute_structural_features
+
     ohlcv_dfs = {}
     assets = ['BTC', 'ETH', 'BNB', 'ADA', 'LTC']
     for asset in assets:
@@ -418,43 +416,61 @@ def load_predictions_and_ohlcv(
             df = pd.read_csv(csv_path)
             df['timestamp'] = pd.to_datetime(df['timestamp'])
             df = df.sort_values('timestamp').reset_index(drop=True)
+
+            # Calculer ATR normalisé (et autres indicateurs structurels)
+            df = compute_structural_features(df)
+
             ohlcv_dfs[asset] = df
 
-    return predictions, returns, ohlcv_dfs
+    return predictions, X, returns, ohlcv_dfs
 
 
-def align_predictions_with_ohlcv(
-    metadata: np.ndarray,
+def compute_atr_from_ohlcv(
     ohlcv_dfs: Dict[str, pd.DataFrame],
     n_samples_total: int
-) -> pd.DataFrame:
+) -> Tuple[pd.DataFrame, np.ndarray]:
     """
-    Aligne les prédictions avec les données OHLCV complètes.
+    Concatène OHLCV de tous les assets et extrait ATR.
 
-    Simplifié: Concatène tous les assets sans métadonnées par sample.
+    RÉUTILISE: Approche simplifiée de test_atr_structural_filter.py.
 
     Args:
-        metadata: Métadonnées samples (pas utilisées ici)
-        ohlcv_dfs: Dict {asset: DataFrame OHLCV}
-        n_samples_total: Nombre total de samples à extraire
+        ohlcv_dfs: Dict {asset: DataFrame OHLCV avec atr_norm}
+        n_samples_total: Nombre de samples dans le dataset ML
 
     Returns:
-        DataFrame OHLCV global (n_samples_total lignes)
+        (df_global, atr_array)
+        - df_global: DataFrame OHLCV concaténé (high, low, close)
+        - atr_array: ATR normalisé (n_samples_total,)
     """
-    # Concaténer tous les assets
+    # Concaténer tous les assets (ordre: BTC → ETH → BNB → ADA → LTC)
+    asset_order = ['BTC', 'ETH', 'BNB', 'ADA', 'LTC']
     all_dfs = []
-    for asset in sorted(ohlcv_dfs.keys()):
-        df = ohlcv_dfs[asset].copy()
-        df = df[['timestamp', 'high', 'low', 'close']].copy()
-        all_dfs.append(df)
+    atr_all = []
 
+    for asset in asset_order:
+        if asset in ohlcv_dfs:
+            df = ohlcv_dfs[asset]
+            all_dfs.append(df[['timestamp', 'high', 'low', 'close']].copy())
+            atr_all.append(df['atr_norm'].values)
+
+    # Concaténer
     df_global = pd.concat(all_dfs, ignore_index=True)
     df_global = df_global.sort_values('timestamp').reset_index(drop=True)
 
-    # Prendre les n_samples_total dernières lignes
+    atr_concat = np.concatenate(atr_all)
+
+    # Prendre les derniers n_samples_total (approche simplifiée)
     df_global = df_global.tail(n_samples_total).reset_index(drop=True)
 
-    return df_global
+    if len(atr_concat) >= n_samples_total:
+        atr_subset = atr_concat[-n_samples_total:]
+    else:
+        # Remplir avec médiane si insuffisant
+        atr_subset = np.full(n_samples_total, np.median(atr_concat))
+        atr_subset[:len(atr_concat)] = atr_concat
+
+    return df_global, atr_subset
 
 
 # =============================================================================
@@ -486,11 +502,11 @@ def run_atr_ml_aware_tests(
 
     # Charger Kalman
     print("Chargement prédictions Kalman...")
-    pred_kalman, returns, ohlcv_dfs = load_predictions_and_ohlcv(indicator, 'kalman', split)
+    pred_kalman, X_kalman, returns, ohlcv_dfs = load_predictions_and_ohlcv(indicator, 'kalman', split)
 
     # Charger Octave
     print("Chargement prédictions Octave...")
-    pred_octave, _, _ = load_predictions_and_ohlcv(indicator, 'octave20', split)
+    pred_octave, X_octave, _, _ = load_predictions_and_ohlcv(indicator, 'octave20', split)
 
     # Vérifier longueurs
     if len(pred_kalman) != len(pred_octave):
@@ -500,22 +516,23 @@ def run_atr_ml_aware_tests(
     print(f"Samples: {n_samples:,}")
     print()
 
-    # Aligner OHLCV
-    print("Alignement OHLCV...")
-    df_ohlcv = align_predictions_with_ohlcv(None, ohlcv_dfs, n_samples)
+    # Extraire OHLCV et ATR standard (pour baseline)
+    print("Calcul ATR standard depuis OHLCV...")
+    df_ohlcv, atr_standard = compute_atr_from_ohlcv(ohlcv_dfs, n_samples)
     print(f"OHLCV shape: {df_ohlcv.shape}")
+    print(f"ATR standard: mean={atr_standard.mean():.4f}, median={np.median(atr_standard):.4f}")
     print()
 
     # Directions
     kalman_dir = (pred_kalman > 0.5).astype(int)
     octave_dir = (pred_octave > 0.5).astype(int)
 
-    # Baseline (utilise Kalman, pas de filtre ATR)
+    # Baseline (utilise Kalman, ATR standard sans filtre)
     print("Baseline (Kalman, sans filtre ATR)...")
     baseline = backtest_atr_ml_aware(
         predictions=pred_kalman,
         returns=returns,
-        atr_ml=np.ones(n_samples),  # ATR dummy
+        atr_ml=atr_standard,  # ATR standard (pour cohérence percentiles)
         fees=fees,
         atr_q_low=0.0,
         atr_q_high=100.0,
