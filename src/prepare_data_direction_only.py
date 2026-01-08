@@ -117,9 +117,17 @@ def get_safe_n_jobs(n_assets: int, ram_per_asset_gb: float = 4.0) -> int:
 
     Évite les crashes WSL en limitant le parallélisme selon la RAM.
 
+    Exemples de calcul:
+        - 64 GB RAM, 8 GB/asset → max 8 assets simultanés (5 assets = n_jobs=5)
+        - 32 GB RAM, 8 GB/asset → max 4 assets simultanés (5 assets = n_jobs=4)
+        - 16 GB RAM, 8 GB/asset → max 2 assets simultanés (5 assets = n_jobs=2)
+        - 8 GB RAM, 8 GB/asset → max 1 asset (5 assets = n_jobs=1, séquentiel)
+
     Args:
         n_assets: Nombre total d'assets à traiter
         ram_per_asset_gb: RAM peak estimée par asset (GB)
+            - Conservateur: 4.0 GB (RAM < 32 GB)
+            - Optimal: 8.0 GB (RAM ≥ 64 GB, plus de marge)
 
     Returns:
         Nombre de jobs sûrs (1 à min(n_assets, n_cores))
@@ -141,6 +149,7 @@ def get_safe_n_jobs(n_assets: int, ram_per_asset_gb: float = 4.0) -> int:
         logger.info(f"Parallélisation: {n_jobs} assets simultanés")
         logger.info(f"  RAM disponible: {available_ram_gb:.1f} GB")
         logger.info(f"  RAM par asset: {ram_per_asset_gb:.1f} GB")
+        logger.info(f"  RAM max utilisable: {n_jobs * ram_per_asset_gb:.1f} GB")
         logger.info(f"  Cores CPU: {n_cores} ({max_by_cpu} utilisables)")
 
         return n_jobs
@@ -762,11 +771,12 @@ def prepare_and_save_all(assets: list = None,
     logger.info(f"Architecture: Pure Signal (Force supprimée car inutile)")
 
     # ========================================================================
-    # PARALLÉLISATION MULTI-CORE (x2-4 selon RAM/CPU) 🚀
+    # PARALLÉLISATION MULTI-CORE (x5 avec 64 GB RAM) 🚀
     # ========================================================================
 
-    # Calculer n_jobs selon RAM disponible
-    n_jobs = get_safe_n_jobs(len(assets), ram_per_asset_gb=4.0)
+    # Calculer n_jobs selon RAM disponible (optimisé pour 64 GB)
+    # ram_per_asset_gb=8.0 permet tous les 5 assets en parallèle avec marge
+    n_jobs = get_safe_n_jobs(len(assets), ram_per_asset_gb=8.0)
 
     logger.info(f"\n🚀 TRAITEMENT PARALLÈLE: {n_jobs} asset(s) simultané(s)")
 
