@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Test Oracle avec Kalman en Fenêtre Glissante
-=============================================
+Test Oracle avec Filtre en Fenêtre Glissante (Kalman ou Octave)
+=================================================================
 
 Phase 2.11 Analysis - Test du signal maximum avec labels parfaits (Oracle).
 
-Ce script teste le potentiel maximum du signal en appliquant le filtre Kalman
-sur une fenêtre glissante (window=50) et en tradant avec les labels parfaits.
+Ce script teste le potentiel maximum du signal en appliquant un filtre
+(Kalman ou Octave) sur une fenêtre glissante et en tradant avec les labels parfaits.
 
 Pipeline CORRECT:
 -----------------
 1. Charger CSV brut (OHLC)
 2. Calculer indicateur technique (RSI/MACD/CCI) - valeurs BRUTES
-3. Appliquer Kalman glissant sur ces valeurs
+3. Appliquer filtre glissant (Kalman OU Octave) sur ces valeurs
 4. Calculer labels Oracle
 5. Extraire returns (close.pct_change())
 6. Backtest
@@ -24,14 +24,14 @@ Tests:
 
 Usage:
 ------
-# Test standard (1000 samples, start=100, window=100)
-python tests/test_oracle_sliding_window.py --indicator macd --split test --n-samples 1000 --window 100
+# Test Kalman (défaut)
+python tests/test_oracle_sliding_window.py --indicator macd --filter-type kalman --n-samples 1000 --window 100
 
-# Test RSI
-python tests/test_oracle_sliding_window.py --indicator rsi --split test --n-samples 1000 --window 100
+# Test Octave
+python tests/test_oracle_sliding_window.py --indicator macd --filter-type octave --n-samples 1000 --window 100
 
-# Test CCI
-python tests/test_oracle_sliding_window.py --indicator cci --split test --n-samples 1000 --window 100
+# Test RSI avec Octave
+python tests/test_oracle_sliding_window.py --indicator rsi --filter-type octave --n-samples 1000 --window 100
 """
 
 import argparse
@@ -44,6 +44,7 @@ from typing import List, Tuple
 
 import numpy as np
 import pandas as pd
+import scipy.signal
 from pykalman import KalmanFilter
 
 # Ajouter src au path
@@ -264,6 +265,96 @@ def apply_sliding_kalman(
         filtered[i] = state_means[-1, 0]
 
     logger.info(f"✅ Kalman appliqué sur {n_samples} fenêtres")
+    logger.info(f"  Filtered min: {filtered.min():.4f}")
+    logger.info(f"  Filtered max: {filtered.max():.4f}")
+    logger.info(f"  Filtered mean: {filtered.mean():.4f}\n")
+
+    return filtered
+
+
+# =============================================================================
+# OCTAVE SLIDING WINDOW
+# =============================================================================
+
+def apply_sliding_octave(
+    values: np.ndarray,
+    window: int,
+    start_idx: int,
+    n_samples: int,
+    step: float = 0.25,
+    order: int = 3
+) -> np.ndarray:
+    """
+    Applique filtre Octave (Butterworth + filtfilt) sur fenêtre glissante.
+
+    Args:
+        values: Valeurs indicateur (shape: n,)
+        window: Taille fenêtre Octave
+        start_idx: Index de départ
+        n_samples: Nombre de samples à traiter
+        step: Paramètre de lissage Butterworth (0.0-1.0, défaut: 0.25)
+        order: Ordre du filtre Butterworth (défaut: 3)
+
+    Returns:
+        Valeurs filtrées (shape: n_samples,)
+    """
+    logger.info(f"🔧 Application Octave glissant:")
+    logger.info(f"  Window: {window}")
+    logger.info(f"  Start index: {start_idx}")
+    logger.info(f"  N samples: {n_samples}")
+    logger.info(f"  End index: {start_idx + n_samples}")
+    logger.info(f"  Step (smoothing): {step}")
+    logger.info(f"  Order: {order}")
+
+    # Vérifier qu'on a assez de données
+    required_length = start_idx + n_samples
+    if len(values) < required_length:
+        raise ValueError(
+            f"Pas assez de données! Requis: {required_length}, "
+            f"Disponible: {len(values)}"
+        )
+
+    # Vérifier NaN dans la zone d'intérêt
+    segment = values[start_idx - window + 1 : start_idx + n_samples]
+    n_nan = np.isnan(segment).sum()
+    if n_nan > 0:
+        logger.warning(f"  ⚠️  {n_nan} NaN détectés dans le segment!")
+        logger.info(f"  → Remplissage par forward-fill\n")
+        # Forward fill des NaN
+        df_temp = pd.DataFrame({'values': values})
+        df_temp['values'] = df_temp['values'].fillna(method='ffill').fillna(method='bfill')
+        values = df_temp['values'].values
+
+    # Créer le filtre Butterworth (une seule fois)
+    B, A = scipy.signal.butter(order, step, output='ba')
+
+    filtered = np.zeros(n_samples)
+
+    # Appliquer sur chaque fenêtre glissante
+    for i in range(n_samples):
+        global_idx = start_idx + i
+
+        # Fenêtre: [global_idx - window + 1 : global_idx + 1]
+        window_start = max(0, global_idx - window + 1)
+        window_end = global_idx + 1
+
+        window_data = values[window_start:window_end]
+
+        # Vérifier taille minimale pour filtfilt
+        if len(window_data) < 3 * order:
+            # Pas assez de données pour filtfilt, utiliser la valeur brute
+            filtered[i] = window_data[-1] if len(window_data) > 0 else 0.0
+        else:
+            # Appliquer filtfilt (bidirectionnel, non-causal)
+            try:
+                filtered_data = scipy.signal.filtfilt(B, A, window_data)
+                # Prendre dernière valeur filtrée
+                filtered[i] = filtered_data[-1]
+            except Exception as e:
+                logger.warning(f"  ⚠️  Erreur filtfilt à i={i}: {e}, utilisation valeur brute")
+                filtered[i] = window_data[-1]
+
+    logger.info(f"✅ Octave appliqué sur {n_samples} fenêtres")
     logger.info(f"  Filtered min: {filtered.min():.4f}")
     logger.info(f"  Filtered max: {filtered.max():.4f}")
     logger.info(f"  Filtered mean: {filtered.mean():.4f}\n")
@@ -495,10 +586,10 @@ def compute_stats(
 # AFFICHAGE
 # =============================================================================
 
-def print_results(results: List[OracleResult]):
+def print_results(results: List[OracleResult], filter_type: str):
     """Affiche résultats comparatifs."""
     logger.info("\n" + "="*100)
-    logger.info("RÉSULTATS TESTS ORACLE - KALMAN SLIDING WINDOW")
+    logger.info(f"RÉSULTATS TESTS ORACLE - {filter_type.upper()} SLIDING WINDOW")
     logger.info("="*100)
     logger.info(
         f"{'Test':<25} {'Trades':>8} {'Win Rate':>9} "
@@ -557,7 +648,7 @@ def print_results(results: List[OracleResult]):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Test Oracle avec Kalman en fenêtre glissante (données brutes)',
+        description='Test Oracle avec filtre en fenêtre glissante (Kalman ou Octave)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__
     )
@@ -568,14 +659,23 @@ def main():
     parser.add_argument('--asset', type=str, default='BTC',
                         choices=list(AVAILABLE_ASSETS_5M.keys()),
                         help='Asset (défaut: BTC)')
+    parser.add_argument('--filter-type', type=str, default='kalman',
+                        choices=['kalman', 'octave'],
+                        help='Type de filtre (défaut: kalman)')
     parser.add_argument('--window', type=int, default=100,
-                        help='Taille fenêtre Kalman (défaut: 100)')
+                        help='Taille fenêtre (défaut: 100)')
     parser.add_argument('--start-idx', type=int, default=100,
                         help='Index de départ (défaut: 100)')
     parser.add_argument('--n-samples', type=int, default=1000,
                         help='Nombre de samples (défaut: 1000)')
     parser.add_argument('--fees', type=float, default=0.001,
                         help='Frais par side (défaut: 0.001)')
+
+    # Paramètres Octave (optionnels)
+    parser.add_argument('--octave-step', type=float, default=0.25,
+                        help='Octave smoothing step (0.0-1.0, défaut: 0.25)')
+    parser.add_argument('--octave-order', type=int, default=3,
+                        help='Octave filter order (défaut: 3)')
 
     # Tests prédéfinis
     parser.add_argument('--test1-only', action='store_true',
@@ -592,11 +692,15 @@ def main():
     args = parser.parse_args()
 
     logger.info("="*100)
-    logger.info(f"TEST ORACLE SLIDING WINDOW - {args.indicator.upper()} ({args.asset})")
+    logger.info(f"TEST ORACLE SLIDING WINDOW - {args.indicator.upper()} ({args.asset}) - {args.filter_type.upper()}")
     logger.info("="*100)
     logger.info(f"Indicateur: {args.indicator}")
     logger.info(f"Asset: {args.asset}")
-    logger.info(f"Kalman window: {args.window}")
+    logger.info(f"Filtre: {args.filter_type}")
+    if args.filter_type == 'octave':
+        logger.info(f"  Octave step: {args.octave_step}")
+        logger.info(f"  Octave order: {args.octave_order}")
+    logger.info(f"Window: {args.window}")
     logger.info(f"Start index: {args.start_idx}")
     logger.info(f"N samples: {args.n_samples}")
     logger.info(f"Fees: {args.fees*100:.2f}% par side ({args.fees*2*100:.2f}% round-trip)")
@@ -614,13 +718,25 @@ def main():
     logger.info(f"  Mean: {np.nanmean(returns_full)*100:.4f}%")
     logger.info(f"  Std: {np.nanstd(returns_full)*100:.4f}%\n")
 
-    # 4. Appliquer Kalman glissant
-    filtered = apply_sliding_kalman(
-        indicator_values,
-        args.window,
-        args.start_idx,
-        args.n_samples
-    )
+    # 4. Appliquer filtre glissant (Kalman ou Octave)
+    if args.filter_type == 'kalman':
+        filtered = apply_sliding_kalman(
+            indicator_values,
+            args.window,
+            args.start_idx,
+            args.n_samples
+        )
+    elif args.filter_type == 'octave':
+        filtered = apply_sliding_octave(
+            indicator_values,
+            args.window,
+            args.start_idx,
+            args.n_samples,
+            step=args.octave_step,
+            order=args.octave_order
+        )
+    else:
+        raise ValueError(f"Type de filtre inconnu: {args.filter_type}")
 
     # 5. Extraire segment returns pour backtest
     returns_segment = returns_full[args.start_idx:args.start_idx + args.n_samples]
@@ -657,7 +773,7 @@ def main():
         results.append(result)
 
     # Afficher résultats
-    print_results(results)
+    print_results(results, args.filter_type)
 
 
 if __name__ == '__main__':
