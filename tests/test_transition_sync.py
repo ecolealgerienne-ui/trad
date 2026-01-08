@@ -28,7 +28,7 @@ import numpy as np
 from typing import Tuple, Dict
 
 
-def load_predictions_and_labels(indicator: str, filter_type: str, split: str) -> Tuple[np.ndarray, np.ndarray]:
+def load_predictions_and_labels(indicator: str, filter_type: str, split: str, weighted: bool = False) -> Tuple[np.ndarray, np.ndarray]:
     """
     Load predictions and labels.
 
@@ -36,13 +36,16 @@ def load_predictions_and_labels(indicator: str, filter_type: str, split: str) ->
         indicator: 'macd', 'rsi', 'cci'
         filter_type: 'kalman' ou 'octave20'
         split: 'train', 'val', 'test'
+        weighted: Si True, charge le dataset Phase 2.11 (_wt suffix)
 
     Returns:
         (predictions, labels)
         - predictions: (n_samples,) - binary [0,1]
         - labels: (n_samples,) - binary [0,1]
     """
-    dataset_pattern = f"dataset_btc_eth_bnb_ada_ltc_{indicator}_direction_only_{filter_type}.npz"
+    # Phase 2.11: Ajouter suffixe _wt si weighted=True
+    suffix = "_wt" if weighted else ""
+    dataset_pattern = f"dataset_btc_eth_bnb_ada_ltc_{indicator}_direction_only_{filter_type}{suffix}.npz"
     dataset_path = Path("data/prepared") / dataset_pattern
 
     if not dataset_path.exists():
@@ -277,6 +280,8 @@ def main():
                         help="Filtre à utiliser (défaut: kalman)")
     parser.add_argument('--split', type=str, default='test', choices=['train', 'val', 'test'],
                         help="Split à tester (défaut: test)")
+    parser.add_argument('--weighted', action='store_true',
+                        help="Phase 2.11: Tester le modèle avec WeightedTransitionBCELoss (_wt suffix)")
 
     args = parser.parse_args()
 
@@ -286,10 +291,12 @@ def main():
     print(f"Indicateur: {args.indicator.upper()}")
     print(f"Filtre: {args.filter_type}")
     print(f"Split: {args.split}")
+    if args.weighted:
+        print(f"Phase 2.11: WeightedTransitionBCELoss (dataset _wt)")
     print()
 
     # Load data
-    predictions, labels = load_predictions_and_labels(args.indicator, args.filter_type, args.split)
+    predictions, labels = load_predictions_and_labels(args.indicator, args.filter_type, args.split, args.weighted)
 
     # Analyze transitions
     results = analyze_transition_sync(predictions, labels)
