@@ -61,6 +61,7 @@ from pathlib import Path
 from datetime import datetime
 from pykalman import KalmanFilter
 import scipy.signal as signal
+import gc  # Pour nettoyage mémoire explicite
 
 logger = logging.getLogger(__name__)
 
@@ -431,12 +432,13 @@ def create_sequences_for_indicator(df: pd.DataFrame,
     logger.info(f"     Lignes valides: {len(df_clean)}/{len(df)} "
                 f"({len(df) - len(df_clean)} supprimées pour NaN)")
 
-    # Extraire arrays
-    features = df_clean[feature_cols].values  # (N, n_features)
-    labels = df_clean[label_cols].values      # (N, 1) - Direction seulement
-    transitions = df_clean[transition_col].values  # (N,) - Indicateur transitions
-    ohlcv = df_clean[ohlcv_cols].values       # (N, 5) - Prix et volume bruts
-    timestamps = df_clean.index.values        # (N,) - Timestamps
+    # Extraire arrays avec types optimisés
+    features = df_clean[feature_cols].values.astype(np.float32)  # (N, n_features)
+    labels = df_clean[label_cols].values.astype(np.float32)      # (N, 1) - Direction seulement
+    transitions = df_clean[transition_col].values.astype(np.int8)  # (N,) - Indicateur transitions
+    ohlcv = df_clean[ohlcv_cols].values.astype(np.float32)       # (N, 5) - Prix et volume bruts
+    # Convertir timestamps en int64 (nanosecondes depuis epoch)
+    timestamps = df_clean.index.values.astype('datetime64[ns]').astype(np.int64)  # (N,) - Timestamps
 
     # Cold start
     start_index = seq_length + cold_start_skip
@@ -444,50 +446,37 @@ def create_sequences_for_indicator(df: pd.DataFrame,
     logger.info(f"     Cold Start: skip premiers {cold_start_skip} samples")
     logger.info(f"     Start index: {start_index}")
 
-    # Créer séquences
-    X_list = []
-    Y_list = []
-    T_list = []
-    OHLCV_list = []
+    # Pré-allouer les arrays (évite copies multiples)
+    n_sequences = len(features) - start_index
+    n_features = features.shape[1]
 
-    for i in range(start_index, len(features)):
+    # Utiliser float64 pour tout (timestamps int64 s'intègrent sans perte)
+    X = np.zeros((n_sequences, seq_length, n_features + 2), dtype=np.float64)
+    Y = np.zeros((n_sequences, 3), dtype=np.float64)  # [timestamp, asset_id, direction]
+    T = np.zeros((n_sequences, 3), dtype=np.float64)  # [timestamp, asset_id, is_transition]
+    OHLCV = np.zeros((n_sequences, 7), dtype=np.float64)  # [timestamp, asset_id, O, H, L, C, V]
+
+    for idx, i in enumerate(range(start_index, len(features))):
         # === X: Features avec timestamp et asset_id intégrés ===
-        # Pour chaque timestep de la séquence, ajouter [timestamp, asset_id] avant les features
-        seq_features = []
-        for t in range(i - seq_length, i):
-            # [timestamp, asset_id, feature1, feature2, ...]
-            row = np.concatenate([
-                [timestamps[t], asset_id],  # Métadonnées
-                features[t]                  # Features
-            ])
-            seq_features.append(row)
-        X_list.append(np.array(seq_features))
+        for t_idx, t in enumerate(range(i - seq_length, i)):
+            X[idx, t_idx, 0] = float(timestamps[t])  # timestamp
+            X[idx, t_idx, 1] = float(asset_id)       # asset_id
+            X[idx, t_idx, 2:] = features[t]          # features
 
         # === Y: Labels avec timestamp et asset_id ===
-        # [timestamp, asset_id, direction]
-        y_row = np.concatenate([
-            [timestamps[i], asset_id],  # Métadonnées
-            labels[i]                   # Label direction
-        ])
-        Y_list.append(y_row)
+        Y[idx, 0] = float(timestamps[i])   # timestamp
+        Y[idx, 1] = float(asset_id)        # asset_id
+        Y[idx, 2] = labels[i, 0]           # direction
 
         # === T: Transitions avec timestamp et asset_id ===
-        # [timestamp, asset_id, is_transition]
-        t_row = np.array([timestamps[i], asset_id, transitions[i]])
-        T_list.append(t_row)
+        T[idx, 0] = float(timestamps[i])   # timestamp
+        T[idx, 1] = float(asset_id)        # asset_id
+        T[idx, 2] = float(transitions[i])  # is_transition
 
         # === OHLCV: Prix bruts avec timestamp et asset_id ===
-        # [timestamp, asset_id, open, high, low, close, volume]
-        ohlcv_row = np.concatenate([
-            [timestamps[i], asset_id],  # Métadonnées
-            ohlcv[i]                    # O, H, L, C, V
-        ])
-        OHLCV_list.append(ohlcv_row)
-
-    X = np.array(X_list, dtype=object)     # dtype=object pour timestamps
-    Y = np.array(Y_list, dtype=object)
-    T = np.array(T_list, dtype=object)
-    OHLCV = np.array(OHLCV_list, dtype=object)
+        OHLCV[idx, 0] = float(timestamps[i])  # timestamp
+        OHLCV[idx, 1] = float(asset_id)       # asset_id
+        OHLCV[idx, 2:] = ohlcv[i]             # O, H, L, C, V
 
     # Stats transitions dans les séquences créées
     n_transitions_seqs = T[:, 2].sum()  # Colonne 2 = is_transition
@@ -684,6 +673,10 @@ def prepare_and_save_all(assets: list = None,
             logger.info(f"     Split: Train={len(splits['train'][0])}, "
                        f"Val={len(splits['val'][0])}, Test={len(splits['test'][0])}")
 
+            # Nettoyage mémoire immédiat après stockage
+            del X, Y, T, OHLCV, splits
+            gc.collect()
+
     # Concaténer et sauvegarder chaque indicateur
     output_paths = {}
 
@@ -830,6 +823,13 @@ def prepare_and_save_all(assets: list = None,
             json.dump(metadata, f, indent=2)
 
         output_paths[indicator] = str(output_path)
+
+        # Nettoyage mémoire après sauvegarde
+        del X_train, Y_train, T_train, OHLCV_train
+        del X_val, Y_val, T_val, OHLCV_val
+        del X_test, Y_test, T_test, OHLCV_test
+        del datasets[indicator]
+        gc.collect()
 
     return output_paths
 
