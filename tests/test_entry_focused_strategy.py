@@ -217,11 +217,12 @@ def run_entry_focused_strategy(
                 exit_reason = "SL"
                 exits_sl += 1
 
-            # Check 4: Direction flip (rare, but handle it)
-            if target != position:
-                should_exit = True
-                exit_reason = "FLIP"
-                exits_flip += 1
+            # Check 4: Direction flip - DISABLED (Entry-Focused pure)
+            # We IGNORE ML during trade, only use Time/TP/SL
+            # if target != position:
+            #     should_exit = True
+            #     exit_reason = "FLIP"
+            #     exits_flip += 1
 
             if should_exit:
                 # Record trade
