@@ -1,12 +1,12 @@
 # Modele CNN-LSTM Multi-Output - Guide Complet
 
 **Date**: 2026-01-08
-**Statut**: ❌ **Test Oracle Kalman Sliding COMPLÉTÉ - Échec Validé sur 3 Indicateurs**
-**Version**: 9.1 - Oracle Kalman Glissant: -19% à -30% PnL (vs Kalman Global: +6,644%)
+**Statut**: ❌ **Tests Oracle Sliding Window COMPLÉTÉS - Kalman ET Octave: Échec Total**
+**Version**: 9.2 - Octave Glissant: -37% à -116% (PIRE que Kalman: -19% à -30%) | Global: +6,644%
 **Models**: MACD Kalman 92.5% | CCI Kalman 90.2% | RSI Kalman 87.6% - Direction-Only validés
-**Découverte Critique**: Kalman Glissant (W=100) DÉTRUIT le signal (Win Rate <30%, PnL négatif même Oracle)
-**Problème Racine**: LAG/RETARD massif + Labels instables → Trading à contretemps
-**Prochaine Étape**: Timeframe 15min/30min (Kalman GLOBAL) OU Retour à Phase 2.10 baseline (+6,644%)
+**Découverte Critique**: Octave Sliding Window génère **3-5× PLUS de trades** que Kalman (apocalypse RSI: -116%)
+**Hiérarchie Filtres**: Kalman GLOBAL (+6,644%) > Kalman Sliding (-19%) > **Octave Sliding (-37% à -116%)**
+**Prochaine Étape**: Timeframe 15min/30min (Kalman GLOBAL uniquement) - ABANDONNER tous sliding windows
 
 ---
 
@@ -1408,6 +1408,192 @@ python tests/test_oracle_sliding_window.py --indicator cci --asset BTC --n-sampl
 > Le Kalman glissant introduit un LAG/RETARD qui détruit complètement le signal, même avec des labels Oracle parfaits. Seul le Kalman GLOBAL (appliqué sur tout l'historique) fonctionne.
 
 **Ne JAMAIS retester cette approche sans raison fondamentale.**
+
+---
+
+## ❌ TEST ORACLE - OCTAVE SLIDING WINDOW (2026-01-08)
+
+**Date**: 2026-01-08
+**Statut**: ❌ **ÉCHEC VALIDÉ - Octave Glissant ENCORE PIRE que Kalman**
+**Script**: `tests/test_oracle_sliding_window.py` (avec `--filter-type octave`)
+**Objectif**: Tester le filtre Octave (Butterworth + filtfilt) en fenêtre glissante vs Kalman
+
+### Motivation
+
+Suite aux tests Kalman sliding window (échec: -19% à -30%), tester le filtre Octave pour comparaison.
+
+**Hypothèse**: Octave (filtre fréquentiel) pourrait mieux gérer les fenêtres courtes que Kalman (filtre bayésien).
+
+### Résultats - 3 Indicateurs (N=1000 samples, window=100)
+
+| Indicateur | Trades | Win Rate (T1/T2) | PnL Net (T1) | PnL Net (T2) | Avg Duration | Frais | Verdict |
+|------------|--------|------------------|--------------|--------------|--------------|-------|---------|
+| **MACD** 🥇 | **221** | **28.05% / 30.77%** | **-37.13%** | **-42.61%** | **4.5p (~22min)** | 44.2% | **Catastrophe** |
+| **RSI** 🥉 | **489** | 24.13% / 25.15% | **-115.53%** | -105.72% | **2.0p (~10min)** | **97.8%** | **Apocalypse** |
+| **CCI** 🥈 | **439** | 28.47% / 27.33% | -63.97% | **-80.97%** | **2.3p (~11min)** | **87.8%** | **Désastre** |
+
+**Observation critique**: T1 = `filtered[t-2] > filtered[t-3]`, T2 = `filtered[t-3] > filtered[t-4]`
+
+### 💥 Comparaison Critique: Octave vs Kalman
+
+| Indicateur | **Kalman Trades** | **Octave Trades** | **Multiplication** | Kalman PnL | Octave PnL | **Différence** |
+|------------|-------------------|-------------------|-------------------|------------|------------|----------------|
+| **MACD** 🥇 | 47 | **221** | **×4.7** 💥 | -19.06% | **-37.13%** | **-95% pire** |
+| **RSI** 🥉 | 121 | **489** | **×4.0** 💥 | -21.96% | **-115.53%** | **-426% pire** |
+| **CCI** 🥈 | 135 | **439** | **×3.3** 💥 | -27.19% | **-63.97%** | **-135% pire** |
+
+**Découverte CHOC**: Octave génère **3-5× PLUS de trades** que Kalman!
+
+### Analyse Catastrophique
+
+#### 1. Octave = Overtrading Massif
+
+```
+MACD Kalman:   47 trades, 21.2p durée,  9.4% frais → -19% PnL
+MACD Octave:  221 trades,  4.5p durée, 44.2% frais → -37% PnL
+
+Octave produit:
+  → 4.7× PLUS de trades
+  → 4.7× MOINS de durée par trade
+  → 4.7× PLUS de frais
+  → 95% PIRE PnL
+```
+
+#### 2. Durée moyenne effondrée
+
+| Indicateur | Kalman Durée | Octave Durée | Réduction |
+|------------|--------------|--------------|-----------|
+| MACD | 21.2p (~1h45) | **4.5p (~22min)** | **÷4.7** 💥 |
+| RSI | 8.2p (~40min) | **2.0p (~10min)** | **÷4.1** 💥 |
+| CCI | 7.4p (~35min) | **2.3p (~11min)** | **÷3.2** 💥 |
+
+**Interprétation**: Octave produit des **micro-sorties** ultra-fréquentes.
+
+#### 3. Frais détruisent TOUT
+
+```
+RSI Octave:
+  - 489 trades × 0.2% frais = 97.8% de frais!
+  - PnL Brut: -17.73%
+  - Frais: -97.8%
+  → PnL Net: -115.53% (frais 5.5× le signal)
+
+CCI Octave:
+  - 439 trades × 0.2% frais = 87.8% de frais!
+  - PnL Brut: +23.83% (signal positif!)
+  - Frais: -87.8%
+  → PnL Net: -63.97% (frais 3.7× le signal)
+```
+
+**Pattern mortel**: Même quand signal brut positif (CCI +23%), frais massacrent le PnL.
+
+#### 4. Hiérarchie préservée (MACD > CCI > RSI)
+
+Même avec Octave catastrophique, l'ordre reste:
+```
+MACD (tendance lourde):  221 trades → -37% (moins pire)
+CCI (oscillateur):       439 trades → -64% (pire)
+RSI (oscillateur rapide): 489 trades → -116% (apocalypse)
+```
+
+**MACD confirmé comme seul indicateur utilisable** (même s'il échoue).
+
+### Diagnostic: Pourquoi Octave est PIRE que Kalman
+
+#### Différence Fondamentale Kalman vs Octave
+
+| Aspect | Kalman | Octave (Butterworth) |
+|--------|--------|---------------------|
+| **Nature** | Filtre bayésien | Filtre fréquentiel |
+| **Lissage** | Adaptatif (variance-aware) | Fixe (step=0.25) |
+| **Stabilité fenêtre courte** | Moyenne | **Mauvaise** 💥 |
+| **Transitions détectées** | Modérées | **Très nombreuses** 💥 |
+| **Résultat** | 47-135 trades | **221-489 trades** |
+
+**Problème clé**: Butterworth avec `step=0.25` est **MOINS lissant** que Kalman.
+→ Plus de variations détectées
+→ Plus de changements de labels
+→ Overtrading massif
+
+#### Formule du Désastre
+
+```
+Signal Octave instable
+  × Fenêtre courte (100)
+  × Oscillateurs nerveux (RSI/CCI)
+  × Frais 0.2%
+= APOCALYPSE (-64% à -116%)
+```
+
+### Comparaison 3-Way: Global vs Kalman Sliding vs Octave Sliding
+
+| Test | Méthode | MACD PnL | RSI PnL | CCI PnL | Conclusion |
+|------|---------|----------|---------|---------|------------|
+| **Phase 2.10** | Kalman **GLOBAL** | **+6,644%** ✅ | - | - | Signal EXISTE |
+| **Kalman Sliding** | Window 100 | **-19%** ❌ | -22% | -27% | Kalman glissant détruit |
+| **Octave Sliding** | Window 100 | **-37%** ❌ | **-116%** | -64% | **Octave PIRE que Kalman** |
+
+**Verdict**: Octave sliding window est **95-426% PIRE** que Kalman sliding window.
+
+### Scripts et Commandes
+
+**Script modifié**: `tests/test_oracle_sliding_window.py` (commit 885e811)
+
+**Nouveau paramètre**: `--filter-type {kalman, octave}`
+
+**Commandes:**
+```bash
+# Test Octave MACD (moins pire)
+python tests/test_oracle_sliding_window.py --indicator macd --filter-type octave --n-samples 1000 --window 100
+
+# Test Octave RSI (apocalypse)
+python tests/test_oracle_sliding_window.py --indicator rsi --filter-type octave --n-samples 1000 --window 100
+
+# Test Octave CCI (désastre)
+python tests/test_oracle_sliding_window.py --indicator cci --filter-type octave --n-samples 1000 --window 100
+
+# Paramètres optionnels Octave
+python tests/test_oracle_sliding_window.py --indicator macd --filter-type octave --octave-step 0.3 --octave-order 4
+```
+
+**Commits:**
+- Ajout support Octave: 885e811
+
+### Conclusion Finale
+
+#### ❌ ABANDONNER DÉFINITIVEMENT:
+
+1. **Octave sliding window** (pire que Kalman)
+2. **Tous filtres en fenêtre glissante** ≤ 200 samples
+3. **RSI/CCI comme indicateurs principaux** (catastrophe confirmée)
+
+**Raisons empiriques**:
+- Octave 3-5× plus de trades que Kalman
+- Octave 95-426% pire PnL que Kalman
+- Win Rate < 30% = signal anti-prédictif
+- Frais détruisent TOUT (44% à 98%)
+
+#### ✅ CONTINUER AVEC:
+
+1. **Kalman GLOBAL uniquement** (validé: +6,644% Oracle)
+2. **MACD comme pivot EXCLUSIF** (seul indicateur acceptable)
+3. **Approches structurelles**:
+   - Timeframe 15/30min (÷3 à ÷6 trades naturellement)
+   - Consensus multi-indicateurs (validé Phase 2.7)
+   - Filtres régime de marché
+
+#### 📋 Leçon Critique Apprise
+
+> **"Octave Sliding < Kalman Sliding < Kalman Global"**
+>
+> **Hiérarchie des filtres en fenêtre glissante:**
+> 1. Kalman GLOBAL: +6,644% (seul qui fonctionne)
+> 2. Kalman SLIDING (W=100): -19% à -30% (détruit signal)
+> 3. **Octave SLIDING (W=100): -37% à -116% (apocalypse)**
+>
+> **Le filtre Octave (Butterworth step=0.25) est trop sensible pour les fenêtres courtes.**
+
+**Ne JAMAIS utiliser de filtre sliding window sans fenêtre ≥ plusieurs milliers de samples.**
 
 ---
 
