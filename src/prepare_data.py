@@ -309,14 +309,22 @@ def load_prepared_data(path: str = None) -> dict:
     # =========================================================================
     # DÉTECTION FORMAT DIRECTION-ONLY
     # =========================================================================
-    # Nouveau format: Y et T ont 3 colonnes [timestamp, asset_id, label]
+    # Nouveau format: X, Y et T ont 3 colonnes avec [timestamp, asset_id, data]
+    # X: (n, 25, 3) avec colonne 2 = feature (c_ret)
+    # Y: (n, 3) avec colonne 2 = label
+    # T: (n, 3) avec colonne 2 = is_transition
     # Ancien format: Y et T ont 1-2 colonnes [label] ou [label1, label2]
     is_direction_only = False
     if data['Y_train'].ndim == 2 and data['Y_train'].shape[1] == 3:
         is_direction_only = True
         logger.info(f"  🎯 Format Direction-Only détecté (Y shape: {data['Y_train'].shape})")
 
-        # Extraire seulement la colonne label (colonne 2)
+        # Extraire seulement la colonne feature (colonne 2) de X
+        X_train = data['X_train'][:, :, 2:3]  # (n, 25, 3) → (n, 25, 1)
+        X_val = data['X_val'][:, :, 2:3]
+        X_test = data['X_test'][:, :, 2:3]
+
+        # Extraire seulement la colonne label (colonne 2) de Y
         Y_train = data['Y_train'][:, 2:3]  # (n, 1)
         Y_val = data['Y_val'][:, 2:3]
         Y_test = data['Y_test'][:, 2:3]
@@ -327,12 +335,16 @@ def load_prepared_data(path: str = None) -> dict:
             T_val = data['T_val'][:, 2:3]
             T_test = data['T_test'][:, 2:3]
 
-        logger.info(f"     → Extraction colonne label (colonne 2):")
-        logger.info(f"     Train: Y={Y_train.shape}, T={T_train.shape if has_transitions else 'N/A'}")
-        logger.info(f"     Val:   Y={Y_val.shape}, T={T_val.shape if has_transitions else 'N/A'}")
-        logger.info(f"     Test:  Y={Y_test.shape}, T={T_test.shape if has_transitions else 'N/A'}")
+        logger.info(f"     → Extraction colonne feature (colonne 2):")
+        logger.info(f"     Train: X={X_train.shape}, Y={Y_train.shape}, T={T_train.shape if has_transitions else 'N/A'}")
+        logger.info(f"     Val:   X={X_val.shape}, Y={Y_val.shape}, T={T_val.shape if has_transitions else 'N/A'}")
+        logger.info(f"     Test:  X={X_test.shape}, Y={Y_test.shape}, T={T_test.shape if has_transitions else 'N/A'}")
     else:
         # Ancien format - utiliser tel quel
+        X_train = data['X_train']
+        X_val = data['X_val']
+        X_test = data['X_test']
+
         Y_train = data['Y_train']
         Y_val = data['Y_val']
         Y_test = data['Y_test']
@@ -348,15 +360,15 @@ def load_prepared_data(path: str = None) -> dict:
     if has_transitions:
         # Inclure les transitions dans les tuples
         result = {
-            'train': (data['X_train'], Y_train, T_train),
-            'val': (data['X_val'], Y_val, T_val),
-            'test': (data['X_test'], Y_test, T_test),
+            'train': (X_train, Y_train, T_train),
+            'val': (X_val, Y_val, T_val),
+            'test': (X_test, Y_test, T_test),
             'metadata': metadata
         }
         logger.info(f"  ✅ Données chargées (avec transitions):")
-        logger.info(f"     Train: X={data['X_train'].shape}, Y={Y_train.shape}, T={T_train.shape}")
-        logger.info(f"     Val:   X={data['X_val'].shape}, Y={Y_val.shape}, T={T_val.shape}")
-        logger.info(f"     Test:  X={data['X_test'].shape}, Y={Y_test.shape}, T={T_test.shape}")
+        logger.info(f"     Train: X={X_train.shape}, Y={Y_train.shape}, T={T_train.shape}")
+        logger.info(f"     Val:   X={X_val.shape}, Y={Y_val.shape}, T={T_val.shape}")
+        logger.info(f"     Test:  X={X_test.shape}, Y={Y_test.shape}, T={T_test.shape}")
 
         # Stats transitions (prendre colonne 0 si (n,1), sinon moyenne)
         trans_train_pct = (T_train[:, 0].mean() if T_train.shape[1] == 1 else T_train.mean()) * 100
@@ -366,15 +378,15 @@ def load_prepared_data(path: str = None) -> dict:
     else:
         # Backward compatibility - sans transitions
         result = {
-            'train': (data['X_train'], Y_train),
-            'val': (data['X_val'], Y_val),
-            'test': (data['X_test'], Y_test),
+            'train': (X_train, Y_train),
+            'val': (X_val, Y_val),
+            'test': (X_test, Y_test),
             'metadata': metadata
         }
         logger.info(f"  ✅ Données chargées:")
-        logger.info(f"     Train: X={data['X_train'].shape}, Y={Y_train.shape}")
-        logger.info(f"     Val:   X={data['X_val'].shape}, Y={Y_val.shape}")
-        logger.info(f"     Test:  X={data['X_test'].shape}, Y={Y_test.shape}")
+        logger.info(f"     Train: X={X_train.shape}, Y={Y_train.shape}")
+        logger.info(f"     Val:   X={X_val.shape}, Y={Y_val.shape}")
+        logger.info(f"     Test:  X={X_test.shape}, Y={Y_test.shape}")
 
     log_dataset_metadata(metadata, logger)
 
