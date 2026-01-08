@@ -50,17 +50,26 @@ class IndicatorDataset(Dataset):
     Args:
         X: Features (n_sequences, sequence_length, n_indicators)
         Y: Labels (n_sequences, n_outputs)
+        T: Transition indicators (n_sequences,) - optionnel (Phase 2.11)
+            - 1.0 si transition (label[i] != label[i-1])
+            - 0.0 si continuation
     """
 
-    def __init__(self, X: np.ndarray, Y: np.ndarray):
+    def __init__(self, X: np.ndarray, Y: np.ndarray, T: np.ndarray = None):
         self.X = torch.FloatTensor(X)
         self.Y = torch.FloatTensor(Y)
+        self.T = torch.FloatTensor(T) if T is not None else None
+        self.has_transitions = (T is not None)
 
     def __len__(self) -> int:
         return len(self.X)
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        return self.X[idx], self.Y[idx]
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, ...]:
+        if self.has_transitions:
+            return self.X[idx], self.Y[idx], self.T[idx]
+        else:
+            # Backward compatibility - return only X, Y
+            return self.X[idx], self.Y[idx]
 
 
 class EarlyStopping:

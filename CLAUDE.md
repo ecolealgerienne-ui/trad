@@ -968,6 +968,273 @@ ATR_ML = EMA(TR * w, n)
 
 ---
 
+## 🎯 Phase 2.10: Analyse des Transitions - Problème Fondamental Identifié (2026-01-08)
+
+**Date**: 2026-01-08
+**Statut**: ✅ **DIAGNOSTIC COMPLET - Cause Racine du Gap 92% → 34% Identifiée**
+**Script**: `tests/test_transition_sync.py`
+**Objectif**: Mesurer si le modèle détecte les retournements au même moment que l'Oracle
+
+### Question Critique
+
+**Si l'Oracle change d'avis (UP→DOWN ou DOWN→UP), est-ce que le modèle change aussi AU MÊME MOMENT?**
+
+```python
+# Test exact
+Pour chaque timestep t où Oracle transition (label[t] != label[t-1]):
+    Est-ce que Model transition aussi? (pred[t] != pred[t-1])
+```
+
+### Motivation
+
+Phase 2.9 a montré:
+- Accuracy globale: 92.5% (excellent)
+- Win Rate trading: 34% (médiocre)
+- Gap: **58.5%** inexpliqué
+
+**Hypothèse**: Le modèle est peut-être bon en **continuation** mais mauvais en **retournement** (les entrées critiques en trading).
+
+### Résultats - 3 Indicateurs Testés
+
+#### MACD Kalman (Test Set, 640k samples)
+
+| Métrique | Valeur | Interprétation |
+|----------|--------|----------------|
+| **Global Accuracy** | 92.54% | ✅ Excellent |
+| **Transition Accuracy** | **58.04%** | ❌ **Rate 42% des retournements!** |
+| **Gap** | **+34.50%** | 💥 Différence massive |
+| **Oracle Transitions** | 68,912 | ~10.8% du dataset |
+| **Model Synced (correct)** | 39,994 (58.04%) | Détectées au bon moment |
+| **Model NOT Synced** | 28,014 (40.65%) | **RATÉES complètement** |
+| **Model Wrong (opposé)** | 904 (1.31%) | Opposé (pire) |
+| **Latence Moyenne** | +0.14 périodes | Quasi-synchrone |
+| **Synchro (0)** | 59.3% | Quand détecté, timing OK |
+| **Retard (+1 à +3)** | 27.0% | Légèrement tard |
+
+#### RSI Kalman (Test Set, 640k samples)
+
+| Métrique | Valeur | Interprétation |
+|----------|--------|----------------|
+| **Global Accuracy** | 87.62% | ✅ Bon |
+| **Transition Accuracy** | **52.37%** | ❌ **Rate 48% des retournements!** |
+| **Gap** | **+35.25%** | 💥 Encore pire que MACD |
+| **Oracle Transitions** | 96,876 | ~15.1% du dataset (plus nerveux) |
+| **Model Synced (correct)** | 50,734 (52.37%) | Détectées |
+| **Model NOT Synced** | 44,479 (45.91%) | **RATÉES** |
+| **Model Wrong (opposé)** | 1,663 (1.72%) | Opposé |
+| **Latence Moyenne** | +0.23 périodes | Légèrement plus tard |
+| **Retard (+1 à +3)** | 33.7% | Plus en retard que MACD |
+
+#### CCI Kalman (Test Set, 640k samples)
+
+| Métrique | Valeur | Interprétation |
+|----------|--------|----------------|
+| **Global Accuracy** | 90.15% | ✅ Très bon |
+| **Transition Accuracy** | **56.63%** | ❌ **Rate 43% des retournements!** |
+| **Gap** | **+33.52%** | 💥 Pattern confirmé |
+| **Oracle Transitions** | 82,395 | ~12.9% du dataset |
+| **Model Synced (correct)** | 46,664 (56.63%) | Détectées |
+| **Model NOT Synced** | 34,616 (42.01%) | **RATÉES** |
+| **Model Wrong (opposé)** | 1,115 (1.35%) | Opposé |
+| **Latence Moyenne** | +0.12 périodes | Quasi-synchrone |
+| **Retard (+1 à +3)** | 27.1% | Comparable MACD |
+
+### Hiérarchie Validée
+
+| Indicateur | Transition Acc | Global Acc | Gap | Nature | Verdict |
+|------------|----------------|------------|-----|--------|---------|
+| **MACD** 🥇 | **58.04%** | 92.54% | +34.50% | Tendance lourde | **Meilleur pour entrées** |
+| **CCI** 🥈 | 56.63% | 90.15% | +33.52% | Oscillateur déviation | Intermédiaire |
+| **RSI** 🥉 | 52.37% | 87.62% | +35.25% | Oscillateur vitesse | Pire pour entrées |
+
+**MACD confirme sa position de pilote** pour les décisions d'entrée.
+
+### Diagnostic Critique
+
+#### Le Modèle Est Excellent en Continuation, Mauvais en Retournement
+
+```
+Accuracy Globale 92.54% mesure:
+  - ~90% continuations (direction stable) → Modèle PARFAIT
+  - ~10% transitions (retournements)      → Modèle MAUVAIS (58%)
+
+Résultat Global: 92.54% ✅ (dominé par les continuations)
+
+Mais en Trading:
+  - Continuations = tenir position (pas critique pour PnL)
+  - Transitions = ENTRÉES (CRITIQUE pour PnL!)
+
+Si modèle rate 42% des entrées:
+  → Entre en retard ou rate complètement
+  → Win Rate effondré (34%)
+  → Explique TOUT le gap 92% → 34%
+```
+
+#### Scénario Typique (42% du Temps)
+
+```
+Oracle (labels):
+t=0   UP    → Continuation (modèle prédit UP ✅)
+t=1   UP    → Continuation (modèle prédit UP ✅)
+t=2   UP    → Continuation (modèle prédit UP ✅)
+t=3   DOWN  → 🚨 TRANSITION (opportunité d'entrée SHORT)
+t=4   DOWN  → Continuation (modèle prédit DOWN ✅)
+
+Modèle (42% du temps):
+t=0   UP    ✅ Correct (continuation)
+t=1   UP    ✅ Correct (continuation)
+t=2   UP    ✅ Correct (continuation)
+t=3   UP    ❌ RATE la transition! (continue UP)
+t=4   DOWN  ✅ Détecte enfin (1 période en retard)
+
+Résultat:
+  - Accuracy globale: 4/5 = 80% (bon!)
+  - Transition accuracy: 0/1 = 0% (raté!)
+  - En trading: Entre 1 période tard → rate le meilleur prix → perte
+```
+
+### Pourquoi La Latence Est Correcte Mais Insuffisante
+
+| Métrique | MACD | RSI | CCI | Observation |
+|----------|------|-----|-----|-------------|
+| **Latence moyenne** | +0.14p | +0.23p | +0.12p | Quasi-synchrone ✅ |
+| **Synchro (0)** | 59.3% | 54.1% | 58.0% | Majorité parfait |
+
+**Interprétation:**
+- **Quand le modèle détecte** une transition, il est au bon moment (latence ~0)
+- **Mais** il ne détecte que 52-58% des transitions!
+- Les 42-48% restants ne sont **jamais détectés** comme transitions
+
+Le problème n'est PAS le timing (quand), c'est la **détection** (si).
+
+### Implications pour le Trading
+
+#### Pourquoi Entry-Focused a Échoué
+
+**Phase 2.8 Entry-Focused (ML pour entrées, ignore ML pour sorties):**
+- Résultat: 21,316 trades, Win Rate 33.92%, PnL Net -6,279%
+- **Explication**: Le modèle rate 42% des bonnes entrées (transitions Oracle)
+- Les entrées restantes (58%) ne suffisent pas à compenser les frais
+
+#### Pourquoi Holding Minimum a Montré un Signal
+
+**Phase 2.6 Holding 30p:**
+- PnL Brut: +110.89% ✅ (le signal existe!)
+- PnL Net: -2,976% ❌ (trop de trades)
+
+**Explication:**
+- Le modèle détecte QUAND MÊME 58% des transitions (suffisant pour signal brut positif)
+- Mais les 42% ratés + flickering = trop de trades (30,876)
+- Frais × Volume détruisent le signal
+
+### Conclusion Fondamentale
+
+**Le gap 92.5% accuracy → 34% Win Rate est expliqué:**
+
+1. ✅ Modèle excellent sur **continuations** (90% du dataset) → 92.5% accuracy
+2. ❌ Modèle mauvais sur **transitions** (10% du dataset) → 52-58% accuracy
+3. 💡 En trading, seules les **transitions comptent** (entrées) → Win Rate effondré
+
+**Ce n'est PAS:**
+- ❌ Un problème de timing (latence ~0 quand détecté)
+- ❌ Un problème d'overfitting (validation/test similaires)
+- ❌ Un problème de signal (Oracle +6,644%, signal existe)
+
+**C'est:**
+- ✅ Un problème de **détection des retournements** (rate 42-48%)
+- ✅ Le modèle a appris la **continuité**, pas le **changement**
+
+### Solutions Possibles
+
+#### Option 1: Weighted Loss (Privilégier Transitions) ⭐
+
+```python
+# Donner plus de poids aux transitions dans la loss
+loss = (1 - alpha) * loss_continuations + alpha * loss_transitions
+# Avec alpha = 0.6-0.8
+```
+
+**Gain attendu:**
+- Transition Accuracy: 58% → 75-80%
+- Global Accuracy: 92.5% → 88-90% (dégradation acceptable)
+- Win Rate Trading: 34% → 45-50%
+
+#### Option 2: Features de Détection Retournements
+
+Ajouter features spécialisées:
+- Momentum divergence (prix monte, momentum baisse)
+- Volume spike (changement brusque)
+- Volatility expansion (début mouvement)
+- Rate of change (accélération/décélération)
+
+#### Option 3: Modèle Dual-Task
+
+```
+Modèle 1: Prédire Direction (actuel)
+Modèle 2: Détecter Transitions (nouveau)
+
+Trading:
+  - Modèle 2 dit "transition" → ENTRER
+  - Modèle 1 dit direction → LONG ou SHORT
+```
+
+#### Option 4: Confirmation Multi-Période (Compensation)
+
+Accepter que le modèle est mauvais sur transitions et compenser:
+
+```python
+# N'entrer QUE si signal stable N périodes
+if model_agrees_for_N_periods(3-5):
+    ENTER  # Signal confirmé
+```
+
+**Inconvénient:** Entre 3-5 périodes tard
+**Avantage:** Seulement vrais retournements (pas faux signaux)
+
+#### Option 5: Timeframe 15min/30min
+
+- Moins de transitions (÷3 à ÷6)
+- Transitions plus longues et stables
+- Plus faciles à détecter pour le modèle
+
+### Scripts et Commandes
+
+**Script créé**: `tests/test_transition_sync.py`
+
+**Commandes de test:**
+```bash
+# MACD (92.5% global, 58% transitions)
+python tests/test_transition_sync.py --indicator macd --split test
+
+# RSI (87.6% global, 52% transitions)
+python tests/test_transition_sync.py --indicator rsi --split test
+
+# CCI (90.2% global, 57% transitions)
+python tests/test_transition_sync.py --indicator cci --split test
+```
+
+**Commits:**
+- Test transition sync: 0945b9a
+- Fix latency O(n²) → O(n log n): 8999d26
+
+### Prochaine Étape Recommandée
+
+**Priorité 1:** Réentraîner avec **Weighted Loss** (privilégier transitions)
+- Impact direct sur le problème identifié
+- Pas besoin de nouvelles données
+- Gain attendu: +15-20% transition accuracy
+
+**Priorité 2:** Timeframe 15min/30min
+- Réduction naturelle transitions (plus stables)
+- Pas de modification modèle
+- Gain attendu: Detection accuracy +10-15%
+
+**Priorité 3:** Features retournements + Dual-Task model
+- Plus complexe, mais potentiel gain maximal
+- Nécessite réarchitecture
+
+---
+
 ### Références Académiques Consolidées
 
 **Traitement du Signal**:

@@ -303,17 +303,40 @@ def load_prepared_data(path: str = None) -> dict:
             }
             logger.warning(f"  ⚠️ Pas de metadata trouvé, utilisation de valeurs par défaut")
 
-    result = {
-        'train': (data['X_train'], data['Y_train']),
-        'val': (data['X_val'], data['Y_val']),
-        'test': (data['X_test'], data['Y_test']),
-        'metadata': metadata
-    }
+    # Vérifier si les transitions sont présentes (Phase 2.11 - Weighted Loss)
+    has_transitions = 'T_train' in data.files
 
-    logger.info(f"  ✅ Données chargées:")
-    logger.info(f"     Train: {data['X_train'].shape}")
-    logger.info(f"     Val:   {data['X_val'].shape}")
-    logger.info(f"     Test:  {data['X_test'].shape}")
+    if has_transitions:
+        # Inclure les transitions dans les tuples
+        result = {
+            'train': (data['X_train'], data['Y_train'], data['T_train']),
+            'val': (data['X_val'], data['Y_val'], data['T_val']),
+            'test': (data['X_test'], data['Y_test'], data['T_test']),
+            'metadata': metadata
+        }
+        logger.info(f"  ✅ Données chargées (avec transitions - Phase 2.11):")
+        logger.info(f"     Train: X={data['X_train'].shape}, Y={data['Y_train'].shape}, T={data['T_train'].shape}")
+        logger.info(f"     Val:   X={data['X_val'].shape}, Y={data['Y_val'].shape}, T={data['T_val'].shape}")
+        logger.info(f"     Test:  X={data['X_test'].shape}, Y={data['Y_test'].shape}, T={data['T_test'].shape}")
+
+        # Stats transitions
+        trans_train_pct = data['T_train'].mean() * 100
+        trans_val_pct = data['T_val'].mean() * 100
+        trans_test_pct = data['T_test'].mean() * 100
+        logger.info(f"     Transitions: Train {trans_train_pct:.1f}%, Val {trans_val_pct:.1f}%, Test {trans_test_pct:.1f}%")
+    else:
+        # Backward compatibility - sans transitions
+        result = {
+            'train': (data['X_train'], data['Y_train']),
+            'val': (data['X_val'], data['Y_val']),
+            'test': (data['X_test'], data['Y_test']),
+            'metadata': metadata
+        }
+        logger.info(f"  ✅ Données chargées:")
+        logger.info(f"     Train: {data['X_train'].shape}")
+        logger.info(f"     Val:   {data['X_val'].shape}")
+        logger.info(f"     Test:  {data['X_test'].shape}")
+
     log_dataset_metadata(metadata, logger)
 
     return result

@@ -344,6 +344,20 @@ def add_dual_labels_for_indicator(df: pd.DataFrame, indicator: str,
     pos_t3 = pos_series.shift(3)
     df[f'{indicator}_dir'] = (pos_t2 > pos_t3).astype(int)
 
+    # 2.5 Détection Transitions (Phase 2.11 - Weighted Loss)
+    # Transition = label[i] != label[i-1]
+    # Utilisé pour pondération augmentée dans la loss function
+    dir_prev = df[f'{indicator}_dir'].shift(1)
+    df[f'{indicator}_is_transition'] = (df[f'{indicator}_dir'] != dir_prev).astype(float)
+    # Note: is_transition sera NaN pour premier sample (pas de prev), c'est OK
+
+    # Stats transitions
+    n_transitions = df[f'{indicator}_is_transition'].sum()
+    n_total = (~df[f'{indicator}_is_transition'].isna()).sum()
+    if n_total > 0:
+        transition_pct = (n_transitions / n_total) * 100
+        logger.info(f"       Transitions: {int(n_transitions)}/{n_total} ({transition_pct:.1f}%)")
+
     # 3. Label Force
     force_labels, z_scores = calculate_force_labels(
         velocity, window=z_score_window, threshold=force_threshold
@@ -381,13 +395,15 @@ def create_sequences_for_indicator(df: pd.DataFrame,
     Returns:
         X: (n, seq_length, 5)
         Y: (n, 1) - [direction]
+        is_transition: (n,) - indicateur binaire transitions (Phase 2.11)
         indices: list de (idx_feature, idx_label)
     """
     # Colonnes label (1 pour cet indicateur - Direction seulement)
     label_cols = [f'{indicator}_dir']
+    transition_col = f'{indicator}_is_transition'
 
     # Supprimer lignes avec NaN
-    cols_needed = feature_cols + label_cols
+    cols_needed = feature_cols + label_cols + [transition_col]
     df_clean = df.dropna(subset=cols_needed)
 
     logger.info(f"     Lignes valides: {len(df_clean)}/{len(df)} "
@@ -396,6 +412,7 @@ def create_sequences_for_indicator(df: pd.DataFrame,
     # Extraire arrays
     features = df_clean[feature_cols].values
     labels = df_clean[label_cols].values  # Shape: (N, 1) - Direction seulement
+    transitions = df_clean[transition_col].values  # Shape: (N,) - Indicateur transitions
     dates = df_clean.index.tolist()
 
     # Cold start
@@ -407,30 +424,48 @@ def create_sequences_for_indicator(df: pd.DataFrame,
     # Créer séquences
     X_list = []
     Y_list = []
+    T_list = []  # Transition indicators
     idx_list = []
 
     for i in range(start_index, len(features)):
         X_list.append(features[i-seq_length:i])
         Y_list.append(labels[i])
+        T_list.append(transitions[i])
         idx_list.append((dates[i-1], dates[i]))
 
     X = np.array(X_list)
     Y = np.array(Y_list)
+    T = np.array(T_list)
 
-    logger.info(f"     Séquences créées: X={X.shape}, Y={Y.shape}")
+    # Stats transitions dans les séquences créées
+    n_transitions_seqs = T.sum()
+    transition_pct_seqs = (n_transitions_seqs / len(T)) * 100
+    logger.info(f"     Séquences créées: X={X.shape}, Y={Y.shape}, Transitions={T.shape}")
+    logger.info(f"     Transitions dans séquences: {int(n_transitions_seqs)}/{len(T)} ({transition_pct_seqs:.1f}%)")
 
-    return X, Y, idx_list
+    return X, Y, T, idx_list
 
 
 # =============================================================================
 # SPLIT CHRONOLOGIQUE
 # =============================================================================
 
-def split_chronological(X: np.ndarray, Y: np.ndarray, indices: list,
+def split_chronological(X: np.ndarray, Y: np.ndarray, T: np.ndarray, indices: list,
                         train_ratio: float = 0.70,
                         val_ratio: float = 0.15,
                         gap: int = SEQUENCE_LENGTH) -> dict:
-    """Split chronologique avec GAP."""
+    """
+    Split chronologique avec GAP.
+
+    Args:
+        X: Features
+        Y: Labels
+        T: Transition indicators (Phase 2.11)
+        indices: Indices temporels
+
+    Returns:
+        Dict avec splits train/val/test incluant transitions
+    """
     n = len(X)
 
     train_end = int(n * train_ratio)
@@ -442,9 +477,9 @@ def split_chronological(X: np.ndarray, Y: np.ndarray, indices: list,
     test_start = val_end
 
     return {
-        'train': (X[:train_end_gap], Y[:train_end_gap], indices[:train_end_gap]),
-        'val': (X[val_start:val_end_gap], Y[val_start:val_end_gap], indices[val_start:val_end_gap]),
-        'test': (X[test_start:], Y[test_start:], indices[test_start:])
+        'train': (X[:train_end_gap], Y[:train_end_gap], T[:train_end_gap], indices[:train_end_gap]),
+        'val': (X[val_start:val_end_gap], Y[val_start:val_end_gap], T[val_start:val_end_gap], indices[val_start:val_end_gap]),
+        'test': (X[test_start:], Y[test_start:], T[test_start:], indices[test_start:])
     }
 
 
@@ -472,10 +507,10 @@ def prepare_indicator_dataset(df: pd.DataFrame, asset_name: str, indicator: str,
     # Calculer labels dual-binary pour cet indicateur
     df = add_dual_labels_for_indicator(df, indicator, filter_type=filter_type)
 
-    # Créer séquences
-    X, Y, indices = create_sequences_for_indicator(df, indicator, feature_cols)
+    # Créer séquences (avec transitions - Phase 2.11)
+    X, Y, T, indices = create_sequences_for_indicator(df, indicator, feature_cols)
 
-    return X, Y, indices
+    return X, Y, T, indices
 
 
 # =============================================================================
@@ -566,12 +601,12 @@ def prepare_and_save_all(assets: list = None,
             ('macd', features_macd),    # 1 feature: c_ret
             ('cci', features_cci)       # 3 features: h_ret, l_ret, c_ret
         ]:
-            X, Y, indices = prepare_indicator_dataset(
+            X, Y, T, indices = prepare_indicator_dataset(
                 df, asset_name, indicator, feature_cols, filter_type=filter_type, clip_value=clip_value
             )
 
-            # Split chronologique
-            splits = split_chronological(X, Y, indices)
+            # Split chronologique (avec transitions)
+            splits = split_chronological(X, Y, T, indices)
 
             for split_name in ['train', 'val', 'test']:
                 datasets[indicator][split_name].append(splits[split_name])
@@ -590,20 +625,24 @@ def prepare_and_save_all(assets: list = None,
         # Concaténer tous les assets
         X_train = np.concatenate([s[0] for s in datasets[indicator]['train']], axis=0)
         Y_train = np.concatenate([s[1] for s in datasets[indicator]['train']], axis=0)
+        T_train = np.concatenate([s[2] for s in datasets[indicator]['train']], axis=0)  # Transitions
         X_val = np.concatenate([s[0] for s in datasets[indicator]['val']], axis=0)
         Y_val = np.concatenate([s[1] for s in datasets[indicator]['val']], axis=0)
+        T_val = np.concatenate([s[2] for s in datasets[indicator]['val']], axis=0)  # Transitions
         X_test = np.concatenate([s[0] for s in datasets[indicator]['test']], axis=0)
         Y_test = np.concatenate([s[1] for s in datasets[indicator]['test']], axis=0)
+        T_test = np.concatenate([s[2] for s in datasets[indicator]['test']], axis=0)  # Transitions
 
-        logger.info(f"   Train: X={X_train.shape}, Y={Y_train.shape}")
-        logger.info(f"   Val:   X={X_val.shape}, Y={Y_val.shape}")
-        logger.info(f"   Test:  X={X_test.shape}, Y={Y_test.shape}")
+        logger.info(f"   Train: X={X_train.shape}, Y={Y_train.shape}, T={T_train.shape}")
+        logger.info(f"   Val:   X={X_val.shape}, Y={Y_val.shape}, T={T_val.shape}")
+        logger.info(f"   Test:  X={X_test.shape}, Y={Y_test.shape}, T={T_test.shape}")
 
         # Stats labels (Direction-only)
         logger.info(f"\n   Balance labels:")
-        for split_name, Y_split in [('Train', Y_train), ('Val', Y_val), ('Test', Y_test)]:
+        for split_name, Y_split, T_split in [('Train', Y_train, T_train), ('Val', Y_val, T_val), ('Test', Y_test, T_test)]:
             dir_pct = Y_split[:, 0].mean() * 100
-            logger.info(f"     {split_name}: Direction {dir_pct:.1f}% UP")
+            trans_pct = T_split.mean() * 100
+            logger.info(f"     {split_name}: Direction {dir_pct:.1f}% UP, Transitions {trans_pct:.1f}%")
 
         # Sauvegarder
         if output_dir is None:
@@ -689,9 +728,9 @@ def prepare_and_save_all(assets: list = None,
 
         np.savez_compressed(
             output_path,
-            X_train=X_train, Y_train=Y_train,
-            X_val=X_val, Y_val=Y_val,
-            X_test=X_test, Y_test=Y_test,
+            X_train=X_train, Y_train=Y_train, T_train=T_train,
+            X_val=X_val, Y_val=Y_val, T_val=T_val,
+            X_test=X_test, Y_test=Y_test, T_test=T_test,
             metadata=json.dumps(metadata)
         )
 
