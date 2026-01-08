@@ -92,6 +92,15 @@ ATR_PERIOD = 14
 # Configuration Octave
 OCTAVE_STEP = 0.20  # Paramètre du filtre Octave (0.20 recommandé)
 
+# Mapping Asset Name → Asset ID (pour encodage dans les matrices)
+ASSET_ID_MAP = {
+    'BTC': 0,
+    'ETH': 1,
+    'BNB': 2,
+    'ADA': 3,
+    'LTC': 4
+}
+
 
 # =============================================================================
 # FILTRE OCTAVE (Butterworth + filtfilt) - NOUVEAU
@@ -214,7 +223,7 @@ def load_data_with_index(file_path: str, asset_name: str = "Asset", max_samples:
     df.index.name = 'datetime'
     df.columns = df.columns.str.lower()
 
-    required = ['open', 'high', 'low', 'close']
+    required = ['open', 'high', 'low', 'close', 'volume']
     missing = [c for c in required if c not in df.columns]
     if missing:
         raise ValueError(f"Colonnes manquantes: {missing}")
@@ -383,37 +392,51 @@ def add_dual_labels_for_indicator(df: pd.DataFrame, indicator: str,
 def create_sequences_for_indicator(df: pd.DataFrame,
                                     indicator: str,
                                     feature_cols: list,
+                                    asset_name: str,
+                                    asset_id: int,
                                     seq_length: int = SEQUENCE_LENGTH,
                                     cold_start_skip: int = COLD_START_SKIP) -> tuple:
     """
-    Crée les séquences pour UN indicateur avec features spécifiques.
+    Crée les séquences pour UN indicateur avec features + métadonnées intégrées.
+
+    NOUVELLE STRUCTURE (timestamp, asset_id intégrés dans CHAQUE matrice):
+    - X: (n, seq_length, n_features+2) = [timestamp, asset_id, features...]
+    - Y: (n, n_labels+2) = [timestamp, asset_id, direction]
+    - T: (n, 3) = [timestamp, asset_id, is_transition]
+    - OHLCV: (n, 7) = [timestamp, asset_id, open, high, low, close, volume]
 
     Args:
         indicator: 'rsi', 'cci', ou 'macd'
-        feature_cols: Liste des features à utiliser (5 colonnes)
+        feature_cols: Liste des features à utiliser
+        asset_name: Nom de l'asset ('BTC', 'ETH', etc.)
+        asset_id: ID encodé de l'asset (0-4)
 
     Returns:
-        X: (n, seq_length, 5)
-        Y: (n, 1) - [direction]
-        is_transition: (n,) - indicateur binaire transitions (Phase 2.11)
-        indices: list de (idx_feature, idx_label)
+        X: (n, seq_length, n_features+2) avec timestamp et asset_id intégrés
+        Y: (n, 3) avec [timestamp, asset_id, direction]
+        T: (n, 3) avec [timestamp, asset_id, is_transition]
+        OHLCV: (n, 7) avec [timestamp, asset_id, O, H, L, C, V]
     """
     # Colonnes label (1 pour cet indicateur - Direction seulement)
     label_cols = [f'{indicator}_dir']
     transition_col = f'{indicator}_is_transition'
 
+    # Colonnes OHLCV brutes
+    ohlcv_cols = ['open', 'high', 'low', 'close', 'volume']
+
     # Supprimer lignes avec NaN
-    cols_needed = feature_cols + label_cols + [transition_col]
+    cols_needed = feature_cols + label_cols + [transition_col] + ohlcv_cols
     df_clean = df.dropna(subset=cols_needed)
 
     logger.info(f"     Lignes valides: {len(df_clean)}/{len(df)} "
                 f"({len(df) - len(df_clean)} supprimées pour NaN)")
 
     # Extraire arrays
-    features = df_clean[feature_cols].values
-    labels = df_clean[label_cols].values  # Shape: (N, 1) - Direction seulement
-    transitions = df_clean[transition_col].values  # Shape: (N,) - Indicateur transitions
-    dates = df_clean.index.tolist()
+    features = df_clean[feature_cols].values  # (N, n_features)
+    labels = df_clean[label_cols].values      # (N, 1) - Direction seulement
+    transitions = df_clean[transition_col].values  # (N,) - Indicateur transitions
+    ohlcv = df_clean[ohlcv_cols].values       # (N, 5) - Prix et volume bruts
+    timestamps = df_clean.index.values        # (N,) - Timestamps
 
     # Cold start
     start_index = seq_length + cold_start_skip
@@ -424,47 +447,84 @@ def create_sequences_for_indicator(df: pd.DataFrame,
     # Créer séquences
     X_list = []
     Y_list = []
-    T_list = []  # Transition indicators
-    idx_list = []
+    T_list = []
+    OHLCV_list = []
 
     for i in range(start_index, len(features)):
-        X_list.append(features[i-seq_length:i])
-        Y_list.append(labels[i])
-        T_list.append(transitions[i])
-        idx_list.append((dates[i-1], dates[i]))
+        # === X: Features avec timestamp et asset_id intégrés ===
+        # Pour chaque timestep de la séquence, ajouter [timestamp, asset_id] avant les features
+        seq_features = []
+        for t in range(i - seq_length, i):
+            # [timestamp, asset_id, feature1, feature2, ...]
+            row = np.concatenate([
+                [timestamps[t], asset_id],  # Métadonnées
+                features[t]                  # Features
+            ])
+            seq_features.append(row)
+        X_list.append(np.array(seq_features))
 
-    X = np.array(X_list)
-    Y = np.array(Y_list)
-    T = np.array(T_list)
+        # === Y: Labels avec timestamp et asset_id ===
+        # [timestamp, asset_id, direction]
+        y_row = np.concatenate([
+            [timestamps[i], asset_id],  # Métadonnées
+            labels[i]                   # Label direction
+        ])
+        Y_list.append(y_row)
+
+        # === T: Transitions avec timestamp et asset_id ===
+        # [timestamp, asset_id, is_transition]
+        t_row = np.array([timestamps[i], asset_id, transitions[i]])
+        T_list.append(t_row)
+
+        # === OHLCV: Prix bruts avec timestamp et asset_id ===
+        # [timestamp, asset_id, open, high, low, close, volume]
+        ohlcv_row = np.concatenate([
+            [timestamps[i], asset_id],  # Métadonnées
+            ohlcv[i]                    # O, H, L, C, V
+        ])
+        OHLCV_list.append(ohlcv_row)
+
+    X = np.array(X_list, dtype=object)     # dtype=object pour timestamps
+    Y = np.array(Y_list, dtype=object)
+    T = np.array(T_list, dtype=object)
+    OHLCV = np.array(OHLCV_list, dtype=object)
 
     # Stats transitions dans les séquences créées
-    n_transitions_seqs = T.sum()
+    n_transitions_seqs = T[:, 2].sum()  # Colonne 2 = is_transition
     transition_pct_seqs = (n_transitions_seqs / len(T)) * 100
-    logger.info(f"     Séquences créées: X={X.shape}, Y={Y.shape}, Transitions={T.shape}")
-    logger.info(f"     Transitions dans séquences: {int(n_transitions_seqs)}/{len(T)} ({transition_pct_seqs:.1f}%)")
 
-    return X, Y, T, idx_list
+    logger.info(f"     Séquences créées:")
+    logger.info(f"       X={X.shape} - [timestamp, asset_id, {len(feature_cols)} features] × {seq_length} steps")
+    logger.info(f"       Y={Y.shape} - [timestamp, asset_id, direction]")
+    logger.info(f"       T={T.shape} - [timestamp, asset_id, is_transition]")
+    logger.info(f"       OHLCV={OHLCV.shape} - [timestamp, asset_id, O, H, L, C, V]")
+    logger.info(f"     Transitions: {int(n_transitions_seqs)}/{len(T)} ({transition_pct_seqs:.1f}%)")
+    logger.info(f"     Asset: {asset_name} (ID={asset_id})")
+
+    return X, Y, T, OHLCV
 
 
 # =============================================================================
 # SPLIT CHRONOLOGIQUE
 # =============================================================================
 
-def split_chronological(X: np.ndarray, Y: np.ndarray, T: np.ndarray, indices: list,
+def split_chronological(X: np.ndarray, Y: np.ndarray, T: np.ndarray, OHLCV: np.ndarray,
                         train_ratio: float = 0.70,
                         val_ratio: float = 0.15,
                         gap: int = SEQUENCE_LENGTH) -> dict:
     """
     Split chronologique avec GAP.
 
+    NOUVELLE STRUCTURE: Inclut OHLCV dans les splits.
+
     Args:
-        X: Features
-        Y: Labels
-        T: Transition indicators (Phase 2.11)
-        indices: Indices temporels
+        X: Features avec [timestamp, asset_id, features...]
+        Y: Labels avec [timestamp, asset_id, direction]
+        T: Transitions avec [timestamp, asset_id, is_transition]
+        OHLCV: Prix bruts avec [timestamp, asset_id, O, H, L, C, V]
 
     Returns:
-        Dict avec splits train/val/test incluant transitions
+        Dict avec splits train/val/test incluant X, Y, T, OHLCV
     """
     n = len(X)
 
@@ -477,9 +537,9 @@ def split_chronological(X: np.ndarray, Y: np.ndarray, T: np.ndarray, indices: li
     test_start = val_end
 
     return {
-        'train': (X[:train_end_gap], Y[:train_end_gap], T[:train_end_gap], indices[:train_end_gap]),
-        'val': (X[val_start:val_end_gap], Y[val_start:val_end_gap], T[val_start:val_end_gap], indices[val_start:val_end_gap]),
-        'test': (X[test_start:], Y[test_start:], T[test_start:], indices[test_start:])
+        'train': (X[:train_end_gap], Y[:train_end_gap], T[:train_end_gap], OHLCV[:train_end_gap]),
+        'val': (X[val_start:val_end_gap], Y[val_start:val_end_gap], T[val_start:val_end_gap], OHLCV[val_start:val_end_gap]),
+        'test': (X[test_start:], Y[test_start:], T[test_start:], OHLCV[test_start:])
     }
 
 
@@ -491,26 +551,36 @@ def prepare_indicator_dataset(df: pd.DataFrame, asset_name: str, indicator: str,
                               feature_cols: list, filter_type: str = 'kalman',
                               clip_value: float = 0.10) -> tuple:
     """
-    Prépare le dataset pour UN indicateur avec features purifiées.
+    Prépare le dataset pour UN indicateur avec features purifiées + métadonnées intégrées.
+
+    NOUVELLE STRUCTURE: Retourne X, Y, T, OHLCV avec (timestamp, asset_id) intégrés.
 
     Args:
         df: DataFrame avec OHLC + indicateurs calculés
+        asset_name: Nom de l'asset ('BTC', 'ETH', etc.)
         indicator: 'rsi', 'cci', ou 'macd'
         feature_cols: Colonnes features à utiliser
         filter_type: 'kalman' ou 'octave'
 
     Returns:
-        (X, Y, indices) pour cet indicateur
+        (X, Y, T, OHLCV) pour cet indicateur avec métadonnées intégrées
     """
     logger.info(f"\n  {asset_name} - {indicator.upper()}: Préparation avec filtre {filter_type.upper()}...")
+
+    # Obtenir l'ID de l'asset
+    asset_id = ASSET_ID_MAP.get(asset_name)
+    if asset_id is None:
+        raise ValueError(f"Asset inconnu: {asset_name}. Valides: {list(ASSET_ID_MAP.keys())}")
 
     # Calculer labels dual-binary pour cet indicateur
     df = add_dual_labels_for_indicator(df, indicator, filter_type=filter_type)
 
-    # Créer séquences (avec transitions - Phase 2.11)
-    X, Y, T, indices = create_sequences_for_indicator(df, indicator, feature_cols)
+    # Créer séquences (avec transitions + OHLCV + métadonnées intégrées)
+    X, Y, T, OHLCV = create_sequences_for_indicator(
+        df, indicator, feature_cols, asset_name, asset_id
+    )
 
-    return X, Y, T, indices
+    return X, Y, T, OHLCV
 
 
 # =============================================================================
@@ -601,12 +671,12 @@ def prepare_and_save_all(assets: list = None,
             ('macd', features_macd),    # 1 feature: c_ret
             ('cci', features_cci)       # 3 features: h_ret, l_ret, c_ret
         ]:
-            X, Y, T, indices = prepare_indicator_dataset(
+            X, Y, T, OHLCV = prepare_indicator_dataset(
                 df, asset_name, indicator, feature_cols, filter_type=filter_type, clip_value=clip_value
             )
 
-            # Split chronologique (avec transitions)
-            splits = split_chronological(X, Y, T, indices)
+            # Split chronologique (avec transitions + OHLCV)
+            splits = split_chronological(X, Y, T, OHLCV)
 
             for split_name in ['train', 'val', 'test']:
                 datasets[indicator][split_name].append(splits[split_name])
@@ -622,26 +692,34 @@ def prepare_and_save_all(assets: list = None,
         logger.info(f"SAUVEGARDE DATASET: {indicator.upper()}")
         logger.info('='*80)
 
-        # Concaténer tous les assets
+        # Concaténer tous les assets (X, Y, T, OHLCV)
         X_train = np.concatenate([s[0] for s in datasets[indicator]['train']], axis=0)
         Y_train = np.concatenate([s[1] for s in datasets[indicator]['train']], axis=0)
-        T_train = np.concatenate([s[2] for s in datasets[indicator]['train']], axis=0)  # Transitions
+        T_train = np.concatenate([s[2] for s in datasets[indicator]['train']], axis=0)
+        OHLCV_train = np.concatenate([s[3] for s in datasets[indicator]['train']], axis=0)
+
         X_val = np.concatenate([s[0] for s in datasets[indicator]['val']], axis=0)
         Y_val = np.concatenate([s[1] for s in datasets[indicator]['val']], axis=0)
-        T_val = np.concatenate([s[2] for s in datasets[indicator]['val']], axis=0)  # Transitions
+        T_val = np.concatenate([s[2] for s in datasets[indicator]['val']], axis=0)
+        OHLCV_val = np.concatenate([s[3] for s in datasets[indicator]['val']], axis=0)
+
         X_test = np.concatenate([s[0] for s in datasets[indicator]['test']], axis=0)
         Y_test = np.concatenate([s[1] for s in datasets[indicator]['test']], axis=0)
-        T_test = np.concatenate([s[2] for s in datasets[indicator]['test']], axis=0)  # Transitions
+        T_test = np.concatenate([s[2] for s in datasets[indicator]['test']], axis=0)
+        OHLCV_test = np.concatenate([s[3] for s in datasets[indicator]['test']], axis=0)
 
-        logger.info(f"   Train: X={X_train.shape}, Y={Y_train.shape}, T={T_train.shape}")
-        logger.info(f"   Val:   X={X_val.shape}, Y={Y_val.shape}, T={T_val.shape}")
-        logger.info(f"   Test:  X={X_test.shape}, Y={Y_test.shape}, T={T_test.shape}")
+        logger.info(f"   Shapes concaténées:")
+        logger.info(f"     Train: X={X_train.shape}, Y={Y_train.shape}, T={T_train.shape}, OHLCV={OHLCV_train.shape}")
+        logger.info(f"     Val:   X={X_val.shape}, Y={Y_val.shape}, T={T_val.shape}, OHLCV={OHLCV_val.shape}")
+        logger.info(f"     Test:  X={X_test.shape}, Y={Y_test.shape}, T={T_test.shape}, OHLCV={OHLCV_test.shape}")
 
-        # Stats labels (Direction-only)
+        # Stats labels (Direction-only avec nouvelle structure)
         logger.info(f"\n   Balance labels:")
         for split_name, Y_split, T_split in [('Train', Y_train, T_train), ('Val', Y_val, T_val), ('Test', Y_test, T_test)]:
-            dir_pct = Y_split[:, 0].mean() * 100
-            trans_pct = T_split.mean() * 100
+            # Y: [timestamp, asset_id, direction] → colonne 2 = direction
+            # T: [timestamp, asset_id, is_transition] → colonne 2 = is_transition
+            dir_pct = Y_split[:, 2].astype(float).mean() * 100
+            trans_pct = T_split[:, 2].astype(float).mean() * 100
             logger.info(f"     {split_name}: Direction {dir_pct:.1f}% UP, Transitions {trans_pct:.1f}%")
 
         # Sauvegarder
@@ -701,10 +779,11 @@ def prepare_and_save_all(assets: list = None,
 
         metadata = {
             'created_at': datetime.now().isoformat(),
-            'version': 'pure_signal_direction_only_v1',
-            'architecture': 'Pure Signal + Direction-Only Labels',
+            'version': 'pure_signal_direction_only_v2_with_metadata',
+            'architecture': 'Pure Signal + Direction-Only + Metadata Intégrées',
             'indicator': indicator.upper(),
             'assets': assets,
+            'asset_id_mapping': ASSET_ID_MAP,
             'filter_type': filter_type,
             **filter_metadata,
             'cold_start_skip': COLD_START_SKIP,
@@ -725,13 +804,21 @@ def prepare_and_save_all(assets: list = None,
             'justification': justification,
             'features_banned': ['o_ret (microstructure)', 'range_ret (redundant/noise)'],
             'stationarity': 'Returns (stationnaires) vs prix bruts (non-stationnaires)',
+            'structure': {
+                'X': f'(n, {SEQUENCE_LENGTH}, {n_features}+2) - [timestamp, asset_id, features...] pour chaque timestep',
+                'Y': '(n, 3) - [timestamp, asset_id, direction]',
+                'T': '(n, 3) - [timestamp, asset_id, is_transition]',
+                'OHLCV': '(n, 7) - [timestamp, asset_id, open, high, low, close, volume]'
+            },
+            'primary_key': '(timestamp, asset_id) - Commune à toutes les matrices',
+            'navigation': 'Même index i → même sample dans X, Y, T, OHLCV'
         }
 
         np.savez_compressed(
             output_path,
-            X_train=X_train, Y_train=Y_train, T_train=T_train,
-            X_val=X_val, Y_val=Y_val, T_val=T_val,
-            X_test=X_test, Y_test=Y_test, T_test=T_test,
+            X_train=X_train, Y_train=Y_train, T_train=T_train, OHLCV_train=OHLCV_train,
+            X_val=X_val, Y_val=Y_val, T_val=T_val, OHLCV_val=OHLCV_val,
+            X_test=X_test, Y_test=Y_test, T_test=T_test, OHLCV_test=OHLCV_test,
             metadata=json.dumps(metadata)
         )
 
