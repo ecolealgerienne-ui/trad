@@ -534,26 +534,32 @@ def create_sequences_for_indicator(df: pd.DataFrame,
     X = X_all_windows[window_start_idx:window_end_idx].copy()  # .copy() pour libérer la vue
 
     # Étape 4: Y, T, OHLCV (vectorisé sans boucle)
-    # Les labels correspondent aux indices [start_index, start_index+1, ..., n-1]
+    # Les labels correspondent aux indices [start_index, start_index+1, ..., n_samples-1]
+    # IMPORTANT: Utiliser n_samples comme borne supérieure pour éviter tout décalage d'index
     n_sequences = len(X)
+
+    # Vérification de sécurité: n_sequences doit être égal à n_samples - start_index
+    expected_n_sequences = n_samples - start_index
+    assert n_sequences == expected_n_sequences, \
+        f"Décalage d'index détecté! n_sequences={n_sequences}, attendu={expected_n_sequences}"
 
     # Y: [timestamp, asset_id, direction]
     Y = np.zeros((n_sequences, 3), dtype=np.float64)
-    Y[:, 0] = timestamps[start_index:start_index + n_sequences].astype(np.float64)
+    Y[:, 0] = timestamps[start_index:n_samples].astype(np.float64)
     Y[:, 1] = float(asset_id)
-    Y[:, 2] = labels[start_index:start_index + n_sequences, 0]
+    Y[:, 2] = labels[start_index:n_samples, 0]
 
     # T: [timestamp, asset_id, is_transition]
     T = np.zeros((n_sequences, 3), dtype=np.float64)
-    T[:, 0] = timestamps[start_index:start_index + n_sequences].astype(np.float64)
+    T[:, 0] = timestamps[start_index:n_samples].astype(np.float64)
     T[:, 1] = float(asset_id)
-    T[:, 2] = transitions[start_index:start_index + n_sequences].astype(np.float64)
+    T[:, 2] = transitions[start_index:n_samples].astype(np.float64)
 
     # OHLCV: [timestamp, asset_id, O, H, L, C, V]
     OHLCV = np.zeros((n_sequences, 7), dtype=np.float64)
-    OHLCV[:, 0] = timestamps[start_index:start_index + n_sequences].astype(np.float64)
+    OHLCV[:, 0] = timestamps[start_index:n_samples].astype(np.float64)
     OHLCV[:, 1] = float(asset_id)
-    OHLCV[:, 2:] = ohlcv[start_index:start_index + n_sequences]
+    OHLCV[:, 2:] = ohlcv[start_index:n_samples]
 
     # Stats transitions dans les séquences créées
     n_transitions_seqs = T[:, 2].sum()  # Colonne 2 = is_transition
