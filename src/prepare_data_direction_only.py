@@ -450,8 +450,7 @@ def create_sequences_for_indicator(df: pd.DataFrame,
                                     feature_cols: list,
                                     asset_name: str,
                                     asset_id: int,
-                                    seq_length: int = SEQUENCE_LENGTH,
-                                    cold_start_skip: int = COLD_START_SKIP) -> tuple:
+                                    seq_length: int = SEQUENCE_LENGTH) -> tuple:
     """
     Crée les séquences pour UN indicateur avec features + métadonnées intégrées.
 
@@ -480,12 +479,13 @@ def create_sequences_for_indicator(df: pd.DataFrame,
     # Colonnes OHLCV brutes
     ohlcv_cols = ['open', 'high', 'low', 'close', 'volume']
 
-    # Supprimer lignes avec NaN
+    # Remplacer NaN par 0 (ne pas supprimer les lignes)
     cols_needed = feature_cols + label_cols + [transition_col] + ohlcv_cols
-    df_clean = df.dropna(subset=cols_needed)
+    df_clean = df[cols_needed].fillna(0)
+    df_clean.index = df.index  # Préserver l'index temporel
 
-    logger.info(f"     Lignes valides: {len(df_clean)}/{len(df)} "
-                f"({len(df) - len(df_clean)} supprimées pour NaN)")
+    n_nans_filled = df[cols_needed].isna().sum().sum()
+    logger.info(f"     NaN → 0: {n_nans_filled} valeurs remplacées")
 
     # Extraire arrays avec types optimisés
     features = df_clean[feature_cols].values.astype(np.float32)  # (N, n_features)
@@ -495,11 +495,11 @@ def create_sequences_for_indicator(df: pd.DataFrame,
     # Convertir timestamps en int64 (nanosecondes depuis epoch)
     timestamps = df_clean.index.values.astype('datetime64[ns]').astype(np.int64)  # (N,) - Timestamps
 
-    # Cold start
-    start_index = seq_length + cold_start_skip
+    # Start index = premier index où on peut créer une fenêtre complète
+    # (besoin de seq_length samples avant)
+    start_index = seq_length
 
-    logger.info(f"     Cold Start: skip premiers {cold_start_skip} samples")
-    logger.info(f"     Start index: {start_index}")
+    logger.info(f"     Start index: {start_index} (besoin de {seq_length} samples pour première fenêtre)")
 
     # ========================================================================
     # VECTORISATION avec sliding_window_view (x30-50 plus rapide) 🚀
@@ -924,7 +924,7 @@ def prepare_and_save_all(assets: list = None,
             'asset_id_mapping': ASSET_ID_MAP,
             'filter_type': filter_type,
             **filter_metadata,
-            'cold_start_skip': COLD_START_SKIP,
+            'trim_edges': TRIM_EDGES,
             'labels': 1,
             'label_names': [f'{indicator}_dir'],
             'label_definitions': {
