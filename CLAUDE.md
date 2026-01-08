@@ -1,11 +1,12 @@
 # Modele CNN-LSTM Multi-Output - Guide Complet
 
-**Date**: 2026-01-07
-**Statut**: ✅ **Phase 2.8 COMPLÉTÉE - Direction-Only Validé**
-**Version**: 8.9 - Direction-Only confirmé stable (+0.1-0.9%), Force abandonné définitivement
-**Models**: MACD Kalman 92.5% | CCI Kalman 90.2% (+0.9%) | RSI Kalman 87.6% - Tous stables/améliorés
-**Découverte**: Kalman > Octave systématiquement (-1.1% à -4.0% gap) - CCI meilleur gain Direction-Only
-**Prochaine Étape**: ATR Structural Filter - Réduire trades 30k → 15k pour atteindre PnL Net positif
+**Date**: 2026-01-08
+**Statut**: ❌ **Phase 2.9 COMPLÉTÉE - Filtres ATR Abandonnés (Échec Validé)**
+**Version**: 9.0 - ATR Structural et ML-Aware testés et abandonnés (flickering 98% domine)
+**Models**: MACD Kalman 92.5% | CCI Kalman 90.2% | RSI Kalman 87.6% - Direction-Only validés
+**Découverte Critique**: Filtrer ENTRÉES inefficace si 98% trades = FLIPS (flickering)
+**Problème Racine**: Gap Accuracy (92.5%) vs Win Rate (31%) = Labels 1-période vs Trades multi-périodes
+**Prochaine Étape**: Timeframe 15min/30min (réduction naturelle -50-67%) OU Consensus Multi-Indicateurs
 
 ---
 
@@ -819,6 +820,151 @@ trade_allowed = ml_has_consensus and force_ok  # Les DEUX requis
 - Implémenter règles conditionnelles
 
 **Phase 4**: Production deployment avec monitoring temps réel
+
+---
+
+## ❌ Phase 2.9: Filtres ATR - Échec Complet (2026-01-08)
+
+**Date**: 2026-01-08
+**Statut**: ❌ **ÉCHEC VALIDÉ - Les deux approches ATR inefficaces**
+**Scripts**: `tests/test_atr_structural_filter.py`, `tests/test_atr_ml_aware_filter.py`
+**Objectif**: Réduire trades 30k → 15k en filtrant par volatilité (ATR)
+
+### Motivation
+
+Phase 2.8 Direction-Only a validé les modèles (92.5% MACD), mais le problème de fréquence de trading persiste:
+- **30,876 trades** (Phase 2.6 Holding 30p)
+- **+110.89% PnL Brut** ✅ (le signal fonctionne!)
+- **-2,976% PnL Net** ❌ (frais détruisent tout)
+- **Edge/trade**: +0.36% - 0.6% frais = **-0.24%** ❌
+
+**Hypothèse**: Filtrer par volatilité ATR (López de Prado 2018) pour ne trader que les zones optimales.
+
+### Approche 1: ATR Structural (Volatilité Brute)
+
+**Date**: 2026-01-08
+**Script**: `tests/test_atr_structural_filter.py`
+**Principe**: Filtrer par percentiles ATR normalisé (Q20-Q80, Q30-Q70)
+
+**Résultats (MACD Kalman, Test Set)**:
+
+| Config | Trades | Réduction | Win Rate | PnL Net | Verdict |
+|--------|--------|-----------|----------|---------|---------|
+| **Baseline** | 88,113 | - | 9.90% | -523% | - |
+| **Q30-Q70** | 44,138 | **-50%** ✅ | **7.94%** ❌ | -263% | Réduction OK, WR dégradé |
+| Q20-Q80 | 52,873 | -40% | 8.54% | -315% | Pareil |
+| Q10-Q90 | 70,551 | -20% | 9.34% | -419% | Pareil |
+
+**Problème identifié**: ❌ **Win Rate se dégrade proportionnellement**
+- Objectif: -50% trades, Win Rate stable
+- Réalité: -50% trades, **Win Rate -2%** (9.90% → 7.94%)
+- Résultat: PnL Net toujours négatif (-263% vs -523%)
+
+**Diagnostic**: Direction-Only sans Force génère trop de signaux low-quality. ATR filtre la quantité mais pas la qualité.
+
+### Approche 2: ATR ML-Aware (Désaccords Kalman/Octave)
+
+**Date**: 2026-01-08
+**Script**: `tests/test_atr_ml_aware_filter.py`
+**Principe**: Pondérer ATR par désaccord Kalman/Octave (zones d'incertitude ML)
+
+**Formule (fournie par utilisateur)**:
+```python
+TR = True Range standard
+difficulty = (Kalman_dir != Octave_dir) + prolonged_disagreement(2+ périodes)
+w = 1 + lambda * difficulty
+ATR_ML = EMA(TR * w, n)
+```
+
+**Tests**: 36 configurations (4 windows × 3 lambdas × 3 percentiles)
+
+**Résultats (MACD Kalman, Test Set)**:
+
+| Config | Trades | Réduction | Win Rate | PnL Net | Coverage ATR |
+|--------|--------|-----------|----------|---------|--------------|
+| **Baseline** | 88,992 | - | 31.02% | -83.42% | 100% |
+| **Meilleur (n=5, λ=0.5, Q30-Q70)** | 88,657 | **-0.4%** ❌ | 31.06% | -82.83% | 40% |
+| n=6, λ=1.5, Q30-Q70 | 88,635 | -0.4% | 31.05% | -82.81% | 40% |
+| n=8, λ=1.5, Q30-Q70 | 88,618 | -0.4% | 31.05% | -82.86% | 40% |
+
+**Observations critiques**:
+
+1. **Coverage vs Reduction Incohérent** 🔍
+   ```
+   Q30-Q70 = 40% ATR Coverage → Devrait filtrer 60% des entrées
+   Mais trades réduits: -0.4% seulement!
+   ```
+
+2. **Direction Flips Dominant** 💥
+   ```
+   Direction Flips: 87,215 / 88,992 = 98.0% des trades
+   Time exits: 1,777 = 2.0% seulement
+   ```
+
+3. **Problème Fondamental**: Le masque ATR est appliqué aux **ENTRÉES**, mais 98% des trades viennent de **DIRECTION_FLIP** (changements d'avis en cours de trade), pas de nouvelles entrées.
+
+**Diagnostic**: Filtrer les entrées ne sert à rien si 98% des trades sont créés par flickering pendant les trades existants.
+
+### Comparaison ATR Structural vs ATR ML-Aware
+
+| Métrique | ATR Structural | ATR ML-Aware | Objectif |
+|----------|----------------|--------------|----------|
+| **Réduction trades** | -50% ✅ | **-0.4%** ❌ | -50% |
+| **Impact Win Rate** | **-2%** ❌ | +0.04% | Stable |
+| **PnL Net** | Toujours négatif | Toujours négatif | Positif |
+| **Flickering** | Non mesuré | **98%** des trades | <50% |
+
+**Conclusion**: Les deux approches échouent pour des raisons différentes:
+- **ATR Structural**: Réduit trades mais dégrade Win Rate (filtre sans discriminer)
+- **ATR ML-Aware**: Ne réduit presque rien car flickering domine
+
+### Problème Racine Identifié: Flickering
+
+**Définition**: Le modèle change d'avis **constamment** pendant les trades existants.
+
+| Observation | Valeur | Impact |
+|-------------|--------|--------|
+| Direction Flips | 87,215 / 88,992 | **98.0%** des trades |
+| Time exits (20p) | 1,777 | **2.0%** seulement |
+| Avg Duration | 7.2 périodes | ~36 minutes |
+| Avg Confidence | 0.612 | Pas sur-confiant (baseline) |
+
+**Gap Accuracy vs Win Rate**:
+- **Labels**: 92.5% accuracy (pente t-2 vs t-3, instantané)
+- **Trading**: 31% Win Rate (durée 7 périodes, direction change plusieurs fois)
+
+**Explication**: Les labels capturent la pente sur 1 période, mais les trades durent plusieurs périodes où la direction change → micro-sorties → PnL détruit.
+
+### Conclusion - Abandonner Filtres ATR
+
+**❌ Échec validé des deux approches ATR**:
+1. Filtrer par volatilité brute (ATR Structural): Réduit trades mais dégrade qualité
+2. Filtrer par incertitude ML (ATR ML-Aware): Inefficace car flickering bypass le filtre
+
+**Raison fondamentale**: Filtrer les ENTRÉES ne résout rien si 98% des trades viennent de FLIPS pendant les trades.
+
+### Recommandations Post-ATR
+
+**Option 1: Timeframe 15min/30min** ⭐ (Recommandé)
+- Réduction naturelle -50% à -67%
+- Moins de bruit haute fréquence
+- Signaux plus stables
+- Pas de modification du modèle
+
+**Option 2: Consensus Multi-Indicateurs**
+- Entrer UNIQUEMENT si MACD + RSI + CCI d'accord
+- Phase 2.7 tests consensus: validé empiriquement (4/6 = sweet spot)
+
+**Option 3: Debug Modèle** (Fondamental)
+- Pourquoi 92.5% accuracy labels → 31% Win Rate trading?
+- Labels = 1 période vs Trades = plusieurs périodes
+- Besoin d'un objectif d'apprentissage plus long-terme
+
+**Scripts créés**:
+- `tests/test_atr_structural_filter.py` (627 lignes) - Commit f8da433
+- `tests/test_atr_ml_aware_filter.py` (643 lignes) - Commit 5476ebb
+
+**Prochaine action**: Pivoter vers Timeframe 15min ou Consensus Multi-Indicateurs.
 
 ---
 
