@@ -5,12 +5,17 @@ Test Entry-Focused Strategy - Use ML for Entries, Ignore ML for Exits
 Principe:
 - ENTRÉES: Utiliser ML predictions (92.5% accuracy validé)
 - SORTIES: Ignorer ML, utiliser Time-based + Return-based (TP/SL)
-- ANTI-FLIP: Si sortie SHORT → prochaine entrée SHORT → SKIP (cooldown)
+- ANTI-FLIP: Si sortie LONG → bloquer re-LONG jusqu'à signal SHORT (et vice-versa)
+
+Règle Anti-Flip Stricte:
+  Exit LONG  → Bloquer LONG jusqu'à prise SHORT
+  Exit SHORT → Bloquer SHORT jusqu'à prise LONG
+  Force alternance réelle LONG/SHORT
 
 Objectif:
 - Réduire les micro-sorties (98% flickering)
 - Maintenir la qualité des entrées (92.5%)
-- Tester plusieurs configurations exit
+- Forcer vraie alternance directionnelle
 
 Usage:
     python tests/test_entry_focused_strategy.py --indicator macd --split test
@@ -40,7 +45,6 @@ class ExitConfig:
     holding_min: int         # Time-based: minimum holding periods
     take_profit: float       # Return-based: TP threshold (e.g. 0.02 = +2%)
     stop_loss: float         # Return-based: SL threshold (e.g. -0.01 = -1%)
-    anti_flip_cooldown: int  # Anti-flip: periods to skip after exit same direction
 
 
 @dataclass
@@ -127,7 +131,7 @@ def run_entry_focused_strategy(
     Strategy:
     1. ENTRY: Use ML predictions (UP → LONG, DOWN → SHORT)
     2. EXIT: First of (Time-based, TP reached, SL reached)
-    3. ANTI-FLIP: Skip entry if last exit same direction within cooldown
+    3. ANTI-FLIP: Skip entry if last exit same direction (wait for opposite signal)
 
     Args:
         predictions: ML predictions (0-1 probabilities)
@@ -148,9 +152,8 @@ def run_entry_focused_strategy(
     trades = []
     total_pnl = 0.0
 
-    # Anti-flip tracking
-    last_exit_direction = None
-    last_exit_time = -999999  # Very old
+    # Anti-flip tracking (directional)
+    last_exit_direction = None  # Track last exit direction
     entries_blocked = 0
 
     # Exit reason counters
@@ -172,11 +175,11 @@ def run_entry_focused_strategy(
 
         # --- ENTRY LOGIC ---
         if position == Position.FLAT:
-            # Anti-flip rule check
-            time_since_exit = i - last_exit_time
-            if (last_exit_direction == target and
-                time_since_exit < config.anti_flip_cooldown):
-                # SKIP: Too soon to re-enter same direction
+            # Anti-flip rule check (directional)
+            if last_exit_direction == target:
+                # SKIP: Wait for opposite signal
+                # Exit LONG → Block LONG until SHORT taken
+                # Exit SHORT → Block SHORT until LONG taken
                 entries_blocked += 1
                 continue
 
@@ -185,6 +188,10 @@ def run_entry_focused_strategy(
             entry_time = i
             entry_price = 1.0  # Normalized
             current_pnl = 0.0
+
+            # Clear last_exit_direction on successful entry (opposite direction)
+            # This allows re-entry same direction after taking opposite
+            last_exit_direction = None
             continue
 
         # --- EXIT LOGIC (Hybrid: Time + TP + SL) ---
@@ -236,9 +243,8 @@ def run_entry_focused_strategy(
                 })
                 total_pnl += pnl_with_fees
 
-                # Update anti-flip tracking
+                # Update anti-flip tracking (directional)
                 last_exit_direction = position
-                last_exit_time = i
 
                 # Reset position
                 position = Position.FLAT
@@ -320,18 +326,17 @@ def test_multiple_configs(
     - Holding: 10, 15, 20, 30 periods
     - TP: 1%, 1.5%, 2%
     - SL: 0.5%, 1%, 1.5%
-    - Cooldown: 5, 10, 15 periods
+    - Anti-flip: Directional (automatic, no cooldown parameter)
 
     Returns:
         Dict mapping config name to results
     """
     configs = []
 
-    # Grid search
+    # Grid search (no cooldown needed - directional blocking)
     holdings = [10, 15, 20, 30]
     tps = [0.01, 0.015, 0.02]  # 1%, 1.5%, 2%
     sls = [0.005, 0.01, 0.015]  # 0.5%, 1%, 1.5%
-    cooldowns = [5, 10, 15]
 
     print("=" * 80)
     print("GÉNÉRATION CONFIGURATIONS")
@@ -339,21 +344,19 @@ def test_multiple_configs(
     print(f"Holding periods: {holdings}")
     print(f"Take Profits: {[f'{tp*100:.1f}%' for tp in tps]}")
     print(f"Stop Losses: {[f'{sl*100:.1f}%' for sl in sls]}")
-    print(f"Cooldowns: {cooldowns}")
+    print(f"Anti-flip: Directional (block same direction until opposite taken)")
     print()
 
     # Create all combinations
     for holding in holdings:
         for tp in tps:
             for sl in sls:
-                for cooldown in cooldowns:
-                    config = ExitConfig(
-                        holding_min=holding,
-                        take_profit=tp,
-                        stop_loss=sl,
-                        anti_flip_cooldown=cooldown
-                    )
-                    configs.append(config)
+                config = ExitConfig(
+                    holding_min=holding,
+                    take_profit=tp,
+                    stop_loss=sl
+                )
+                configs.append(config)
 
     print(f"Total configurations: {len(configs)}")
     print()
@@ -361,7 +364,7 @@ def test_multiple_configs(
     # Test all configs
     results = {}
     for idx, config in enumerate(configs, 1):
-        config_name = f"H{config.holding_min}_TP{config.take_profit*100:.1f}_SL{config.stop_loss*100:.1f}_C{config.anti_flip_cooldown}"
+        config_name = f"H{config.holding_min}_TP{config.take_profit*100:.1f}_SL{config.stop_loss*100:.1f}"
 
         if idx % 10 == 0:
             print(f"Testing config {idx}/{len(configs)}: {config_name}")
@@ -424,7 +427,7 @@ def print_results_table(results: Dict[str, TradeResult]):
     print(f"  Holding Min: {best_result.config.holding_min} périodes")
     print(f"  Take Profit: {best_result.config.take_profit*100:.1f}%")
     print(f"  Stop Loss: {best_result.config.stop_loss*100:.1f}%")
-    print(f"  Cooldown: {best_result.config.anti_flip_cooldown} périodes")
+    print(f"  Anti-Flip: Directional (block same direction until opposite)")
     print()
     print(f"Trades: {best_result.n_trades}")
     print(f"  LONG: {best_result.n_long} ({best_result.n_long/best_result.n_trades*100:.1f}%)")
