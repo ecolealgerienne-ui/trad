@@ -28,6 +28,26 @@ def diagnose_dataset(npz_path: str):
     print(f"  X_train: {X_train.shape}")
     print(f"  Y_train: {Y_train.shape}")
 
+    # Analyser le contenu de X (première séquence, premier timestep)
+    print(f"\n🔍 Contenu de X (première séquence, timestep 0):")
+    print(f"  Feature 0: {X_train[0, 0, 0]:.6f}")
+    print(f"  Feature 1: {X_train[0, 0, 1]:.6f}")
+    print(f"  Feature 2: {X_train[0, 0, 2]:.6f}")
+
+    # Vérifier si features 0 et 1 sont timestamp et asset_id
+    print(f"\n🔍 Analyse des features:")
+    print(f"  Feature 0 min/max: {X_train[:, 0, 0].min():.2f} / {X_train[:, 0, 0].max():.2f}")
+    print(f"  Feature 1 min/max: {X_train[:, 0, 1].min():.2f} / {X_train[:, 0, 1].max():.2f}")
+    print(f"  Feature 2 min/max: {X_train[:, 0, 2].min():.6f} / {X_train[:, 0, 2].max():.6f}")
+
+    # Si feature 1 ressemble à asset_id
+    if np.all(X_train[:, 0, 1] >= 0) and np.all(X_train[:, 0, 1] <= 10):
+        print(f"  ⚠️  Feature 1 ressemble à asset_id (0-4)")
+
+    # Si feature 2 ressemble à un return
+    if np.abs(X_train[:, 0, 2]).max() < 1.0:
+        print(f"  ✅ Feature 2 ressemble à un return (-1 à +1)")
+
     # Asset IDs uniques dans X
     asset_ids_x = np.unique(X_train[:, 0, 1])
     print(f"\n🎯 Asset IDs uniques dans X[:, 0, 1]: {asset_ids_x}")
