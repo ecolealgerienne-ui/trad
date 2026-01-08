@@ -206,14 +206,27 @@ def analyze_transition_sync(predictions: np.ndarray, labels: np.ndarray) -> Dict
     print("ANALYSE DE LATENCE (Model vs Oracle)")
     print("=" * 80)
 
+    # Optimized latency calculation using numpy (O(n log n) instead of O(n²))
+    oracle_arr = np.array(oracle_transitions)
+    model_arr = np.array(model_transitions)
+
     latencies = []
-    for oracle_idx in oracle_transitions:
-        # Find nearest model transition (before or after)
-        min_distance = float('inf')
-        for model_idx in model_transitions:
-            distance = model_idx - oracle_idx
-            if abs(distance) < abs(min_distance):
-                min_distance = distance
+    for oracle_idx in oracle_arr:
+        # Find nearest model transition using binary search
+        idx = np.searchsorted(model_arr, oracle_idx)
+
+        # Check both neighbors (before and after)
+        candidates = []
+        if idx > 0:
+            candidates.append(model_arr[idx - 1] - oracle_idx)  # Before
+        if idx < len(model_arr):
+            candidates.append(model_arr[idx] - oracle_idx)  # After
+
+        # Pick nearest
+        if candidates:
+            min_distance = min(candidates, key=abs)
+        else:
+            min_distance = 0  # Shouldn't happen
 
         latencies.append(min_distance)
 
