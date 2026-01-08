@@ -618,19 +618,8 @@ def main():
         device = args.device
     logger.info(f"\nDevice: {device}")
 
-    # Afficher hyperparamètres
-    # Déterminer mode (multi-output ou single-output)
-    single_indicator = args.indicator != 'all'
-    if single_indicator:
-        indicator_idx = INDICATOR_INDEX[args.indicator]  # None pour close, macd40, etc.
-        indicator_name = INDICATOR_NAMES[args.indicator]
-        num_outputs = 1
-        logger.info(f"\n🎯 Mode SINGLE-OUTPUT: {indicator_name}")
-    else:
-        indicator_idx = None
-        indicator_name = None
-        num_outputs = 3
-        logger.info(f"\n🎯 Mode MULTI-OUTPUT: RSI, CCI, MACD")
+    # NOTE: Mode (single vs multi) sera déterminé APRÈS le chargement des données
+    # pour permettre la détection automatique de l'indicateur depuis le nom du fichier
 
     logger.info(f"\n⚙️ Hyperparamètres d'entraînement:")
     logger.info(f"  Batch size: {args.batch_size}")
@@ -722,6 +711,63 @@ def main():
 
         if filter_type_metadata:
             logger.info(f"  Filtre: {filter_type_metadata.upper()}")
+
+    # =========================================================================
+    # AUTO-DÉTECTION INDICATEUR (depuis filename ou metadata)
+    # =========================================================================
+    detected_indicator = None
+    detected_filter = None
+
+    if args.data:
+        data_name = Path(args.data).stem.lower()  # dataset_btc_macd_direction_only_kalman_wt
+
+        # Détecter indicateur depuis le nom du fichier
+        for ind in ['rsi', 'cci', 'macd', 'close']:
+            if f'_{ind}_' in data_name or data_name.endswith(f'_{ind}'):
+                detected_indicator = ind
+                break
+
+        # Détecter filtre depuis le nom du fichier (fallback si pas dans metadata)
+        for filt in ['kalman', 'octave20', 'octave', 'decycler']:
+            if filt in data_name:
+                detected_filter = filt
+                break
+
+    # Priorité: metadata > filename > CLI
+    if is_dual_binary and indicator_for_metrics:
+        detected_indicator = indicator_for_metrics.lower()
+
+    # Priorité pour le filtre: metadata > CLI argument > filename
+    if filter_type_metadata:
+        detected_filter = filter_type_metadata
+    elif args.filter:
+        detected_filter = args.filter
+
+    # Fallback sur CLI pour ancien pipeline (si aucune détection)
+    if not detected_indicator and args.indicator != 'all':
+        detected_indicator = args.indicator
+
+    # =========================================================================
+    # DÉTERMINER MODE (single vs multi) APRÈS détection indicateur
+    # =========================================================================
+    # Si indicateur détecté (filename/metadata) OU CLI != 'all' → SINGLE-OUTPUT
+    single_indicator = detected_indicator is not None or args.indicator != 'all'
+
+    if single_indicator:
+        if detected_indicator:
+            indicator_idx = INDICATOR_INDEX.get(detected_indicator)
+            indicator_name = INDICATOR_NAMES.get(detected_indicator, detected_indicator.upper())
+        else:
+            indicator_idx = INDICATOR_INDEX[args.indicator]
+            indicator_name = INDICATOR_NAMES[args.indicator]
+        num_outputs = 1
+        logger.info(f"\n🎯 Mode SINGLE-OUTPUT: {indicator_name}")
+        logger.info(f"   Indicateur détecté: {detected_indicator or args.indicator}")
+    else:
+        indicator_idx = None
+        indicator_name = None
+        num_outputs = 3
+        logger.info(f"\n🎯 Mode MULTI-OUTPUT: RSI, CCI, MACD")
 
     # Filtrer les labels si mode single-output (ancien pipeline)
     if single_indicator and not is_dual_binary:
@@ -885,44 +931,9 @@ def main():
     }
 
     # =========================================================================
-    # NOMMAGE AUTOMATIQUE DU MODÈLE (détection intelligente)
+    # NOMMAGE AUTOMATIQUE DU MODÈLE
     # =========================================================================
-    # Détecter l'indicateur depuis:
-    # 1. Les metadata (dual-binary: indicator_for_metrics)
-    # 2. Le nom du fichier (ex: dataset_..._rsi_dual_binary_kalman.npz → 'rsi')
-    # 3. L'argument CLI --indicator (fallback ancien pipeline)
-
-    detected_indicator = None
-    detected_filter = None
-
-    if args.data:
-        data_name = Path(args.data).stem.lower()  # dataset_btc_eth_bnb_ada_ltc_rsi_dual_binary_kalman
-
-        # Détecter indicateur depuis le nom du fichier
-        for ind in ['rsi', 'cci', 'macd', 'close']:
-            if f'_{ind}_' in data_name or data_name.endswith(f'_{ind}'):
-                detected_indicator = ind
-                break
-
-        # Détecter filtre depuis le nom du fichier (fallback si pas dans metadata)
-        for filt in ['kalman', 'octave20', 'octave', 'decycler']:
-            if filt in data_name:
-                detected_filter = filt
-                break
-
-    # Priorité: metadata > filename > CLI
-    if is_dual_binary and indicator_for_metrics:
-        detected_indicator = indicator_for_metrics.lower()
-
-    # Priorité pour le filtre: metadata > CLI argument > filename
-    if filter_type_metadata:
-        detected_filter = filter_type_metadata
-    elif args.filter:
-        detected_filter = args.filter
-
-    # Fallback sur CLI pour ancien pipeline
-    if not detected_indicator and single_indicator:
-        detected_indicator = args.indicator
+    # detected_indicator et detected_filter ont été détectés plus tôt (lignes 715-748)
 
     # Construire le nom du modèle
     suffix_parts = []
