@@ -515,16 +515,24 @@ def create_sequences_for_indicator(df: pd.DataFrame,
     combined[:, 2:] = features  # float32 → float64 (cast automatique)
 
     # Étape 2: Appliquer sliding_window_view (opération instantanée, pas de copie !)
-    # Shape: (n_windows, seq_length, n_features+2)
-    # Note: sliding_window_view retourne une vue, pas une copie → économie RAM
+    # Note: sliding_window_view sur array 2D retourne directement shape 3D
+    # Input: (n_samples, n_features+2)
+    # Output: (n_samples - seq_length + 1, seq_length, n_features+2)
     X_all_windows = sliding_window_view(combined, window_shape=seq_length, axis=0)
-    # Reshape pour avoir la bonne structure (bug de sliding_window_view avec 2D)
-    X_all_windows = X_all_windows[:, 0, :, :]  # (n_windows, seq_length, n_features+2)
 
     # Étape 3: Appliquer cold start (skip premiers start_index)
-    X = X_all_windows[start_index - seq_length:].copy()  # .copy() pour libérer la vue
+    # Alignement fenêtre/label :
+    # - Pour prédire label[i], on utilise la fenêtre combined[i-seq_length:i]
+    # - X_all_windows[j] = fenêtre combined[j:j+seq_length]
+    # - Donc fenêtre combined[i-seq_length:i] = X_all_windows[i-seq_length]
+    # - Pour label[start_index], on veut X_all_windows[start_index-seq_length]
+    # - Pour label[n-1], on veut X_all_windows[n-1-seq_length]
+    # Donc: X = X_all_windows[start_index-seq_length:]
+    window_start_idx = start_index - seq_length
+    X = X_all_windows[window_start_idx:].copy()  # .copy() pour libérer la vue
 
     # Étape 4: Y, T, OHLCV (vectorisé sans boucle)
+    # Les labels correspondent aux indices [start_index, start_index+1, ..., n-1]
     n_sequences = len(X)
 
     # Y: [timestamp, asset_id, direction]
