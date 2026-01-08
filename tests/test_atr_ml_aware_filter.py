@@ -25,12 +25,16 @@ Usage:
     python tests/test_atr_ml_aware_filter.py --indicator macd --split test --n 6 --lambda-w 1.0 --atr-q-low 25 --atr-q-high 70
 """
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
+
 import argparse
 import numpy as np
 import pandas as pd
-from pathlib import Path
 from typing import Dict, Tuple
 from dataclasses import dataclass
+from structural_filters import compute_structural_features
 
 
 # =============================================================================
@@ -388,8 +392,6 @@ def load_predictions_and_ohlcv(
     returns = c_ret[:, -1]  # Dernier timestep
 
     # Charger OHLCV avec ATR (réutilise structural_filters.py)
-    from structural_filters import compute_structural_features
-
     ohlcv_dfs = {}
     assets = ['BTC', 'ETH', 'BNB', 'ADA', 'LTC']
     for asset in assets:
