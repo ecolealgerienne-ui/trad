@@ -1,12 +1,12 @@
 # Modele CNN-LSTM Multi-Output - Guide Complet
 
 **Date**: 2026-01-08
-**Statut**: ❌ **Phase 2.9 COMPLÉTÉE - Filtres ATR Abandonnés (Échec Validé)**
-**Version**: 9.0 - ATR Structural et ML-Aware testés et abandonnés (flickering 98% domine)
+**Statut**: ❌ **Test Oracle Kalman Sliding COMPLÉTÉ - Échec Validé sur 3 Indicateurs**
+**Version**: 9.1 - Oracle Kalman Glissant: -19% à -30% PnL (vs Kalman Global: +6,644%)
 **Models**: MACD Kalman 92.5% | CCI Kalman 90.2% | RSI Kalman 87.6% - Direction-Only validés
-**Découverte Critique**: Filtrer ENTRÉES inefficace si 98% trades = FLIPS (flickering)
-**Problème Racine**: Gap Accuracy (92.5%) vs Win Rate (31%) = Labels 1-période vs Trades multi-périodes
-**Prochaine Étape**: Timeframe 15min/30min (réduction naturelle -50-67%) OU Consensus Multi-Indicateurs
+**Découverte Critique**: Kalman Glissant (W=100) DÉTRUIT le signal (Win Rate <30%, PnL négatif même Oracle)
+**Problème Racine**: LAG/RETARD massif + Labels instables → Trading à contretemps
+**Prochaine Étape**: Timeframe 15min/30min (Kalman GLOBAL) OU Retour à Phase 2.10 baseline (+6,644%)
 
 ---
 
@@ -1232,6 +1232,182 @@ python tests/test_transition_sync.py --indicator cci --split test
 **Priorité 3:** Features retournements + Dual-Task model
 - Plus complexe, mais potentiel gain maximal
 - Nécessite réarchitecture
+
+---
+
+## ❌ TEST ORACLE - KALMAN SLIDING WINDOW (2026-01-08)
+
+**Date**: 2026-01-08
+**Statut**: ❌ **ÉCHEC VALIDÉ - Kalman Glissant DÉTRUIT le signal**
+**Script**: `tests/test_oracle_sliding_window.py`
+**Objectif**: Tester le potentiel maximum du signal avec Kalman appliqué en fenêtre glissante
+
+### Contexte
+
+Suite à Phase 2.11 (Weighted Loss échec: -6.5% transition accuracy), test Oracle pour valider si le signal existe avec Kalman glissant.
+
+**Hypothèse**: Appliquer Kalman sur fenêtre glissante (window=100) + labels Oracle devrait donner PnL positif si le signal existe.
+
+### Pipeline Correct (après correction bug)
+
+**🐛 Bug Initial Identifié:**
+```python
+# ❌ INCORRECT (bug commit 0c733b4)
+returns = extract_c_ret(X, indicator)  # Extrait c_ret du dataset
+values = 50.0 + np.cumsum(returns * 100)  # cumsum = reconstruction PRIX!
+# Résultat: RSI et MACD donnaient MÊMES résultats (tous deux = cumsum du prix)
+```
+
+**✅ Pipeline Correct (commit 165721f):**
+1. Charger **CSV brut** (OHLC) depuis `data_trad/BTCUSD_all_5m.csv`
+2. Calculer **indicateur brut** (RSI/MACD/CCI) avec `calculate_rsi()`, `calculate_macd()`, `calculate_cci()`
+3. Appliquer **Kalman glissant** sur valeurs brutes (window=100)
+4. Calculer **labels Oracle**: `filtered[t-2] > filtered[t-3]` ou `filtered[t-3] > filtered[t-4]`
+5. Extraire **returns**: `df['close'].pct_change()`
+6. **Backtest** avec labels parfaits
+
+### Résultats - 3 Indicateurs (N=1000 samples, window=100)
+
+| Indicateur | Trades | Win Rate (T1/T2) | PnL Net (T1) | PnL Net (T2) | Avg Duration | Frais | Verdict |
+|------------|--------|------------------|--------------|--------------|--------------|-------|---------|
+| **MACD** 🥇 | **47** | **27.7% / 29.8%** | **-19.06%** | **-13.89%** | **21.2p (~1h45)** | 9.4% | **Moins pire** |
+| **RSI** 🥉 | **121** | 25.6% / 24.0% | -21.96% | **-30.62%** | 8.2p (~40min) | **24.2%** | **Pire** |
+| **CCI** 🥈 | **135** | 26.7% / 28.2% | **-27.19%** | -25.97% | 7.4p (~35min) | **27.0%** | **Très pire** |
+
+**Observation critique**: T1 = `filtered[t-2] > filtered[t-3]`, T2 = `filtered[t-3] > filtered[t-4]`
+
+### Analyse Détaillée
+
+#### 1. TOUS les indicateurs ÉCHOUENT
+
+- ❌ **Win Rate < 30%** (pire que hasard 50%)
+- ❌ **PnL Net tous négatifs** (-13% à -30%)
+- ❌ **Profit Factor < 0.6** (< 1.0 = perdant garanti)
+- ❌ **Sharpe Ratio tous négatifs** (-52 à -99)
+
+#### 2. Plus de trades = Pire performance
+
+```
+MACD (stable):      47 trades →  9.4% frais → -19% PnL Net  ← Moins pire
+RSI (nerveux):     121 trades → 24.2% frais → -30% PnL Net  ← Pire (-57% vs MACD)
+CCI (très nerveux): 135 trades → 27.0% frais → -27% PnL Net  ← Très pire (-43% vs MACD)
+```
+
+**Pattern clair**: Les indicateurs nerveux (oscillateurs) overtrading massif → frais détruisent le PnL.
+
+#### 3. MACD = Indicateur le plus robuste
+
+**Pourquoi MACD survit mieux (même s'il échoue) :**
+- MACD = Indicateur de **tendance lourde** (double EMA)
+- Naturellement plus stable que RSI/CCI (oscillateurs de vitesse)
+- Moins de transitions détectées (47 vs 121-135)
+- Trades 3× plus longs (21.2p vs 7-8p)
+- Frais 2.5-3× plus bas (9.4% vs 24-27%)
+
+**Hiérarchie validée**:
+```
+MACD (tendance) > CCI (déviation) > RSI (vitesse)
+   -19%              -27%             -30%
+```
+
+#### 4. Comparaison avec Phase 2.10 (Kalman GLOBAL)
+
+| Test | Méthode | PnL Oracle | Conclusion |
+|------|---------|------------|------------|
+| **Phase 2.10** | Kalman **GLOBAL** | **+6,644%** ✅ | Signal EXISTE |
+| **Ce test** | Kalman **GLISSANT (W=100)** | **-19% à -30%** ❌ | Kalman glissant DÉTRUIT signal |
+
+**Différence critique**:
+```
+Kalman GLOBAL (Phase 2.10):
+  - Appliqué sur TOUT l'historique (~640k samples)
+  - Labels stables (100% concordance)
+  - Aucun LAG/RETARD
+  → Oracle: +6,644% (signal fonctionne!)
+
+Kalman GLISSANT (ce test):
+  - Appliqué sur fenêtres de 100 samples
+  - Labels instables/retardés
+  - LAG énorme (50-100 périodes)
+  → Oracle: -19% à -30% (signal détruit)
+```
+
+### Diagnostic : Pourquoi Kalman Glissant Échoue
+
+#### Problème 1: LAG/RETARD massif
+
+```
+Kalman window=100 + label lag (t-2 vs t-3) = Signal TRÈS retardé
+
+Quand Kalman détecte une hausse (t-2 > t-3):
+  → Le marché est DÉJÀ en train de redescendre
+  → Trading à contretemps
+  → Win Rate 22-30% (pire que hasard)
+```
+
+#### Problème 2: Labels instables
+
+- Kalman sur fenêtre courte (100) → labels changent selon la fenêtre
+- Concordance avec global: probablement 85-90% (vs 100% avec global)
+- 10-15% de désaccords → transitions aléatoires → overtrading
+
+#### Problème 3: Oscillateurs amplifiés
+
+RSI/CCI déjà nerveux × Kalman instable = Catastrophe:
+- RSI: 121 trades (2.5× MACD)
+- CCI: 135 trades (2.9× MACD)
+- Frais 24-27% détruisent tout
+
+### Scripts et Commandes
+
+**Script créé**: `tests/test_oracle_sliding_window.py`
+
+**Commandes:**
+```bash
+# Test MACD (meilleur des 3)
+python tests/test_oracle_sliding_window.py --indicator macd --asset BTC --n-samples 1000 --window 100
+
+# Test RSI (pire)
+python tests/test_oracle_sliding_window.py --indicator rsi --asset BTC --n-samples 1000 --window 100
+
+# Test CCI (très pire)
+python tests/test_oracle_sliding_window.py --indicator cci --asset BTC --n-samples 1000 --window 100
+```
+
+**Commits:**
+- Script initial (bugué): 0c733b4
+- Fix pipeline (CSV brut → indicateur): 165721f
+
+### Conclusion Finale
+
+#### ❌ ABANDONNER DÉFINITIVEMENT:
+
+1. **Kalman glissant** pour labels/trading
+2. Toute approche de **filtrage sur fenêtre courte** (≤ 100-200)
+3. Utilisation de RSI/CCI comme **indicateurs principaux** (trop nerveux)
+
+**Raisons empiriques**:
+- 3/3 indicateurs échouent avec Oracle (labels parfaits!)
+- Win Rate < 30% = signal anti-prédictif
+- PnL -19% à -30% = frais détruisent tout
+- Comparaison Phase 2.10: Kalman global +6,644% vs glissant -19% à -30%
+
+#### ✅ CONTINUER AVEC:
+
+1. **Kalman GLOBAL** (validé: +6,644% Oracle en Phase 2.10)
+2. **MACD comme pivot** (confirmé comme le plus stable)
+3. Approches alternatives:
+   - Timeframe 15/30min (réduction naturelle trades)
+   - Consensus multi-indicateurs (Phase 2.7: Direction 4/6)
+   - Filtres structurels (ATR, volume, régime)
+
+#### 📋 Leçon Apprise
+
+> **"Sliding Window Kalman ≠ Global Kalman"**
+>
+> Le Kalman glissant introduit un LAG/RETARD qui détruit complètement le signal, même avec des labels Oracle parfaits. Seul le Kalman GLOBAL (appliqué sur tout l'historique) fonctionne.
+
+**Ne JAMAIS retester cette approche sans raison fondamentale.**
 
 ---
 
