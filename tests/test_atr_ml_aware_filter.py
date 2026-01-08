@@ -341,11 +341,11 @@ def load_predictions_and_ohlcv(
     indicator: str,
     filter_type: str,
     split: str = 'test'
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, pd.DataFrame]]:
+) -> Tuple[np.ndarray, np.ndarray, Dict[str, pd.DataFrame]]:
     """
-    Charge prédictions Direction, X (pour returns), et DataFrames OHLCV.
+    Charge prédictions Direction depuis .npz et DataFrames OHLCV.
 
-    RÉUTILISE: Logique validée de test_atr_structural_filter.py.
+    RÉUTILISE: Logique validée de test_holding_strategy.py.
 
     Args:
         indicator: 'macd', 'rsi', 'cci'
@@ -353,9 +353,8 @@ def load_predictions_and_ohlcv(
         split: 'train', 'val', 'test'
 
     Returns:
-        (predictions, X, returns, ohlcv_dfs)
-        - predictions: Probabilités Direction (0-1)
-        - X: Features brutes (pour extraire c_ret)
+        (predictions, returns, ohlcv_dfs)
+        - predictions: Probabilités Direction (0-1) depuis .npz
         - returns: Returns réels (%) extraits de X
         - ohlcv_dfs: Dict {asset: DataFrame OHLCV avec atr_norm}
     """
@@ -367,42 +366,25 @@ def load_predictions_and_ohlcv(
 
     data = np.load(dataset_path, allow_pickle=True)
 
-    # Sélection split (PAS de metadata dans Direction-Only!)
-    if split == 'train':
-        X = data['X_train']
-        Y = data['Y_train']
-    elif split == 'val':
-        X = data['X_val']
-        Y = data['Y_val']
-    else:
-        X = data['X_test']
-        Y = data['Y_test']
+    # Charger X, Y, et Y_pred directement depuis le .npz
+    X = data[f'X_{split}']
+    Y = data[f'Y_{split}']
+    Y_pred = data.get(f'Y_{split}_pred', None)
 
-    # Charger modèle et prédire
-    model_name = f"best_model_{indicator}_{filter_type}_direction_only.pth"
-    model_path = Path("models") / model_name
+    if Y_pred is None:
+        raise ValueError(f"Y_{split}_pred introuvable dans {dataset_path}")
 
-    if not model_path.exists():
-        raise FileNotFoundError(f"Modèle introuvable: {model_path}")
-
-    import torch
-    from model import MultiOutputCNNLSTM
-
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-    n_features = X.shape[2]
-    model = MultiOutputCNNLSTM(n_features=n_features, n_outputs=1).to(device)
-    model.load_state_dict(torch.load(model_path, map_location=device))
-    model.eval()
-
-    with torch.no_grad():
-        X_tensor = torch.tensor(X, dtype=torch.float32, device=device)
-        outputs = model(X_tensor).cpu().numpy().flatten()
-
-    predictions = outputs  # Déjà en [0,1] (sigmoid dans forward)
+    # Y_pred shape: (n_samples, 1) pour Direction-Only
+    predictions = Y_pred.flatten()  # (n_samples,)
 
     # Extraire returns (c_ret de X - logique validée!)
-    c_ret = X[:, :, 0]  # Feature 0 = c_ret
+    if indicator in ['rsi', 'macd']:
+        c_ret = X[:, :, 0]  # Feature 0 = c_ret
+    elif indicator == 'cci':
+        c_ret = X[:, :, 2]  # Feature 2 = c_ret pour CCI
+    else:
+        raise ValueError(f"Indicateur inconnu: {indicator}")
+
     returns = c_ret[:, -1]  # Dernier timestep
 
     # Charger OHLCV avec ATR (réutilise structural_filters.py)
@@ -422,7 +404,7 @@ def load_predictions_and_ohlcv(
 
             ohlcv_dfs[asset] = df
 
-    return predictions, X, returns, ohlcv_dfs
+    return predictions, returns, ohlcv_dfs
 
 
 def compute_atr_from_ohlcv(
@@ -502,11 +484,11 @@ def run_atr_ml_aware_tests(
 
     # Charger Kalman
     print("Chargement prédictions Kalman...")
-    pred_kalman, X_kalman, returns, ohlcv_dfs = load_predictions_and_ohlcv(indicator, 'kalman', split)
+    pred_kalman, returns, ohlcv_dfs = load_predictions_and_ohlcv(indicator, 'kalman', split)
 
     # Charger Octave
     print("Chargement prédictions Octave...")
-    pred_octave, X_octave, _, _ = load_predictions_and_ohlcv(indicator, 'octave20', split)
+    pred_octave, _, _ = load_predictions_and_ohlcv(indicator, 'octave20', split)
 
     # Vérifier longueurs
     if len(pred_kalman) != len(pred_octave):
