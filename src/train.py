@@ -151,7 +151,15 @@ def train_epoch(
     all_predictions = []
     all_targets = []
 
-    for X_batch, Y_batch in dataloader:
+    for batch in dataloader:
+        # Unpacking flexible: (X, Y) ou (X, Y, T)
+        if len(batch) == 3:
+            X_batch, Y_batch, T_batch = batch
+            T_batch = T_batch.to(device)
+        else:
+            X_batch, Y_batch = batch
+            T_batch = None
+
         # Déplacer sur device
         X_batch = X_batch.to(device)
         Y_batch = Y_batch.to(device)
@@ -160,8 +168,11 @@ def train_epoch(
         optimizer.zero_grad()
         outputs = model(X_batch)
 
-        # Loss
-        loss = loss_fn(outputs, Y_batch)
+        # Loss (passer transitions si WeightedTransitionBCELoss)
+        if T_batch is not None:
+            loss = loss_fn(outputs, Y_batch, T_batch)
+        else:
+            loss = loss_fn(outputs, Y_batch)
 
         # Backward
         loss.backward()
@@ -211,7 +222,15 @@ def validate_epoch(
     all_targets = []
 
     with torch.no_grad():
-        for X_batch, Y_batch in dataloader:
+        for batch in dataloader:
+            # Unpacking flexible: (X, Y) ou (X, Y, T)
+            if len(batch) == 3:
+                X_batch, Y_batch, T_batch = batch
+                T_batch = T_batch.to(device)
+            else:
+                X_batch, Y_batch = batch
+                T_batch = None
+
             # Déplacer sur device
             X_batch = X_batch.to(device)
             Y_batch = Y_batch.to(device)
@@ -219,8 +238,11 @@ def validate_epoch(
             # Forward
             outputs = model(X_batch)
 
-            # Loss
-            loss = loss_fn(outputs, Y_batch)
+            # Loss (passer transitions si WeightedTransitionBCELoss)
+            if T_batch is not None:
+                loss = loss_fn(outputs, Y_batch, T_batch)
+            else:
+                loss = loss_fn(outputs, Y_batch)
 
             # Accumuler
             total_loss += loss.item() * X_batch.size(0)
@@ -632,9 +654,24 @@ def main():
         # Charger données préparées (rapide)
         logger.info(f"\n1. Chargement des données préparées: {args.data}")
         prepared = load_prepared_data(args.data)
-        X_train, Y_train = prepared['train']
-        X_val, Y_val = prepared['val']
-        X_test, Y_test = prepared['test']
+
+        # Unpacking avec détection automatique des transitions (Phase 2.11)
+        if len(prepared['train']) == 3:
+            # Nouveau format: (X, Y, T) avec transitions
+            X_train, Y_train, T_train = prepared['train']
+            X_val, Y_val, T_val = prepared['val']
+            X_test, Y_test, T_test = prepared['test']
+            has_transitions = True
+            logger.info(f"  ✅ Dataset avec transitions détecté (Phase 2.11 - Weighted Loss)")
+        else:
+            # Ancien format: (X, Y) sans transitions
+            X_train, Y_train = prepared['train']
+            X_val, Y_val = prepared['val']
+            X_test, Y_test = prepared['test']
+            T_train = T_val = T_test = None
+            has_transitions = False
+            logger.info(f"  ℹ️ Dataset sans transitions (backward compatibility)")
+
         metadata = prepared['metadata']
         log_dataset_metadata(metadata, logger)
     else:
@@ -703,8 +740,9 @@ def main():
     # =========================================================================
     logger.info("\n2. Création des DataLoaders...")
 
-    train_dataset = IndicatorDataset(X_train, Y_train)
-    val_dataset = IndicatorDataset(X_val, Y_val)
+    # Passer les transitions si disponibles (Phase 2.11)
+    train_dataset = IndicatorDataset(X_train, Y_train, T_train)
+    val_dataset = IndicatorDataset(X_val, Y_val, T_val)
 
     train_loader = DataLoader(
         train_dataset,
@@ -768,19 +806,47 @@ def main():
     logger.info(f"  num_features={n_features_detected}, num_outputs={num_outputs_final}")
     logger.info(f"  use_layer_norm={use_layer_norm}, use_bce_with_logits={use_bce_with_logits}")
 
-    model, loss_fn = create_model(
-        device=device,
-        num_indicators=n_features_detected,
-        num_outputs=num_outputs_final,
-        cnn_filters=args.cnn_filters,
-        lstm_hidden_size=args.lstm_hidden,
-        lstm_num_layers=args.lstm_layers,
-        lstm_dropout=args.lstm_dropout,
-        dense_hidden_size=args.dense_hidden,
-        dense_dropout=args.dense_dropout,
-        use_layer_norm=use_layer_norm,
-        use_bce_with_logits=use_bce_with_logits
-    )
+    # Phase 2.11: Utiliser WeightedTransitionBCELoss si transitions disponibles
+    if has_transitions:
+        logger.info(f"  🎯 Phase 2.11: WeightedTransitionBCELoss ACTIVÉ (transition_weight=5.0×)")
+        from model import WeightedTransitionBCELoss
+
+        # Créer le modèle (sans loss, on la remplace)
+        model, _ = create_model(
+            device=device,
+            num_indicators=n_features_detected,
+            num_outputs=num_outputs_final,
+            cnn_filters=args.cnn_filters,
+            lstm_hidden_size=args.lstm_hidden,
+            lstm_num_layers=args.lstm_layers,
+            lstm_dropout=args.lstm_dropout,
+            dense_hidden_size=args.dense_hidden,
+            dense_dropout=args.dense_dropout,
+            use_layer_norm=use_layer_norm,
+            use_bce_with_logits=use_bce_with_logits
+        )
+
+        # Remplacer par WeightedTransitionBCELoss
+        loss_fn = WeightedTransitionBCELoss(
+            num_outputs=num_outputs_final,
+            transition_weight=5.0,  # 5× poids pour les transitions
+            use_bce_with_logits=use_bce_with_logits
+        )
+    else:
+        # Backward compatibility: loss classique
+        model, loss_fn = create_model(
+            device=device,
+            num_indicators=n_features_detected,
+            num_outputs=num_outputs_final,
+            cnn_filters=args.cnn_filters,
+            lstm_hidden_size=args.lstm_hidden,
+            lstm_num_layers=args.lstm_layers,
+            lstm_dropout=args.lstm_dropout,
+            dense_hidden_size=args.dense_hidden,
+            dense_dropout=args.dense_dropout,
+            use_layer_norm=use_layer_norm,
+            use_bce_with_logits=use_bce_with_logits
+        )
 
     # Optimizer
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
@@ -866,6 +932,9 @@ def main():
         suffix_parts.append(detected_filter)
     if is_dual_binary:
         suffix_parts.append('dual_binary')
+    # Phase 2.11: Ajouter _wt si transitions (ne pas écraser modèles existants)
+    if has_transitions:
+        suffix_parts.append('wt')
 
     if suffix_parts:
         suffix = '_'.join(suffix_parts)
@@ -876,6 +945,8 @@ def main():
     logger.info(f"\n💾 Modèle sauvegardé:")
     logger.info(f"  Indicateur détecté: {detected_indicator or 'aucun'}")
     logger.info(f"  Filtre détecté: {detected_filter or 'aucun'}")
+    if has_transitions:
+        logger.info(f"  ✅ Weighted Transitions: OUI (suffixe _wt ajouté)")
 
     logger.info(f"  Modèle sera sauvegardé: {save_path}")
 
