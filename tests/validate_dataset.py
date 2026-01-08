@@ -11,6 +11,7 @@ Vérifie:
 """
 
 import numpy as np
+import json
 import argparse
 from pathlib import Path
 
@@ -199,26 +200,49 @@ def validate_dataset(npz_path: str, verbose: bool = True):
     print("MÉTADONNÉES")
     print('─'*80)
 
-    metadata = data['metadata'].item()
+    # Charger metadata (stocké en JSON string dans le .npz)
+    metadata_raw = data['metadata']
 
-    required_meta = [
-        'version', 'architecture', 'indicator', 'assets',
-        'filter_type', 'trim_edges', 'labels', 'label_names'
-    ]
+    # Si c'est un array numpy, extraire l'item
+    if hasattr(metadata_raw, 'item'):
+        metadata_str = metadata_raw.item()
+    else:
+        metadata_str = metadata_raw
 
-    missing_meta = [k for k in required_meta if k not in metadata]
-    if missing_meta:
-        warnings.append(f"Métadonnées manquantes: {missing_meta}")
+    # Parser le JSON string en dict
+    try:
+        if isinstance(metadata_str, str):
+            metadata = json.loads(metadata_str)
+        elif isinstance(metadata_str, dict):
+            metadata = metadata_str  # Déjà un dict
+        else:
+            raise ValueError(f"Type inattendu: {type(metadata_str)}")
+    except Exception as e:
+        errors.append(f"Erreur parsing métadonnées: {e}")
+        print(f"❌ Métadonnées: erreur parsing ({e})")
+        print(f"   Type: {type(metadata_str).__name__}")
+        metadata = {}
 
-    if verbose:
-        print(f"\nIndicateur: {metadata.get('indicator', 'N/A')}")
-        print(f"Assets: {metadata.get('assets', 'N/A')}")
-        print(f"Filtre: {metadata.get('filter_type', 'N/A')}")
-        print(f"TRIM edges: {metadata.get('trim_edges', 'N/A')}")
-        print(f"Labels: {metadata.get('label_names', 'N/A')}")
+    # Vérifier les champs requis
+    if metadata:
+        required_meta = [
+            'version', 'architecture', 'indicator', 'assets',
+            'filter_type', 'trim_edges', 'labels', 'label_names'
+        ]
 
-    if not missing_meta:
-        print("\n✅ Métadonnées complètes")
+        missing_meta = [k for k in required_meta if k not in metadata]
+        if missing_meta:
+            warnings.append(f"Métadonnées manquantes: {missing_meta}")
+
+        if verbose:
+            print(f"\nIndicateur: {metadata.get('indicator', 'N/A')}")
+            print(f"Assets: {metadata.get('assets', 'N/A')}")
+            print(f"Filtre: {metadata.get('filter_type', 'N/A')}")
+            print(f"TRIM edges: {metadata.get('trim_edges', 'N/A')}")
+            print(f"Labels: {metadata.get('label_names', 'N/A')}")
+
+        if not missing_meta:
+            print("\n✅ Métadonnées complètes")
 
     # ========================================================================
     # RÉSUMÉ
