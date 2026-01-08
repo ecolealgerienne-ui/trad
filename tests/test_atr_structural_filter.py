@@ -294,8 +294,15 @@ def backtest_atr_filter(
     q_low_val = np.percentile(atr, atr_q_low)
     q_high_val = np.percentile(atr, atr_q_high)
 
-    # Masque ATR (Q20 < ATR < Q80)
-    atr_mask = (atr > q_low_val) & (atr < q_high_val)
+    # Masque ATR (Q20 <= ATR <= Q80)
+    # NOTE: Utiliser <= pour inclure les bornes (important pour baseline Q0-Q100)
+    if atr_q_low == 0.0 and atr_q_high == 100.0:
+        # Baseline: tout autoriser
+        atr_mask = np.ones(len(atr), dtype=bool)
+    else:
+        # Filtre: bornes inclusives
+        atr_mask = (atr >= q_low_val) & (atr <= q_high_val)
+
     atr_coverage = atr_mask.mean()
 
     logger.info(f"📊 ATR Percentiles: Q{atr_q_low}={q_low_val:.4f}, Q{atr_q_high}={q_high_val:.4f}")
@@ -494,7 +501,12 @@ def print_comparison_table(results: List[StrategyResult], baseline: StrategyResu
         if res.name == "Baseline":
             continue
 
-        reduction = (1 - res.n_trades / baseline.n_trades) * 100 if baseline.n_trades > 0 else 0
+        # Calculer réduction (avec protection division par zéro)
+        if baseline.n_trades > 0:
+            reduction = (1 - res.n_trades / baseline.n_trades) * 100
+        else:
+            reduction = 0.0
+
         delta_wr = (res.win_rate - baseline.win_rate) * 100
 
         # Verdict
@@ -516,19 +528,24 @@ def print_comparison_table(results: List[StrategyResult], baseline: StrategyResu
     print("="*100)
 
     # Métriques détaillées du meilleur
-    best = max(results, key=lambda r: r.total_pnl_after_fees)
+    # Filtrer baseline pour trouver le meilleur
+    non_baseline_results = [r for r in results if r.name != "Baseline"]
 
-    print(f"\n🏆 MEILLEURE CONFIG: {best.name}")
-    print(f"   Trades: {best.n_trades:,} ({best.n_long:,} LONG + {best.n_short:,} SHORT)")
-    print(f"   Win Rate: {best.win_rate*100:.2f}%")
-    print(f"   PnL Brut: {best.total_pnl:+.2f}%")
-    print(f"   PnL Net: {best.total_pnl_after_fees:+.2f}%")
-    print(f"   Frais: {best.total_fees:.2f}%")
-    print(f"   Profit Factor: {best.profit_factor:.2f}")
-    print(f"   Sharpe Ratio: {best.sharpe_ratio:.2f}")
-    print(f"   Avg Duration: {best.avg_duration:.1f} périodes")
-    print(f"   ATR Coverage: {best.atr_coverage*100:.1f}%")
-    print(f"   ATR Range: [{best.atr_q_low:.4f}, {best.atr_q_high:.4f}]")
+    if non_baseline_results:
+        best = max(non_baseline_results, key=lambda r: r.total_pnl_after_fees)
+        print(f"\n🏆 MEILLEURE CONFIG: {best.name}")
+        print(f"   Trades: {best.n_trades:,} ({best.n_long:,} LONG + {best.n_short:,} SHORT)")
+        print(f"   Win Rate: {best.win_rate*100:.2f}%")
+        print(f"   PnL Brut: {best.total_pnl:+.2f}%")
+        print(f"   PnL Net: {best.total_pnl_after_fees:+.2f}%")
+        print(f"   Frais: {best.total_fees:.2f}%")
+        print(f"   Profit Factor: {best.profit_factor:.2f}")
+        print(f"   Sharpe Ratio: {best.sharpe_ratio:.2f}")
+        print(f"   Avg Duration: {best.avg_duration:.1f} périodes")
+        print(f"   ATR Coverage: {best.atr_coverage*100:.1f}%")
+        print(f"   ATR Range: [{best.atr_q_low:.4f}, {best.atr_q_high:.4f}]")
+    else:
+        print(f"\n⚠️ Aucune config ATR testée (baseline uniquement)")
 
 
 # =============================================================================
@@ -577,19 +594,16 @@ def main():
     # Baseline (sans filtre ATR)
     logger.info(f"\n{'='*60}\nBASELINE (sans filtre ATR)\n{'='*60}")
 
-    # Créer masque "tout autorisé" pour baseline
-    atr_all = np.ones_like(atr)
-
+    # Pour baseline: utiliser ATR réel mais avec percentiles Q0-Q100 (tout autorisé)
     baseline = backtest_atr_filter(
         pred=Y_pred,
         returns=returns,
-        atr=atr_all,  # Pas de filtre
+        atr=atr,  # ATR réel
         fees=args.fees,
-        atr_q_low=0.0,
-        atr_q_high=100.0
+        atr_q_low=0.0,   # Q0 = minimum absolu
+        atr_q_high=100.0  # Q100 = maximum absolu
     )
     baseline.name = "Baseline"
-    baseline.atr_coverage = 1.0
     results.append(baseline)
 
     logger.info(f"   Trades: {baseline.n_trades:,}")
@@ -612,7 +626,13 @@ def main():
 
         results.append(res)
 
-        logger.info(f"   Trades: {res.n_trades:,} ({(1-res.n_trades/baseline.n_trades)*100:+.1f}%)")
+        # Calculer réduction (avec protection division par zéro)
+        if baseline.n_trades > 0:
+            reduction_pct = (1 - res.n_trades / baseline.n_trades) * 100
+            logger.info(f"   Trades: {res.n_trades:,} ({reduction_pct:+.1f}%)")
+        else:
+            logger.info(f"   Trades: {res.n_trades:,} (N/A)")
+
         logger.info(f"   Win Rate: {res.win_rate*100:.2f}% ({(res.win_rate-baseline.win_rate)*100:+.2f}%)")
         logger.info(f"   PnL Net: {res.total_pnl_after_fees:+.2f}%")
         logger.info(f"   Coverage: {res.atr_coverage*100:.1f}%")
