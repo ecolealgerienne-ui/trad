@@ -59,6 +59,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
 from constants import AVAILABLE_ASSETS_5M, RSI_PERIOD, CCI_PERIOD, MACD_FAST, MACD_SLOW, MACD_SIGNAL
 from indicators import calculate_rsi, calculate_cci, calculate_macd
+from backtest_utils import backtest_simple_labels, BacktestResult as BT_Result
 
 # =============================================================================
 # LOGGING
@@ -486,12 +487,12 @@ def compute_labels(
 
 
 # =============================================================================
-# BACKTEST ORACLE
+# BACKTEST ORACLE (WRAPPER pour backtest_simple_labels)
 # =============================================================================
 
 def backtest_oracle(
     labels: np.ndarray,
-    returns: np.ndarray,
+    df_segment: pd.DataFrame,
     fees: float,
     lag1: int,
     lag2: int
@@ -499,168 +500,44 @@ def backtest_oracle(
     """
     Backtest avec labels Oracle parfaits.
 
+    MÉTHODE CAUSALE CORRECTE (via backtest_simple_labels):
+    - Achète à Open[i+1] quand signal à timestep i
+    - PnL calculé sur les Opens, pas les Closes
+
     Args:
         labels: Labels Oracle (1=UP, 0=DOWN)
-        returns: Returns du marché
+        df_segment: DataFrame avec colonnes 'open', 'close' (segment backtest)
         fees: Frais par side
         lag1, lag2: Lags utilisés pour le nom
 
     Returns:
         OracleResult
     """
-    n_samples = len(labels)
-    trades = []
+    # Utiliser la fonction commune de backtest
+    bt_result = backtest_simple_labels(labels, df_segment, fees)
 
-    position = Position.FLAT
-    entry_time = 0
-    current_pnl = 0.0
-
-    n_long = 0
-    n_short = 0
-
-    # Max lag pour skip initial
-    max_lag = max(lag1, lag2)
-
-    for i in range(max_lag, n_samples):
-        label = labels[i]
-        ret = returns[i]
-
-        # Accumuler PnL
-        if position != Position.FLAT:
-            if position == Position.LONG:
-                current_pnl += ret
-            else:  # SHORT
-                current_pnl -= ret
-
-        # Target position
-        target = Position.LONG if label == 1 else Position.SHORT
-
-        # Changement de position?
-        if position != target:
-            # Fermer position actuelle
-            if position != Position.FLAT:
-                trade_fees = 2 * fees
-                pnl_after_fees = current_pnl - trade_fees
-
-                trades.append(Trade(
-                    start=entry_time,
-                    end=i,
-                    duration=i - entry_time,
-                    position=position.value,
-                    pnl=current_pnl,
-                    pnl_after_fees=pnl_after_fees
-                ))
-
-            # Ouvrir nouvelle position
-            position = target
-            entry_time = i
-            current_pnl = 0.0
-
-            if target == Position.LONG:
-                n_long += 1
-            else:
-                n_short += 1
-
-    # Fermer position finale
-    if position != Position.FLAT:
-        trade_fees = 2 * fees
-        pnl_after_fees = current_pnl - trade_fees
-
-        trades.append(Trade(
-            start=entry_time,
-            end=n_samples - 1,
-            duration=n_samples - 1 - entry_time,
-            position=position.value,
-            pnl=current_pnl,
-            pnl_after_fees=pnl_after_fees
-        ))
-
-    # Calculer statistiques
-    return compute_stats(trades, n_long, n_short, n_samples, lag1, lag2)
-
-
-def compute_stats(
-    trades: List[Trade],
-    n_long: int,
-    n_short: int,
-    n_samples: int,
-    lag1: int,
-    lag2: int
-) -> OracleResult:
-    """Calcule statistiques backtest."""
-    if len(trades) == 0:
-        return OracleResult(
-            name=f"Oracle (t-{lag1} vs t-{lag2})",
-            lag1=lag1,
-            lag2=lag2,
-            n_samples=n_samples,
-            n_trades=0,
-            n_long=0,
-            n_short=0,
-            total_pnl=0.0,
-            total_pnl_after_fees=0.0,
-            total_fees=0.0,
-            win_rate=0.0,
-            profit_factor=0.0,
-            avg_win=0.0,
-            avg_loss=0.0,
-            avg_duration=0.0,
-            sharpe_ratio=0.0,
-            trades=[]
-        )
-
-    pnls = np.array([t.pnl for t in trades])
-    pnls_after_fees = np.array([t.pnl_after_fees for t in trades])
-    durations = np.array([t.duration for t in trades])
-
-    total_pnl = pnls.sum()
-    total_pnl_after_fees = pnls_after_fees.sum()
-    total_fees = total_pnl - total_pnl_after_fees
-
-    wins = pnls_after_fees > 0
-    losses = pnls_after_fees < 0
-
-    win_rate = wins.mean() if len(trades) > 0 else 0.0
-
-    sum_wins = pnls_after_fees[wins].sum() if wins.any() else 0.0
-    sum_losses = abs(pnls_after_fees[losses].sum()) if losses.any() else 0.0
-    profit_factor = sum_wins / sum_losses if sum_losses > 0 else 0.0
-
-    avg_win = pnls_after_fees[wins].mean() if wins.any() else 0.0
-    avg_loss = pnls_after_fees[losses].mean() if losses.any() else 0.0
-
-    avg_duration = durations.mean()
-
-    # Sharpe Ratio (annualisé, 5min = 288 périodes/jour)
-    if len(pnls_after_fees) > 1:
-        returns_mean = pnls_after_fees.mean()
-        returns_std = pnls_after_fees.std()
-        if returns_std > 0:
-            sharpe = (returns_mean / returns_std) * np.sqrt(288 * 365)
-        else:
-            sharpe = 0.0
-    else:
-        sharpe = 0.0
-
+    # Convertir BT_Result → OracleResult
     return OracleResult(
         name=f"Oracle (t-{lag1} vs t-{lag2})",
         lag1=lag1,
         lag2=lag2,
-        n_samples=n_samples,
-        n_trades=len(trades),
-        n_long=n_long,
-        n_short=n_short,
-        total_pnl=total_pnl,
-        total_pnl_after_fees=total_pnl_after_fees,
-        total_fees=total_fees,
-        win_rate=win_rate,
-        profit_factor=profit_factor,
-        avg_win=avg_win,
-        avg_loss=avg_loss,
-        avg_duration=avg_duration,
-        sharpe_ratio=sharpe,
-        trades=trades
+        n_samples=len(labels),
+        n_trades=bt_result.n_trades,
+        n_long=bt_result.n_long,
+        n_short=bt_result.n_short,
+        total_pnl=bt_result.total_pnl,
+        total_pnl_after_fees=bt_result.total_pnl_after_fees,
+        total_fees=bt_result.total_fees,
+        win_rate=bt_result.win_rate,
+        profit_factor=bt_result.profit_factor,
+        avg_win=bt_result.avg_win,
+        avg_loss=bt_result.avg_loss,
+        avg_duration=bt_result.avg_duration,
+        sharpe_ratio=bt_result.sharpe_ratio,
+        trades=bt_result.trades
     )
+
+
 
 
 # =============================================================================
@@ -809,12 +686,6 @@ def main():
     # 2. Calculer indicateur
     indicator_values = calculate_indicator(df, args.indicator)
 
-    # 3. Extraire returns
-    returns_full = df['close'].pct_change().values
-    logger.info(f"📊 Returns calculés:")
-    logger.info(f"  Mean: {np.nanmean(returns_full)*100:.4f}%")
-    logger.info(f"  Std: {np.nanstd(returns_full)*100:.4f}%\n")
-
     # 4. Appliquer filtre (Global ou Sliding)
     if args.mode == 'global':
         # Mode GLOBAL: Kalman uniquement (validé Phase 2.10)
@@ -850,8 +721,12 @@ def main():
     else:
         raise ValueError(f"Mode inconnu: {args.mode}")
 
-    # 5. Extraire segment returns pour backtest
-    returns_segment = returns_full[args.start_idx:args.start_idx + args.n_samples]
+    # 5. Extraire segment DataFrame pour backtest
+    # IMPORTANT: Besoin de start_idx + n_samples + 1 pour avoir Open[i+1]
+    df_segment = df.iloc[args.start_idx:args.start_idx + args.n_samples + 1].reset_index(drop=True)
+    logger.info(f"📊 DataFrame segment pour backtest:")
+    logger.info(f"  Lignes: {len(df_segment)} (n_samples + 1 pour Open[i+1])")
+    logger.info(f"  Colonnes: {list(df_segment.columns)}\n")
 
     # Déterminer tests à exécuter
     if args.lag1 is not None and args.lag2 is not None:
@@ -880,8 +755,8 @@ def main():
         # Calculer labels
         labels = compute_labels(filtered, lag1, lag2)
 
-        # Backtest
-        result = backtest_oracle(labels, returns_segment, args.fees, lag1, lag2)
+        # Backtest (achète à Open[i+1], pas Close[i])
+        result = backtest_oracle(labels, df_segment, args.fees, lag1, lag2)
         results.append(result)
 
     # Afficher résultats
