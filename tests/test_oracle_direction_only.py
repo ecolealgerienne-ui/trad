@@ -61,6 +61,8 @@ class Trade:
     exit_price: float
     pnl: float  # PnL brut (%)
     pnl_after_fees: float  # PnL net (%)
+    asset_id: int = 0  # ID de l'asset
+    entry_timestamp: float = 0.0  # Timestamp d'entrée
 
 
 @dataclass
@@ -80,6 +82,27 @@ class BacktestResult:
     sharpe_ratio: float
     max_drawdown: float
     trades: List[Trade]
+
+
+@dataclass
+class AssetResult:
+    """Résultats par asset."""
+    asset_id: int
+    n_trades: int
+    total_pnl: float
+    total_pnl_after_fees: float
+    win_rate: float
+    avg_duration: float
+
+
+@dataclass
+class MonthlyResult:
+    """Résultats par mois."""
+    year_month: str
+    n_trades: int
+    total_pnl: float
+    total_pnl_after_fees: float
+    win_rate: float
 
 
 # =============================================================================
@@ -129,6 +152,8 @@ def load_dataset(indicator: str, split: str = 'test') -> Dict:
 def backtest_single_asset(
     labels: np.ndarray,
     opens: np.ndarray,
+    timestamps: np.ndarray,
+    asset_id: int,
     fees: float = 0.001
 ) -> List[Trade]:
     """
@@ -142,6 +167,8 @@ def backtest_single_asset(
     Args:
         labels: (n,) Direction labels pour cet asset
         opens: (n,) Prix Open pour cet asset
+        timestamps: (n,) Timestamps pour cet asset
+        asset_id: ID de l'asset
         fees: Frais par side
 
     Returns:
@@ -152,6 +179,7 @@ def backtest_single_asset(
     position = Position.FLAT
     entry_idx = 0
     entry_price = 0.0
+    entry_timestamp = 0.0
 
     # Boucle principale
     for i in range(n_samples - 1):  # -1 car besoin de Open[i+1]
@@ -163,6 +191,7 @@ def backtest_single_asset(
             position = target
             entry_idx = i
             entry_price = opens[i + 1]  # Entrée à Open[i+1]
+            entry_timestamp = timestamps[i + 1]
             continue
 
         # Changement de position (reversal)
@@ -189,13 +218,16 @@ def backtest_single_asset(
                 entry_price=entry_price,
                 exit_price=exit_price,
                 pnl=pnl,
-                pnl_after_fees=pnl_after_fees
+                pnl_after_fees=pnl_after_fees,
+                asset_id=asset_id,
+                entry_timestamp=entry_timestamp
             ))
 
             # Nouvelle position (reversal immédiat)
             position = target
             entry_idx = i
             entry_price = opens[i + 1]
+            entry_timestamp = timestamps[i + 1]
 
     # Fermer position finale
     if position != Position.FLAT:
@@ -217,7 +249,9 @@ def backtest_single_asset(
             entry_price=entry_price,
             exit_price=exit_price,
             pnl=pnl,
-            pnl_after_fees=pnl_after_fees
+            pnl_after_fees=pnl_after_fees,
+            asset_id=asset_id,
+            entry_timestamp=entry_timestamp
         ))
 
     return trades
@@ -227,7 +261,7 @@ def backtest_oracle(
     labels: np.ndarray,
     ohlcv: np.ndarray,
     fees: float = 0.001
-) -> BacktestResult:
+) -> tuple:
     """
     Backtest avec labels Oracle (direction parfaite).
 
@@ -246,9 +280,10 @@ def backtest_oracle(
         fees: Frais par side (défaut: 0.1%)
 
     Returns:
-        BacktestResult
+        (BacktestResult, List[AssetResult])
     """
     # Extraire colonnes
+    timestamps = ohlcv[:, 0]  # Colonne 0 = timestamp
     asset_ids = ohlcv[:, 1].astype(int)  # Colonne 1 = asset_id
     opens = ohlcv[:, 2]  # Colonne 2 = Open
 
@@ -257,6 +292,7 @@ def backtest_oracle(
     logger.info(f"  Assets détectés: {len(unique_assets)} ({unique_assets})")
 
     all_trades = []
+    asset_results = []
     n_long = 0
     n_short = 0
 
@@ -266,25 +302,49 @@ def backtest_oracle(
         mask = asset_ids == asset_id
         asset_labels = labels[mask]
         asset_opens = opens[mask]
+        asset_timestamps = timestamps[mask]
 
         logger.info(f"    Asset {int(asset_id)}: {len(asset_labels):,} samples")
 
         # Backtest cet asset
-        trades = backtest_single_asset(asset_labels, asset_opens, fees)
+        trades = backtest_single_asset(
+            asset_labels, asset_opens, asset_timestamps, int(asset_id), fees
+        )
 
-        # Compter LONG/SHORT
+        # Compter LONG/SHORT et stats par asset
+        asset_pnl = 0.0
+        asset_pnl_net = 0.0
+        asset_wins = 0
+        asset_duration = 0
         for t in trades:
             if t.position == 'LONG':
                 n_long += 1
             else:
                 n_short += 1
+            asset_pnl += t.pnl
+            asset_pnl_net += t.pnl_after_fees
+            if t.pnl_after_fees > 0:
+                asset_wins += 1
+            asset_duration += t.duration
+
+        # Résultat pour cet asset
+        if len(trades) > 0:
+            asset_results.append(AssetResult(
+                asset_id=int(asset_id),
+                n_trades=len(trades),
+                total_pnl=asset_pnl,
+                total_pnl_after_fees=asset_pnl_net,
+                win_rate=asset_wins / len(trades) if len(trades) > 0 else 0.0,
+                avg_duration=asset_duration / len(trades) if len(trades) > 0 else 0.0
+            ))
 
         all_trades.extend(trades)
 
     logger.info(f"  Total trades: {len(all_trades):,}")
 
-    # Calculer statistiques
-    return compute_stats(all_trades, n_long, n_short)
+    # Calculer statistiques globales
+    result = compute_stats(all_trades, n_long, n_short)
+    return result, asset_results
 
 
 def compute_stats(trades: List[Trade], n_long: int, n_short: int) -> BacktestResult:
@@ -352,8 +412,109 @@ def compute_stats(trades: List[Trade], n_long: int, n_short: int) -> BacktestRes
 
 
 # =============================================================================
+# CALCUL STATS MENSUELLES
+# =============================================================================
+
+def compute_monthly_stats(trades: List[Trade]) -> List[MonthlyResult]:
+    """
+    Calcule les statistiques par mois.
+
+    Args:
+        trades: Liste des trades avec timestamps
+
+    Returns:
+        Liste des résultats mensuels
+    """
+    from datetime import datetime
+    from collections import defaultdict
+
+    # Grouper par mois
+    monthly_data = defaultdict(list)
+
+    for trade in trades:
+        # Convertir timestamp en datetime
+        dt = datetime.fromtimestamp(trade.entry_timestamp)
+        year_month = dt.strftime('%Y-%m')
+        monthly_data[year_month].append(trade)
+
+    # Calculer stats par mois
+    monthly_results = []
+    for year_month in sorted(monthly_data.keys()):
+        month_trades = monthly_data[year_month]
+        n_trades = len(month_trades)
+        total_pnl = sum(t.pnl for t in month_trades)
+        total_pnl_net = sum(t.pnl_after_fees for t in month_trades)
+        wins = sum(1 for t in month_trades if t.pnl_after_fees > 0)
+        win_rate = wins / n_trades if n_trades > 0 else 0.0
+
+        monthly_results.append(MonthlyResult(
+            year_month=year_month,
+            n_trades=n_trades,
+            total_pnl=total_pnl,
+            total_pnl_after_fees=total_pnl_net,
+            win_rate=win_rate
+        ))
+
+    return monthly_results
+
+
+# =============================================================================
 # AFFICHAGE RÉSULTATS
 # =============================================================================
+
+def print_asset_results(asset_results: List[AssetResult]):
+    """Affiche les résultats par asset."""
+    # Mapping asset_id → nom
+    asset_names = {0: 'BTC', 1: 'ETH', 2: 'BNB', 3: 'ADA', 4: 'LTC'}
+
+    print("\n" + "="*70)
+    print("RÉSULTATS PAR ASSET")
+    print("="*70)
+
+    print(f"\n{'Asset':<8} {'Trades':>10} {'PnL Brut':>12} {'PnL Net':>12} {'Win Rate':>10} {'Durée Moy':>10}")
+    print("-"*70)
+
+    for ar in asset_results:
+        name = asset_names.get(ar.asset_id, f'Asset{ar.asset_id}')
+        print(f"{name:<8} {ar.n_trades:>10,} {ar.total_pnl*100:>+11.2f}% {ar.total_pnl_after_fees*100:>+11.2f}% {ar.win_rate*100:>9.1f}% {ar.avg_duration:>9.1f}p")
+
+    # Moyennes
+    if asset_results:
+        avg_pnl = sum(ar.total_pnl for ar in asset_results) / len(asset_results)
+        avg_pnl_net = sum(ar.total_pnl_after_fees for ar in asset_results) / len(asset_results)
+        avg_wr = sum(ar.win_rate for ar in asset_results) / len(asset_results)
+        avg_dur = sum(ar.avg_duration for ar in asset_results) / len(asset_results)
+        avg_trades = sum(ar.n_trades for ar in asset_results) / len(asset_results)
+
+        print("-"*70)
+        print(f"{'MOYENNE':<8} {avg_trades:>10,.0f} {avg_pnl*100:>+11.2f}% {avg_pnl_net*100:>+11.2f}% {avg_wr*100:>9.1f}% {avg_dur:>9.1f}p")
+
+
+def print_monthly_results(trades: List[Trade]):
+    """Affiche les résultats par mois."""
+    monthly_results = compute_monthly_stats(trades)
+
+    print("\n" + "="*70)
+    print("RÉSULTATS PAR MOIS")
+    print("="*70)
+
+    print(f"\n{'Mois':<10} {'Trades':>10} {'PnL Brut':>12} {'PnL Net':>12} {'Win Rate':>10}")
+    print("-"*60)
+
+    for mr in monthly_results:
+        print(f"{mr.year_month:<10} {mr.n_trades:>10,} {mr.total_pnl*100:>+11.2f}% {mr.total_pnl_after_fees*100:>+11.2f}% {mr.win_rate*100:>9.1f}%")
+
+    # Moyennes
+    if monthly_results:
+        avg_trades = sum(mr.n_trades for mr in monthly_results) / len(monthly_results)
+        avg_pnl = sum(mr.total_pnl for mr in monthly_results) / len(monthly_results)
+        avg_pnl_net = sum(mr.total_pnl_after_fees for mr in monthly_results) / len(monthly_results)
+        avg_wr = sum(mr.win_rate for mr in monthly_results) / len(monthly_results)
+
+        print("-"*60)
+        print(f"{'MOYENNE':<10} {avg_trades:>10,.0f} {avg_pnl*100:>+11.2f}% {avg_pnl_net*100:>+11.2f}% {avg_wr*100:>9.1f}%")
+        print(f"\nNombre de mois: {len(monthly_results)}")
+
 
 def print_results(result: BacktestResult, indicator: str, mode: str):
     """Affiche les résultats du backtest."""
@@ -441,10 +602,16 @@ def main():
         logger.info(f"  Mode: Oracle (labels parfaits)")
 
     # Backtest
-    result = backtest_oracle(labels_to_use, OHLCV, fees=args.fees)
+    result, asset_results = backtest_oracle(labels_to_use, OHLCV, fees=args.fees)
 
-    # Afficher résultats
+    # Afficher résultats globaux
     print_results(result, args.indicator, mode)
+
+    # Afficher résultats par asset
+    print_asset_results(asset_results)
+
+    # Afficher résultats par mois
+    print_monthly_results(result.trades)
 
 
 if __name__ == '__main__':

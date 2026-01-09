@@ -273,45 +273,62 @@ Index 100001: ETH, Open = $3,000  (sortie!)
 
 **Solution**: Backtest par asset en utilisant `asset_id` (colonne 1 du OHLCV), puis agrégation des trades.
 
-### Résultats Oracle - MACD Direction-Only (Test Set)
+### Résultats Oracle - 3 Indicateurs (Test Set, 5 assets, ~15 mois)
 
-| Métrique | Valeur | Interprétation |
-|----------|--------|----------------|
-| **PnL Brut** | **+9,669%** | ✅ **LE SIGNAL FONCTIONNE!** |
-| Trades | 68,924 | ❌ ~48 trades/jour/asset |
-| Frais (0.2%) | 13,785% | 💥 1.4× le PnL brut |
-| **PnL Net** | **-4,116%** | ❌ Frais détruisent tout |
-| Win Rate | 33.4% | ⚠️ Faible mais compensé par taille gains |
-| Avg Win | +0.589% | ✅ Gains > Pertes |
-| Avg Loss | -0.385% | ✅ |
-| Durée moyenne | 9.3 périodes | ~46 minutes |
-| Long/Short | 50%/50% | ✅ Équilibré |
+| Métrique | **RSI** 🥇 | **CCI** 🥈 | **MACD** 🥉 |
+|----------|------------|------------|-------------|
+| **PnL Brut** | **+16,676%** | +13,534% | +9,669% |
+| Trades | 96,887 | 82,404 | 68,924 |
+| Frais (0.2%) | 19,377% | 16,481% | 13,785% |
+| **PnL Net** | -2,701% | -2,947% | -4,116% |
+| Win Rate | 33.1% | 33.7% | 33.4% |
+| Profit Factor | 0.87 | 0.84 | 0.77 |
+| Avg Win | +0.542% | +0.561% | +0.589% |
+| Avg Loss | -0.310% | -0.339% | -0.385% |
+| Durée moyenne | 6.6p (~33min) | 7.8p (~39min) | 9.3p (~46min) |
+| Long/Short | 50%/50% | 50%/50% | 50%/50% |
 
-### Analyse du Win Rate 33.4%
+### Analyse Comparative
 
-**Pourquoi Win Rate < 50% avec Oracle?**
+**Hiérarchie PnL Brut**: RSI (+16,676%) > CCI (+13,534%) > MACD (+9,669%)
 
-Le label `direction[i] = filtered[i-2] > filtered[i-3]` indique la **direction de l'indicateur** (pente MACD filtré), pas la **direction du prix**:
+**Paradoxe inversé vs ML accuracy**: RSI a le **meilleur signal brut** mais la **pire accuracy ML** (87.6%)!
+
+| Indicateur | PnL Brut | ML Accuracy | Trades | Signal/Trade | Nature |
+|------------|----------|-------------|--------|--------------|--------|
+| **RSI** 🥇 | +16,676% | 87.6% 🥉 | 96,887 | +0.172% | Oscillateur rapide |
+| **CCI** 🥈 | +13,534% | 88.6% 🥈 | 82,404 | +0.164% | Oscillateur moyen |
+| **MACD** 🥉 | +9,669% | 92.4% 🥇 | 68,924 | +0.140% | Tendance lourde |
+
+**Observations clés**:
+- Les **oscillateurs rapides** (RSI) capturent plus de signal brut mais génèrent plus de trades
+- **MACD** est plus stable (moins de trades) mais moins rentable en brut
+- **Accuracy ML ≠ Rentabilité Oracle** (le signal brut et la prédictibilité sont décorrélés)
+
+### Analyse du Win Rate ~33%
+
+**Pourquoi Win Rate < 50% avec Oracle (labels parfaits)?**
+
+Le label `direction[i] = filtered[i-2] > filtered[i-3]` indique la **direction de l'indicateur** (pente), pas la **direction du prix**:
 
 ```
-Label = 1 (UP) signifie: MACD filtré montait entre t-3 et t-2
+Label = 1 (UP) signifie: Indicateur filtré montait entre t-3 et t-2
                         ≠ Prix va monter à partir de t+1!
 ```
 
 Malgré le faible Win Rate, le PnL Brut est positif car:
-- Avg Win (+0.589%) > |Avg Loss| (-0.385%)
+- Avg Win > |Avg Loss| (ratio ~1.6-1.75×)
 - Les trades gagnants capturent des mouvements plus importants
 
 ### Diagnostic Final
 
-| Aspect | Status | Conclusion |
-|--------|--------|------------|
-| **Signal** | ✅ +9,669% PnL Brut | Le signal EXISTE et FONCTIONNE |
-| **Trades** | ❌ 68,924 (~48/jour/asset) | Trop fréquent |
-| **Frais** | ❌ 13,785% | 1.4× le PnL brut |
-| **Net** | ❌ -4,116% | Frais détruisent le signal |
+| Aspect | RSI | CCI | MACD | Conclusion |
+|--------|-----|-----|------|------------|
+| **Signal Brut** | +16,676% | +13,534% | +9,669% | ✅ TOUS fonctionnent |
+| **Trades** | 96,887 | 82,404 | 68,924 | ❌ Tous trop fréquents |
+| **PnL Net** | -2,701% | -2,947% | -4,116% | ❌ Frais détruisent |
 
-**Problème = FRÉQUENCE DE TRADING**, pas le signal.
+**Problème = FRÉQUENCE DE TRADING**, pas le signal. Les 3 indicateurs ont un signal profitable!
 
 ### Solutions Recommandées
 
@@ -337,8 +354,15 @@ python tests/test_oracle_direction_only.py --indicator cci --split test --fees 0
 
 ### Conclusion
 
-✅ **DONNÉES VALIDÉES** - Le signal direction-only fonctionne (PnL Brut +9,669%)
-❌ **PROBLÈME IDENTIFIÉ** - Trop de trades (68,924) × frais (0.2%) = destruction du signal
+✅ **DONNÉES VALIDÉES** - Les 3 indicateurs ont un signal profitable:
+  - RSI: +16,676% | CCI: +13,534% | MACD: +9,669%
+
+❌ **PROBLÈME IDENTIFIÉ** - Trop de trades (69k-97k) × frais (0.2%) = destruction du signal
+
+🔍 **DÉCOUVERTE PARADOXALE** - Accuracy ML inversement corrélée au PnL Brut:
+  - RSI: 87.6% accuracy → +16,676% brut (meilleur signal!)
+  - MACD: 92.4% accuracy → +9,669% brut (moins de signal)
+
 🎯 **PROCHAINE ÉTAPE** - Réduire la fréquence de trading (holding minimum ou timeframe plus long)
 
 ---
