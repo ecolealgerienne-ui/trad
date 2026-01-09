@@ -978,9 +978,6 @@ def main():
         suffix_parts.append(detected_filter)
     if is_dual_binary:
         suffix_parts.append('dual_binary')
-    # Phase 2.11: Ajouter _wt si transitions (ne pas écraser modèles existants)
-    if has_transitions:
-        suffix_parts.append('wt')
 
     if suffix_parts:
         suffix = '_'.join(suffix_parts)
@@ -991,8 +988,6 @@ def main():
     logger.info(f"\n💾 Modèle sauvegardé:")
     logger.info(f"  Indicateur détecté: {detected_indicator or 'aucun'}")
     logger.info(f"  Filtre détecté: {detected_filter or 'aucun'}")
-    if has_transitions:
-        logger.info(f"  ✅ Weighted Transitions: OUI (suffixe _wt ajouté)")
 
     logger.info(f"  Modèle sera sauvegardé: {save_path}")
 
