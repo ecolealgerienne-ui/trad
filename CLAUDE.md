@@ -1,12 +1,12 @@
 # Modele CNN-LSTM Multi-Output - Guide Complet
 
 **Date**: 2026-01-09
-**Statut**: ✅ **Signal Validé - PnL Brut +9,669% | ADA = Seul Asset Profitable**
-**Version**: 9.5 - Analyse Per-Asset: ADA 🥇 seul positif sur 3 indicateurs
+**Statut**: ✅ **Signal Validé - RSI +16,676% 🥇 | CCI +13,534% 🥈 | MACD +9,669% 🥉**
+**Version**: 9.6 - Phase 2.12: Weighted Probability Fusion ÉCHEC (fusion dégrade le signal)
 **Models**: MACD Kalman 92.4% | CCI Kalman+Shortcut 88.6% | RSI Kalman 87.6%
-**Découverte Critique**: ADA = seul asset profitable (MACD +16%, CCI +542%, RSI +911%) | BTC = pire
-**Hiérarchie Assets**: ADA 🥇 > LTC 🥈 (oscillateurs) > ETH/BNB > BTC 🥉 (toujours pire)
-**Prochaine Étape**: Tester ML sur ADA uniquement comme proof-of-concept
+**Découverte Critique**: Fusion multi-indicateurs = ÉCHEC | RSI Oracle = meilleur signal brut
+**Hiérarchie Oracle**: RSI 🥇 (+16,676%) > CCI 🥈 (+13,534%) > MACD 🥉 (+9,669%)
+**Prochaine Étape**: Focus ADA uniquement OU réduction trades (timeframe 15/30min)
 
 ---
 
@@ -1957,6 +1957,180 @@ python tests/test_oracle_sliding_window.py --indicator macd --filter-type octave
 > **Le filtre Octave (Butterworth step=0.25) est trop sensible pour les fenêtres courtes.**
 
 **Ne JAMAIS utiliser de filtre sliding window sans fenêtre ≥ plusieurs milliers de samples.**
+
+---
+
+## ❌ Phase 2.12: Weighted Probability Fusion - ÉCHEC VALIDÉ (2026-01-09)
+
+**Date**: 2026-01-09
+**Statut**: ❌ **ÉCHEC COMPLET - Fusion multi-indicateurs DÉGRADE systématiquement le signal**
+**Script**: `tests/test_weighted_probability_fusion.py`
+**Objectif**: Combiner MACD/RSI/CCI avec pondération pour améliorer les décisions
+
+### Contexte
+
+Suite à la validation Oracle (RSI +16,676%, CCI +13,534%, MACD +9,669% PnL Brut), tentative de fusion probabiliste des 3 indicateurs.
+
+### Méthode 1: Z-Score Normalization
+
+**Principe** (López de Prado, Ryu & Kim 2022):
+```python
+# Normaliser chaque indicateur
+p_norm = (prob - mean) / std
+
+# Fusionner avec poids
+score = w_macd * p_macd_norm + w_cci * p_cci_norm + w_rsi * p_rsi_norm
+
+# Décision
+if score > threshold: LONG
+elif score < -threshold: SHORT
+else: HOLD
+```
+
+**Poids par défaut**: MACD=0.56, CCI=0.28, RSI=0.16
+
+### Méthode 2: Raw Probabilities
+
+**Principe** (formule simple):
+```python
+score = w1 * p1 + w2 * p2 + w3 * p3 - bias
+# bias = 0.5 pour centrer autour de 0
+```
+
+### Résultats - MACD Baseline (Test Set, ~445 jours)
+
+| Stratégie | Trades | Réduction | WR | Δ WR | PnL Brut | PnL Net |
+|-----------|--------|-----------|-----|------|----------|---------|
+| **MACD Baseline** | 68,924 | - | 33.40% | - | **+9,669%** | -4,116% |
+| Fusion(t=0.3) | 98,975 | **-43.6%** ❌ | 21.64% | -11.76% | +107% | -19,688% |
+| Fusion(t=0.5) | 98,785 | -43.3% | 21.09% | -12.31% | +157% | -19,600% |
+| Fusion(t=0.7) | 97,720 | -41.8% | 20.29% | -13.11% | +23% | -19,521% |
+| Fusion(t=1.0) | 91,738 | -33.1% | 18.99% | -14.40% | -20% | -18,368% |
+
+**Problème critique**: La fusion génère **PLUS de trades** (+43%), pas moins!
+
+### Résultats - RSI Baseline (Test Set)
+
+| Stratégie | Trades | Réduction | WR | Δ WR | PnL Brut | PnL Net |
+|-----------|--------|-----------|-----|------|----------|---------|
+| **RSI Baseline** | 96,887 | - | 33.12% | - | **+16,676%** 🥇 | -2,701% |
+| Fusion(t=0.3) | 109,366 | -12.9% | 19.27% | -13.85% | +47% | -21,826% |
+| Fusion(t≥0.5) | 0 | 100% | - | - | 0% | 0% |
+
+**Observation**: Avec seuils ≥0.5, **0 trades** car score limité à [-0.5, +0.5]
+
+### Résultats - CCI Baseline (Test Set)
+
+| Stratégie | Trades | Réduction | WR | Δ WR | PnL Brut | PnL Net |
+|-----------|--------|-----------|-----|------|----------|---------|
+| **CCI Baseline** | 82,404 | - | 33.66% | - | **+13,534%** 🥈 | -2,947% |
+| Fusion(t=0.3) | 103,285 | -25.3% | 20.08% | -13.58% | +164% | -20,493% |
+| Fusion(t≥0.5) | 0 | 100% | - | - | 0% | 0% |
+
+### Hiérarchie Oracle Confirmée
+
+| Indicateur | PnL Brut Oracle | Trades | Signal/Trade | Verdict |
+|------------|-----------------|--------|--------------|---------|
+| **RSI** 🥇 | **+16,676%** | 96,887 | +0.172% | **Meilleur signal brut** |
+| **CCI** 🥈 | +13,534% | 82,404 | +0.164% | Intermédiaire |
+| **MACD** 🥉 | +9,669% | 68,924 | +0.140% | Moins de signal, plus stable |
+
+### Diagnostic - Pourquoi la Fusion Échoue
+
+#### 1. Les indicateurs sont CORRÉLÉS, pas complémentaires
+
+```
+RSI, CCI, MACD = 3 projections du MÊME signal latent (momentum)
+Ils diffèrent par: filtre, latence, sensibilité
+Ils NE diffèrent PAS par: nature de l'information capturée
+
+→ Voter entre 3 miroirs du même objet = INUTILE
+```
+
+#### 2. Fusion = Amplification du bruit
+
+```
+MACD seul: 33.40% WR, 68k trades (relativement stable)
+MACD + RSI + CCI: 18-21% WR, 91-109k trades (plus de bruit!)
+```
+
+La combinaison **amplifie les désaccords** au lieu de les filtrer.
+
+#### 3. Violation des hypothèses d'Ensemble Learning
+
+Pour que le Stacking/Fusion fonctionne:
+- Les erreurs des modèles doivent être **faiblement corrélées**
+- **Ce qu'on observe**: 98.8% de recouvrement sur les erreurs
+- **Résultat**: Gain nul ou négatif (prouvé empiriquement)
+
+### Méthode Raw Probs - Limitation Mathématique
+
+Avec `bias=0.5` et `weights=1.0`:
+```
+score = w1*p1 + w2*p2 + w3*p3 - 0.5
+      = 1.0 * prob_moyenne - 0.5
+
+Range: [-0.5, +0.5]
+→ threshold ≥ 0.5 impossible à atteindre
+→ 0 trades avec seuils élevés
+```
+
+### Scripts et Commandes
+
+**Script créé**: `tests/test_weighted_probability_fusion.py`
+
+**Options**:
+- `--baseline {macd,rsi,cci}`: Indicateur de référence
+- `--raw-probs`: Mode probabilités brutes (vs z-score)
+- `--bias 0.5`: Biais pour raw-probs
+- `--thresholds 0.3,0.5,0.7,1.0`: Seuils à tester
+- `--w-macd/--w-rsi/--w-cci`: Poids personnalisés
+
+**Commandes**:
+```bash
+# Z-score (défaut)
+python tests/test_weighted_probability_fusion.py --split test --baseline macd
+python tests/test_weighted_probability_fusion.py --split test --baseline rsi
+python tests/test_weighted_probability_fusion.py --split test --baseline cci
+
+# Raw probs
+python tests/test_weighted_probability_fusion.py --split test --baseline rsi --raw-probs
+```
+
+**Commits**:
+- Script initial: `aa99007`
+- Ajout --baseline: `0c9ef96`
+- Ajout --raw-probs: `c1b1288`
+
+### Conclusion Définitive
+
+#### ❌ ABANDONNER:
+
+1. **Fusion multi-indicateurs** (z-score ou raw probs)
+2. **Voting/Consensus** entre MACD/RSI/CCI
+3. **Stacking/Ensemble** sur ces indicateurs
+
+**Raisons empiriques validées**:
+- 0/12 configurations améliorent le baseline
+- Win Rate dégradé de 13-14% systématiquement
+- Trades augmentés de 25-43% (inverse de l'objectif)
+- PnL Net 4-8× pire que baseline seul
+
+#### ✅ CONSERVER:
+
+1. **Indicateurs en isolation** (meilleure performance)
+2. **RSI Oracle = meilleur signal brut** (+16,676%)
+3. **Focus sur réduction des frais** (pas fusion)
+
+### Leçon Fondamentale
+
+> **"On ne peut pas voter entre trois miroirs du même objet."**
+>
+> Les indicateurs RSI, CCI, MACD capturent le même phénomène latent (momentum).
+> Les combiner n'ajoute pas d'information, ça ajoute du BRUIT.
+>
+> **La vraie solution**: Réduire les trades (timeframe, holding minimum)
+> **Pas**: Combiner des signaux corrélés
 
 ---
 
