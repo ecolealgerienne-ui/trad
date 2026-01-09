@@ -16,7 +16,6 @@ import argparse
 import numpy as np
 from pathlib import Path
 from typing import Dict, Tuple
-import torch
 
 
 def load_dataset(indicator: str, filter_type: str = 'kalman') -> Dict:
@@ -59,57 +58,17 @@ def get_split_data(data: Dict, split: str) -> Tuple[np.ndarray, np.ndarray]:
     return data[x_key], data[y_key]
 
 
-def load_model_and_predict(indicator: str, X: np.ndarray, filter_type: str = 'kalman') -> np.ndarray:
-    """Charge un modèle et génère des prédictions."""
-    model_path = Path(f'models/best_model_{indicator}_{filter_type}_direction_only.pth')
+def get_predictions_from_dataset(data: Dict, split: str) -> Tuple[np.ndarray, np.ndarray]:
+    """Récupère les prédictions déjà stockées dans le dataset."""
+    pred_key = f'Y_{split}_pred'
 
-    if not model_path.exists():
-        # Essayer l'ancien nom
-        model_path = Path(f'models/best_model_{indicator}_kalman_dual_binary.pth')
+    if pred_key not in data:
+        raise ValueError(f"Prédictions '{pred_key}' non trouvées. Clés disponibles: {list(data.keys())}")
 
-    if not model_path.exists():
-        raise FileNotFoundError(f"Modèle non trouvé: {model_path}")
+    probs = data[pred_key].flatten()
+    binary_preds = (probs > 0.5).astype(int)
 
-    # Charger le modèle
-    from src.model import MultiOutputCNNLSTM
-
-    checkpoint = torch.load(model_path, map_location='cpu')
-
-    # Déterminer la configuration
-    n_features = X.shape[2]
-    n_outputs = 1  # Direction only
-
-    model = MultiOutputCNNLSTM(
-        n_features=n_features,
-        n_outputs=n_outputs,
-        use_layer_norm=checkpoint.get('use_layer_norm', False)
-    )
-
-    model.load_state_dict(checkpoint['model_state_dict'])
-    model.eval()
-
-    # Prédictions
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = model.to(device)
-
-    X_tensor = torch.tensor(X, dtype=torch.float32).to(device)
-
-    predictions = []
-    batch_size = 1024
-
-    with torch.no_grad():
-        for i in range(0, len(X_tensor), batch_size):
-            batch = X_tensor[i:i+batch_size]
-            outputs = model(batch)
-            probs = outputs.cpu().numpy()
-            predictions.append(probs)
-
-    predictions = np.concatenate(predictions, axis=0)
-
-    # Binariser (> 0.5 = UP)
-    binary_preds = (predictions > 0.5).astype(int).flatten()
-
-    return binary_preds, predictions.flatten()
+    return binary_preds, probs
 
 
 def analyze_oracle_correlation(labels: Dict[str, np.ndarray]) -> Dict:
@@ -496,17 +455,17 @@ def main():
     voting_results = None
 
     if args.use_predictions:
-        print("\nChargement des modèles et génération des prédictions...")
+        print("\nChargement des prédictions depuis les datasets...")
         predictions = {}
         probs = {}
 
         for ind in indicators:
-            if ind in X_data:
+            if ind in datasets:
                 try:
-                    preds, prob = load_model_and_predict(ind, X_data[ind], args.filter)
+                    preds, prob = get_predictions_from_dataset(datasets[ind], args.split)
                     predictions[ind] = preds[:min_size]
                     probs[ind] = prob[:min_size]
-                    print(f"  {ind.upper()}: OK")
+                    print(f"  {ind.upper()}: {len(preds)} prédictions chargées")
                 except Exception as e:
                     print(f"  ⚠️ {ind.upper()}: {e}")
 
