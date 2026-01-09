@@ -450,6 +450,10 @@ def parse_args():
                         choices=['auto', 'cuda', 'cpu'],
                         help='Device à utiliser (auto détecte automatiquement)')
 
+    # Weighted Loss Control
+    parser.add_argument('--no-weighted-loss', action='store_true',
+                        help='Désactiver WeightedTransitionBCELoss même si transitions disponibles (baseline mode)')
+
     return parser.parse_args()
 
 
@@ -888,7 +892,12 @@ def main():
     logger.info(f"  use_layer_norm={use_layer_norm}, use_bce_with_logits={use_bce_with_logits}")
 
     # Phase 2.11: Utiliser WeightedTransitionBCELoss si transitions disponibles
-    if has_transitions:
+    # Flag --no-weighted-loss permet de forcer le mode baseline
+    use_weighted_loss = has_transitions and not args.no_weighted_loss
+    if args.no_weighted_loss and has_transitions:
+        logger.info(f"  ⚠️ WeightedTransitionBCELoss DÉSACTIVÉ (--no-weighted-loss)")
+
+    if use_weighted_loss:
         logger.info(f"  🎯 Phase 2.11: WeightedTransitionBCELoss ACTIVÉ (transition_weight=5.0×)")
         from model import WeightedTransitionBCELoss
 
