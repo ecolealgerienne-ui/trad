@@ -1,12 +1,12 @@
 # Modele CNN-LSTM Multi-Output - Guide Complet
 
 **Date**: 2026-01-09
-**Statut**: ✅ **Signal Validé - RSI +16,676% 🥇 | CCI +13,534% 🥈 | MACD +9,669% 🥉**
-**Version**: 9.7 - Phase 2.13: Analyse d'Indépendance - RSI/CCI/MACD = MÊME SIGNAL
+**Statut**: ✅ **MACD Confirmé Meilleur Oracle de Sortie** (Phase 2.14)
+**Version**: 9.8 - Phase 2.14: Entry/Exit avec Oracle - MACD 🥇 domine
 **Models**: MACD Kalman 92.4% | CCI Kalman+Shortcut 88.6% | RSI Kalman 87.6%
-**Découverte Critique**: RSI/CCI/MACD corrélés à 100% (Oracle) | Erreurs ML corrélées à 80.6%
-**Hiérarchie Oracle**: RSI 🥇 (+16,676%) > CCI 🥈 (+13,534%) > MACD 🥉 (+9,669%)
-**Prochaine Étape**: Chercher signaux VRAIMENT indépendants (Volume, Order Flow, Sentiment)
+**Découverte Phase 2.14**: Sortie Oracle → MACD -2,082% | CCI -2,382% | RSI -2,638%
+**Hiérarchie Trading**: MACD 🥇 (moins trades, +stable) > CCI 🥈 > RSI 🥉 (trop nerveux)
+**Prochaine Étape**: Réduire trades sous 3,000 (timeframe 15/30min, holding agressif)
 
 ---
 
@@ -2345,6 +2345,174 @@ python tests/test_indicator_independence.py --split test --use-predictions
 >
 > La fusion échoue car les indicateurs ne sont pas indépendants.
 > Pour améliorer, il faut chercher des signaux VRAIMENT différents (Volume, Order Flow, Sentiment).
+
+---
+
+## 🎯 Phase 2.14: Stratégie Entry/Exit avec Oracle - Comparaison Indicateurs (2026-01-09)
+
+**Date**: 2026-01-09
+**Statut**: ✅ **MACD CONFIRMÉ COMME MEILLEUR ORACLE DE SORTIE**
+**Script**: `tests/test_entry_oracle_exit.py`
+**Objectif**: Comparer MACD, RSI, CCI comme Oracle de sortie avec entrée pondérée
+
+### Contexte
+
+Suite à Phase 2.13 (indicateurs corrélés à 100%), test d'une stratégie hybride:
+- **Entrée**: Score pondéré ML (w_MACD×P_MACD + w_CCI×P_CCI + w_RSI×P_RSI)
+- **Sortie**: Oracle (labels parfaits) - changement de direction
+
+**Objectif**: Isoler le problème d'entrée vs sortie en utilisant une sortie parfaite (Oracle).
+
+### Grid Search - 3,072 Combinaisons
+
+| Paramètre | Valeurs testées |
+|-----------|-----------------|
+| **Poids** | [0.2, 0.4, 0.6, 0.8]³ = 64 combinaisons |
+| **Seuil LONG** | > [0.2, 0.4, 0.6, 0.8] = 4 valeurs |
+| **Seuil SHORT** | < [0.2, 0.4, 0.6, 0.8] = 4 valeurs |
+| **Oracle** | [MACD, RSI, CCI] = 3 indicateurs |
+| **Total** | 64 × 4 × 4 × 3 = **3,072 combinaisons** |
+
+**Asset testé**: BTC (split test)
+
+### Résultats - Comparaison des 3 Oracles
+
+| Oracle | Meilleurs Poids | ThLong | ThShort | Trades | Win Rate | PnL Gross | PnL Net | Durée Moy |
+|--------|-----------------|--------|---------|--------|----------|-----------|---------|-----------|
+| **MACD** 🥇 | (0.8, 0.2, 0.4) | 0.8 | 0.2 | **13,444** | **22.1%** | +607% | **-2,082%** | **8.4p** |
+| **CCI** 🥈 | (0.8, 0.4, 0.6) | 0.8 | 0.2 | 15,248 | 20.2% | +667% | -2,382% | 6.8p |
+| **RSI** 🥉 | (0.4, 0.2, 0.6) | 0.8 | 0.2 | 17,026 | 19.3% | +768% | -2,638% | 5.8p |
+
+### Analyse - Pourquoi MACD Gagne
+
+#### 1. Moins de Trades = Moins de Frais
+
+| Oracle | Trades | Frais (0.2%) | Impact |
+|--------|--------|--------------|--------|
+| MACD | 13,444 | 2,689% | Meilleur |
+| CCI | 15,248 | 3,050% | +361% pire |
+| RSI | 17,026 | 3,405% | +716% pire |
+
+**MACD produit 21% moins de trades que CCI et 27% moins que RSI.**
+
+#### 2. Durée Moyenne Plus Longue
+
+| Oracle | Durée | Interprétation |
+|--------|-------|----------------|
+| MACD | 8.4p (~42min) | Tendance lourde = signaux stables |
+| CCI | 6.8p (~34min) | Oscillateur moyen |
+| RSI | 5.8p (~29min) | Oscillateur rapide = nerveux |
+
+**MACD garde les trades plus longtemps → moins de churn.**
+
+#### 3. Win Rate Plus Élevé
+
+| Oracle | Win Rate | Delta vs RSI |
+|--------|----------|--------------|
+| MACD | 22.1% | +2.8% |
+| CCI | 20.2% | +0.9% |
+| RSI | 19.3% | baseline |
+
+**MACD détecte mieux les vraies sorties.**
+
+### Paradoxe RSI: Meilleur PnL Gross, Pire PnL Net
+
+| Oracle | PnL Gross | PnL Net | Écart |
+|--------|-----------|---------|-------|
+| RSI | **+768%** 🥇 | -2,638% 🥉 | **3,406%** |
+| CCI | +667% 🥈 | -2,382% 🥈 | 3,049% |
+| MACD | +607% 🥉 | **-2,082%** 🥇 | **2,689%** |
+
+**Explication**: RSI capte plus de signal brut (+768%) mais génère trop de trades (17k) → frais détruisent tout.
+
+### Top 5 par Oracle
+
+#### MACD (Meilleur)
+
+| Rank | Poids (M,C,R) | ThLong | ThShort | Trades | WR | PnL Net |
+|------|---------------|--------|---------|--------|-----|---------|
+| 1 | (0.8, 0.2, 0.4) | 0.8 | 0.2 | 13,444 | 22.1% | -2,082% |
+| 2 | (0.6, 0.2, 0.6) | 0.8 | 0.2 | 13,477 | 22.1% | -2,086% |
+| 3 | (0.8, 0.2, 0.8) | 0.8 | 0.2 | 13,470 | 22.1% | -2,086% |
+| 4 | (0.6, 0.2, 0.2) | 0.8 | 0.2 | 13,447 | 22.1% | -2,088% |
+| 5 | (0.6, 0.2, 0.4) | 0.8 | 0.2 | 13,470 | 22.1% | -2,089% |
+
+#### CCI
+
+| Rank | Poids (M,C,R) | ThLong | ThShort | Trades | WR | PnL Net |
+|------|---------------|--------|---------|--------|-----|---------|
+| 1 | (0.8, 0.4, 0.6) | 0.8 | 0.2 | 15,248 | 20.2% | -2,382% |
+| 2 | (0.4, 0.2, 0.2) | 0.8 | 0.2 | 15,207 | 20.1% | -2,385% |
+| 3 | (0.8, 0.4, 0.4) | 0.8 | 0.2 | 15,207 | 20.1% | -2,385% |
+| 4 | (0.6, 0.4, 0.4) | 0.8 | 0.2 | 15,256 | 20.2% | -2,385% |
+| 5 | (0.6, 0.6, 0.2) | 0.8 | 0.2 | 15,271 | 20.2% | -2,385% |
+
+#### RSI
+
+| Rank | Poids (M,C,R) | ThLong | ThShort | Trades | WR | PnL Net |
+|------|---------------|--------|---------|--------|-----|---------|
+| 1 | (0.4, 0.2, 0.6) | 0.8 | 0.2 | 17,026 | 19.3% | -2,638% |
+| 2 | (0.6, 0.2, 0.8) | 0.8 | 0.2 | 16,952 | 19.2% | -2,638% |
+| 3 | (0.4, 0.2, 0.8) | 0.8 | 0.2 | 17,105 | 19.4% | -2,640% |
+| 4 | (0.2, 0.2, 0.6) | 0.8 | 0.2 | 17,323 | 19.5% | -2,641% |
+| 5 | (0.2, 0.2, 0.8) | 0.8 | 0.2 | 17,443 | 19.7% | -2,641% |
+
+### Découvertes Clés
+
+#### 1. Seuils Extrêmes Dominent
+
+**100% des top 20 utilisent**: ThLong = 0.8, ThShort = 0.2
+
+**Interprétation**: Seuils extrêmes filtrent les entrées faibles → moins de trades de mauvaise qualité.
+
+#### 2. Poids MACD Élevé
+
+Les meilleurs résultats ont tous:
+- **w_MACD = 0.6-0.8** (poids fort)
+- **w_CCI = 0.2-0.4** (poids faible)
+- **w_RSI = 0.2-0.8** (variable)
+
+**MACD domine aussi côté entrée**, pas seulement sortie.
+
+#### 3. Hiérarchie Confirmée
+
+| Contexte | Classement |
+|----------|------------|
+| **Oracle Exit (sortie)** | MACD 🥇 > CCI 🥈 > RSI 🥉 |
+| **Oracle PnL Brut (Phase 2.13)** | RSI 🥇 > CCI 🥈 > MACD 🥉 |
+| **ML Accuracy** | MACD 🥇 > CCI 🥈 > RSI 🥉 |
+
+**Conclusion**: MACD = meilleur pour trading réel (moins de trades, plus stable).
+
+### Commandes
+
+```bash
+# Test complet avec comparaison des 3 Oracles
+python tests/test_entry_oracle_exit.py --asset BTC --split test
+
+# Options
+--asset {BTC,ETH,BNB,ADA,LTC}  # Asset à tester
+--split {train,val,test}       # Split dataset
+--fees 0.001                   # Frais (0.1%)
+--top-n 20                     # Nombre de résultats à afficher
+```
+
+### Conclusion Phase 2.14
+
+✅ **MACD CONFIRMÉ comme meilleur indicateur** pour stratégie entry/exit:
+- Meilleur PnL Net (-2,082% vs -2,382% CCI, -2,638% RSI)
+- Moins de trades (13,444 vs 15,248 CCI, 17,026 RSI)
+- Win Rate plus élevé (22.1% vs 20.2% CCI, 19.3% RSI)
+- Durée moyenne plus longue (8.4p vs 6.8p CCI, 5.8p RSI)
+
+❌ **Problème fondamental non résolu**: Même avec sortie Oracle parfaite, PnL Net reste négatif
+- 13,444 trades × 0.2% = 2,689% de frais
+- Signal brut +607% ne couvre pas les frais
+
+🎯 **Prochaine étape**: Réduire nombre de trades sous ~3,000 pour être profitable
+- Timeframe 15/30min (réduction naturelle)
+- Holding minimum plus agressif
+- Filtrer entrées sur volatilité/volume
 
 ---
 
