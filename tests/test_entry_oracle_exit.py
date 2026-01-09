@@ -254,13 +254,17 @@ def run_grid_search(
     opens: np.ndarray,
     fees: float = 0.001,
     top_n: int = 20
-) -> List[StrategyResult]:
+) -> Tuple[List[StrategyResult], Dict[str, List[StrategyResult]]]:
     """
     Exécute le grid search sur toutes les combinaisons.
 
     64 (poids) × 4 (seuil long) × 4 (seuil short) × 3 (oracle) = 3,072 combinaisons
+
+    Returns:
+        Tuple: (top_n global results, dict of top_n per oracle)
     """
     all_results = []
+    results_by_oracle = {ind: [] for ind in INDICATORS}
 
     # Générer toutes les combinaisons
     weight_combos = list(product(WEIGHT_VALUES, repeat=3))
@@ -305,6 +309,7 @@ def run_grid_search(
                         n_short=metrics['n_short']
                     )
                     all_results.append(result)
+                    results_by_oracle[oracle_ind].append(result)
 
     elapsed = time.time() - start_time
     logger.info(f"✅ Grid search terminé en {elapsed:.1f}s")
@@ -312,7 +317,12 @@ def run_grid_search(
     # Trier par PnL Net décroissant
     all_results.sort(key=lambda x: x.pnl_net, reverse=True)
 
-    return all_results[:top_n]
+    # Trier chaque oracle séparément
+    for ind in INDICATORS:
+        results_by_oracle[ind].sort(key=lambda x: x.pnl_net, reverse=True)
+        results_by_oracle[ind] = results_by_oracle[ind][:top_n]
+
+    return all_results[:top_n], results_by_oracle
 
 
 def main():
@@ -399,11 +409,11 @@ def main():
 
     # === GRID SEARCH ===
     logger.info("\n" + "=" * 120)
-    top_results = run_grid_search(probs_all, oracle_labels, opens, args.fees, args.top_n)
+    top_results, results_by_oracle = run_grid_search(probs_all, oracle_labels, opens, args.fees, args.top_n)
 
     # === AFFICHAGE DES RÉSULTATS ===
     logger.info("\n" + "=" * 120)
-    logger.info(f"🏆 TOP {args.top_n} MEILLEURES COMBINAISONS (par PnL Net)")
+    logger.info(f"🏆 TOP {args.top_n} MEILLEURES COMBINAISONS GLOBALES (par PnL Net)")
     logger.info("=" * 120)
 
     logger.info(f"\n{'Rank':<5} {'Weights (M,C,R)':<18} {'ThLong':<8} {'ThShort':<8} {'Oracle':<8} "
@@ -419,11 +429,45 @@ def main():
                     f"{res.pnl_gross:>+10.2f}% {res.pnl_net:>+10.2f}% "
                     f"{res.avg_duration:<8.1f} {ls_str:<10}")
 
-    # === ANALYSE DU MEILLEUR ===
+    # === MEILLEUR PAR ORACLE (COMPARAISON COMPLÈTE) ===
+    logger.info("\n" + "=" * 120)
+    logger.info("📊 COMPARAISON DES 3 ORACLES - MEILLEUR RÉSULTAT DE CHAQUE")
+    logger.info("=" * 120)
+
+    logger.info(f"\n{'Oracle':<8} {'Weights (M,C,R)':<18} {'ThLong':<8} {'ThShort':<8} "
+                f"{'Trades':<8} {'WinRate':<8} {'PnL Gross':<12} {'PnL Net':<12} {'AvgDur':<8}")
+    logger.info("-" * 110)
+
+    for oracle_ind in INDICATORS:
+        if results_by_oracle[oracle_ind]:
+            best = results_by_oracle[oracle_ind][0]
+            w_str = f"({best.weights[0]:.1f},{best.weights[1]:.1f},{best.weights[2]:.1f})"
+            logger.info(f"{oracle_ind.upper():<8} {w_str:<18} {best.threshold_long:<8.1f} {best.threshold_short:<8.1f} "
+                        f"{best.total_trades:<8} {best.win_rate:<7.1f}% "
+                        f"{best.pnl_gross:>+10.2f}% {best.pnl_net:>+10.2f}% "
+                        f"{best.avg_duration:<8.1f}")
+
+    # === TOP 5 PAR ORACLE ===
+    for oracle_ind in INDICATORS:
+        logger.info(f"\n{'='*80}")
+        logger.info(f"🎯 TOP 5 pour Oracle = {oracle_ind.upper()}")
+        logger.info(f"{'='*80}")
+
+        logger.info(f"{'Rank':<5} {'Weights (M,C,R)':<18} {'ThLong':<8} {'ThShort':<8} "
+                    f"{'Trades':<8} {'WinRate':<8} {'PnL Gross':<12} {'PnL Net':<12}")
+        logger.info("-" * 90)
+
+        for rank, res in enumerate(results_by_oracle[oracle_ind][:5], 1):
+            w_str = f"({res.weights[0]:.1f},{res.weights[1]:.1f},{res.weights[2]:.1f})"
+            logger.info(f"{rank:<5} {w_str:<18} {res.threshold_long:<8.1f} {res.threshold_short:<8.1f} "
+                        f"{res.total_trades:<8} {res.win_rate:<7.1f}% "
+                        f"{res.pnl_gross:>+10.2f}% {res.pnl_net:>+10.2f}%")
+
+    # === ANALYSE DU MEILLEUR GLOBAL ===
     if top_results:
         best = top_results[0]
         logger.info("\n" + "=" * 120)
-        logger.info("🥇 MEILLEURE COMBINAISON")
+        logger.info("🥇 MEILLEURE COMBINAISON GLOBALE")
         logger.info("=" * 120)
         logger.info(f"Weights: MACD={best.weights[0]:.1f}, CCI={best.weights[1]:.1f}, RSI={best.weights[2]:.1f}")
         logger.info(f"Threshold LONG: > {best.threshold_long}")
@@ -435,17 +479,8 @@ def main():
         logger.info(f"PnL Net: {best.pnl_net:+.2f}%")
         logger.info(f"Durée moyenne: {best.avg_duration:.1f} périodes")
 
-        # Stats par Oracle
-        logger.info("\n📊 MEILLEUR RÉSULTAT PAR ORACLE:")
-        for oracle_ind in INDICATORS:
-            oracle_results = [r for r in top_results if r.oracle_indicator == oracle_ind]
-            if oracle_results:
-                best_oracle = oracle_results[0]
-                logger.info(f"  {oracle_ind.upper()}: PnL Net={best_oracle.pnl_net:+.2f}%, "
-                            f"WR={best_oracle.win_rate:.1f}%, Trades={best_oracle.total_trades}")
-
     # === STATS DISTRIBUTION ===
-    logger.info("\n📈 DISTRIBUTION DES RÉSULTATS (top 20):")
+    logger.info("\n📈 DISTRIBUTION DES RÉSULTATS (top 20 global):")
     all_pnl_net = [r.pnl_net for r in top_results]
     all_trades = [r.total_trades for r in top_results]
 
