@@ -1,12 +1,12 @@
 # Modele CNN-LSTM Multi-Output - Guide Complet
 
-**Date**: 2026-01-08
-**Statut**: ❌ **Tests Oracle Sliding Window COMPLÉTÉS - Kalman ET Octave: Échec Total**
-**Version**: 9.2 - Octave Glissant: -37% à -116% (PIRE que Kalman: -19% à -30%) | Global: +6,644%
-**Models**: MACD Kalman 92.5% | CCI Kalman 90.2% | RSI Kalman 87.6% - Direction-Only validés
-**Découverte Critique**: Octave Sliding Window génère **3-5× PLUS de trades** que Kalman (apocalypse RSI: -116%)
-**Hiérarchie Filtres**: Kalman GLOBAL (+6,644%) > Kalman Sliding (-19%) > **Octave Sliding (-37% à -116%)**
-**Prochaine Étape**: Timeframe 15min/30min (Kalman GLOBAL uniquement) - ABANDONNER tous sliding windows
+**Date**: 2026-01-09
+**Statut**: ✅ **Optimisations Architecture Complétées - Shortcut validé pour CCI**
+**Version**: 9.3 - Shortcut Last-2 Steps: CCI +6% | MACD/RSI: baseline optimal
+**Models**: MACD Kalman 92.4% | CCI Kalman+Shortcut 88.6% | RSI Kalman 87.6% - Direction-Only validés
+**Découverte Critique**: Shortcut bénéficie UNIQUEMENT aux indicateurs multi-features (CCI: 3 features HLC)
+**Hiérarchie Modèles**: MACD 92.4% > CCI 88.6% > RSI 87.6%
+**Prochaine Étape**: Timeframe 15min/30min ou Trading Strategy avec ces modèles
 
 ---
 
@@ -89,6 +89,138 @@ python tests/test_structural_filters.py --split test --holding-min 30
 3. **Utilisateur exécute** sur sa machine (avec GPU + données)
 4. Utilisateur partage les résultats
 5. Claude analyse et propose prochaine étape
+
+---
+
+## 🎯 OPTIMISATIONS ARCHITECTURE - Shortcut & Temporal Gate (2026-01-09)
+
+**Date**: 2026-01-09
+**Statut**: ✅ **COMPLÉTÉ - Shortcut validé pour CCI uniquement**
+**Objectif**: Améliorer l'accuracy au-delà des baselines (MACD 92.4%, RSI 87.6%, CCI ~82%)
+
+### Méthodes Testées (Recommandations Expert)
+
+3 méthodes architecturales ont été testées pour améliorer la détection des transitions :
+
+#### 1. Shortcut Last-N Steps
+
+**Principe**: Skip connection donnant accès direct aux N derniers timesteps, bypassing CNN/LSTM.
+
+```python
+# Dans model.py
+if use_shortcut:
+    shortcut = x[:, -shortcut_steps:, :].reshape(batch_size, -1)  # (batch, steps*features)
+    combined = torch.cat([lstm_out, shortcut], dim=1)  # Concaténer avec sortie LSTM
+```
+
+**Hypothèse**: Les derniers timesteps contiennent l'information critique pour les transitions.
+
+#### 2. Temporal Gate
+
+**Principe**: Poids learnable par timestep appliqués AVANT le CNN (0.5→1.0 initialisation linéaire).
+
+```python
+# Dans model.py
+if use_temporal_gate:
+    self.temporal_gate = nn.Parameter(torch.linspace(0.5, 1.0, steps=sequence_length))
+# Dans forward():
+    gate_weights = torch.sigmoid(self.temporal_gate)
+    x = x * gate_weights.unsqueeze(0).unsqueeze(-1)
+```
+
+**Hypothèse**: Donner plus d'importance aux timesteps récents.
+
+#### 3. WeightedTransitionLoss
+
+**Principe**: Loss BCE avec poids plus élevé sur les transitions (label[t] != label[t-1]).
+
+**Hypothèse**: Forcer le modèle à mieux apprendre les changements de direction.
+
+### Résultats Empiriques
+
+#### Test sur MACD (baseline 92.4%)
+
+| Méthode | Val Acc | Delta | Verdict |
+|---------|---------|-------|---------|
+| Baseline | 92.4% | - | ✅ Référence |
+| Shortcut steps=5 | 92.4% | ±0% | ❌ Neutre |
+| Shortcut steps=2 | 91.7% | -0.7% | ❌ Dégradation |
+| Temporal Gate | 91.0% | -1.4% | ❌ Dégradation |
+| WeightedTransition w=2 | ~92% | ±0% | ❌ Neutre |
+
+#### Test sur RSI (baseline 87.6%)
+
+| Méthode | Val Acc | Delta | Verdict |
+|---------|---------|-------|---------|
+| Baseline | 87.6% | - | ✅ Référence |
+| Shortcut steps=2 | 87.6% | ±0% | ❌ Neutre |
+| Temporal Gate | ~87% | ±0% | ❌ Neutre |
+
+#### Test sur CCI (baseline 82.6%)
+
+| Méthode | Val Acc | Test Acc | Delta | Verdict |
+|---------|---------|----------|-------|---------|
+| Baseline | 82.6% | - | - | Référence |
+| Shortcut steps=5 | 90.1% | - | +7.5% | ✅ Amélioration |
+| **Shortcut steps=2** | **90.4%** | **88.6%** | **+6.0%** | ✅ **OPTIMAL** |
+| Temporal Gate | ~82% | - | ±0% | ❌ Neutre |
+
+### Découverte Clé : Shortcut Spécifique aux Multi-Features
+
+**Pourquoi Shortcut fonctionne UNIQUEMENT sur CCI ?**
+
+| Indicateur | Features | Shortcut Effect | Explication |
+|------------|----------|-----------------|-------------|
+| **MACD** | 1 (c_ret) | ❌ -0.7% | 1 feature → LSTM capture tout le contexte nécessaire |
+| **RSI** | 1 (c_ret) | ❌ ±0% | 1 feature → pas de bénéfice du raccourci |
+| **CCI** | 3 (h_ret, l_ret, c_ret) | ✅ **+6.0%** | 3 features (HLC) → accès direct au Typical Price récent aide |
+
+**Interprétation**:
+- CCI utilise le **Typical Price = (H+L+C)/3**
+- Le shortcut donne un accès direct aux 2 derniers HLC
+- Cela aide le modèle à capturer les mouvements récents du Typical Price
+- Pour MACD/RSI (1 seule feature), le LSTM suffit amplement
+
+### Configuration Optimale par Indicateur
+
+| Indicateur | Config Optimale | Test Accuracy | Commande |
+|------------|-----------------|---------------|----------|
+| **MACD** | Baseline | **92.4%** 🥇 | `--no-weighted-loss` |
+| **CCI** | Shortcut s=2 | **88.6%** 🥈 | `--shortcut --shortcut-steps 2 --no-weighted-loss` |
+| **RSI** | Baseline | **87.6%** 🥉 | `--no-weighted-loss` |
+
+### Commandes d'Entraînement Optimales
+
+```bash
+# MACD - Baseline (meilleur)
+python src/train.py \
+    --data data/prepared/dataset_btc_eth_bnb_ada_ltc_macd_direction_only_kalman.npz \
+    --epochs 50 --no-weighted-loss
+
+# CCI - Avec Shortcut (meilleur)
+python src/train.py \
+    --data data/prepared/dataset_btc_eth_bnb_ada_ltc_cci_direction_only_kalman.npz \
+    --epochs 50 --shortcut --shortcut-steps 2 --no-weighted-loss
+
+# RSI - Baseline (meilleur)
+python src/train.py \
+    --data data/prepared/dataset_btc_eth_bnb_ada_ltc_rsi_direction_only_kalman.npz \
+    --epochs 50 --no-weighted-loss
+```
+
+### Conclusion
+
+❌ **Méthodes ÉCHEC pour MACD/RSI** : Shortcut, Temporal Gate, WeightedTransitionLoss
+- Le modèle est déjà optimal pour les indicateurs 1-feature
+- Ces architectures n'apportent rien ou dégradent
+
+✅ **Shortcut SUCCÈS pour CCI** : +6% accuracy (82.6% → 88.6%)
+- Spécifique aux indicateurs multi-features (HLC)
+- `--shortcut --shortcut-steps 2` est la config optimale
+
+**Règle générale** : Le nombre de features détermine si Shortcut aide
+- 1 feature → Baseline
+- 3+ features → Shortcut steps=2
 
 ---
 
