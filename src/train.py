@@ -998,6 +998,9 @@ def main():
         'indicator_for_metrics': indicator_for_metrics,
         'use_layer_norm': use_layer_norm,
         'use_bce_with_logits': use_bce_with_logits,
+        'use_shortcut': args.shortcut,
+        'shortcut_steps': args.shortcut_steps,
+        'use_temporal_gate': args.temporal_gate,
     }
 
     # =========================================================================
