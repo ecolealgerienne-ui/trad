@@ -455,6 +455,8 @@ def parse_args():
     # Weighted Loss Control
     parser.add_argument('--no-weighted-loss', action='store_true',
                         help='Désactiver WeightedTransitionBCELoss même si transitions disponibles (baseline mode)')
+    parser.add_argument('--transition-weight', type=float, default=5.0,
+                        help='Poids pour les transitions dans WeightedTransitionBCELoss (défaut: 5.0)')
 
     # Shortcut Last-N Steps
     parser.add_argument('--shortcut', action='store_true',
@@ -910,7 +912,7 @@ def main():
         logger.info(f"  ⚠️ WeightedTransitionBCELoss DÉSACTIVÉ (--no-weighted-loss)")
 
     if use_weighted_loss:
-        logger.info(f"  🎯 Phase 2.11: WeightedTransitionBCELoss ACTIVÉ (transition_weight=5.0×)")
+        logger.info(f"  🎯 Phase 2.11: WeightedTransitionBCELoss ACTIVÉ (transition_weight={args.transition_weight}×)")
         from model import WeightedTransitionBCELoss
 
         # Créer le modèle (sans loss, on la remplace)
@@ -934,7 +936,7 @@ def main():
         # Remplacer par WeightedTransitionBCELoss
         loss_fn = WeightedTransitionBCELoss(
             num_outputs=num_outputs_final,
-            transition_weight=5.0,  # 5× poids pour les transitions
+            transition_weight=args.transition_weight,
             use_bce_with_logits=use_bce_with_logits
         )
     else:
