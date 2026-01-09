@@ -462,6 +462,10 @@ def parse_args():
     parser.add_argument('--shortcut-steps', type=int, default=5,
                         help='Nombre de steps pour le shortcut (défaut: 5)')
 
+    # Temporal Gate (poids learnable par timestep)
+    parser.add_argument('--temporal-gate', action='store_true',
+                        help='Activer temporal gate (poids learnable par timestep, favorise récents)')
+
     return parser.parse_args()
 
 
@@ -923,7 +927,8 @@ def main():
             use_layer_norm=use_layer_norm,
             use_bce_with_logits=use_bce_with_logits,
             use_shortcut=args.shortcut,
-            shortcut_steps=args.shortcut_steps
+            shortcut_steps=args.shortcut_steps,
+            use_temporal_gate=args.temporal_gate
         )
 
         # Remplacer par WeightedTransitionBCELoss
@@ -947,12 +952,15 @@ def main():
             use_layer_norm=use_layer_norm,
             use_bce_with_logits=use_bce_with_logits,
             use_shortcut=args.shortcut,
-            shortcut_steps=args.shortcut_steps
+            shortcut_steps=args.shortcut_steps,
+            use_temporal_gate=args.temporal_gate
         )
 
-    # Log shortcut si activé
+    # Log features actives
     if args.shortcut:
         logger.info(f"🔗 Shortcut Last-{args.shortcut_steps} Steps ACTIVÉ (skip connection)")
+    if args.temporal_gate:
+        logger.info(f"⏱️ Temporal Gate ACTIVÉ (poids learnable par timestep)")
 
     # Optimizer
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
