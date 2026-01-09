@@ -29,24 +29,34 @@ def load_dataset(indicator: str, filter_type: str = 'kalman') -> Dict:
         raise FileNotFoundError(f"Dataset non trouvé: {path}")
 
     data = np.load(path, allow_pickle=True)
-    return {
-        'X': data['X'],
-        'Y': data['Y'],
-        'timestamps': data['timestamps'] if 'timestamps' in data else None,
-        'split_indices': data['split_indices'].item() if 'split_indices' in data else None
-    }
+
+    # Les datasets utilisent X_train/X_val/X_test au lieu de X
+    result = {}
+    for split in ['train', 'val', 'test']:
+        x_key = f'X_{split}'
+        y_key = f'Y_{split}'
+        if x_key in data and y_key in data:
+            result[f'X_{split}'] = data[x_key]
+            result[f'Y_{split}'] = data[y_key]
+
+    # Aussi charger les prédictions si disponibles
+    for split in ['train', 'val', 'test']:
+        pred_key = f'Y_{split}_pred'
+        if pred_key in data:
+            result[pred_key] = data[pred_key]
+
+    return result
 
 
 def get_split_data(data: Dict, split: str) -> Tuple[np.ndarray, np.ndarray]:
     """Extrait les données pour un split donné."""
-    if data['split_indices'] is None:
-        raise ValueError("Pas d'indices de split dans le dataset")
+    x_key = f'X_{split}'
+    y_key = f'Y_{split}'
 
-    indices = data['split_indices'][split]
-    X = data['X'][indices]
-    Y = data['Y'][indices]
+    if x_key not in data or y_key not in data:
+        raise ValueError(f"Split '{split}' non trouvé. Clés disponibles: {list(data.keys())}")
 
-    return X, Y
+    return data[x_key], data[y_key]
 
 
 def load_model_and_predict(indicator: str, X: np.ndarray, filter_type: str = 'kalman') -> np.ndarray:
