@@ -456,6 +456,12 @@ def parse_args():
     parser.add_argument('--no-weighted-loss', action='store_true',
                         help='Désactiver WeightedTransitionBCELoss même si transitions disponibles (baseline mode)')
 
+    # Shortcut Last-N Steps
+    parser.add_argument('--shortcut', action='store_true',
+                        help='Activer shortcut last-5 steps (améliore détection transitions)')
+    parser.add_argument('--shortcut-steps', type=int, default=5,
+                        help='Nombre de steps pour le shortcut (défaut: 5)')
+
     return parser.parse_args()
 
 
@@ -915,7 +921,9 @@ def main():
             dense_hidden_size=args.dense_hidden,
             dense_dropout=args.dense_dropout,
             use_layer_norm=use_layer_norm,
-            use_bce_with_logits=use_bce_with_logits
+            use_bce_with_logits=use_bce_with_logits,
+            use_shortcut=args.shortcut,
+            shortcut_steps=args.shortcut_steps
         )
 
         # Remplacer par WeightedTransitionBCELoss
@@ -937,8 +945,14 @@ def main():
             dense_hidden_size=args.dense_hidden,
             dense_dropout=args.dense_dropout,
             use_layer_norm=use_layer_norm,
-            use_bce_with_logits=use_bce_with_logits
+            use_bce_with_logits=use_bce_with_logits,
+            use_shortcut=args.shortcut,
+            shortcut_steps=args.shortcut_steps
         )
+
+    # Log shortcut si activé
+    if args.shortcut:
+        logger.info(f"🔗 Shortcut Last-{args.shortcut_steps} Steps ACTIVÉ (skip connection)")
 
     # Optimizer
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)

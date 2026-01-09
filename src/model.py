@@ -93,7 +93,9 @@ class MultiOutputCNNLSTM(nn.Module):
         dense_hidden_size: int = DENSE_HIDDEN_SIZE,
         dense_dropout: float = DENSE_DROPOUT,
         use_layer_norm: bool = True,
-        use_bce_with_logits: bool = True
+        use_bce_with_logits: bool = True,
+        use_shortcut: bool = False,
+        shortcut_steps: int = 5
     ):
         super(MultiOutputCNNLSTM, self).__init__()
 
@@ -102,6 +104,8 @@ class MultiOutputCNNLSTM(nn.Module):
         self.num_outputs = num_outputs
         self.use_layer_norm = use_layer_norm
         self.use_bce_with_logits = use_bce_with_logits
+        self.use_shortcut = use_shortcut
+        self.shortcut_steps = shortcut_steps
 
         # =====================================================================
         # CNN Layer (1D Convolution sur dimension temporelle)
@@ -159,17 +163,32 @@ class MultiOutputCNNLSTM(nn.Module):
         self.dense_dropout = nn.Dropout(dense_dropout)
 
         # =====================================================================
+        # Shortcut Last-N Steps (optionnel)
+        # =====================================================================
+        # Donne au réseau un accès direct aux derniers timesteps de l'input
+        # Améliore la détection des transitions récentes
+        shortcut_size = shortcut_steps * num_indicators if use_shortcut else 0
+        self.shortcut_size = shortcut_size
+
+        if use_shortcut:
+            # Gate learnable pour pondérer l'importance des derniers steps
+            self.shortcut_gate = nn.Parameter(torch.linspace(0.5, 1.0, steps=shortcut_size))
+
+        # =====================================================================
         # Têtes de Sortie Indépendantes (num_outputs)
         # =====================================================================
         # Chaque tête prédit la pente d'un indicateur (0 ou 1)
         # Dynamique selon num_outputs (1 pour single-indicator, 3 pour multi)
+        # Input size = dense_hidden_size + shortcut_size (si activé)
 
+        head_input_size = dense_hidden_size + shortcut_size
         self.output_heads = nn.ModuleList([
-            nn.Linear(dense_hidden_size, 1) for _ in range(num_outputs)
+            nn.Linear(head_input_size, 1) for _ in range(num_outputs)
         ])
 
         layernorm_status = "avec LayerNorm" if use_layer_norm else "sans LayerNorm"
-        logger.info(f"✅ Modèle CNN-LSTM créé ({layernorm_status}):")
+        shortcut_status = f"+ Shortcut Last-{shortcut_steps}" if use_shortcut else ""
+        logger.info(f"✅ Modèle CNN-LSTM créé ({layernorm_status}) {shortcut_status}:")
         logger.info(f"  Input: ({sequence_length}, {num_indicators})")
         logger.info(f"  CNN: {cnn_filters} filters, kernel={cnn_kernel_size}")
         if use_layer_norm:
@@ -190,6 +209,9 @@ class MultiOutputCNNLSTM(nn.Module):
         """
         # Input: (batch, sequence_length, num_indicators)
         batch_size = x.size(0)
+
+        # Sauvegarder input original pour shortcut (si activé)
+        x_original = x if self.use_shortcut else None
 
         # =====================================================================
         # CNN
@@ -227,6 +249,21 @@ class MultiOutputCNNLSTM(nn.Module):
         x = self.dense_shared(x)  # (batch, dense_hidden_size)
         x = self.dense_activation(x)
         x = self.dense_dropout(x)
+
+        # =====================================================================
+        # Shortcut Last-N Steps (si activé)
+        # =====================================================================
+        if self.use_shortcut and x_original is not None:
+            # Extraire les N derniers timesteps de l'input original
+            # x_original: (batch, seq_len, num_indicators)
+            last_steps = x_original[:, -self.shortcut_steps:, :]  # (batch, N, num_indicators)
+            last_steps = last_steps.reshape(batch_size, -1)  # (batch, N * num_indicators)
+
+            # Appliquer gate learnable (pondère l'importance)
+            last_steps = last_steps * torch.sigmoid(self.shortcut_gate)
+
+            # Concatener avec dense output
+            x = torch.cat([x, last_steps], dim=1)  # (batch, dense_hidden_size + shortcut_size)
 
         # =====================================================================
         # Têtes de Sortie (num_outputs indépendants)
@@ -539,7 +576,9 @@ def create_model(
     dense_hidden_size: int = DENSE_HIDDEN_SIZE,
     dense_dropout: float = DENSE_DROPOUT,
     use_layer_norm: bool = True,
-    use_bce_with_logits: bool = True
+    use_bce_with_logits: bool = True,
+    use_shortcut: bool = False,
+    shortcut_steps: int = 5
 ) -> Tuple[MultiOutputCNNLSTM, nn.Module]:
     """
     Factory function pour créer le modèle et la loss.
@@ -556,6 +595,8 @@ def create_model(
         dense_dropout: Dropout dense
         use_layer_norm: Activer LayerNorm (MACD: True, RSI/CCI: False)
         use_bce_with_logits: Utiliser BCEWithLogitsLoss (MACD: True, RSI/CCI: False)
+        use_shortcut: Activer shortcut last-N steps (améliore détection transitions)
+        shortcut_steps: Nombre de steps pour le shortcut (défaut: 5)
 
     Returns:
         (model, loss_fn)
@@ -570,7 +611,9 @@ def create_model(
         dense_hidden_size=dense_hidden_size,
         dense_dropout=dense_dropout,
         use_layer_norm=use_layer_norm,
-        use_bce_with_logits=use_bce_with_logits
+        use_bce_with_logits=use_bce_with_logits,
+        use_shortcut=use_shortcut,
+        shortcut_steps=shortcut_steps
     )
 
     # Choisir la loss function selon l'indicateur
