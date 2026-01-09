@@ -893,8 +893,7 @@ def prepare_and_save_all(assets: list = None,
         else:
             filter_suffix = filter_type
 
-        # Phase 2.11: Ajouter suffixe _wt pour tests isolés (ne pas écraser existant)
-        output_path = output_dir / f"dataset_{assets_str}_{indicator}_direction_only_{filter_suffix}_wt.npz"
+        output_path = output_dir / f"dataset_{assets_str}_{indicator}_direction_only_{filter_suffix}.npz"
 
         # Features et metadata par indicateur
         if indicator == 'rsi':
