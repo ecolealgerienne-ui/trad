@@ -433,7 +433,11 @@ def compute_monthly_stats(trades: List[Trade]) -> List[MonthlyResult]:
 
     for trade in trades:
         # Convertir timestamp en datetime
-        dt = datetime.fromtimestamp(trade.entry_timestamp)
+        # Si timestamp > 1e12, c'est en millisecondes → diviser par 1000
+        ts = trade.entry_timestamp
+        if ts > 1e12:
+            ts = ts / 1000
+        dt = datetime.fromtimestamp(ts)
         year_month = dt.strftime('%Y-%m')
         monthly_data[year_month].append(trade)
 
