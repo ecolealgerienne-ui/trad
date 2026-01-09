@@ -131,16 +131,23 @@ def backtest_strategy(
     opens: np.ndarray,
     weights_in: Tuple[float, float, float],
     weights_ou: Tuple[float, float, float],
-    fees: float = 0.001
+    fees: float = 0.001,
+    inverted: bool = False
 ) -> List[Trade]:
     """
     Exécute le backtest avec la stratégie weighted entry/exit.
 
-    Logique:
+    Logique NORMALE (inverted=False):
     - FLAT → LONG si score_IN > 0.6
     - FLAT → SHORT si score_IN < 0.4
     - LONG → EXIT si score_OU < 0.5
     - SHORT → EXIT si score_OU > 0.5
+
+    Logique INVERSÉE (inverted=True):
+    - FLAT → LONG si score_IN < 0.4 (consensus baissier = contrarian LONG)
+    - FLAT → SHORT si score_IN > 0.6 (consensus haussier = contrarian SHORT)
+    - LONG → EXIT si score_OU > 0.5
+    - SHORT → EXIT si score_OU < 0.5
     """
     n_samples = len(opens)
     trades = []
@@ -156,20 +163,35 @@ def backtest_strategy(
 
         if position == 'FLAT':
             # Chercher une entrée
-            if score_in > THRESHOLD_IN_LONG:
-                position = 'LONG'
-                entry_idx = i
-                entry_price = opens[i + 1]  # Exécution au prochain Open
-                entry_score_in = score_in
-            elif score_in < THRESHOLD_IN_SHORT:
-                position = 'SHORT'
-                entry_idx = i
-                entry_price = opens[i + 1]
-                entry_score_in = score_in
+            if inverted:
+                # Logique inversée (contrarian)
+                if score_in < THRESHOLD_IN_SHORT:  # Consensus baissier → LONG
+                    position = 'LONG'
+                    entry_idx = i
+                    entry_price = opens[i + 1]
+                    entry_score_in = score_in
+                elif score_in > THRESHOLD_IN_LONG:  # Consensus haussier → SHORT
+                    position = 'SHORT'
+                    entry_idx = i
+                    entry_price = opens[i + 1]
+                    entry_score_in = score_in
+            else:
+                # Logique normale
+                if score_in > THRESHOLD_IN_LONG:
+                    position = 'LONG'
+                    entry_idx = i
+                    entry_price = opens[i + 1]
+                    entry_score_in = score_in
+                elif score_in < THRESHOLD_IN_SHORT:
+                    position = 'SHORT'
+                    entry_idx = i
+                    entry_price = opens[i + 1]
+                    entry_score_in = score_in
 
         elif position == 'LONG':
             # Chercher une sortie
-            if score_ou < THRESHOLD_OUT:
+            exit_condition = score_ou > THRESHOLD_OUT if inverted else score_ou < THRESHOLD_OUT
+            if exit_condition:
                 exit_price = opens[i + 1]
                 pnl_gross = (exit_price - entry_price) / entry_price
                 pnl_net = pnl_gross - 2 * fees  # Frais entrée + sortie
@@ -190,7 +212,8 @@ def backtest_strategy(
 
         elif position == 'SHORT':
             # Chercher une sortie
-            if score_ou > THRESHOLD_OUT:
+            exit_condition = score_ou < THRESHOLD_OUT if inverted else score_ou > THRESHOLD_OUT
+            if exit_condition:
                 exit_price = opens[i + 1]
                 pnl_gross = (entry_price - exit_price) / entry_price
                 pnl_net = pnl_gross - 2 * fees
@@ -247,7 +270,8 @@ def run_grid_search(
     probs: Dict[str, np.ndarray],
     opens: np.ndarray,
     fees: float = 0.001,
-    top_n: int = 20
+    top_n: int = 20,
+    inverted: bool = False
 ) -> List[StrategyResult]:
     """
     Exécute le grid search sur toutes les combinaisons de poids.
@@ -261,7 +285,8 @@ def run_grid_search(
     weight_combos_ou = list(product(WEIGHT_VALUES, repeat=3))
 
     total_combos = len(weight_combos_in) * len(weight_combos_ou)
-    logger.info(f"🔍 Grid search: {total_combos:,} combinaisons")
+    mode_str = "INVERSÉ (contrarian)" if inverted else "NORMAL"
+    logger.info(f"🔍 Grid search: {total_combos:,} combinaisons - Mode {mode_str}")
 
     start_time = time.time()
 
@@ -276,7 +301,7 @@ def run_grid_search(
                 remaining = (total_combos - combo_idx) / rate
                 logger.info(f"  Progress: {combo_idx:,}/{total_combos:,} ({combo_idx/total_combos*100:.1f}%) - ETA: {remaining:.0f}s")
 
-            trades = backtest_strategy(probs, opens, weights_in, weights_ou, fees)
+            trades = backtest_strategy(probs, opens, weights_in, weights_ou, fees, inverted)
             metrics = evaluate_trades(trades)
 
             result = StrategyResult(
@@ -316,6 +341,8 @@ def main():
     parser.add_argument('--filter', type=str, default='kalman',
                         choices=['kalman', 'octave20'],
                         help='Type de filtre (défaut: kalman)')
+    parser.add_argument('--inverted', action='store_true',
+                        help='Inverser la logique (contrarian: score<0.4→LONG, score>0.6→SHORT)')
 
     args = parser.parse_args()
 
@@ -323,15 +350,20 @@ def main():
     asset_map = {'BTC': 0, 'ETH': 1, 'BNB': 2, 'ADA': 3, 'LTC': 4}
     asset_id = asset_map[args.asset]
 
+    mode_str = "INVERSÉ (contrarian)" if args.inverted else "NORMAL"
     logger.info("=" * 100)
-    logger.info("🎯 TEST WEIGHTED ENTRY/EXIT STRATEGY")
+    logger.info(f"🎯 TEST WEIGHTED ENTRY/EXIT STRATEGY - Mode {mode_str}")
     logger.info("=" * 100)
     logger.info(f"Asset: {args.asset} (ID={asset_id})")
     logger.info(f"Split: {args.split}")
     logger.info(f"Fees: {args.fees*100:.2f}%")
     logger.info(f"Filter: {args.filter}")
+    logger.info(f"Mode: {mode_str}")
     logger.info(f"Poids testés: {WEIGHT_VALUES}")
-    logger.info(f"Seuils: IN_LONG>{THRESHOLD_IN_LONG}, IN_SHORT<{THRESHOLD_IN_SHORT}, OUT={THRESHOLD_OUT}")
+    if args.inverted:
+        logger.info(f"Seuils: IN_LONG<{THRESHOLD_IN_SHORT}, IN_SHORT>{THRESHOLD_IN_LONG}, OUT={THRESHOLD_OUT}")
+    else:
+        logger.info(f"Seuils: IN_LONG>{THRESHOLD_IN_LONG}, IN_SHORT<{THRESHOLD_IN_SHORT}, OUT={THRESHOLD_OUT}")
 
     # === CHARGEMENT DES DONNÉES ===
     logger.info("\n📂 Chargement des datasets...")
@@ -379,7 +411,7 @@ def main():
 
     # === GRID SEARCH ===
     logger.info("\n" + "=" * 100)
-    top_results = run_grid_search(probs_all, opens, args.fees, args.top_n)
+    top_results = run_grid_search(probs_all, opens, args.fees, args.top_n, args.inverted)
 
     # === AFFICHAGE DES RÉSULTATS ===
     logger.info("\n" + "=" * 100)
@@ -419,7 +451,7 @@ def main():
         baseline_trades = backtest_strategy(
             probs_all, opens,
             (0.4, 0.4, 0.4), (0.4, 0.4, 0.4),
-            args.fees
+            args.fees, args.inverted
         )
         baseline_metrics = evaluate_trades(baseline_trades)
 
