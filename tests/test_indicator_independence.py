@@ -438,41 +438,50 @@ def main():
         print("Erreur: Au moins 2 indicateurs requis")
         return
 
-    # Aligner les tailles (prendre le minimum)
-    min_size = min(len(l) for l in labels.values())
-    for ind in labels:
-        labels[ind] = labels[ind][:min_size]
-        X_data[ind] = X_data[ind][:min_size]
-
-    print(f"\nTaille alignée: {min_size} samples")
-
-    # 1. Analyse Oracle (labels)
-    oracle_results = analyze_oracle_correlation(labels)
-
-    # 2. Analyse des prédictions ML (optionnel)
+    # 2. Charger les prédictions ML (si demandé) AVANT d'aligner les tailles
     error_results = None
     conditional_results = None
     voting_results = None
+    predictions = {}
+    probs = {}
 
     if args.use_predictions:
         print("\nChargement des prédictions depuis les datasets...")
-        predictions = {}
-        probs = {}
 
         for ind in indicators:
             if ind in datasets:
                 try:
                     preds, prob = get_predictions_from_dataset(datasets[ind], args.split)
-                    predictions[ind] = preds[:min_size]
-                    probs[ind] = prob[:min_size]
+                    predictions[ind] = preds
+                    probs[ind] = prob
                     print(f"  {ind.upper()}: {len(preds)} prédictions chargées")
                 except Exception as e:
                     print(f"  ⚠️ {ind.upper()}: {e}")
 
-        if len(predictions) >= 2:
-            error_results = analyze_error_overlap(labels, predictions)
-            conditional_results = analyze_conditional_accuracy(labels, predictions)
-            voting_results = analyze_voting_potential(labels, predictions)
+    # Aligner les tailles (prendre le minimum entre labels ET predictions)
+    all_sizes = [len(l) for l in labels.values()]
+    if predictions:
+        all_sizes.extend([len(p) for p in predictions.values()])
+
+    min_size = min(all_sizes)
+    print(f"\nTaille alignée: {min_size} samples")
+
+    for ind in labels:
+        labels[ind] = labels[ind][:min_size]
+        X_data[ind] = X_data[ind][:min_size]
+
+    for ind in predictions:
+        predictions[ind] = predictions[ind][:min_size]
+        probs[ind] = probs[ind][:min_size]
+
+    # 1. Analyse Oracle (labels)
+    oracle_results = analyze_oracle_correlation(labels)
+
+    # 3. Analyse des erreurs ML
+    if len(predictions) >= 2:
+        error_results = analyze_error_overlap(labels, predictions)
+        conditional_results = analyze_conditional_accuracy(labels, predictions)
+        voting_results = analyze_voting_potential(labels, predictions)
 
     # Afficher les résultats
     print_results(oracle_results, error_results, conditional_results, voting_results)
