@@ -279,7 +279,9 @@ def run_weighted_fusion_backtest(
     weights: Dict[str, float],
     threshold: float,
     fees: float = 0.001,
-    use_train_calibration: bool = True
+    use_train_calibration: bool = True,
+    raw_probs: bool = False,
+    bias: float = 0.5
 ) -> StrategyResult:
     """
     Exécute le backtest avec fusion pondérée.
@@ -291,6 +293,8 @@ def run_weighted_fusion_backtest(
         threshold: Seuil de décision
         fees: Frais par trade
         use_train_calibration: Utiliser stats train pour normaliser
+        raw_probs: Si True, utilise score = w1*p1 + w2*p2 + w3*p3 - bias
+        bias: Biais pour raw_probs (défaut: 0.5)
     """
     indicators = ['macd', 'rsi', 'cci']
 
@@ -311,28 +315,38 @@ def run_weighted_fusion_backtest(
         else:
             probs[ind] = None
 
-    # === CALIBRATION (stats sur train) ===
+    # === CALIBRATION (stats sur train) - seulement si z-score ===
     stats = {}
-    for ind in indicators:
-        if probs[ind] is None:
-            stats[ind] = None
-            continue
+    if not raw_probs:
+        for ind in indicators:
+            if probs[ind] is None:
+                stats[ind] = None
+                continue
 
-        if use_train_calibration:
-            train_pred = datasets[ind].get('Y_train_pred') if ind in datasets else None
-            if train_pred is not None:
-                stats[ind] = compute_indicator_stats(train_pred, ind.upper())
+            if use_train_calibration:
+                train_pred = datasets[ind].get('Y_train_pred') if ind in datasets else None
+                if train_pred is not None:
+                    stats[ind] = compute_indicator_stats(train_pred, ind.upper())
+                else:
+                    stats[ind] = compute_indicator_stats(probs[ind], ind.upper())
             else:
                 stats[ind] = compute_indicator_stats(probs[ind], ind.upper())
-        else:
-            stats[ind] = compute_indicator_stats(probs[ind], ind.upper())
 
-    # Afficher stats calibration
-    logger.info(f"\n📊 CALIBRATION (z-score normalization):")
-    for ind in indicators:
-        if stats[ind]:
-            marker = "⭐" if ind == baseline else "  "
-            logger.info(f"  {marker} {ind.upper()}: mean={stats[ind].mean:.4f}, std={stats[ind].std:.4f}, weight={weights.get(ind, 0):.2f}")
+        # Afficher stats calibration
+        logger.info(f"\n📊 CALIBRATION (z-score normalization):")
+        for ind in indicators:
+            if stats[ind]:
+                marker = "⭐" if ind == baseline else "  "
+                logger.info(f"  {marker} {ind.upper()}: mean={stats[ind].mean:.4f}, std={stats[ind].std:.4f}, weight={weights.get(ind, 0):.2f}")
+    else:
+        # Mode raw probs - afficher stats basiques
+        logger.info(f"\n📊 MODE RAW PROBS (score = w1*p1 + w2*p2 + w3*p3 - {bias}):")
+        for ind in indicators:
+            if probs[ind] is not None:
+                marker = "⭐" if ind == baseline else "  "
+                p_mean = np.mean(probs[ind])
+                p_std = np.std(probs[ind])
+                logger.info(f"  {marker} {ind.upper()}: mean={p_mean:.4f}, std={p_std:.4f}, weight={weights.get(ind, 0):.2f}")
 
     # === CALCUL SCORES FUSIONNÉS ===
     n_samples = len(probs[baseline])
@@ -341,9 +355,19 @@ def run_weighted_fusion_backtest(
     for i in range(n_samples):
         score = 0.0
         for ind in indicators:
-            if probs[ind] is not None and stats[ind] is not None:
-                p_norm = stats[ind].normalize(probs[ind][i])
-                score += weights.get(ind, 0) * p_norm
+            if probs[ind] is not None:
+                if raw_probs:
+                    # Raw probs: score = w1*p1 + w2*p2 + w3*p3 - bias
+                    score += weights.get(ind, 0) * probs[ind][i]
+                else:
+                    # Z-score normalization
+                    if stats[ind] is not None:
+                        p_norm = stats[ind].normalize(probs[ind][i])
+                        score += weights.get(ind, 0) * p_norm
+
+        if raw_probs:
+            score -= bias  # Soustraire le biais pour centrer autour de 0
+
         fusion_scores[i] = score
 
     # Afficher distribution des scores
@@ -684,6 +708,12 @@ def main():
     parser.add_argument('--thresholds', type=str, default='0.3,0.5,0.7,1.0',
                         help='Seuils à tester (défaut: 0.3,0.5,0.7,1.0)')
 
+    # Mode raw probs vs z-score
+    parser.add_argument('--raw-probs', action='store_true',
+                        help='Utiliser score = w1*p1 + w2*p2 + w3*p3 - bias (au lieu de z-score)')
+    parser.add_argument('--bias', type=float, default=0.5,
+                        help='Biais pour raw-probs (défaut: 0.5)')
+
     args = parser.parse_args()
 
     # Déterminer les poids automatiquement si non spécifiés
@@ -712,6 +742,10 @@ def main():
     logger.info(f"  Filter: {args.filter}")
     logger.info(f"  Frais: {args.fees*100:.2f}%")
     logger.info(f"  Baseline: {args.baseline.upper()} ⭐")
+    if args.raw_probs:
+        logger.info(f"  Mode: RAW PROBS (score = w1*p1 + w2*p2 + w3*p3 - {args.bias})")
+    else:
+        logger.info(f"  Mode: Z-SCORE (score = w1*z1 + w2*z2 + w3*z3)")
     logger.info(f"\n⚖️  POIDS:")
     for ind in ['macd', 'rsi', 'cci']:
         marker = "⭐" if ind == args.baseline else "  "
@@ -754,7 +788,9 @@ def main():
             weights=weights,
             threshold=threshold,
             fees=args.fees,
-            use_train_calibration=True
+            use_train_calibration=True,
+            raw_probs=args.raw_probs,
+            bias=args.bias
         )
         results.append(result)
 
