@@ -319,10 +319,11 @@ def load_prepared_data(path: str = None) -> dict:
         is_direction_only = True
         logger.info(f"  🎯 Format Direction-Only détecté (Y shape: {data['Y_train'].shape})")
 
-        # Extraire seulement la colonne feature (colonne 2) de X
-        X_train = data['X_train'][:, :, 2:3]  # (n, 25, 3) → (n, 25, 1)
-        X_val = data['X_val'][:, :, 2:3]
-        X_test = data['X_test'][:, :, 2:3]
+        # Extraire les colonnes features (à partir de colonne 2) de X
+        # NOTE: MACD/RSI ont 1 feature, CCI a 3 features (h_ret, l_ret, c_ret)
+        X_train = data['X_train'][:, :, 2:]  # (n, 25, n_features+2) → (n, 25, n_features)
+        X_val = data['X_val'][:, :, 2:]
+        X_test = data['X_test'][:, :, 2:]
 
         # Extraire seulement la colonne label (colonne 2) de Y
         Y_train = data['Y_train'][:, 2:3]  # (n, 1)
