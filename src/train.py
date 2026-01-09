@@ -168,8 +168,9 @@ def train_epoch(
         optimizer.zero_grad()
         outputs = model(X_batch)
 
-        # Loss (passer transitions si WeightedTransitionBCELoss)
-        if T_batch is not None:
+        # Loss (passer transitions SEULEMENT si WeightedTransitionBCELoss)
+        # Note: T_batch peut exister mais loss_fn peut être baseline (--no-weighted-loss)
+        if T_batch is not None and hasattr(loss_fn, 'transition_weight'):
             loss = loss_fn(outputs, Y_batch, T_batch)
         else:
             loss = loss_fn(outputs, Y_batch)
@@ -238,8 +239,9 @@ def validate_epoch(
             # Forward
             outputs = model(X_batch)
 
-            # Loss (passer transitions si WeightedTransitionBCELoss)
-            if T_batch is not None:
+            # Loss (passer transitions SEULEMENT si WeightedTransitionBCELoss)
+            # Note: T_batch peut exister mais loss_fn peut être baseline (--no-weighted-loss)
+            if T_batch is not None and hasattr(loss_fn, 'transition_weight'):
                 loss = loss_fn(outputs, Y_batch, T_batch)
             else:
                 loss = loss_fn(outputs, Y_batch)
