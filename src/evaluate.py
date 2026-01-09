@@ -470,6 +470,9 @@ def main():
         dense_dropout=model_config.get('dense_dropout', 0.3),
         use_layer_norm=model_config.get('use_layer_norm', True),  # Par défaut True pour rétrocompatibilité
         use_bce_with_logits=model_config.get('use_bce_with_logits', True),  # Par défaut True pour rétrocompatibilité
+        use_shortcut=model_config.get('use_shortcut', False),
+        shortcut_steps=model_config.get('shortcut_steps', 5),
+        use_temporal_gate=model_config.get('use_temporal_gate', False),
     )
 
     # Charger poids
