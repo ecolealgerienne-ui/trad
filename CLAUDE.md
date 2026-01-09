@@ -1,12 +1,12 @@
 # Modele CNN-LSTM Multi-Output - Guide Complet
 
 **Date**: 2026-01-09
-**Statut**: ✅ **Optimisations Architecture Complétées - Shortcut validé pour CCI**
-**Version**: 9.3 - Shortcut Last-2 Steps: CCI +6% | MACD/RSI: baseline optimal
-**Models**: MACD Kalman 92.4% | CCI Kalman+Shortcut 88.6% | RSI Kalman 87.6% - Direction-Only validés
-**Découverte Critique**: Shortcut bénéficie UNIQUEMENT aux indicateurs multi-features (CCI: 3 features HLC)
+**Statut**: ✅ **Signal Validé - PnL Brut +9,669% | Problème = Fréquence Trades**
+**Version**: 9.4 - Oracle Direction-Only validé | Shortcut CCI +6%
+**Models**: MACD Kalman 92.4% | CCI Kalman+Shortcut 88.6% | RSI Kalman 87.6%
+**Découverte Critique**: Signal fonctionne (+9,669% brut) mais 68k trades × 0.2% frais = -4,116% net
 **Hiérarchie Modèles**: MACD 92.4% > CCI 88.6% > RSI 87.6%
-**Prochaine Étape**: Timeframe 15min/30min ou Trading Strategy avec ces modèles
+**Prochaine Étape**: Réduire fréquence trades (Holding minimum ou Timeframe 15min/30min)
 
 ---
 
@@ -221,6 +221,125 @@ python src/train.py \
 **Règle générale** : Le nombre de features détermine si Shortcut aide
 - 1 feature → Baseline
 - 3+ features → Shortcut steps=2
+
+---
+
+## ✅ VALIDATION ORACLE - Datasets Direction-Only (2026-01-09)
+
+**Date**: 2026-01-09
+**Statut**: ✅ **DONNÉES VALIDÉES - Signal fonctionne, problème = fréquence trades**
+**Script**: `tests/test_oracle_direction_only.py`
+**Objectif**: Valider que les datasets direction-only contiennent un signal profitable
+
+### Contexte
+
+Après l'optimisation Shortcut (CCI +6%), validation des datasets direction-only avec un test Oracle (labels parfaits) pour confirmer que le signal existe avant d'optimiser la stratégie de trading.
+
+### Structure des Datasets Direction-Only
+
+```
+X: (n, 25, features+2) - [timestamp, asset_id, features...] × 25 timesteps
+Y: (n, 3) - [timestamp, asset_id, direction]
+T: (n, 3) - [timestamp, asset_id, is_transition]
+OHLCV: (n, 7) - [timestamp, asset_id, O, H, L, C, V]
+
+Navigation: Même index i → même sample dans X, Y, T, OHLCV
+```
+
+### Logique de Trading (Causale)
+
+```python
+# Signal à index i → Exécution à Open[i+1]
+# Direction: 1=UP→LONG, 0=DOWN→SHORT
+# Toujours en position (reversal immédiat sur changement)
+
+for i in range(n_samples - 1):
+    direction = labels[i]
+    target = LONG if direction == 1 else SHORT
+    if position != target:
+        exit_price = opens[i + 1]
+        entry_price = opens[i + 1]  # Reversal immédiat
+```
+
+### Bug Critique Corrigé
+
+**Problème initial**: Dataset contient 5 assets concaténés. Itérer sur toutes les données ensemble causait des calculs de PnL traversant les frontières entre assets:
+
+```
+Index 100000: BTC, Open = $45,000 (entrée LONG)
+Index 100001: ETH, Open = $3,000  (sortie!)
+→ PnL = (3000 - 45000) / 45000 = -93% ← CATASTROPHIQUE!
+```
+
+**Solution**: Backtest par asset en utilisant `asset_id` (colonne 1 du OHLCV), puis agrégation des trades.
+
+### Résultats Oracle - MACD Direction-Only (Test Set)
+
+| Métrique | Valeur | Interprétation |
+|----------|--------|----------------|
+| **PnL Brut** | **+9,669%** | ✅ **LE SIGNAL FONCTIONNE!** |
+| Trades | 68,924 | ❌ ~48 trades/jour/asset |
+| Frais (0.2%) | 13,785% | 💥 1.4× le PnL brut |
+| **PnL Net** | **-4,116%** | ❌ Frais détruisent tout |
+| Win Rate | 33.4% | ⚠️ Faible mais compensé par taille gains |
+| Avg Win | +0.589% | ✅ Gains > Pertes |
+| Avg Loss | -0.385% | ✅ |
+| Durée moyenne | 9.3 périodes | ~46 minutes |
+| Long/Short | 50%/50% | ✅ Équilibré |
+
+### Analyse du Win Rate 33.4%
+
+**Pourquoi Win Rate < 50% avec Oracle?**
+
+Le label `direction[i] = filtered[i-2] > filtered[i-3]` indique la **direction de l'indicateur** (pente MACD filtré), pas la **direction du prix**:
+
+```
+Label = 1 (UP) signifie: MACD filtré montait entre t-3 et t-2
+                        ≠ Prix va monter à partir de t+1!
+```
+
+Malgré le faible Win Rate, le PnL Brut est positif car:
+- Avg Win (+0.589%) > |Avg Loss| (-0.385%)
+- Les trades gagnants capturent des mouvements plus importants
+
+### Diagnostic Final
+
+| Aspect | Status | Conclusion |
+|--------|--------|------------|
+| **Signal** | ✅ +9,669% PnL Brut | Le signal EXISTE et FONCTIONNE |
+| **Trades** | ❌ 68,924 (~48/jour/asset) | Trop fréquent |
+| **Frais** | ❌ 13,785% | 1.4× le PnL brut |
+| **Net** | ❌ -4,116% | Frais détruisent le signal |
+
+**Problème = FRÉQUENCE DE TRADING**, pas le signal.
+
+### Solutions Recommandées
+
+| # | Solution | Impact Attendu | Status |
+|---|----------|----------------|--------|
+| 1 | **Holding minimum** | -30% à -50% trades | À tester |
+| 2 | **Timeframe 15min/30min** | -50% à -67% trades naturellement | À tester |
+| 3 | **Maker fees 0.02%** | Frais ÷10 → PnL Net positif | Dépend exchange |
+| 4 | **Consensus multi-indicateurs** | Filtre entrées faibles | Testé (Phase 2.7) |
+
+### Commandes
+
+```bash
+# Test Oracle MACD
+python tests/test_oracle_direction_only.py --indicator macd --split test --fees 0.001
+
+# Test Oracle RSI
+python tests/test_oracle_direction_only.py --indicator rsi --split test --fees 0.001
+
+# Test Oracle CCI
+python tests/test_oracle_direction_only.py --indicator cci --split test --fees 0.001
+```
+
+### Conclusion
+
+✅ **DONNÉES VALIDÉES** - Le signal direction-only fonctionne (PnL Brut +9,669%)
+❌ **PROBLÈME IDENTIFIÉ** - Trop de trades (68,924) × frais (0.2%) = destruction du signal
+🎯 **PROCHAINE ÉTAPE** - Réduire la fréquence de trading (holding minimum ou timeframe plus long)
 
 ---
 
