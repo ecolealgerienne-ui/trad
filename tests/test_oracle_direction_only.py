@@ -123,16 +123,16 @@ def load_dataset(indicator: str, split: str = 'test') -> Dict:
 
 
 # =============================================================================
-# BACKTEST ORACLE
+# BACKTEST ORACLE (PAR ASSET)
 # =============================================================================
 
-def backtest_oracle(
+def backtest_single_asset(
     labels: np.ndarray,
-    ohlcv: np.ndarray,
+    opens: np.ndarray,
     fees: float = 0.001
-) -> BacktestResult:
+) -> List[Trade]:
     """
-    Backtest avec labels Oracle (direction parfaite).
+    Backtest pour UN SEUL asset.
 
     LOGIQUE CAUSALE:
     - Signal à index i → Exécution à Open[i+1]
@@ -140,23 +140,18 @@ def backtest_oracle(
     - Direction: 1=UP→LONG, 0=DOWN→SHORT
 
     Args:
-        labels: (n,) Direction labels (0=DOWN, 1=UP)
-        ohlcv: (n, 7) Prix [timestamp, asset_id, O, H, L, C, V]
-        fees: Frais par side (défaut: 0.1%)
+        labels: (n,) Direction labels pour cet asset
+        opens: (n,) Prix Open pour cet asset
+        fees: Frais par side
 
     Returns:
-        BacktestResult
+        Liste des trades
     """
     n_samples = len(labels)
-    opens = ohlcv[:, 2]  # Colonne 2 = Open
-
     trades = []
     position = Position.FLAT
     entry_idx = 0
     entry_price = 0.0
-
-    n_long = 0
-    n_short = 0
 
     # Boucle principale
     for i in range(n_samples - 1):  # -1 car besoin de Open[i+1]
@@ -168,10 +163,6 @@ def backtest_oracle(
             position = target
             entry_idx = i
             entry_price = opens[i + 1]  # Entrée à Open[i+1]
-            if target == Position.LONG:
-                n_long += 1
-            else:
-                n_short += 1
             continue
 
         # Changement de position (reversal)
@@ -204,15 +195,11 @@ def backtest_oracle(
             # Nouvelle position (reversal immédiat)
             position = target
             entry_idx = i
-            entry_price = opens[i + 1]  # Même Open pour entrée
-            if target == Position.LONG:
-                n_long += 1
-            else:
-                n_short += 1
+            entry_price = opens[i + 1]
 
     # Fermer position finale
     if position != Position.FLAT:
-        exit_price = opens[-1]  # Dernière valeur disponible
+        exit_price = opens[-1]
 
         if position == Position.LONG:
             pnl = (exit_price - entry_price) / entry_price
@@ -233,8 +220,71 @@ def backtest_oracle(
             pnl_after_fees=pnl_after_fees
         ))
 
+    return trades
+
+
+def backtest_oracle(
+    labels: np.ndarray,
+    ohlcv: np.ndarray,
+    fees: float = 0.001
+) -> BacktestResult:
+    """
+    Backtest avec labels Oracle (direction parfaite).
+
+    CRITIQUE: Le dataset contient PLUSIEURS assets concaténés!
+    On doit faire le backtest PAR ASSET pour éviter de calculer
+    des PnL entre prix BTC et ETH.
+
+    LOGIQUE CAUSALE:
+    - Signal à index i → Exécution à Open[i+1]
+    - Toujours en position (LONG ou SHORT, jamais FLAT)
+    - Direction: 1=UP→LONG, 0=DOWN→SHORT
+
+    Args:
+        labels: (n,) Direction labels (0=DOWN, 1=UP)
+        ohlcv: (n, 7) Prix [timestamp, asset_id, O, H, L, C, V]
+        fees: Frais par side (défaut: 0.1%)
+
+    Returns:
+        BacktestResult
+    """
+    # Extraire colonnes
+    asset_ids = ohlcv[:, 1].astype(int)  # Colonne 1 = asset_id
+    opens = ohlcv[:, 2]  # Colonne 2 = Open
+
+    # Identifier les assets uniques
+    unique_assets = np.unique(asset_ids)
+    logger.info(f"  Assets détectés: {len(unique_assets)} ({unique_assets})")
+
+    all_trades = []
+    n_long = 0
+    n_short = 0
+
+    # Backtest PAR ASSET
+    for asset_id in unique_assets:
+        # Masque pour cet asset
+        mask = asset_ids == asset_id
+        asset_labels = labels[mask]
+        asset_opens = opens[mask]
+
+        logger.info(f"    Asset {int(asset_id)}: {len(asset_labels):,} samples")
+
+        # Backtest cet asset
+        trades = backtest_single_asset(asset_labels, asset_opens, fees)
+
+        # Compter LONG/SHORT
+        for t in trades:
+            if t.position == 'LONG':
+                n_long += 1
+            else:
+                n_short += 1
+
+        all_trades.extend(trades)
+
+    logger.info(f"  Total trades: {len(all_trades):,}")
+
     # Calculer statistiques
-    return compute_stats(trades, n_long, n_short)
+    return compute_stats(all_trades, n_long, n_short)
 
 
 def compute_stats(trades: List[Trade], n_long: int, n_short: int) -> BacktestResult:
