@@ -433,13 +433,23 @@ def compute_monthly_stats(trades: List[Trade]) -> List[MonthlyResult]:
 
     for trade in trades:
         # Convertir timestamp en datetime
-        # Si timestamp > 1e12, c'est en millisecondes → diviser par 1000
+        # Détection automatique de l'unité du timestamp
         ts = trade.entry_timestamp
-        if ts > 1e12:
-            ts = ts / 1000
-        dt = datetime.fromtimestamp(ts)
-        year_month = dt.strftime('%Y-%m')
-        monthly_data[year_month].append(trade)
+        if ts > 1e18:  # Nanosecondes
+            ts = ts / 1e9
+        elif ts > 1e15:  # Microsecondes
+            ts = ts / 1e6
+        elif ts > 1e12:  # Millisecondes
+            ts = ts / 1e3
+        # Sinon c'est déjà en secondes
+
+        try:
+            dt = datetime.fromtimestamp(ts)
+            year_month = dt.strftime('%Y-%m')
+            monthly_data[year_month].append(trade)
+        except (ValueError, OSError):
+            # Timestamp invalide, ignorer ce trade pour les stats mensuelles
+            continue
 
     # Calculer stats par mois
     monthly_results = []
