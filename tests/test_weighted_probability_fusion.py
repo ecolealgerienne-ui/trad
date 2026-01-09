@@ -9,21 +9,21 @@ Méthode:
 1. Normaliser les probabilités avec z-score par indicateur
    p_norm = (prob - mean) / std
 2. Fusionner avec poids pondérés
-   score = w_macd * p_macd_norm + w_cci * p_cci_norm + w_rsi * p_rsi_norm
+   score = w_baseline * p_baseline_norm + w_other1 * p_other1_norm + w_other2 * p_other2_norm
 3. Décision basée sur seuil
    score > threshold → LONG
    score < -threshold → SHORT
    sinon → HOLD
 
 Poids par défaut (basés sur performance empirique):
-- MACD: 0.56 (meilleur indicateur)
-- CCI:  0.28 (intermédiaire)
-- RSI:  0.16 (modulateur faible)
+- Baseline: 0.56 (indicateur principal)
+- Other1:   0.28 (support)
+- Other2:   0.16 (modulateur faible)
 
 Usage:
-    python tests/test_weighted_probability_fusion.py --split test
-    python tests/test_weighted_probability_fusion.py --split test --threshold 0.5
-    python tests/test_weighted_probability_fusion.py --split test --optimize-weights
+    python tests/test_weighted_probability_fusion.py --split test --baseline macd
+    python tests/test_weighted_probability_fusion.py --split test --baseline rsi
+    python tests/test_weighted_probability_fusion.py --split test --baseline cci --threshold 0.5
 """
 
 import argparse
@@ -275,7 +275,8 @@ def backtest_single_asset(
 
 def run_weighted_fusion_backtest(
     datasets: Dict,
-    weights: Tuple[float, float, float],
+    baseline: str,
+    weights: Dict[str, float],
     threshold: float,
     fees: float = 0.001,
     use_train_calibration: bool = True
@@ -285,85 +286,65 @@ def run_weighted_fusion_backtest(
 
     Args:
         datasets: Données des 3 indicateurs
-        weights: (w_macd, w_cci, w_rsi)
+        baseline: Indicateur de référence ('macd', 'rsi', 'cci')
+        weights: Dict des poids {'macd': 0.56, 'cci': 0.28, 'rsi': 0.16}
         threshold: Seuil de décision
         fees: Frais par trade
         use_train_calibration: Utiliser stats train pour normaliser
     """
-    w_macd, w_cci, w_rsi = weights
+    indicators = ['macd', 'rsi', 'cci']
 
-    # Extraire données MACD (référence)
-    macd_data = datasets['macd']
-    Y_macd = macd_data['Y']
-    OHLCV = macd_data['OHLCV']
+    # Extraire données baseline (référence pour Y et OHLCV)
+    baseline_data = datasets[baseline]
+    Y_baseline = baseline_data['Y']
+    OHLCV = baseline_data['OHLCV']
 
-    # Probabilités
-    macd_probs = macd_data.get('Y_pred')
-    rsi_probs = datasets['rsi'].get('Y_pred') if datasets.get('rsi') else None
-    cci_probs = datasets['cci'].get('Y_pred') if datasets.get('cci') else None
-
-    # Vérifier qu'on a les prédictions
-    if macd_probs is None:
-        logger.warning("⚠️ Pas de prédictions MACD - utilisation des labels")
-        macd_probs = Y_macd[:, 2].astype(float)
+    # Extraire probabilités pour chaque indicateur
+    probs = {}
+    for ind in indicators:
+        if ind in datasets and datasets[ind].get('Y_pred') is not None:
+            probs[ind] = datasets[ind]['Y_pred']
+        elif ind == baseline:
+            # Utiliser labels si pas de prédictions pour baseline
+            logger.warning(f"⚠️ Pas de prédictions {baseline.upper()} - utilisation des labels")
+            probs[ind] = Y_baseline[:, 2].astype(float)
+        else:
+            probs[ind] = None
 
     # === CALIBRATION (stats sur train) ===
-    if use_train_calibration:
-        # Utiliser stats train si disponibles
-        macd_train = macd_data.get('Y_train_pred')
-        rsi_train = datasets['rsi'].get('Y_train_pred') if datasets.get('rsi') else None
-        cci_train = datasets['cci'].get('Y_train_pred') if datasets.get('cci') else None
+    stats = {}
+    for ind in indicators:
+        if probs[ind] is None:
+            stats[ind] = None
+            continue
 
-        if macd_train is not None:
-            macd_stats = compute_indicator_stats(macd_train, 'MACD')
+        if use_train_calibration:
+            train_pred = datasets[ind].get('Y_train_pred') if ind in datasets else None
+            if train_pred is not None:
+                stats[ind] = compute_indicator_stats(train_pred, ind.upper())
+            else:
+                stats[ind] = compute_indicator_stats(probs[ind], ind.upper())
         else:
-            macd_stats = compute_indicator_stats(macd_probs, 'MACD')
-
-        if rsi_train is not None and rsi_probs is not None:
-            rsi_stats = compute_indicator_stats(rsi_train, 'RSI')
-        elif rsi_probs is not None:
-            rsi_stats = compute_indicator_stats(rsi_probs, 'RSI')
-        else:
-            rsi_stats = None
-
-        if cci_train is not None and cci_probs is not None:
-            cci_stats = compute_indicator_stats(cci_train, 'CCI')
-        elif cci_probs is not None:
-            cci_stats = compute_indicator_stats(cci_probs, 'CCI')
-        else:
-            cci_stats = None
-    else:
-        # Calibration sur les données courantes
-        macd_stats = compute_indicator_stats(macd_probs, 'MACD')
-        rsi_stats = compute_indicator_stats(rsi_probs, 'RSI') if rsi_probs is not None else None
-        cci_stats = compute_indicator_stats(cci_probs, 'CCI') if cci_probs is not None else None
+            stats[ind] = compute_indicator_stats(probs[ind], ind.upper())
 
     # Afficher stats calibration
     logger.info(f"\n📊 CALIBRATION (z-score normalization):")
-    logger.info(f"  MACD: mean={macd_stats.mean:.4f}, std={macd_stats.std:.4f}")
-    if rsi_stats:
-        logger.info(f"  RSI:  mean={rsi_stats.mean:.4f}, std={rsi_stats.std:.4f}")
-    if cci_stats:
-        logger.info(f"  CCI:  mean={cci_stats.mean:.4f}, std={cci_stats.std:.4f}")
+    for ind in indicators:
+        if stats[ind]:
+            marker = "⭐" if ind == baseline else "  "
+            logger.info(f"  {marker} {ind.upper()}: mean={stats[ind].mean:.4f}, std={stats[ind].std:.4f}, weight={weights.get(ind, 0):.2f}")
 
     # === CALCUL SCORES FUSIONNÉS ===
-    n_samples = len(macd_probs)
+    n_samples = len(probs[baseline])
     fusion_scores = np.zeros(n_samples)
 
     for i in range(n_samples):
-        # Normaliser chaque indicateur
-        p_macd_norm = macd_stats.normalize(macd_probs[i])
-
-        p_rsi_norm = 0.0
-        if rsi_probs is not None and rsi_stats is not None:
-            p_rsi_norm = rsi_stats.normalize(rsi_probs[i])
-
-        p_cci_norm = 0.0
-        if cci_probs is not None and cci_stats is not None:
-            p_cci_norm = cci_stats.normalize(cci_probs[i])
-
-        # Fusion pondérée
-        fusion_scores[i] = w_macd * p_macd_norm + w_cci * p_cci_norm + w_rsi * p_rsi_norm
+        score = 0.0
+        for ind in indicators:
+            if probs[ind] is not None and stats[ind] is not None:
+                p_norm = stats[ind].normalize(probs[ind][i])
+                score += weights.get(ind, 0) * p_norm
+        fusion_scores[i] = score
 
     # Afficher distribution des scores
     logger.info(f"\n📈 DISTRIBUTION SCORES FUSIONNÉS:")
@@ -384,7 +365,7 @@ def run_weighted_fusion_backtest(
     for asset_id in asset_ids:
         mask = OHLCV[:, 1].astype(int) == asset_id
 
-        asset_labels = Y_macd[mask, 2]
+        asset_labels = Y_baseline[mask, 2]
         asset_opens = OHLCV[mask, 2]
         asset_scores = fusion_scores[mask]
 
@@ -459,15 +440,16 @@ def run_weighted_fusion_backtest(
     )
 
 
-def run_macd_only_baseline(
+def run_baseline_only(
     datasets: Dict,
+    baseline: str,
     fees: float = 0.001
 ) -> StrategyResult:
-    """Baseline: MACD seul (direction binaire, toujours en position)."""
+    """Baseline: indicateur seul (direction binaire, toujours en position)."""
 
-    macd_data = datasets['macd']
-    Y_macd = macd_data['Y']
-    OHLCV = macd_data['OHLCV']
+    baseline_data = datasets[baseline]
+    Y_baseline = baseline_data['Y']
+    OHLCV = baseline_data['OHLCV']
 
     asset_ids = np.unique(OHLCV[:, 1].astype(int))
     all_trades = []
@@ -476,7 +458,7 @@ def run_macd_only_baseline(
     for asset_id in asset_ids:
         mask = OHLCV[:, 1].astype(int) == asset_id
 
-        labels = Y_macd[mask, 2]
+        labels = Y_baseline[mask, 2]
         opens = OHLCV[mask, 2]
 
         n_samples = len(labels)
@@ -552,7 +534,7 @@ def run_macd_only_baseline(
     # Métriques
     if not all_trades:
         return StrategyResult(
-            name="MACD Baseline",
+            name=f"{baseline.upper()} Baseline",
             total_trades=0,
             win_rate=0.0,
             pnl_gross=0.0,
@@ -586,7 +568,7 @@ def run_macd_only_baseline(
     short_trades = sum(1 for t in all_trades if t.direction == Position.SHORT)
 
     return StrategyResult(
-        name="MACD Baseline",
+        name=f"{baseline.upper()} Baseline",
         total_trades=n_trades,
         win_rate=win_rate,
         pnl_gross=pnl_gross,
@@ -664,7 +646,7 @@ def print_results(results: List[StrategyResult], baseline: StrategyResult):
             logger.info(f"   Trades: {baseline.total_trades:,} → {best.total_trades:,} "
                         f"({(best.total_trades - baseline.total_trades) / baseline.total_trades * 100:+.1f}%)")
         else:
-            logger.info(f"\n⚠️ Aucune amélioration vs baseline MACD")
+            logger.info(f"\n⚠️ Aucune amélioration vs baseline {baseline.name}")
             logger.info(f"   Baseline reste meilleur: {baseline.pnl_net:+.2f}%")
 
 
@@ -683,13 +665,18 @@ def main():
     parser.add_argument('--fees', type=float, default=0.001,
                         help='Frais par trade (défaut: 0.001 = 0.1%%)')
 
-    # Poids
-    parser.add_argument('--w-macd', type=float, default=0.56,
-                        help='Poids MACD (défaut: 0.56)')
-    parser.add_argument('--w-cci', type=float, default=0.28,
-                        help='Poids CCI (défaut: 0.28)')
-    parser.add_argument('--w-rsi', type=float, default=0.16,
-                        help='Poids RSI (défaut: 0.16)')
+    # Baseline indicator
+    parser.add_argument('--baseline', type=str, default='macd',
+                        choices=['macd', 'rsi', 'cci'],
+                        help='Indicateur baseline (défaut: macd)')
+
+    # Poids (baseline=0.56, other1=0.28, other2=0.16 par défaut)
+    parser.add_argument('--w-macd', type=float, default=None,
+                        help='Poids MACD (auto si non spécifié)')
+    parser.add_argument('--w-cci', type=float, default=None,
+                        help='Poids CCI (auto si non spécifié)')
+    parser.add_argument('--w-rsi', type=float, default=None,
+                        help='Poids RSI (auto si non spécifié)')
 
     # Seuils à tester
     parser.add_argument('--threshold', type=float, default=None,
@@ -699,6 +686,24 @@ def main():
 
     args = parser.parse_args()
 
+    # Déterminer les poids automatiquement si non spécifiés
+    # Baseline = 0.56, premier autre = 0.28, second autre = 0.16
+    default_weights = {'macd': 0.0, 'rsi': 0.0, 'cci': 0.0}
+    other_indicators = [ind for ind in ['macd', 'rsi', 'cci'] if ind != args.baseline]
+
+    if args.w_macd is None and args.w_rsi is None and args.w_cci is None:
+        # Auto-assign based on baseline
+        default_weights[args.baseline] = 0.56
+        default_weights[other_indicators[0]] = 0.28
+        default_weights[other_indicators[1]] = 0.16
+    else:
+        # Use provided values
+        default_weights['macd'] = args.w_macd if args.w_macd is not None else 0.0
+        default_weights['rsi'] = args.w_rsi if args.w_rsi is not None else 0.0
+        default_weights['cci'] = args.w_cci if args.w_cci is not None else 0.0
+
+    weights = default_weights
+
     logger.info("="*140)
     logger.info("TEST WEIGHTED PROBABILITY FUSION")
     logger.info("="*140)
@@ -706,10 +711,11 @@ def main():
     logger.info(f"  Split: {args.split}")
     logger.info(f"  Filter: {args.filter}")
     logger.info(f"  Frais: {args.fees*100:.2f}%")
+    logger.info(f"  Baseline: {args.baseline.upper()} ⭐")
     logger.info(f"\n⚖️  POIDS:")
-    logger.info(f"  MACD: {args.w_macd:.2f}")
-    logger.info(f"  CCI:  {args.w_cci:.2f}")
-    logger.info(f"  RSI:  {args.w_rsi:.2f}")
+    for ind in ['macd', 'rsi', 'cci']:
+        marker = "⭐" if ind == args.baseline else "  "
+        logger.info(f"  {marker} {ind.upper()}: {weights[ind]:.2f}")
 
     # Charger données
     logger.info(f"\n📂 CHARGEMENT DES DONNÉES...")
@@ -725,17 +731,15 @@ def main():
         else:
             logger.warning(f"  ❌ {indicator.upper()}: Non trouvé")
 
-    if 'macd' not in datasets:
-        logger.error("❌ MACD requis!")
+    if args.baseline not in datasets:
+        logger.error(f"❌ {args.baseline.upper()} requis!")
         return 1
 
-    # Baseline MACD
-    logger.info(f"\n🔄 Test Baseline (MACD seul)...")
-    baseline = run_macd_only_baseline(datasets, fees=args.fees)
+    # Baseline (indicateur seul)
+    logger.info(f"\n🔄 Test Baseline ({args.baseline.upper()} seul)...")
+    baseline_result = run_baseline_only(datasets, baseline=args.baseline, fees=args.fees)
 
     # Tests avec différents seuils
-    weights = (args.w_macd, args.w_cci, args.w_rsi)
-
     if args.threshold is not None:
         thresholds = [args.threshold]
     else:
@@ -746,6 +750,7 @@ def main():
         logger.info(f"\n🔄 Test Fusion (threshold={threshold})...")
         result = run_weighted_fusion_backtest(
             datasets=datasets,
+            baseline=args.baseline,
             weights=weights,
             threshold=threshold,
             fees=args.fees,
@@ -754,7 +759,7 @@ def main():
         results.append(result)
 
     # Afficher résultats
-    print_results(results, baseline)
+    print_results(results, baseline_result)
 
     logger.info(f"\n✅ Test terminé!")
     return 0
