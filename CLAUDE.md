@@ -1,12 +1,12 @@
 # Modele CNN-LSTM Multi-Output - Guide Complet
 
 **Date**: 2026-01-09
-**Statut**: ✅ **Signal Validé - PnL Brut +9,669% | Problème = Fréquence Trades**
-**Version**: 9.4 - Oracle Direction-Only validé | Shortcut CCI +6%
+**Statut**: ✅ **Signal Validé - PnL Brut +9,669% | ADA = Seul Asset Profitable**
+**Version**: 9.5 - Analyse Per-Asset: ADA 🥇 seul positif sur 3 indicateurs
 **Models**: MACD Kalman 92.4% | CCI Kalman+Shortcut 88.6% | RSI Kalman 87.6%
-**Découverte Critique**: Signal fonctionne (+9,669% brut) mais 68k trades × 0.2% frais = -4,116% net
-**Hiérarchie Modèles**: MACD 92.4% > CCI 88.6% > RSI 87.6%
-**Prochaine Étape**: Réduire fréquence trades (Holding minimum ou Timeframe 15min/30min)
+**Découverte Critique**: ADA = seul asset profitable (MACD +16%, CCI +542%, RSI +911%) | BTC = pire
+**Hiérarchie Assets**: ADA 🥇 > LTC 🥈 (oscillateurs) > ETH/BNB > BTC 🥉 (toujours pire)
+**Prochaine Étape**: Tester ML sur ADA uniquement comme proof-of-concept
 
 ---
 
@@ -364,6 +364,94 @@ python tests/test_oracle_direction_only.py --indicator cci --split test --fees 0
   - MACD: 92.4% accuracy → +9,669% brut (moins de signal)
 
 🎯 **PROCHAINE ÉTAPE** - Réduire la fréquence de trading (holding minimum ou timeframe plus long)
+
+### 🏆 Analyse Per-Asset - Découverte Critique (2026-01-09)
+
+**Découverte majeure**: ADA est le **SEUL** asset constamment profitable avec Oracle sur les 3 indicateurs!
+
+#### Résultats Par Asset (Test Set, ~15 mois)
+
+| Asset | MACD Net | CCI Net | RSI Net | Verdict |
+|-------|----------|---------|---------|---------|
+| **ADA** 🥇 | **+16%** ✅ | **+542%** ✅ | **+911%** ✅ | **Seul 100% positif** |
+| LTC 🥈 | -386% | +96% ✅ | +315% ✅ | Oscillateurs OK |
+| ETH | -887% | -795% | -762% | Toujours négatif |
+| BNB | -1,183% | -1,050% | -1,190% | Toujours négatif |
+| BTC 🥉 | -1,676% | -1,740% | -1,975% | **Toujours le pire** |
+
+#### Observations Par Indicateur
+
+**MACD** (Tendance lourde):
+- Seul ADA positif (+16%)
+- Tous les autres assets négatifs (-386% à -1,676%)
+- BTC = pire performance (-1,676%)
+
+**CCI** (Oscillateur moyen):
+- ADA (+542%) et LTC (+96%) positifs
+- ETH/BNB/BTC négatifs (-795% à -1,740%)
+
+**RSI** (Oscillateur rapide):
+- ADA (+911%) et LTC (+315%) positifs
+- ETH/BNB/BTC négatifs (-762% à -1,975%)
+
+#### Pattern Identifié
+
+| Pattern | Observation | Interprétation |
+|---------|-------------|----------------|
+| **ADA = Meilleur** | +16% à +911% (tous positifs) | Comportement plus prédictible |
+| **BTC = Pire** | -1,676% à -1,975% (tous négatifs) | Trop de bruit/manipulation |
+| **Oscillateurs > MACD pour LTC** | RSI/CCI positifs, MACD négatif | LTC oscille plus qu'il ne trend |
+| **ETH/BNB = Corrélés** | Performance similaire négative | Suivent probablement BTC |
+
+#### Analyse Mensuelle (Meilleurs Mois)
+
+| Période | MACD | CCI | RSI | Observation |
+|---------|------|-----|-----|-------------|
+| **2024-12** | +259% | +1,017% | +1,298% | 🔥 **Meilleur mois** |
+| **2025-02** | +423% | +546% | +824% | ✅ Très bon |
+| 2025-01 | -453% | -267% | -174% | ❌ Pire mois |
+| 2024-10 | -343% | -417% | -442% | ❌ Mauvais |
+
+**Pattern saisonnier**: Fin d'année (décembre) et début Q1 (février) semblent meilleurs.
+
+#### Recommandations Stratégiques
+
+**1. Focus sur ADA** ⭐ (Priorité Haute)
+- Seul asset constamment profitable
+- Test avec modèle ML sur ADA uniquement
+- Si ML fonctionne sur ADA → étendre progressivement
+
+**2. Éviter BTC** ⚠️
+- Toujours le pire performer
+- Trop de bruit/manipulation pour le signal
+- Peut-être utile comme filtre de régime (quand BTC est "propre")
+
+**3. Oscillateurs pour LTC**
+- RSI/CCI fonctionnent, MACD non
+- LTC = asset d'oscillation, pas de tendance
+
+**4. Filtre temporel**
+- Éviter janvier (toujours négatif)
+- Privilégier décembre-février
+
+#### Commandes avec per-asset stats
+
+```bash
+# Le script affiche maintenant les stats par asset et par mois
+python tests/test_oracle_direction_only.py --indicator macd --split test --fees 0.001
+python tests/test_oracle_direction_only.py --indicator cci --split test --fees 0.001
+python tests/test_oracle_direction_only.py --indicator rsi --split test --fees 0.001
+```
+
+#### Conclusion Per-Asset
+
+✅ **DÉCOUVERTE CRITIQUE**: ADA est le seul asset profitable sur les 3 indicateurs
+- MACD: +16% | CCI: +542% | RSI: +911%
+- Suggère que le signal existe mais dépend fortement de l'asset
+
+❌ **ÉVITER**: BTC (toujours pire), ETH/BNB (suivent BTC)
+
+🎯 **ACTION RECOMMANDÉE**: Tester le modèle ML sur ADA uniquement comme proof-of-concept
 
 ---
 
