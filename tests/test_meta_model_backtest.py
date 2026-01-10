@@ -335,30 +335,27 @@ def backtest_with_meta_filter(
             meta_prob = asset_meta_probs[i]
             target = Position.LONG if direction == 1 else Position.SHORT
 
-            # First entry - filter by meta-prob
+            # CAS 1: FLAT - décider si entrer
             if position == Position.FLAT:
-                if meta_prob <= threshold:
+                if meta_prob > threshold:
+                    # Entrer en position
+                    position = target
+                    entry_idx = i
+                    entry_price = asset_opens[i + 1]
+                    entry_meta_prob = meta_prob
+                else:
+                    # Rester FLAT (pas de trade, filtré)
                     n_filtered += 1
-                    continue
+                continue
 
-                # Execute entry
-                position = target
-                entry_idx = i
-                entry_price = asset_opens[i + 1]
-                entry_meta_prob = meta_prob
-
-            # Position reversal - filter by meta-prob
-            elif position != target:
-                if meta_prob <= threshold:
-                    n_filtered += 1
-                    continue
-
-                # Execute exit and new entry
+            # CAS 2: EN POSITION - vérifier si sortir
+            if position != target:
+                # TOUJOURS sortir (signal a changé, protéger capital)
                 exit_idx = i
                 exit_price = asset_opens[i + 1]
                 duration = exit_idx - entry_idx
 
-                # Calculate PnL
+                # Calculate PnL avec entry_price SAUVEGARDÉ
                 if position == Position.LONG:
                     pnl = (exit_price - entry_price) / entry_price
                 else:  # SHORT
@@ -383,11 +380,18 @@ def backtest_with_meta_filter(
                 )
                 all_trades.append(trade)
 
-                # New entry
-                position = target
-                entry_idx = i
-                entry_price = asset_opens[i + 1]
-                entry_meta_prob = meta_prob
+                # RETOUR À FLAT
+                position = Position.FLAT
+
+                # Décider si nouvelle entrée immédiate
+                if meta_prob > threshold:
+                    position = target
+                    entry_idx = i
+                    entry_price = asset_opens[i + 1]
+                    entry_meta_prob = meta_prob
+                else:
+                    # Rester FLAT (filtré)
+                    n_filtered += 1
 
         # Close final position (if any)
         if position != Position.FLAT:
