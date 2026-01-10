@@ -33,7 +33,6 @@ Référence:
 
 import argparse
 import numpy as np
-import torch
 from pathlib import Path
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
@@ -44,52 +43,42 @@ import joblib
 import json
 from typing import Tuple, Dict
 
-# Ajouter le répertoire parent au path pour importer les modules
-import sys
-sys.path.append(str(Path(__file__).parent.parent))
 
-from src.model import CNNLSTMMultiOutput
-from src.constants import DEVICE
-
-
-def load_model(model_path: Path, n_features: int) -> CNNLSTMMultiOutput:
+def load_meta_dataset(split: str, indicator: str = 'macd', filter_type: str = 'kalman') -> Dict:
     """
-    Charge un modèle primaire entraîné.
+    Charge le dataset meta-labels avec prédictions.
 
     Args:
-        model_path: Chemin vers le .pth
-        n_features: Nombre de features (1 pour MACD/RSI, 3 pour CCI)
+        split: 'train', 'val', ou 'test'
+        indicator: Indicateur utilisé pour meta-labels (default: 'macd')
+        filter_type: Type de filtre (default: 'kalman')
 
     Returns:
-        Modèle chargé en mode eval
+        Dict avec predictions, meta_labels, ohlcv, etc.
     """
-    model = CNNLSTMMultiOutput(n_features=n_features, n_outputs=1)
-    model.load_state_dict(torch.load(model_path, map_location=DEVICE))
-    model.to(DEVICE)
-    model.eval()
-    return model
+    npz_path = Path(f'data/prepared/meta_labels_{indicator}_{filter_type}_{split}.npz')
 
+    if not npz_path.exists():
+        raise FileNotFoundError(f"Meta-labels file not found: {npz_path}")
 
-def extract_probabilities(
-    model: CNNLSTMMultiOutput,
-    sequences: np.ndarray
-) -> np.ndarray:
-    """
-    Extrait les probabilités de direction d'un modèle primaire.
+    print(f"Loading {split} set: {npz_path.name}")
+    data = np.load(npz_path, allow_pickle=True)
 
-    Args:
-        model: Modèle primaire (direction-only)
-        sequences: Séquences (n, seq_len, n_features)
+    result = {
+        'predictions_macd': data['predictions_macd'],
+        'predictions_rsi': data['predictions_rsi'],
+        'predictions_cci': data['predictions_cci'],
+        'meta_labels': data['meta_labels'],
+        'ohlcv': data['OHLCV'],
+        'metadata': json.loads(str(data['metadata'])) if 'metadata' in data else {}
+    }
 
-    Returns:
-        Probabilités (n,) - probabilité de direction UP
-    """
-    model.eval()
-    with torch.no_grad():
-        X = torch.tensor(sequences, dtype=torch.float32, device=DEVICE)
-        outputs = model(X)  # (n, 1) - déjà après sigmoid
-        probs = outputs[:, 0].cpu().numpy()  # (n,)
-    return probs
+    print(f"  Samples: {len(result['meta_labels'])}")
+    print(f"  Positive: {np.sum(result['meta_labels'] == 1)}")
+    print(f"  Negative: {np.sum(result['meta_labels'] == 0)}")
+    print(f"  Ignored: {np.sum(result['meta_labels'] == -1)}")
+
+    return result
 
 
 def calculate_atr(ohlcv: np.ndarray, period: int = 14) -> np.ndarray:
@@ -131,21 +120,17 @@ def calculate_atr(ohlcv: np.ndarray, period: int = 14) -> np.ndarray:
 
 
 def build_meta_features(
-    sequences_macd: np.ndarray,
-    sequences_rsi: np.ndarray,
-    sequences_cci: np.ndarray,
-    ohlcv: np.ndarray,
-    model_macd: CNNLSTMMultiOutput,
-    model_rsi: CNNLSTMMultiOutput,
-    model_cci: CNNLSTMMultiOutput
+    predictions_macd: np.ndarray,
+    predictions_rsi: np.ndarray,
+    predictions_cci: np.ndarray,
+    ohlcv: np.ndarray
 ) -> np.ndarray:
     """
-    Construit les features du meta-modèle.
+    Construit les features du meta-modèle depuis les prédictions existantes.
 
     Args:
-        sequences_*: Séquences pour chaque indicateur
+        predictions_*: Probabilités des modèles primaires (n,)
         ohlcv: Données OHLCV (n, 7)
-        model_*: Modèles primaires
 
     Returns:
         Features (n, 6):
@@ -154,11 +139,10 @@ def build_meta_features(
     """
     print("Building meta-features...")
 
-    # 1. Extraire probabilités primaires
-    print("  Extracting probabilities from primary models...")
-    macd_prob = extract_probabilities(model_macd, sequences_macd)
-    rsi_prob = extract_probabilities(model_rsi, sequences_rsi)
-    cci_prob = extract_probabilities(model_cci, sequences_cci)
+    # 1. Probabilités primaires (déjà disponibles)
+    macd_prob = predictions_macd
+    rsi_prob = predictions_rsi
+    cci_prob = predictions_cci
 
     # 2. Calculer confidence metrics
     print("  Computing confidence metrics...")
@@ -347,65 +331,15 @@ def main():
     # Créer répertoire output
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Chemins datasets
-    data_dir = Path('data/prepared')
-    models_dir = Path('models')
-
-    # Charger meta-labels
+    # Charger meta-labels avec prédictions
     print("\n" + "="*80)
     print("LOADING DATASETS")
     print("="*80)
 
-    splits = ['train', 'val', 'test']
     datasets = {}
-
-    for split in splits:
-        print(f"\nLoading {split} split...")
-        meta_path = data_dir / f'meta_labels_macd_{args.filter}_{split}.npz'
-        meta_data = np.load(meta_path, allow_pickle=True)
-
-        # Charger aussi les datasets originaux pour RSI et CCI
-        macd_path = data_dir / f'dataset_btc_eth_bnb_ada_ltc_macd_direction_only_{args.filter}.npz'
-        rsi_path = data_dir / f'dataset_btc_eth_bnb_ada_ltc_rsi_direction_only_{args.filter}.npz'
-        cci_path = data_dir / f'dataset_btc_eth_bnb_ada_ltc_cci_direction_only_{args.filter}.npz'
-
-        macd_data = np.load(macd_path, allow_pickle=True)
-        rsi_data = np.load(rsi_path, allow_pickle=True)
-        cci_data = np.load(cci_path, allow_pickle=True)
-
-        # Extraire selon le split
-        metadata = macd_data['metadata'].item()
-        split_ranges = metadata['split_ranges'][split]
-        start, end = split_ranges['start'], split_ranges['end']
-
-        datasets[split] = {
-            'sequences_macd': macd_data['X'][start:end],
-            'sequences_rsi': rsi_data['X'][start:end],
-            'sequences_cci': cci_data['X'][start:end],
-            'ohlcv': meta_data['ohlcv'],
-            'meta_labels': meta_data['meta_labels']
-        }
-
-        print(f"  Sequences: {datasets[split]['sequences_macd'].shape}")
-        print(f"  Meta-labels: {datasets[split]['meta_labels'].shape}")
-
-    # Charger modèles primaires
-    print("\n" + "="*80)
-    print("LOADING PRIMARY MODELS")
-    print("="*80)
-
-    model_macd_path = models_dir / f'best_model_macd_{args.filter}_dual_binary.pth'
-    model_rsi_path = models_dir / f'best_model_rsi_{args.filter}_dual_binary.pth'
-    model_cci_path = models_dir / f'best_model_cci_{args.filter}_dual_binary.pth'
-
-    print(f"Loading MACD model: {model_macd_path}")
-    model_macd = load_model(model_macd_path, n_features=1)
-
-    print(f"Loading RSI model: {model_rsi_path}")
-    model_rsi = load_model(model_rsi_path, n_features=1)
-
-    print(f"Loading CCI model: {model_cci_path}")
-    model_cci = load_model(model_cci_path, n_features=3)
+    for split in ['train', 'val', 'test']:
+        print(f"\n{split.upper()}:")
+        datasets[split] = load_meta_dataset(split, indicator='macd', filter_type=args.filter)
 
     # Construire features meta-modèle pour chaque split
     print("\n" + "="*80)
@@ -415,16 +349,13 @@ def main():
     X_meta = {}
     y_meta = {}
 
-    for split in splits:
+    for split in ['train', 'val', 'test']:
         print(f"\n{split.upper()} split:")
         X_meta[split] = build_meta_features(
-            sequences_macd=datasets[split]['sequences_macd'],
-            sequences_rsi=datasets[split]['sequences_rsi'],
-            sequences_cci=datasets[split]['sequences_cci'],
-            ohlcv=datasets[split]['ohlcv'],
-            model_macd=model_macd,
-            model_rsi=model_rsi,
-            model_cci=model_cci
+            predictions_macd=datasets[split]['predictions_macd'],
+            predictions_rsi=datasets[split]['predictions_rsi'],
+            predictions_cci=datasets[split]['predictions_cci'],
+            ohlcv=datasets[split]['ohlcv']
         )
         y_meta[split] = datasets[split]['meta_labels']
 
@@ -438,7 +369,7 @@ def main():
 
     # Évaluer sur les 3 splits
     results = {}
-    for split in splits:
+    for split in ['train', 'val', 'test']:
         results[split] = evaluate_model(
             model=meta_model,
             X=X_meta[split],
