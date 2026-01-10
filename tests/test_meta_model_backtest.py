@@ -360,11 +360,13 @@ def backtest_with_meta_filter(
 
                 # Calculate PnL
                 if position == Position.LONG:
-                    pnl = ((exit_price - entry_price) / entry_price) * 100
+                    pnl = (exit_price - entry_price) / entry_price
                 else:  # SHORT
-                    pnl = ((entry_price - exit_price) / entry_price) * 100
+                    pnl = (entry_price - exit_price) / entry_price
 
-                pnl_after_fees = pnl - (2 * fees * 100)  # Entry + exit fees
+                # Frais: entrée + sortie
+                trade_fees = 2 * fees
+                pnl_after_fees = pnl - trade_fees
 
                 trade = Trade(
                     entry_idx=entry_idx,
@@ -394,11 +396,12 @@ def backtest_with_meta_filter(
             duration = exit_idx - entry_idx
 
             if position == Position.LONG:
-                pnl = ((exit_price - entry_price) / entry_price) * 100
+                pnl = (exit_price - entry_price) / entry_price
             else:
-                pnl = ((entry_price - exit_price) / entry_price) * 100
+                pnl = (entry_price - exit_price) / entry_price
 
-            pnl_after_fees = pnl - (2 * fees * 100)
+            trade_fees = 2 * fees
+            pnl_after_fees = pnl - trade_fees
 
             trade = Trade(
                 entry_idx=entry_idx,
@@ -500,15 +503,15 @@ def print_results(result: BacktestResult):
     print(f"Trades: {result.n_trades:,} (LONG: {result.n_long:,}, SHORT: {result.n_short:,})")
     print(f"Filtrés: {result.n_filtered:,}")
     print(f"Win Rate: {result.win_rate:.2f}%")
-    print(f"PnL Brut: {result.total_pnl:+.2f}%")
-    print(f"PnL Net: {result.total_pnl_after_fees:+.2f}%")
-    print(f"Frais: {result.total_fees:.2f}%")
+    print(f"PnL Brut: {result.total_pnl * 100:+.2f}%")
+    print(f"PnL Net: {result.total_pnl_after_fees * 100:+.2f}%")
+    print(f"Frais: {result.total_fees * 100:.2f}%")
     print(f"Profit Factor: {result.profit_factor:.2f}")
-    print(f"Avg Win: {result.avg_win:+.3f}%")
-    print(f"Avg Loss: {result.avg_loss:+.3f}%")
+    print(f"Avg Win: {result.avg_win * 100:+.3f}%")
+    print(f"Avg Loss: {result.avg_loss * 100:+.3f}%")
     print(f"Avg Duration: {result.avg_duration:.1f} périodes")
     print(f"Sharpe Ratio: {result.sharpe_ratio:.2f}")
-    print(f"Max Drawdown: {result.max_drawdown:.2f}%")
+    print(f"Max Drawdown: {result.max_drawdown * 100:.2f}%")
 
 
 def compare_strategies(
@@ -571,7 +574,7 @@ def compare_strategies(
     print(f"{'-'*80}")
 
     for r in results:
-        print(f"{r.strategy_name:<30} {r.n_trades:>10,} {r.n_filtered:>10,} {r.win_rate:>8.2f} {r.total_pnl_after_fees:>12.2f}")
+        print(f"{r.strategy_name:<30} {r.n_trades:>10,} {r.n_filtered:>10,} {r.win_rate:>8.2f} {r.total_pnl_after_fees * 100:>12.2f}")
 
 
 # =============================================================================
