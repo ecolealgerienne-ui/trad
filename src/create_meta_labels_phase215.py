@@ -55,7 +55,7 @@ def load_dataset(indicator: str, filter_type: str, split: str) -> dict:
         'labels': data[Y_key],              # (n, 1) - direction
         'timestamps': data[T_key],          # (n, 3) - [timestamp, asset_id, is_transition]
         'ohlcv': data[OHLCV_key],          # (n, 7) - [timestamp, asset_id, O, H, L, C, V]
-        'metadata': json.loads(data['metadata']) if 'metadata' in data else {}
+        'metadata': json.loads(data['metadata'].item()) if 'metadata' in data else {}
     }
 
     print(f"  Split: {split}")
@@ -331,7 +331,7 @@ def save_meta_dataset(
         # Nouvelles données
         meta_labels=meta_labels,      # (n,) - 0, 1, ou -1
         # Métadonnées
-        metadata=metadata_enriched,
+        metadata=json.dumps(metadata_enriched),
         trades=trades  # Liste de dict (sauvegardé comme objet)
     )
 
