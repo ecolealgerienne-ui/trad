@@ -23,9 +23,14 @@ from typing import Tuple, List
 import json
 
 
-def load_dataset(indicator: str, filter_type: str) -> dict:
+def load_dataset(indicator: str, filter_type: str, split: str) -> dict:
     """
     Charge dataset direction-only existant avec timestamps.
+
+    Args:
+        indicator: 'macd', 'rsi', ou 'cci'
+        filter_type: 'kalman' ou 'octave'
+        split: 'train', 'val', ou 'test'
 
     Returns:
         dict avec sequences, labels, timestamps, ohlcv, metadata
@@ -38,15 +43,22 @@ def load_dataset(indicator: str, filter_type: str) -> dict:
     print(f"Loading dataset: {dataset_path}")
     data = np.load(dataset_path, allow_pickle=True)
 
-    # Extraire toutes les données
+    # Clés selon le split
+    X_key = f'X_{split}'
+    Y_key = f'Y_{split}'
+    T_key = f'T_{split}'
+    OHLCV_key = f'OHLCV_{split}'
+
+    # Extraire les données du split demandé
     result = {
-        'sequences': data['X'],           # (n, 25, features)
-        'labels': data['Y'],              # (n, 1) - direction
-        'timestamps': data['T'],          # (n, 3) - [timestamp, asset_id, is_transition]
-        'ohlcv': data['OHLCV'],          # (n, 7) - [timestamp, asset_id, O, H, L, C, V]
-        'metadata': data['metadata'].item() if 'metadata' in data else {}
+        'sequences': data[X_key],           # (n, 25, features)
+        'labels': data[Y_key],              # (n, 1) - direction
+        'timestamps': data[T_key],          # (n, 3) - [timestamp, asset_id, is_transition]
+        'ohlcv': data[OHLCV_key],          # (n, 7) - [timestamp, asset_id, O, H, L, C, V]
+        'metadata': json.loads(data['metadata']) if 'metadata' in data else {}
     }
 
+    print(f"  Split: {split}")
     print(f"  Sequences: {result['sequences'].shape}")
     print(f"  Labels: {result['labels'].shape}")
     print(f"  Timestamps: {result['timestamps'].shape}")
@@ -358,7 +370,7 @@ def main():
     print()
 
     # 1. Charger dataset avec timestamps
-    data = load_dataset(args.indicator, args.filter)
+    data = load_dataset(args.indicator, args.filter, args.split)
     sequences = data['sequences']
     labels = data['labels']
     timestamps = data['timestamps']
