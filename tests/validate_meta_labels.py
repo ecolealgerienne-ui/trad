@@ -598,12 +598,13 @@ def validate_statistics(meta_data: Dict) -> bool:
         print_pass(f"Nombre de timesteps négatifs cohérent: {actual_negative_timesteps}")
 
     # Vérifier aussi le nombre de trades positifs/négatifs (calcul séparé)
-    actual_positive_trades = sum(1 for t in trades if t['pnl'] > meta_config['pnl_threshold']
+    # CRITIQUE: Utiliser PnL NET pour cohérence avec référence!
+    actual_positive_trades = sum(1 for t in trades if t['pnl_after_fees'] > meta_config['pnl_threshold']
                                   and t['duration'] >= meta_config['min_duration'])
     actual_negative_trades = len(trades) - actual_positive_trades
 
     print_info(f"\nStatistiques par trades:")
-    print_info(f"  Trades positifs (profitable + duration>=min): {actual_positive_trades} ({100*actual_positive_trades/len(trades):.1f}%)")
+    print_info(f"  Trades positifs (profitable NET + duration>=min): {actual_positive_trades} ({100*actual_positive_trades/len(trades):.1f}%)")
     print_info(f"  Trades négatifs: {actual_negative_trades} ({100*actual_negative_trades/len(trades):.1f}%)")
 
     # Comparer avec Phase 2.15 Oracle results (référence)
@@ -621,15 +622,16 @@ def validate_statistics(meta_data: Dict) -> bool:
     fees_total = len(trades) * 2 * meta_config['fees'] * 100  # Entry + exit
     pnl_net = pnl_gross - fees_total
 
-    # Win Rate selon définition Triple Barrier: profitable ET duration >= min_duration
+    # Win Rate selon définition Triple Barrier: profitable NET ET duration >= min_duration
+    # CRITIQUE: Utiliser PnL NET pour cohérence avec référence!
     winning_trades = sum(1 for t in trades
-                         if t['pnl'] > meta_config['pnl_threshold']
+                         if t['pnl_after_fees'] > meta_config['pnl_threshold']
                          and t['duration'] >= meta_config['min_duration'])
     win_rate = 100 * winning_trades / total_trades if total_trades > 0 else 0
     avg_duration = np.mean([t['duration'] for t in trades])
 
-    # Pour comparaison: Win Rate brut (juste PnL > 0)
-    winning_trades_raw = sum(1 for t in trades if t['pnl'] > 0)
+    # Pour comparaison: Win Rate brut (juste PnL NET > 0, sans filtre duration)
+    winning_trades_raw = sum(1 for t in trades if t['pnl_after_fees'] > 0)
     win_rate_raw = 100 * winning_trades_raw / total_trades if total_trades > 0 else 0
 
     print_info(f"  Trades: {total_trades:,} (référence: 68,924)")

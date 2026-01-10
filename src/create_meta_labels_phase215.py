@@ -134,6 +134,7 @@ def backtest_single_asset(
                 'exit_idx': start_idx + i,
                 'direction': position,
                 'pnl': pnl,
+                'pnl_after_fees': pnl_after_fees,
                 'duration': i - entry_idx,
                 'exit_reason': 'DIRECTION_FLIP'
             })
@@ -163,6 +164,7 @@ def backtest_single_asset(
             'exit_idx': start_idx + n_samples - 1,
             'direction': position,
             'pnl': pnl,
+            'pnl_after_fees': pnl_after_fees,
             'duration': n_samples - 1 - entry_idx,
             'exit_reason': 'END_OF_ASSET'
         })
@@ -227,6 +229,12 @@ def simulate_oracle_backtest(
             asset_labels, asset_opens, start_idx, fees
         )
 
+        # DEBUG: Afficher les 5 premiers trades de cet asset
+        print(f"      DEBUG - 5 premiers trades asset {int(asset_id)}:")
+        for i, t in enumerate(trades[:5]):
+            print(f"        Trade {i}: entry={t['entry_idx']}, exit={t['exit_idx']}, "
+                  f"dir={t['direction']}, pnl={t['pnl']*100:.2f}%, dur={t['duration']}p")
+
         all_trades.extend(trades)
         total_pnl_gross += pnl_gross
         total_pnl_net += pnl_net
@@ -237,6 +245,18 @@ def simulate_oracle_backtest(
     print(f"    PnL Net: {total_pnl_net*100:.2f}%")
     if len(all_trades) > 0:
         print(f"    Avg duration: {np.mean([t['duration'] for t in all_trades]):.1f} periods")
+
+    # DEBUG: Vérifier que sum(trades PnL) == total_pnl_gross
+    sum_trades_pnl = sum(t['pnl'] for t in all_trades)
+    print(f"\n  DEBUG - Vérification cohérence PnL:")
+    print(f"    total_pnl_gross (accumulé): {total_pnl_gross*100:.2f}%")
+    print(f"    sum(trade['pnl']): {sum_trades_pnl*100:.2f}%")
+    print(f"    Différence: {(total_pnl_gross - sum_trades_pnl)*100:.4f}%")
+
+    # Vérifier Win Rate (sur PnL NET pour cohérence avec référence)
+    winning_trades = sum(1 for t in all_trades if t['pnl_after_fees'] > 0)
+    win_rate = 100 * winning_trades / len(all_trades)
+    print(f"    Win Rate (PnL NET > 0): {win_rate:.1f}%")
 
     return all_trades, total_pnl_gross, total_pnl_net
 
@@ -268,11 +288,11 @@ def create_meta_labels_triple_barrier(
     meta_labels = []
 
     for trade in trades:
-        pnl = trade['pnl']
+        pnl_net = trade['pnl_after_fees']  # CRITIQUE: Utiliser PnL NET, pas brut!
         duration = trade['duration']
 
-        # Règle: Profitable ET pas micro-sortie
-        if pnl > pnl_threshold and duration >= min_duration:
+        # Règle: Profitable (PnL NET > threshold) ET pas micro-sortie
+        if pnl_net > pnl_threshold and duration >= min_duration:
             label = 1  # Accepter le trade
         else:
             label = 0  # Rejeter le trade
@@ -289,13 +309,13 @@ def create_meta_labels_triple_barrier(
     print(f"    Positive (1): {n_positive} ({100*n_positive/len(meta_labels):.1f}%)")
     print(f"    Negative (0): {n_negative} ({100*n_negative/len(meta_labels):.1f}%)")
 
-    # Analyse des rejetés
-    rejected_profitable = sum(1 for t in trades if t['pnl'] > 0 and t['duration'] < min_duration)
-    rejected_losing = sum(1 for t in trades if t['pnl'] <= 0)
+    # Analyse des rejetés (utiliser PnL NET)
+    rejected_profitable = sum(1 for t in trades if t['pnl_after_fees'] > 0 and t['duration'] < min_duration)
+    rejected_losing = sum(1 for t in trades if t['pnl_after_fees'] <= 0)
 
     print(f"  Rejection reasons:")
-    print(f"    Micro-exits (profitable but < {min_duration}p): {rejected_profitable}")
-    print(f"    Losing trades: {rejected_losing}")
+    print(f"    Micro-exits (profitable NET but < {min_duration}p): {rejected_profitable}")
+    print(f"    Losing trades (NET): {rejected_losing}")
 
     return meta_labels
 
