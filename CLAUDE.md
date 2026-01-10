@@ -1163,6 +1163,84 @@ Tester `confidence_spread²` comme feature non-linéaire.
 - Wikipedia: Meta-learning (https://en.wikipedia.org/wiki/Meta-learning)
 - Quantreo: Meta-Labeling Tutorial (https://www.quantreo.com/meta-labeling)
 
+### Phase 2.18: Backtest Meta-Model (2026-01-10)
+
+**Script créé**: `tests/test_meta_model_backtest.py`
+**Objectif**: Valider l'impact du meta-model en trading réel avec différents seuils de probabilité
+
+#### Architecture du Backtest
+
+```
+Modèle Primaire (MACD) → Prédiction direction (UP/DOWN, probabilité 0-1)
+                 ↓
+Meta-Model (Logistic) → Prédiction profitable? (OUI/NON, probabilité 0-1)
+                 ↓
+         Si meta_prob > threshold
+                 ↓
+         Exécution trade à Open[t+1]
+```
+
+#### Stratégies Testées
+
+| Stratégie | Threshold | Description |
+|-----------|-----------|-------------|
+| **Baseline** | 0.0 | Pas de filtrage (toutes les prédictions primaires) |
+| **Standard** | 0.5 | Filtrage équilibré |
+| **Conservateur** | **0.6** | **Recommandé par littérature** ✅ |
+| **Très Conservateur** | 0.7 | Haute précision, peu de trades |
+
+#### Commandes d'Exécution
+
+**Pré-requis**: Avoir exécuté les étapes précédentes:
+```bash
+# 1. Générer meta-labels (déjà fait)
+python src/create_meta_labels_phase215.py --indicator macd --filter kalman --split test
+
+# 2. Entraîner meta-model (déjà fait)
+python src/train_meta_model_phase217.py --filter kalman
+```
+
+**Tests backtest**:
+```bash
+# Comparer toutes les stratégies (baseline, 0.5, 0.6, 0.7)
+python tests/test_meta_model_backtest.py --indicator macd --split test --compare-thresholds
+
+# Tester un seul threshold
+python tests/test_meta_model_backtest.py --indicator macd --split test --threshold 0.6
+
+# Avec frais personnalisés
+python tests/test_meta_model_backtest.py --indicator macd --split test --compare-thresholds --fees 0.002
+```
+
+#### Métriques Attendues
+
+**Baseline (threshold=0.0)** - Référence actuelle (Phase 2.15):
+- Trades: ~108,000
+- Win Rate: 22-23%
+- PnL Net: -21k à -25%
+
+**Avec meta-filter (threshold=0.6)** - Objectif:
+- **Trades**: ~30,000-50,000 (-70%)
+- **Win Rate**: 35-40% (+12-17%)
+- **PnL Net**: Positif (+1,500% à +5,000%)
+- **Precision**: 68% (validé en Phase 2.17)
+
+#### Analyse Attendue
+
+Le script génère:
+1. **Résultats par stratégie**: Trades, Win Rate, PnL, Profit Factor, Sharpe
+2. **Tableau comparatif**: Vue d'ensemble des 4 stratégies
+3. **Trades filtrés**: Combien de trades bloqués par le meta-filter?
+
+**Critères de succès**:
+- ✅ Réduction trades ≥ 50%
+- ✅ Win Rate ≥ 35%
+- ✅ PnL Net > 0% (positif)
+- ✅ Profit Factor > 1.0
+
+**Si objectifs atteints**: Meta-labeling validé pour production
+**Si objectifs ratés**: Analyser FP/FN patterns (Phase 2.19)
+
 ---
 
 ## 🎯 OPTIMISATIONS ARCHITECTURE - Shortcut & Temporal Gate (2026-01-09)
