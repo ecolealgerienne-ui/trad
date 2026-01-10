@@ -18,14 +18,9 @@ Usage:
 
 import argparse
 import numpy as np
-import torch
 from pathlib import Path
 from typing import Tuple, List
 import json
-
-# Imports locaux
-from model import CNNLSTMMultiOutput
-from constants import DEVICE
 
 
 def load_dataset(indicator: str, filter_type: str) -> dict:
@@ -58,73 +53,6 @@ def load_dataset(indicator: str, filter_type: str) -> dict:
     print(f"  OHLCV: {result['ohlcv'].shape}")
 
     return result
-
-
-def load_trained_model(indicator: str, filter_type: str, n_features: int) -> torch.nn.Module:
-    """
-    Charge le modèle entraîné pour un indicateur donné.
-
-    Args:
-        indicator: 'macd', 'rsi', ou 'cci'
-        filter_type: 'kalman' ou 'octave'
-        n_features: Nombre de features (1 pour macd/rsi, 3 pour cci)
-
-    Returns:
-        Modèle chargé en mode eval
-    """
-    model_path = Path(f'models/best_model_{indicator}_{filter_type}_dual_binary.pth')
-
-    if not model_path.exists():
-        raise FileNotFoundError(f"Model not found: {model_path}")
-
-    print(f"Loading model: {model_path}")
-
-    # Créer modèle avec architecture direction-only (n_outputs=1)
-    model = CNNLSTMMultiOutput(n_features=n_features, n_outputs=1)
-    model.load_state_dict(torch.load(model_path, map_location=DEVICE))
-    model.to(DEVICE)
-    model.eval()
-
-    return model
-
-
-def generate_predictions(model: torch.nn.Module, sequences: np.ndarray) -> np.ndarray:
-    """
-    Génère les prédictions du modèle (probabilités).
-
-    Args:
-        model: Modèle PyTorch
-        sequences: Séquences (n, 25, features)
-
-    Returns:
-        Probabilités (n,) - valeurs [0, 1]
-    """
-    print("Generating predictions...")
-
-    predictions = []
-    batch_size = 512
-    n_samples = len(sequences)
-
-    with torch.no_grad():
-        for i in range(0, n_samples, batch_size):
-            batch = sequences[i:i+batch_size]
-            batch_tensor = torch.tensor(batch, dtype=torch.float32, device=DEVICE)
-
-            # Forward pass
-            outputs = model(batch_tensor)  # outputs déjà en [0,1] (sigmoid dans model.py)
-
-            # Direction output seulement (shape: batch, 1)
-            probs = outputs.cpu().numpy().flatten()
-            predictions.extend(probs)
-
-            if (i // batch_size) % 10 == 0:
-                print(f"  Progress: {i}/{n_samples} ({100*i/n_samples:.1f}%)")
-
-    predictions = np.array(predictions)
-    print(f"  Predictions shape: {predictions.shape}")
-    print(f"  Predictions range: [{predictions.min():.3f}, {predictions.max():.3f}]")
-
-    return predictions
 
 
 def simulate_oracle_backtest(
@@ -352,13 +280,12 @@ def save_meta_dataset(
     timestamps: np.ndarray,
     ohlcv: np.ndarray,
     meta_labels: np.ndarray,
-    predictions: np.ndarray,
     trades: List[dict],
     metadata: dict,
     args: argparse.Namespace
 ):
     """
-    Sauvegarde nouveau dataset avec meta-labels et prédictions.
+    Sauvegarde nouveau dataset avec meta-labels.
 
     CRITIQUE: Préserve la structure originale + ajoute nouvelles données.
     """
@@ -391,7 +318,6 @@ def save_meta_dataset(
         OHLCV=ohlcv,
         # Nouvelles données
         meta_labels=meta_labels,      # (n,) - 0, 1, ou -1
-        predictions=predictions,      # (n,) - probabilités [0, 1]
         # Métadonnées
         metadata=metadata_enriched,
         trades=trades  # Liste de dict (sauvegardé comme objet)
@@ -439,20 +365,7 @@ def main():
     ohlcv = data['ohlcv']
     metadata = data['metadata']
 
-    # Déterminer n_features selon indicateur
-    n_features = sequences.shape[2]  # 1 pour macd/rsi, 3 pour cci
-    print(f"Number of features: {n_features}")
-    print()
-
-    # 2. Charger modèle entraîné
-    model = load_trained_model(args.indicator, args.filter, n_features)
-    print()
-
-    # 3. Générer prédictions
-    predictions = generate_predictions(model, sequences)
-    print()
-
-    # 4. Simuler backtest Oracle
+    # 2. Simuler backtest Oracle
     trades, pnl_gross, pnl_net = simulate_oracle_backtest(
         labels=labels,
         ohlcv=ohlcv,
@@ -477,7 +390,7 @@ def main():
     )
     print()
 
-    # 7. Sauvegarder nouveau dataset
+    # 6. Sauvegarder nouveau dataset
     output_path = Path(args.output_dir) / f'meta_labels_{args.indicator}_{args.filter}_{args.split}.npz'
     save_meta_dataset(
         output_path=output_path,
@@ -486,7 +399,6 @@ def main():
         timestamps=timestamps,
         ohlcv=ohlcv,
         meta_labels=timestep_meta_labels,
-        predictions=predictions,
         trades=trades,
         metadata=metadata,
         args=args
