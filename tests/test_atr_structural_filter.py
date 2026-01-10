@@ -2,32 +2,22 @@
 """
 Test Stratégie ATR Structural Filter - Filtrer trades par régime de volatilité.
 
+VERSION 2.0 - Corrigé avec prix Open réels (pas c_ret!)
+
 HYPOTHÈSE (López de Prado 2018):
 Ne trader QUE dans les régimes de volatilité "sains" (ni trop basse, ni trop haute).
 - ATR < Q20: Marché trop calme (ranging, signaux faibles)
 - Q20 < ATR < Q80: Volatilité saine (conditions optimales)
 - ATR > Q80: Volatilité extrême (gaps, slippage élevé)
 
-PRINCIPE:
-- Entrée: MACD Direction=UP ou DOWN (Direction-Only)
-- Filtre: Trade UNIQUEMENT si Q20 < ATR < Q80
-- Sortie: Direction flip
-
-OBJECTIF Phase 2.8:
-- Baseline: 30,876 trades, +110.89% PnL Brut, -2,976% PnL Net
-- Cible: ~15,000 trades (-50%), PnL Net POSITIF (+100-200%)
-
-TESTS:
-- Percentiles: (Q10, Q90), (Q20, Q80), (Q30, Q70)
-- Indicateur: MACD Direction-Only Kalman (92.5% accuracy)
-- Dataset: 5 assets (BTC, ETH, BNB, ADA, LTC), Test Set
+CORRECTIONS vs v1.0:
+- Utilise prix Open réels (OHLCV[:, 2]) au lieu de c_ret
+- Backtest PAR ASSET (pas global sur dataset concaténé)
+- Calcul PnL: (exit_price - entry_price) / entry_price
+- Intègre structure de test_oracle_direction_only.py
 
 Usage:
-    python tests/test_atr_structural_filter.py --split test --fees 0.003
-
-Référence littérature:
-    Marcos López de Prado (2018) - "Advances in Financial ML"
-    Chapitre 18: Structural Breaks and Microstructure Noise
+    python tests/test_atr_structural_filter.py --indicator macd --split test --fees 0.001
 """
 
 import sys
@@ -35,15 +25,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
 import numpy as np
-import pandas as pd
 import argparse
-from typing import Dict, List, Tuple
 from dataclasses import dataclass
-from enum import Enum
+from typing import List, Dict
+from enum import IntEnum
+from datetime import datetime
+from collections import defaultdict
 import logging
-
-# Importer fonctions validées (réutilisation!)
-from structural_filters import calculate_atr_normalized
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,52 +41,44 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# CONSTANTES
+# CONSTANTES ET TYPES
 # =============================================================================
+
+class Position(IntEnum):
+    """Position de trading."""
+    FLAT = 0
+    LONG = 1
+    SHORT = -1
+
 
 # Percentiles à tester (low, high)
 PERCENTILE_CONFIGS = [
-    (10, 90, "Large"),   # Large (garde 80%)
-    (20, 80, "Standard"), # Standard (garde 60%)
-    (30, 70, "Strict"),   # Strict (garde 40%)
+    (0, 100, "Baseline"),   # Tout autoriser (référence)
+    (10, 90, "Large"),      # Large (garde 80%)
+    (20, 80, "Standard"),   # Standard (garde 60%)
+    (30, 70, "Strict"),     # Strict (garde 40%)
 ]
-
-# Mapping assets vers CSV (RÉUTILISER config existante!)
-AVAILABLE_ASSETS = {
-    'BTC': 'data_trad/BTCUSD_all_5m.csv',
-    'ETH': 'data_trad/ETHUSD_all_5m.csv',
-    'BNB': 'data_trad/BNBUSD_all_5m.csv',
-    'ADA': 'data_trad/ADAUSD_all_5m.csv',
-    'LTC': 'data_trad/LTCUSD_all_5m.csv',
-}
-
-
-# =============================================================================
-# DATACLASSES (RÉUTILISÉES de test_holding_strategy.py)
-# =============================================================================
-
-class Position(Enum):
-    """Positions possibles."""
-    FLAT = "FLAT"
-    LONG = "LONG"
-    SHORT = "SHORT"
 
 
 @dataclass
 class Trade:
     """Enregistrement d'un trade."""
-    start: int
-    end: int
+    entry_idx: int
+    exit_idx: int
     duration: int
-    position: str
-    pnl: float
-    pnl_after_fees: float
-    exit_reason: str  # "DIRECTION_FLIP", "END"
+    position: str  # 'LONG' ou 'SHORT'
+    entry_price: float
+    exit_price: float
+    pnl: float  # PnL brut (%)
+    pnl_after_fees: float  # PnL net (%)
+    asset_id: int = 0
+    entry_timestamp: float = 0.0
+    exit_reason: str = ""  # "DIRECTION_FLIP", "ATR_OUT", "END"
 
 
 @dataclass
-class StrategyResult:
-    """Résultats d'une stratégie."""
+class BacktestResult:
+    """Résultats du backtest."""
     name: str
     n_trades: int
     n_long: int
@@ -112,343 +92,442 @@ class StrategyResult:
     avg_loss: float
     avg_duration: float
     sharpe_ratio: float
+    atr_coverage: float  # % samples autorisés par ATR
     trades: List[Trade]
-    # Métriques filtre ATR
-    atr_coverage: float  # % samples où filtre autorise trade
-    atr_q_low: float
-    atr_q_high: float
+
+
+@dataclass
+class AssetResult:
+    """Résultats par asset."""
+    asset_id: int
+    n_trades: int
+    total_pnl: float
+    total_pnl_after_fees: float
+    win_rate: float
+    avg_duration: float
 
 
 # =============================================================================
 # CHARGEMENT DONNÉES
 # =============================================================================
 
-def load_dataset_direction_only(split: str = 'test') -> Dict:
+def load_dataset(indicator: str, split: str = 'test') -> Dict:
     """
-    Charge dataset MACD Direction-Only Kalman.
+    Charge le dataset direction-only avec OHLCV.
 
-    RÉUTILISE: Logique de test_holding_strategy.py mais adapté Direction-Only.
+    RÉUTILISE: Structure de test_oracle_direction_only.py
     """
-    path = f'data/prepared/dataset_btc_eth_bnb_ada_ltc_macd_direction_only_kalman.npz'
+    path = Path(f'data/prepared/dataset_btc_eth_bnb_ada_ltc_{indicator}_direction_only_kalman.npz')
 
-    if not Path(path).exists():
+    if not path.exists():
         raise FileNotFoundError(f"Dataset introuvable: {path}")
 
-    logger.info(f"📂 Chargement: {path}")
+    logger.info(f"Chargement: {path}")
     data = np.load(path, allow_pickle=True)
 
-    # Vérifier shape Y (doit être (n,1) pour Direction-Only)
-    Y_split = data[f'Y_{split}']
-    if Y_split.ndim == 2 and Y_split.shape[1] == 1:
-        logger.info(f"✅ Direction-Only détecté: Y shape = {Y_split.shape}")
-    else:
-        raise ValueError(f"Y shape incorrect (attendu (n,1)): {Y_split.shape}")
+    # Extraire données du split
+    Y = data[f'Y_{split}']
+    OHLCV = data[f'OHLCV_{split}']
+    Y_pred = data.get(f'Y_{split}_pred', None)
+
+    logger.info(f"  Y shape: {Y.shape} - [timestamp, asset_id, direction]")
+    logger.info(f"  OHLCV shape: {OHLCV.shape} - [timestamp, asset_id, O, H, L, C, V]")
 
     return {
-        'X': data[f'X_{split}'],
-        'Y': data[f'Y_{split}'],
-        'Y_pred': data.get(f'Y_{split}_pred', None),
-        'metadata': data.get('metadata', None),
+        'Y': Y,
+        'OHLCV': OHLCV,
+        'Y_pred': Y_pred
     }
 
 
-def load_ohlcv_data() -> Dict[str, pd.DataFrame]:
-    """
-    Charge données OHLCV pour tous les assets (pour calcul ATR).
+# =============================================================================
+# CALCUL ATR
+# =============================================================================
 
-    RÉUTILISE: Structure AVAILABLE_ASSETS de constants.py.
+def calculate_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, window: int = 14) -> np.ndarray:
     """
-    logger.info(f"📂 Chargement OHLCV ({len(AVAILABLE_ASSETS)} assets)")
+    Calcule l'ATR normalisé (ATR / Close).
 
-    dataframes = {}
-    for asset, path in AVAILABLE_ASSETS.items():
-        if not Path(path).exists():
-            logger.warning(f"⚠️ CSV introuvable: {path} (asset {asset} ignoré)")
+    Args:
+        high: Prix High
+        low: Prix Low
+        close: Prix Close
+        window: Période ATR (défaut: 14)
+
+    Returns:
+        ATR normalisé (%)
+    """
+    n = len(close)
+    tr = np.zeros(n)
+
+    # True Range
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        hl = high[i] - low[i]
+        hc = abs(high[i] - close[i-1])
+        lc = abs(low[i] - close[i-1])
+        tr[i] = max(hl, hc, lc)
+
+    # ATR (EMA du True Range)
+    atr = np.zeros(n)
+    atr[:window] = np.nan
+    atr[window-1] = np.mean(tr[:window])
+
+    multiplier = 2 / (window + 1)
+    for i in range(window, n):
+        atr[i] = tr[i] * multiplier + atr[i-1] * (1 - multiplier)
+
+    # Normaliser par Close
+    atr_norm = atr / close
+
+    return atr_norm
+
+
+def compute_atr_per_asset(ohlcv: np.ndarray, window: int = 14) -> np.ndarray:
+    """
+    Calcule l'ATR normalisé PAR ASSET.
+
+    IMPORTANT: Calculer ATR par asset pour éviter les discontinuités
+    entre assets concaténés dans le dataset.
+
+    Args:
+        ohlcv: (n, 7) - [timestamp, asset_id, O, H, L, C, V]
+        window: Période ATR
+
+    Returns:
+        ATR array (n,)
+    """
+    asset_ids = ohlcv[:, 1].astype(int)
+    unique_assets = np.unique(asset_ids)
+
+    highs = ohlcv[:, 3]
+    lows = ohlcv[:, 4]
+    closes = ohlcv[:, 5]
+
+    atr = np.zeros(len(ohlcv))
+
+    for asset_id in unique_assets:
+        mask = asset_ids == asset_id
+        indices = np.where(mask)[0]
+
+        asset_high = highs[mask]
+        asset_low = lows[mask]
+        asset_close = closes[mask]
+
+        asset_atr = calculate_atr(asset_high, asset_low, asset_close, window)
+        atr[indices] = asset_atr
+
+    # Remplacer NaN par médiane (warmup period)
+    valid_atr = atr[~np.isnan(atr)]
+    if len(valid_atr) > 0:
+        atr[np.isnan(atr)] = np.median(valid_atr)
+
+    return atr
+
+
+# =============================================================================
+# BACKTEST PAR ASSET (RÉUTILISE test_oracle_direction_only.py)
+# =============================================================================
+
+def backtest_single_asset(
+    labels: np.ndarray,
+    opens: np.ndarray,
+    timestamps: np.ndarray,
+    atr_values: np.ndarray,
+    atr_mask: np.ndarray,
+    asset_id: int,
+    fees: float = 0.001
+) -> List[Trade]:
+    """
+    Backtest pour UN SEUL asset avec filtre ATR.
+
+    LOGIQUE CAUSALE (RÉUTILISE test_oracle_direction_only.py):
+    - Signal à index i → Exécution à Open[i+1]
+    - Toujours en position (LONG ou SHORT, jamais FLAT sauf si ATR bloque)
+    - Direction: 1=UP→LONG, 0=DOWN→SHORT
+    - ATR: Trade autorisé seulement si atr_mask[i] == True
+
+    Args:
+        labels: (n,) Direction labels
+        opens: (n,) Prix Open
+        timestamps: (n,) Timestamps
+        atr_values: (n,) ATR normalisé
+        atr_mask: (n,) True si ATR dans range acceptable
+        asset_id: ID de l'asset
+        fees: Frais par side
+
+    Returns:
+        Liste des trades
+    """
+    n_samples = len(labels)
+    trades = []
+    position = Position.FLAT
+    entry_idx = 0
+    entry_price = 0.0
+    entry_timestamp = 0.0
+
+    for i in range(n_samples - 1):
+        direction = int(labels[i])
+        atr_ok = atr_mask[i]
+
+        # Target position basée sur direction ET ATR
+        if atr_ok:
+            target = Position.LONG if direction == 1 else Position.SHORT
+        else:
+            # ATR hors range → ne pas entrer ou sortir si déjà en position
+            target = Position.FLAT
+
+        # Première entrée
+        if position == Position.FLAT:
+            if target != Position.FLAT:
+                position = target
+                entry_idx = i
+                entry_price = opens[i + 1]
+                entry_timestamp = timestamps[i + 1]
             continue
 
-        df = pd.read_csv(path)
+        # Gestion position existante
+        exit_signal = False
+        exit_reason = ""
 
-        # Vérifier colonnes requises
-        required = ['high', 'low', 'close', 'timestamp']
-        missing = [col for col in required if col not in df.columns]
-        if missing:
-            raise ValueError(f"Asset {asset}: colonnes manquantes {missing}")
+        # Cas 1: Direction flip (même si ATR OK)
+        if target != Position.FLAT and target != position:
+            exit_signal = True
+            exit_reason = "DIRECTION_FLIP"
 
-        # Calculer ATR normalisé (RÉUTILISE fonction validée!)
-        df['atr_norm'] = calculate_atr_normalized(
-            df['high'].values,
-            df['low'].values,
-            df['close'].values,
-            window=14
-        )
+        # Cas 2: ATR sort du range → sortie forcée
+        elif not atr_ok:
+            exit_signal = True
+            exit_reason = "ATR_OUT"
 
-        dataframes[asset] = df
-        logger.info(f"   {asset}: {len(df)} samples, ATR mean={df['atr_norm'].mean():.4f}")
+        if exit_signal:
+            exit_price = opens[i + 1]
 
-    logger.info(f"✅ OHLCV chargé pour {len(dataframes)} assets")
-    return dataframes
+            # Calcul PnL (CORRECT: prix réels!)
+            if position == Position.LONG:
+                pnl = (exit_price - entry_price) / entry_price
+            else:  # SHORT
+                pnl = (entry_price - exit_price) / entry_price
 
+            trade_fees = 2 * fees
+            pnl_after_fees = pnl - trade_fees
 
-def extract_c_ret(X: np.ndarray) -> np.ndarray:
-    """
-    Extrait c_ret des features.
+            trades.append(Trade(
+                entry_idx=entry_idx,
+                exit_idx=i,
+                duration=i - entry_idx,
+                position='LONG' if position == Position.LONG else 'SHORT',
+                entry_price=entry_price,
+                exit_price=exit_price,
+                pnl=pnl,
+                pnl_after_fees=pnl_after_fees,
+                asset_id=asset_id,
+                entry_timestamp=entry_timestamp,
+                exit_reason=exit_reason
+            ))
 
-    RÉUTILISE: Logique exacte de test_holding_strategy.py.
-    """
-    # MACD: c_ret est feature 0
-    c_ret = X[:, :, 0]
-    return c_ret[:, -1]  # Dernier timestep
+            # Flip immédiat si DIRECTION_FLIP
+            if exit_reason == "DIRECTION_FLIP":
+                position = target
+                entry_idx = i
+                entry_price = opens[i + 1]
+                entry_timestamp = timestamps[i + 1]
+            else:
+                # ATR_OUT → retour FLAT
+                position = Position.FLAT
+                entry_price = 0.0
 
+    # Fermer position finale
+    if position != Position.FLAT:
+        exit_price = opens[-1]
 
-def compute_atr_from_ohlcv(
-    ohlcv_dfs: Dict[str, pd.DataFrame],
-    n_samples_total: int
-) -> np.ndarray:
-    """
-    Calcule ATR depuis OHLCV (approche simplifiée sans alignement parfait).
-
-    APPROCHE SIMPLIFIÉE (sans metadata par sample):
-    - Concatène tous les assets (ordre: BTC → ETH → BNB → ADA → LTC)
-    - Calcule ATR globalement
-    - Mapping indices: samples ML correspondent aux derniers SEQUENCE_LENGTH steps
-
-    NOTE: Moins précis que l'alignement parfait, mais suffisant pour valider hypothèse.
-    Si test prometteur → améliorer alignement dans version ultérieure.
-
-    Args:
-        ohlcv_dfs: DataFrames OHLCV par asset
-        n_samples_total: Nombre de samples dans le dataset ML
-
-    Returns:
-        ATR array (n_samples_total,)
-    """
-    logger.info(f"🔗 Calcul ATR depuis OHLCV (approche simplifiée)")
-
-    # Concaténer tous les assets dans l'ordre (comme prepare_data_direction_only.py)
-    asset_order = ['BTC', 'ETH', 'BNB', 'ADA', 'LTC']
-    atr_all = []
-
-    for asset in asset_order:
-        if asset in ohlcv_dfs:
-            df = ohlcv_dfs[asset]
-            atr_all.append(df['atr_norm'].values)
-            logger.info(f"   {asset}: {len(df)} samples, ATR mean={df['atr_norm'].mean():.4f}")
+        if position == Position.LONG:
+            pnl = (exit_price - entry_price) / entry_price
         else:
-            logger.warning(f"⚠️ Asset {asset} non trouvé dans OHLCV")
+            pnl = (entry_price - exit_price) / entry_price
 
-    # Concaténer
-    atr_concat = np.concatenate(atr_all)
-    logger.info(f"   ATR total: {len(atr_concat)} samples")
+        trade_fees = 2 * fees
+        pnl_after_fees = pnl - trade_fees
 
-    # Prendre les derniers n_samples_total (après TRIM edges + sequences)
-    # NOTE: Approximation! Assume que samples ML = dernières sequences créées
-    if len(atr_concat) >= n_samples_total:
-        atr_subset = atr_concat[-n_samples_total:]
-        logger.info(f"   ATR subset: {len(atr_subset)} samples (tail du dataset)")
-    else:
-        logger.warning(f"⚠️ ATR concat ({len(atr_concat)}) < samples ML ({n_samples_total})")
-        # Remplir avec médiane si insuffisant
-        atr_subset = np.full(n_samples_total, np.median(atr_concat))
-        atr_subset[:len(atr_concat)] = atr_concat
+        trades.append(Trade(
+            entry_idx=entry_idx,
+            exit_idx=n_samples - 1,
+            duration=n_samples - 1 - entry_idx,
+            position='LONG' if position == Position.LONG else 'SHORT',
+            entry_price=entry_price,
+            exit_price=exit_price,
+            pnl=pnl,
+            pnl_after_fees=pnl_after_fees,
+            asset_id=asset_id,
+            entry_timestamp=entry_timestamp,
+            exit_reason="END"
+        ))
 
-    logger.info(f"✅ ATR calculé: mean={atr_subset.mean():.4f}, median={np.median(atr_subset):.4f}")
-
-    return atr_subset
+    return trades
 
 
-# =============================================================================
-# BACKTEST AVEC FILTRE ATR
-# =============================================================================
-
-def backtest_atr_filter(
-    pred: np.ndarray,
-    returns: np.ndarray,
+def backtest_with_atr_filter(
+    labels: np.ndarray,
+    ohlcv: np.ndarray,
     atr: np.ndarray,
-    fees: float,
-    atr_q_low: float = 20.0,
-    atr_q_high: float = 80.0
-) -> StrategyResult:
+    fees: float = 0.001,
+    atr_q_low: float = 0.0,
+    atr_q_high: float = 100.0
+) -> tuple:
     """
-    Backtest avec filtre ATR percentile.
+    Backtest avec filtre ATR, PAR ASSET.
 
-    RÉUTILISE: Logique calcul PnL de test_holding_strategy.py (PROUVÉE!).
-    ADAPTE: Direction-Only (1 output) au lieu de Dual-Binary (2 outputs).
-    AJOUTE: Filtre ATR Q20-Q80.
+    RÉUTILISE: Structure de test_oracle_direction_only.py
 
     Args:
-        pred: Prédictions (n_samples, 1) - [Direction uniquement]
-        returns: Returns (n_samples,)
-        atr: ATR normalisé (n_samples,)
-        fees: Frais par side (ex: 0.003 = 0.3%)
-        atr_q_low: Percentile bas (défaut: 20)
-        atr_q_high: Percentile haut (défaut: 80)
+        labels: (n,) Direction labels
+        ohlcv: (n, 7) Prix [timestamp, asset_id, O, H, L, C, V]
+        atr: (n,) ATR normalisé
+        fees: Frais par side
+        atr_q_low: Percentile bas ATR
+        atr_q_high: Percentile haut ATR
 
     Returns:
-        StrategyResult
+        (BacktestResult, List[AssetResult])
     """
-    # Convertir en binaire
-    pred_bin = (pred > 0.5).astype(int)  # Shape (n,1)
-    pred_direction = pred_bin[:, 0]       # Shape (n,)
-
     # Calculer percentiles ATR
-    q_low_val = np.percentile(atr, atr_q_low)
-    q_high_val = np.percentile(atr, atr_q_high)
+    valid_atr = atr[~np.isnan(atr)]
+    if len(valid_atr) == 0:
+        raise ValueError("Aucune valeur ATR valide!")
 
-    # Masque ATR (Q20 <= ATR <= Q80)
-    # NOTE: Utiliser <= pour inclure les bornes (important pour baseline Q0-Q100)
+    q_low_val = np.percentile(valid_atr, atr_q_low)
+    q_high_val = np.percentile(valid_atr, atr_q_high)
+
+    # Masque ATR
     if atr_q_low == 0.0 and atr_q_high == 100.0:
-        # Baseline: tout autoriser
         atr_mask = np.ones(len(atr), dtype=bool)
     else:
-        # Filtre: bornes inclusives
         atr_mask = (atr >= q_low_val) & (atr <= q_high_val)
 
     atr_coverage = atr_mask.mean()
 
-    logger.info(f"📊 ATR Percentiles: Q{atr_q_low}={q_low_val:.4f}, Q{atr_q_high}={q_high_val:.4f}")
-    logger.info(f"📊 ATR Coverage: {atr_coverage*100:.1f}% samples autorisés")
+    logger.info(f"  ATR Q{atr_q_low:.0f}={q_low_val:.4f}, Q{atr_q_high:.0f}={q_high_val:.4f}")
+    logger.info(f"  ATR Coverage: {atr_coverage*100:.1f}%")
 
-    n_samples = len(pred_direction)
-    trades = []
+    # Extraire colonnes OHLCV
+    timestamps = ohlcv[:, 0]
+    asset_ids = ohlcv[:, 1].astype(int)
+    opens = ohlcv[:, 2]
 
-    position = Position.FLAT
-    entry_time = 0
-    current_pnl = 0.0
+    unique_assets = np.unique(asset_ids)
+    logger.info(f"  Assets détectés: {len(unique_assets)}")
 
+    all_trades = []
+    asset_results = []
     n_long = 0
     n_short = 0
 
-    for i in range(n_samples):
-        direction = int(pred_direction[i])  # 0=DOWN, 1=UP
-        atr_ok = atr_mask[i]                # True si ATR dans range
-        ret = returns[i]
+    # Backtest PAR ASSET
+    for asset_id in unique_assets:
+        mask = asset_ids == asset_id
+        asset_labels = labels[mask]
+        asset_opens = opens[mask]
+        asset_timestamps = timestamps[mask]
+        asset_atr = atr[mask]
+        asset_atr_mask = atr_mask[mask]
 
-        # Accumuler PnL (RÉUTILISE logique PROUVÉE!)
-        if position != Position.FLAT:
-            if position == Position.LONG:
-                current_pnl += ret
-            else:  # SHORT
-                current_pnl -= ret
+        trades = backtest_single_asset(
+            asset_labels, asset_opens, asset_timestamps,
+            asset_atr, asset_atr_mask,
+            int(asset_id), fees
+        )
 
-        # Decision Matrix (SIMPLIFIÉ vs Dual-Binary)
-        if direction == 1 and atr_ok:
-            target = Position.LONG
-        elif direction == 0 and atr_ok:
-            target = Position.SHORT
-        else:
-            target = Position.FLAT  # Filtre ATR bloque ou pas de signal
+        # Stats par asset
+        asset_pnl = 0.0
+        asset_pnl_net = 0.0
+        asset_wins = 0
+        asset_duration = 0
 
-        # LOGIQUE SORTIE (SIMPLIFIÉ: Flip uniquement)
-        exit_signal = False
-        exit_reason = None
-
-        if position != Position.FLAT:
-            # Direction flip (RÉUTILISE logique commit e51a691!)
-            if target != Position.FLAT and target != position:
-                exit_signal = True
-                exit_reason = "DIRECTION_FLIP"
-
-            # Sortie si ATR sort du range (force exit)
-            elif not atr_ok:
-                exit_signal = True
-                exit_reason = "ATR_OUT_OF_RANGE"
-
-        # Exécuter sortie si nécessaire
-        if exit_signal:
-            trade_fees = 2 * fees  # Round-trip
-            pnl_after_fees = current_pnl - trade_fees
-
-            trades.append(Trade(
-                start=entry_time,
-                end=i,
-                duration=i - entry_time,
-                position=position.value,
-                pnl=current_pnl,
-                pnl_after_fees=pnl_after_fees,
-                exit_reason=exit_reason
-            ))
-
-            # Flip immédiat si DIRECTION_FLIP (RÉUTILISE logique PROUVÉE!)
-            if exit_reason == "DIRECTION_FLIP":
-                position = target
-                entry_time = i
-                current_pnl = 0.0
-                if target == Position.LONG:
-                    n_long += 1
-                else:
-                    n_short += 1
-            else:
-                # Sortie complète (ATR out of range)
-                position = Position.FLAT
-                current_pnl = 0.0
-
-        # Nouvelle entrée si FLAT
-        elif position == Position.FLAT and target != Position.FLAT:
-            position = target
-            entry_time = i
-            current_pnl = 0.0
-            if target == Position.LONG:
+        for t in trades:
+            if t.position == 'LONG':
                 n_long += 1
             else:
                 n_short += 1
+            asset_pnl += t.pnl
+            asset_pnl_net += t.pnl_after_fees
+            if t.pnl_after_fees > 0:
+                asset_wins += 1
+            asset_duration += t.duration
 
-    # Clôturer position finale si ouverte
-    if position != Position.FLAT:
-        trade_fees = 2 * fees
-        pnl_after_fees = current_pnl - trade_fees
+        if len(trades) > 0:
+            asset_results.append(AssetResult(
+                asset_id=int(asset_id),
+                n_trades=len(trades),
+                total_pnl=asset_pnl,
+                total_pnl_after_fees=asset_pnl_net,
+                win_rate=asset_wins / len(trades),
+                avg_duration=asset_duration / len(trades)
+            ))
 
-        trades.append(Trade(
-            start=entry_time,
-            end=n_samples - 1,
-            duration=n_samples - 1 - entry_time,
-            position=position.value,
-            pnl=current_pnl,
-            pnl_after_fees=pnl_after_fees,
-            exit_reason="END"
-        ))
+        all_trades.extend(trades)
 
-    # Calculer métriques (RÉUTILISE formules de test_holding_strategy.py)
+    # Calculer stats globales
+    result = compute_stats(all_trades, n_long, n_short, atr_coverage, atr_q_low, atr_q_high)
+    return result, asset_results
+
+
+def compute_stats(
+    trades: List[Trade],
+    n_long: int,
+    n_short: int,
+    atr_coverage: float,
+    atr_q_low: float,
+    atr_q_high: float
+) -> BacktestResult:
+    """Calcule les statistiques du backtest."""
+    name = f"ATR_Q{int(atr_q_low)}-Q{int(atr_q_high)}"
+
     if len(trades) == 0:
-        return StrategyResult(
-            name=f"ATR_Q{int(atr_q_low)}-Q{int(atr_q_high)}",
+        return BacktestResult(
+            name=name,
             n_trades=0, n_long=0, n_short=0,
             total_pnl=0.0, total_pnl_after_fees=0.0, total_fees=0.0,
             win_rate=0.0, profit_factor=0.0,
             avg_win=0.0, avg_loss=0.0, avg_duration=0.0,
-            sharpe_ratio=0.0, trades=[],
-            atr_coverage=atr_coverage,
-            atr_q_low=q_low_val,
-            atr_q_high=q_high_val
+            sharpe_ratio=0.0, atr_coverage=atr_coverage, trades=[]
         )
 
-    pnl_brut = sum(t.pnl for t in trades)
-    pnl_net = sum(t.pnl_after_fees for t in trades)
-    total_fees = pnl_brut - pnl_net
+    pnls = np.array([t.pnl for t in trades])
+    pnls_net = np.array([t.pnl_after_fees for t in trades])
+    durations = np.array([t.duration for t in trades])
 
-    wins = [t for t in trades if t.pnl_after_fees > 0]
-    losses = [t for t in trades if t.pnl_after_fees <= 0]
+    total_pnl = pnls.sum()
+    total_pnl_net = pnls_net.sum()
+    total_fees = total_pnl - total_pnl_net
 
-    win_rate = len(wins) / len(trades) if trades else 0.0
+    # Win rate
+    wins = pnls_net > 0
+    losses = pnls_net < 0
+    win_rate = wins.mean()
 
-    total_wins = sum(t.pnl_after_fees for t in wins)
-    total_losses = abs(sum(t.pnl_after_fees for t in losses))
-    profit_factor = total_wins / total_losses if total_losses > 0 else 0.0
+    # Profit factor
+    sum_wins = pnls_net[wins].sum() if wins.any() else 0.0
+    sum_losses = abs(pnls_net[losses].sum()) if losses.any() else 0.0
+    profit_factor = sum_wins / sum_losses if sum_losses > 0 else 0.0
 
-    avg_win = np.mean([t.pnl_after_fees for t in wins]) if wins else 0.0
-    avg_loss = np.mean([t.pnl_after_fees for t in losses]) if losses else 0.0
-    avg_duration = np.mean([t.duration for t in trades])
+    # Moyennes
+    avg_win = pnls_net[wins].mean() if wins.any() else 0.0
+    avg_loss = pnls_net[losses].mean() if losses.any() else 0.0
+    avg_duration = durations.mean()
 
-    # Sharpe Ratio
-    trade_returns = np.array([t.pnl_after_fees for t in trades])
-    sharpe = (trade_returns.mean() / trade_returns.std()) if trade_returns.std() > 0 else 0.0
+    # Sharpe
+    if len(pnls_net) > 1 and pnls_net.std() > 0:
+        sharpe = (pnls_net.mean() / pnls_net.std()) * np.sqrt(288 * 365)
+    else:
+        sharpe = 0.0
 
-    return StrategyResult(
-        name=f"ATR_Q{int(atr_q_low)}-Q{int(atr_q_high)}",
+    return BacktestResult(
+        name=name,
         n_trades=len(trades),
         n_long=n_long,
         n_short=n_short,
-        total_pnl=pnl_brut,
-        total_pnl_after_fees=pnl_net,
+        total_pnl=total_pnl,
+        total_pnl_after_fees=total_pnl_net,
         total_fees=total_fees,
         win_rate=win_rate,
         profit_factor=profit_factor,
@@ -456,10 +535,8 @@ def backtest_atr_filter(
         avg_loss=avg_loss,
         avg_duration=avg_duration,
         sharpe_ratio=sharpe,
-        trades=trades,
         atr_coverage=atr_coverage,
-        atr_q_low=q_low_val,
-        atr_q_high=q_high_val
+        trades=trades
     )
 
 
@@ -467,85 +544,69 @@ def backtest_atr_filter(
 # AFFICHAGE RÉSULTATS
 # =============================================================================
 
-def print_comparison_table(results: List[StrategyResult], baseline: StrategyResult):
-    """
-    Affiche tableau comparatif (RÉUTILISE style de test_holding_strategy.py).
-    """
-    print("\n" + "="*100)
-    print("RÉSULTATS ATR STRUCTURAL FILTER".center(100))
+def print_results(result: BacktestResult, indicator: str):
+    """Affiche les résultats détaillés."""
+    print(f"\n{'='*70}")
+    print(f"RÉSULTATS {result.name} - {indicator.upper()}")
+    print("="*70)
+
+    print(f"\nTrades:")
+    print(f"  Total: {result.n_trades:,}")
+    print(f"  Long: {result.n_long:,}")
+    print(f"  Short: {result.n_short:,}")
+    print(f"  Durée moyenne: {result.avg_duration:.1f} périodes")
+
+    print(f"\nPerformance:")
+    print(f"  PnL Brut: {result.total_pnl*100:+.2f}%")
+    print(f"  Frais: {result.total_fees*100:.2f}%")
+    print(f"  PnL Net: {result.total_pnl_after_fees*100:+.2f}%")
+
+    print(f"\nMétriques:")
+    print(f"  Win Rate: {result.win_rate*100:.1f}%")
+    print(f"  Profit Factor: {result.profit_factor:.2f}")
+    print(f"  Avg Win: {result.avg_win*100:+.3f}%")
+    print(f"  Avg Loss: {result.avg_loss*100:+.3f}%")
+    print(f"  Sharpe Ratio: {result.sharpe_ratio:.2f}")
+    print(f"  ATR Coverage: {result.atr_coverage*100:.1f}%")
+
+
+def print_asset_results(asset_results: List[AssetResult]):
+    """Affiche les résultats par asset."""
+    asset_names = {0: 'BTC', 1: 'ETH', 2: 'BNB', 3: 'ADA', 4: 'LTC'}
+
+    print(f"\n{'='*70}")
+    print("RÉSULTATS PAR ASSET")
+    print("="*70)
+
+    print(f"\n{'Asset':<8} {'Trades':>10} {'PnL Brut':>12} {'PnL Net':>12} {'Win Rate':>10} {'Durée':>10}")
+    print("-"*70)
+
+    for ar in asset_results:
+        name = asset_names.get(ar.asset_id, f'Asset{ar.asset_id}')
+        print(f"{name:<8} {ar.n_trades:>10,} {ar.total_pnl*100:>+11.2f}% {ar.total_pnl_after_fees*100:>+11.2f}% {ar.win_rate*100:>9.1f}% {ar.avg_duration:>9.1f}p")
+
+
+def print_comparison_table(results: List[BacktestResult]):
+    """Affiche tableau comparatif."""
+    print(f"\n{'='*100}")
+    print("COMPARAISON ATR FILTERS")
     print("="*100)
 
-    # Header
-    header = (
-        f"{'Config':<15} | "
-        f"{'Trades':>8} | {'Réduc':>7} | "
-        f"{'WR':>6} | {'Δ WR':>7} | "
-        f"{'PnL Brut':>10} | {'PnL Net':>10} | "
-        f"{'Coverage':>9} | {'Verdict':<10}"
-    )
+    baseline = results[0]
+
+    header = f"{'Config':<18} | {'Trades':>10} | {'Réduction':>10} | {'Win Rate':>10} | {'PnL Brut':>12} | {'PnL Net':>12} | {'Coverage':>10}"
     print(header)
     print("-"*100)
 
-    # Baseline
-    print(
-        f"{'Baseline':<15} | "
-        f"{baseline.n_trades:>8,} | {'-':>7} | "
-        f"{baseline.win_rate*100:>5.2f}% | {'-':>7} | "
-        f"{baseline.total_pnl:>+9.2f}% | {baseline.total_pnl_after_fees:>+9.2f}% | "
-        f"{'-':>9} | {'Référence':<10}"
-    )
-    print("-"*100)
-
-    # Autres configs
     for res in results:
-        if res.name == "Baseline":
-            continue
-
-        # Calculer réduction (avec protection division par zéro)
-        if baseline.n_trades > 0:
-            reduction = (1 - res.n_trades / baseline.n_trades) * 100
+        if res == baseline:
+            reduction = "-"
         else:
-            reduction = 0.0
+            reduction = f"{(1 - res.n_trades/baseline.n_trades)*100:+.1f}%"
 
-        delta_wr = (res.win_rate - baseline.win_rate) * 100
-
-        # Verdict
-        if res.total_pnl_after_fees > 0:
-            verdict = "✅ POSITIF"
-        elif res.total_pnl_after_fees > baseline.total_pnl_after_fees:
-            verdict = "⚠️ Mieux"
-        else:
-            verdict = "❌ Pire"
-
-        print(
-            f"{res.name:<15} | "
-            f"{res.n_trades:>8,} | {reduction:>+6.1f}% | "
-            f"{res.win_rate*100:>5.2f}% | {delta_wr:>+6.2f}% | "
-            f"{res.total_pnl:>+9.2f}% | {res.total_pnl_after_fees:>+9.2f}% | "
-            f"{res.atr_coverage*100:>8.1f}% | {verdict:<10}"
-        )
+        print(f"{res.name:<18} | {res.n_trades:>10,} | {reduction:>10} | {res.win_rate*100:>9.1f}% | {res.total_pnl*100:>+11.2f}% | {res.total_pnl_after_fees*100:>+11.2f}% | {res.atr_coverage*100:>9.1f}%")
 
     print("="*100)
-
-    # Métriques détaillées du meilleur
-    # Filtrer baseline pour trouver le meilleur
-    non_baseline_results = [r for r in results if r.name != "Baseline"]
-
-    if non_baseline_results:
-        best = max(non_baseline_results, key=lambda r: r.total_pnl_after_fees)
-        print(f"\n🏆 MEILLEURE CONFIG: {best.name}")
-        print(f"   Trades: {best.n_trades:,} ({best.n_long:,} LONG + {best.n_short:,} SHORT)")
-        print(f"   Win Rate: {best.win_rate*100:.2f}%")
-        print(f"   PnL Brut: {best.total_pnl:+.2f}%")
-        print(f"   PnL Net: {best.total_pnl_after_fees:+.2f}%")
-        print(f"   Frais: {best.total_fees:.2f}%")
-        print(f"   Profit Factor: {best.profit_factor:.2f}")
-        print(f"   Sharpe Ratio: {best.sharpe_ratio:.2f}")
-        print(f"   Avg Duration: {best.avg_duration:.1f} périodes")
-        print(f"   ATR Coverage: {best.atr_coverage*100:.1f}%")
-        print(f"   ATR Range: [{best.atr_q_low:.4f}, {best.atr_q_high:.4f}]")
-    else:
-        print(f"\n⚠️ Aucune config ATR testée (baseline uniquement)")
 
 
 # =============================================================================
@@ -553,95 +614,102 @@ def print_comparison_table(results: List[StrategyResult], baseline: StrategyResu
 # =============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Test ATR Structural Filter")
-    parser.add_argument('--split', type=str, default='test', choices=['train', 'val', 'test'],
-                        help='Split à tester (défaut: test)')
-    parser.add_argument('--fees', type=float, default=0.003,
-                        help='Frais par side (défaut: 0.003 = 0.3%%)')
+    parser = argparse.ArgumentParser(description='Test ATR Structural Filter v2.0')
+    parser.add_argument('--indicator', type=str, default='macd',
+                        choices=['macd', 'rsi', 'cci'],
+                        help='Indicateur à tester')
+    parser.add_argument('--split', type=str, default='test',
+                        choices=['train', 'val', 'test'],
+                        help='Split à utiliser')
+    parser.add_argument('--fees', type=float, default=0.001,
+                        help='Frais par side (défaut: 0.1%%)')
+    parser.add_argument('--use-predictions', action='store_true',
+                        help='Utiliser prédictions ML au lieu de labels Oracle')
+    parser.add_argument('--atr-window', type=int, default=14,
+                        help='Période ATR (défaut: 14)')
 
     args = parser.parse_args()
 
-    logger.info(f"🚀 Test ATR Structural Filter")
-    logger.info(f"   Split: {args.split}")
-    logger.info(f"   Frais: {args.fees*100:.2f}% par side ({args.fees*2*100:.2f}% round-trip)")
+    logger.info("="*70)
+    logger.info("TEST ATR STRUCTURAL FILTER v2.0")
+    logger.info("="*70)
+    logger.info(f"Indicateur: {args.indicator.upper()}")
+    logger.info(f"Split: {args.split}")
+    logger.info(f"Frais: {args.fees*100:.2f}% par side")
+    logger.info(f"ATR Window: {args.atr_window}")
 
-    # Charger dataset Direction-Only
-    data = load_dataset_direction_only(args.split)
+    # Charger données
+    data = load_dataset(args.indicator, args.split)
 
-    X = data['X']
     Y = data['Y']
+    OHLCV = data['OHLCV']
     Y_pred = data['Y_pred']
-    metadata = data['metadata']
 
-    if Y_pred is None:
-        raise ValueError("Prédictions manquantes! Utiliser src/train.py avec --save-predictions")
+    # Labels: colonne 2 = direction
+    labels = Y[:, 2].astype(int)
 
-    logger.info(f"✅ Dataset: X={X.shape}, Y={Y.shape}, Y_pred={Y_pred.shape}")
+    logger.info(f"\nDonnées:")
+    logger.info(f"  Samples: {len(labels):,}")
+    logger.info(f"  Labels UP: {(labels == 1).sum():,} ({(labels == 1).mean()*100:.1f}%)")
 
-    # Extraire returns (RÉUTILISE logique validée!)
-    returns = extract_c_ret(X)
-    logger.info(f"✅ Returns extraits: {returns.shape}")
+    # Mode Oracle ou ML
+    if args.use_predictions and Y_pred is not None:
+        mode = "ML Predictions"
+        pred = Y_pred[:, 0] if Y_pred.ndim > 1 else Y_pred
+        labels_to_use = (pred > 0.5).astype(int)
+        logger.info(f"  Mode: Prédictions ML")
+    else:
+        mode = "Oracle"
+        labels_to_use = labels
+        logger.info(f"  Mode: Oracle (labels parfaits)")
 
-    # Charger OHLCV et calculer ATR
-    ohlcv_dfs = load_ohlcv_data()
+    # Calculer ATR depuis OHLCV
+    logger.info(f"\nCalcul ATR...")
+    atr = compute_atr_per_asset(OHLCV, window=args.atr_window)
+    logger.info(f"  ATR mean: {np.nanmean(atr):.4f}, median: {np.nanmedian(atr):.4f}")
 
-    # Calculer ATR (approche simplifiée sans metadata par sample)
-    atr = compute_atr_from_ohlcv(ohlcv_dfs, len(Y_pred))
+    # Tester toutes les configs ATR
+    all_results = []
+    all_asset_results = []
 
-    # Tester configs ATR
-    results = []
-
-    # Baseline (sans filtre ATR)
-    logger.info(f"\n{'='*60}\nBASELINE (sans filtre ATR)\n{'='*60}")
-
-    # Pour baseline: utiliser ATR réel mais avec percentiles Q0-Q100 (tout autorisé)
-    baseline = backtest_atr_filter(
-        pred=Y_pred,
-        returns=returns,
-        atr=atr,  # ATR réel
-        fees=args.fees,
-        atr_q_low=0.0,   # Q0 = minimum absolu
-        atr_q_high=100.0  # Q100 = maximum absolu
-    )
-    baseline.name = "Baseline"
-    results.append(baseline)
-
-    logger.info(f"   Trades: {baseline.n_trades:,}")
-    logger.info(f"   Win Rate: {baseline.win_rate*100:.2f}%")
-    logger.info(f"   PnL Brut: {baseline.total_pnl:+.2f}%")
-    logger.info(f"   PnL Net: {baseline.total_pnl_after_fees:+.2f}%")
-
-    # Tester configs ATR
     for q_low, q_high, name in PERCENTILE_CONFIGS:
-        logger.info(f"\n{'='*60}\nATR Filter: Q{q_low}-Q{q_high} ({name})\n{'='*60}")
+        logger.info(f"\n{'='*60}")
+        logger.info(f"Test: {name} (Q{q_low}-Q{q_high})")
+        logger.info("="*60)
 
-        res = backtest_atr_filter(
-            pred=Y_pred,
-            returns=returns,
-            atr=atr,
+        result, asset_results = backtest_with_atr_filter(
+            labels_to_use, OHLCV, atr,
             fees=args.fees,
             atr_q_low=q_low,
             atr_q_high=q_high
         )
+        result.name = name
 
-        results.append(res)
+        all_results.append(result)
+        all_asset_results.append(asset_results)
 
-        # Calculer réduction (avec protection division par zéro)
-        if baseline.n_trades > 0:
-            reduction_pct = (1 - res.n_trades / baseline.n_trades) * 100
-            logger.info(f"   Trades: {res.n_trades:,} ({reduction_pct:+.1f}%)")
-        else:
-            logger.info(f"   Trades: {res.n_trades:,} (N/A)")
+        logger.info(f"  Trades: {result.n_trades:,}")
+        logger.info(f"  Win Rate: {result.win_rate*100:.1f}%")
+        logger.info(f"  PnL Net: {result.total_pnl_after_fees*100:+.2f}%")
 
-        logger.info(f"   Win Rate: {res.win_rate*100:.2f}% ({(res.win_rate-baseline.win_rate)*100:+.2f}%)")
-        logger.info(f"   PnL Net: {res.total_pnl_after_fees:+.2f}%")
-        logger.info(f"   Coverage: {res.atr_coverage*100:.1f}%")
+    # Afficher résultats
+    print_comparison_table(all_results)
 
-    # Afficher tableau comparatif
-    print_comparison_table(results, baseline)
+    # Afficher détails du baseline
+    print_results(all_results[0], args.indicator)
+    print_asset_results(all_asset_results[0])
 
-    logger.info(f"\n✅ Tests terminés!")
+    # Afficher meilleur non-baseline
+    non_baseline = [r for r in all_results if r.name != "Baseline"]
+    if non_baseline:
+        best = max(non_baseline, key=lambda r: r.total_pnl_after_fees)
+        print(f"\n🏆 MEILLEURE CONFIG: {best.name}")
+        print_results(best, args.indicator)
+
+        # Trouver asset results correspondant
+        best_idx = all_results.index(best)
+        print_asset_results(all_asset_results[best_idx])
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

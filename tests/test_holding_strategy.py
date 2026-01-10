@@ -2,24 +2,25 @@
 """
 Test Stratégie Holding Minimum - Forcer durée minimale des trades.
 
+VERSION 2.0 - Corrigé avec prix Open réels (pas c_ret!)
+
 HYPOTHÈSE:
-Les erreurs MACD (Accuracy 92%, Win Rate 14%) viennent de SORTIES TROP PRÉCOCES.
-Forcer une durée minimale de trade pourrait améliorer Win Rate en capturant le mouvement réel.
+Les micro-sorties (direction flips fréquents) détruisent le PnL.
+Forcer une durée minimale de trade devrait améliorer le Win Rate.
 
 PRINCIPE:
-- Entrée: MACD Direction=UP & Force=STRONG
-- Sortie NORMALE: Force=WEAK
-- Sortie FORCÉE: Uniquement si trade_duration >= MIN_HOLDING
+- Toujours en position (LONG ou SHORT basé sur direction)
+- Sur direction flip: flip UNIQUEMENT si trade_duration >= MIN_HOLDING
+- Si < MIN_HOLDING: IGNORER le flip, continuer le trade actuel
 
-TESTS:
-- Baseline: Pas de holding minimum (sortie immédiate si Force=WEAK)
-- MIN_HOLDING = 10 périodes (~50 min)
-- MIN_HOLDING = 15 périodes (~75 min)
-- MIN_HOLDING = 20 périodes (~100 min)
-- MIN_HOLDING = 30 périodes (~150 min)
+CORRECTIONS vs v1.0:
+- Utilise prix Open réels (OHLCV[:, 2]) au lieu de c_ret
+- Backtest PAR ASSET (pas global sur dataset concaténé)
+- Calcul PnL: (exit_price - entry_price) / entry_price
+- Utilise dataset direction-only (pas dual-binary)
 
 Usage:
-    python tests/test_holding_strategy.py --indicator macd --split test
+    python tests/test_holding_strategy.py --indicator macd --split test --fees 0.001
 """
 
 import sys
@@ -28,9 +29,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
 import numpy as np
 import argparse
-from typing import Dict, List, Tuple
 from dataclasses import dataclass
-from enum import Enum
+from typing import List, Dict
+from enum import IntEnum
 import logging
 
 logging.basicConfig(
@@ -41,33 +42,43 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# CONSTANTES
+# CONSTANTES ET TYPES
 # =============================================================================
+
+class Position(IntEnum):
+    """Position de trading."""
+    FLAT = 0
+    LONG = 1
+    SHORT = -1
+
 
 MIN_HOLDING_VALUES = [0, 10, 15, 20, 30]  # Périodes à tester
-
-
-# =============================================================================
-# DATACLASSES
-# =============================================================================
-
-class Position(Enum):
-    """Positions possibles."""
-    FLAT = "FLAT"
-    LONG = "LONG"
-    SHORT = "SHORT"
 
 
 @dataclass
 class Trade:
     """Enregistrement d'un trade."""
-    start: int
-    end: int
+    entry_idx: int
+    exit_idx: int
     duration: int
-    position: str
-    pnl: float
-    pnl_after_fees: float
-    exit_reason: str  # "FORCE_WEAK", "HOLDING_MIN", "DIRECTION_FLIP"
+    position: str  # 'LONG' ou 'SHORT'
+    entry_price: float
+    exit_price: float
+    pnl: float  # PnL brut (%)
+    pnl_after_fees: float  # PnL net (%)
+    asset_id: int = 0
+    exit_reason: str = ""  # "DIRECTION_FLIP", "HOLDING_BLOCK", "END"
+
+
+@dataclass
+class AssetResult:
+    """Résultats par asset."""
+    asset_id: int
+    n_trades: int
+    total_pnl: float
+    total_pnl_after_fees: float
+    win_rate: float
+    avg_duration: float
 
 
 @dataclass
@@ -88,10 +99,10 @@ class StrategyResult:
     avg_duration: float
     sharpe_ratio: float
     trades: List[Trade]
-    # Nouvelles métriques
-    n_exits_force_weak: int
-    n_exits_holding_min: int
-    n_exits_direction_flip: int
+    asset_results: List[AssetResult]
+    # Métriques sorties
+    n_flips_executed: int
+    n_flips_blocked: int
 
 
 # =============================================================================
@@ -99,177 +110,241 @@ class StrategyResult:
 # =============================================================================
 
 def load_dataset(indicator: str, split: str = 'test') -> Dict:
-    """Charge dataset Kalman."""
-    path = f'data/prepared/dataset_btc_eth_bnb_ada_ltc_{indicator}_dual_binary_kalman.npz'
+    """
+    Charge le dataset direction-only avec OHLCV.
 
-    if not Path(path).exists():
+    RÉUTILISE: Structure de test_oracle_direction_only.py
+    """
+    path = Path(f'data/prepared/dataset_btc_eth_bnb_ada_ltc_{indicator}_direction_only_kalman.npz')
+
+    if not path.exists():
         raise FileNotFoundError(f"Dataset introuvable: {path}")
 
-    logger.info(f"📂 Chargement: {path}")
+    logger.info(f"Chargement: {path}")
     data = np.load(path, allow_pickle=True)
 
+    # Extraire données du split
+    Y = data[f'Y_{split}']
+    OHLCV = data[f'OHLCV_{split}']
+    Y_pred = data.get(f'Y_{split}_pred', None)
+
+    logger.info(f"  Y shape: {Y.shape} - [timestamp, asset_id, direction]")
+    logger.info(f"  OHLCV shape: {OHLCV.shape} - [timestamp, asset_id, O, H, L, C, V]")
+
     return {
-        'X': data[f'X_{split}'],
-        'Y': data[f'Y_{split}'],
-        'Y_pred': data.get(f'Y_{split}_pred', None),
+        'Y': Y,
+        'OHLCV': OHLCV,
+        'Y_pred': Y_pred
     }
 
 
-def extract_c_ret(X: np.ndarray, indicator: str) -> np.ndarray:
-    """Extrait c_ret des features."""
-    if indicator in ['rsi', 'macd']:
-        c_ret = X[:, :, 0]
-        return c_ret[:, -1]
-    elif indicator == 'cci':
-        c_ret = X[:, :, 2]
-        return c_ret[:, -1]
-    else:
-        raise ValueError(f"Indicateur inconnu: {indicator}")
-
-
 # =============================================================================
-# BACKTEST AVEC HOLDING MINIMUM
+# BACKTEST PAR ASSET AVEC HOLDING MINIMUM
 # =============================================================================
 
-def backtest_holding_strategy(
-    pred: np.ndarray,
-    returns: np.ndarray,
-    fees: float,
+def backtest_single_asset(
+    labels: np.ndarray,
+    opens: np.ndarray,
+    timestamps: np.ndarray,
+    asset_id: int,
+    fees: float = 0.001,
+    min_holding: int = 0
+) -> tuple:
+    """
+    Backtest pour UN SEUL asset avec holding minimum.
+
+    LOGIQUE CAUSALE:
+    - Signal à index i → Exécution à Open[i+1]
+    - Toujours en position (LONG ou SHORT, jamais FLAT)
+    - Direction: 1=UP→LONG, 0=DOWN→SHORT
+    - Flip autorisé UNIQUEMENT si trade_duration >= min_holding
+
+    Args:
+        labels: (n,) Direction labels
+        opens: (n,) Prix Open
+        timestamps: (n,) Timestamps
+        asset_id: ID de l'asset
+        fees: Frais par side
+        min_holding: Durée minimale avant flip autorisé
+
+    Returns:
+        (trades, n_flips_executed, n_flips_blocked)
+    """
+    n_samples = len(labels)
+    trades = []
+
+    position = Position.FLAT
+    entry_idx = 0
+    entry_price = 0.0
+    entry_timestamp = 0.0
+
+    n_flips_executed = 0
+    n_flips_blocked = 0
+
+    for i in range(n_samples - 1):
+        direction = int(labels[i])
+        target = Position.LONG if direction == 1 else Position.SHORT
+
+        # Première entrée
+        if position == Position.FLAT:
+            position = target
+            entry_idx = i
+            entry_price = opens[i + 1]
+            entry_timestamp = timestamps[i + 1]
+            continue
+
+        # Gestion position existante
+        trade_duration = i - entry_idx
+
+        # Direction flip?
+        if target != position:
+            # Vérifier holding minimum
+            if trade_duration >= min_holding:
+                # Flip autorisé
+                exit_price = opens[i + 1]
+
+                # Calcul PnL (CORRECT: prix réels!)
+                if position == Position.LONG:
+                    pnl = (exit_price - entry_price) / entry_price
+                else:  # SHORT
+                    pnl = (entry_price - exit_price) / entry_price
+
+                trade_fees = 2 * fees
+                pnl_after_fees = pnl - trade_fees
+
+                trades.append(Trade(
+                    entry_idx=entry_idx,
+                    exit_idx=i,
+                    duration=trade_duration,
+                    position='LONG' if position == Position.LONG else 'SHORT',
+                    entry_price=entry_price,
+                    exit_price=exit_price,
+                    pnl=pnl,
+                    pnl_after_fees=pnl_after_fees,
+                    asset_id=asset_id,
+                    exit_reason="DIRECTION_FLIP"
+                ))
+
+                # Flip immédiat
+                position = target
+                entry_idx = i
+                entry_price = opens[i + 1]
+                entry_timestamp = timestamps[i + 1]
+                n_flips_executed += 1
+            else:
+                # Flip bloqué - holding minimum pas atteint
+                n_flips_blocked += 1
+                # Continuer le trade actuel (ignorer le signal)
+
+    # Fermer position finale
+    if position != Position.FLAT:
+        exit_price = opens[-1]
+        trade_duration = n_samples - 1 - entry_idx
+
+        if position == Position.LONG:
+            pnl = (exit_price - entry_price) / entry_price
+        else:
+            pnl = (entry_price - exit_price) / entry_price
+
+        trade_fees = 2 * fees
+        pnl_after_fees = pnl - trade_fees
+
+        trades.append(Trade(
+            entry_idx=entry_idx,
+            exit_idx=n_samples - 1,
+            duration=trade_duration,
+            position='LONG' if position == Position.LONG else 'SHORT',
+            entry_price=entry_price,
+            exit_price=exit_price,
+            pnl=pnl,
+            pnl_after_fees=pnl_after_fees,
+            asset_id=asset_id,
+            exit_reason="END"
+        ))
+
+    return trades, n_flips_executed, n_flips_blocked
+
+
+def backtest_with_holding(
+    labels: np.ndarray,
+    ohlcv: np.ndarray,
+    fees: float = 0.001,
     min_holding: int = 0
 ) -> StrategyResult:
     """
-    Backtest avec holding minimum.
+    Backtest avec holding minimum, PAR ASSET.
 
     Args:
-        pred: Prédictions (n_samples, 2) - [Direction, Force]
-        returns: Returns (n_samples,)
+        labels: (n,) Direction labels
+        ohlcv: (n, 7) Prix [timestamp, asset_id, O, H, L, C, V]
         fees: Frais par side
-        min_holding: Durée minimale du trade (0 = baseline)
+        min_holding: Durée minimale avant flip
 
     Returns:
         StrategyResult
     """
-    # Convertir en binaire
-    pred_bin = (pred > 0.5).astype(int)
+    # Extraire colonnes OHLCV
+    timestamps = ohlcv[:, 0]
+    asset_ids = ohlcv[:, 1].astype(int)
+    opens = ohlcv[:, 2]
 
-    n_samples = len(pred_bin)
-    trades = []
+    unique_assets = np.unique(asset_ids)
 
-    position = Position.FLAT
-    entry_time = 0
-    current_pnl = 0.0
-
+    all_trades = []
+    asset_results = []
     n_long = 0
     n_short = 0
-    n_exits_force_weak = 0
-    n_exits_holding_min = 0
-    n_exits_direction_flip = 0
+    total_flips_executed = 0
+    total_flips_blocked = 0
 
-    for i in range(n_samples):
-        direction = int(pred_bin[i, 0])  # 0=DOWN, 1=UP
-        force = int(pred_bin[i, 1])      # 0=WEAK, 1=STRONG
-        ret = returns[i]
+    # Backtest PAR ASSET
+    for asset_id in unique_assets:
+        mask = asset_ids == asset_id
+        asset_labels = labels[mask]
+        asset_opens = opens[mask]
+        asset_timestamps = timestamps[mask]
 
-        # Accumuler PnL
-        if position != Position.FLAT:
-            if position == Position.LONG:
-                current_pnl += ret
-            else:  # SHORT
-                current_pnl -= ret
+        trades, flips_exec, flips_block = backtest_single_asset(
+            asset_labels, asset_opens, asset_timestamps,
+            int(asset_id), fees, min_holding
+        )
 
-        # Decision Matrix
-        if direction == 1 and force == 1:
-            target = Position.LONG
-        elif direction == 0 and force == 1:
-            target = Position.SHORT
-        else:
-            target = Position.FLAT
+        total_flips_executed += flips_exec
+        total_flips_blocked += flips_block
 
-        # Durée trade actuel
-        trade_duration = i - entry_time if position != Position.FLAT else 0
+        # Stats par asset
+        asset_pnl = 0.0
+        asset_pnl_net = 0.0
+        asset_wins = 0
+        asset_duration = 0
 
-        # LOGIQUE SORTIE avec HOLDING MINIMUM
-        exit_signal = False
-        exit_reason = None
-
-        if position != Position.FLAT:
-            # Cas 1: Force=WEAK et holding minimum atteint
-            if target == Position.FLAT and trade_duration >= min_holding:
-                exit_signal = True
-                exit_reason = "FORCE_WEAK"
-                n_exits_force_weak += 1
-
-            # Cas 2: Direction flip (toujours prioritaire, même si < min_holding)
-            elif target != Position.FLAT and target != position:
-                exit_signal = True
-                exit_reason = "DIRECTION_FLIP"
-                n_exits_direction_flip += 1
-
-            # Cas 3: Force=WEAK mais holding minimum PAS atteint
-            elif target == Position.FLAT and trade_duration < min_holding:
-                # IGNORER signal sortie, continuer trade
-                exit_signal = False
-                exit_reason = "HOLDING_MIN_BLOCK"
-                n_exits_holding_min += 1
-
-        # Exécuter sortie si nécessaire
-        if exit_signal:
-            trade_fees = 2 * fees
-            pnl_after_fees = current_pnl - trade_fees
-
-            trades.append(Trade(
-                start=entry_time,
-                end=i,
-                duration=i - entry_time,
-                position=position.value,
-                pnl=current_pnl,
-                pnl_after_fees=pnl_after_fees,
-                exit_reason=exit_reason
-            ))
-
-            # Reset si sortie complète (FORCE_WEAK)
-            if exit_reason == "FORCE_WEAK":
-                position = Position.FLAT
-                current_pnl = 0.0
-
-            # Flip immédiat si DIRECTION_FLIP
-            elif exit_reason == "DIRECTION_FLIP":
-                position = target
-                entry_time = i
-                current_pnl = 0.0
-                if target == Position.LONG:
-                    n_long += 1
-                else:
-                    n_short += 1
-
-        # Nouvelle entrée si FLAT
-        elif position == Position.FLAT and target != Position.FLAT:
-            position = target
-            entry_time = i
-            current_pnl = 0.0
-            if target == Position.LONG:
+        for t in trades:
+            if t.position == 'LONG':
                 n_long += 1
             else:
                 n_short += 1
+            asset_pnl += t.pnl
+            asset_pnl_net += t.pnl_after_fees
+            if t.pnl_after_fees > 0:
+                asset_wins += 1
+            asset_duration += t.duration
 
-    # Fermer position finale
-    if position != Position.FLAT:
-        trade_fees = 2 * fees
-        pnl_after_fees = current_pnl - trade_fees
+        if len(trades) > 0:
+            asset_results.append(AssetResult(
+                asset_id=int(asset_id),
+                n_trades=len(trades),
+                total_pnl=asset_pnl,
+                total_pnl_after_fees=asset_pnl_net,
+                win_rate=asset_wins / len(trades),
+                avg_duration=asset_duration / len(trades)
+            ))
 
-        trades.append(Trade(
-            start=entry_time,
-            end=n_samples - 1,
-            duration=n_samples - 1 - entry_time,
-            position=position.value,
-            pnl=current_pnl,
-            pnl_after_fees=pnl_after_fees,
-            exit_reason="END_OF_DATA"
-        ))
+        all_trades.extend(trades)
 
+    # Calculer stats globales
     return compute_stats(
-        trades, n_long, n_short, min_holding,
-        n_exits_force_weak, n_exits_holding_min, n_exits_direction_flip
+        all_trades, n_long, n_short, min_holding,
+        total_flips_executed, total_flips_blocked, asset_results
     )
 
 
@@ -278,64 +353,61 @@ def compute_stats(
     n_long: int,
     n_short: int,
     min_holding: int,
-    n_exits_force_weak: int,
-    n_exits_holding_min: int,
-    n_exits_direction_flip: int
+    n_flips_executed: int,
+    n_flips_blocked: int,
+    asset_results: List[AssetResult]
 ) -> StrategyResult:
-    """Calcule statistiques."""
+    """Calcule les statistiques du backtest."""
+    name = f"Holding {min_holding}p" if min_holding > 0 else "Baseline (0p)"
+
     if len(trades) == 0:
         return StrategyResult(
-            name=f"Holding {min_holding}p",
-            min_holding=min_holding,
+            name=name, min_holding=min_holding,
             n_trades=0, n_long=0, n_short=0,
             total_pnl=0.0, total_pnl_after_fees=0.0, total_fees=0.0,
             win_rate=0.0, profit_factor=0.0,
             avg_win=0.0, avg_loss=0.0, avg_duration=0.0,
-            sharpe_ratio=0.0, trades=[],
-            n_exits_force_weak=0, n_exits_holding_min=0, n_exits_direction_flip=0
+            sharpe_ratio=0.0, trades=[], asset_results=[],
+            n_flips_executed=0, n_flips_blocked=0
         )
 
     pnls = np.array([t.pnl for t in trades])
-    pnls_after_fees = np.array([t.pnl_after_fees for t in trades])
+    pnls_net = np.array([t.pnl_after_fees for t in trades])
     durations = np.array([t.duration for t in trades])
 
     total_pnl = pnls.sum()
-    total_pnl_after_fees = pnls_after_fees.sum()
-    total_fees = total_pnl - total_pnl_after_fees
+    total_pnl_net = pnls_net.sum()
+    total_fees = total_pnl - total_pnl_net
 
-    wins = pnls_after_fees > 0
-    losses = pnls_after_fees < 0
+    # Win rate
+    wins = pnls_net > 0
+    losses = pnls_net < 0
+    win_rate = wins.mean()
 
-    win_rate = wins.mean() if len(trades) > 0 else 0.0
-
-    sum_wins = pnls_after_fees[wins].sum() if wins.any() else 0.0
-    sum_losses = abs(pnls_after_fees[losses].sum()) if losses.any() else 0.0
+    # Profit factor
+    sum_wins = pnls_net[wins].sum() if wins.any() else 0.0
+    sum_losses = abs(pnls_net[losses].sum()) if losses.any() else 0.0
     profit_factor = sum_wins / sum_losses if sum_losses > 0 else 0.0
 
-    avg_win = pnls_after_fees[wins].mean() if wins.any() else 0.0
-    avg_loss = pnls_after_fees[losses].mean() if losses.any() else 0.0
-
+    # Moyennes
+    avg_win = pnls_net[wins].mean() if wins.any() else 0.0
+    avg_loss = pnls_net[losses].mean() if losses.any() else 0.0
     avg_duration = durations.mean()
 
-    # Sharpe Ratio (annualisé, 5min = 288 périodes/jour)
-    if len(pnls_after_fees) > 1:
-        returns_mean = pnls_after_fees.mean()
-        returns_std = pnls_after_fees.std()
-        if returns_std > 0:
-            sharpe = (returns_mean / returns_std) * np.sqrt(288 * 365)
-        else:
-            sharpe = 0.0
+    # Sharpe (annualisé, 288 périodes/jour)
+    if len(pnls_net) > 1 and pnls_net.std() > 0:
+        sharpe = (pnls_net.mean() / pnls_net.std()) * np.sqrt(288 * 365)
     else:
         sharpe = 0.0
 
     return StrategyResult(
-        name=f"Holding {min_holding}p" if min_holding > 0 else "Baseline (0p)",
+        name=name,
         min_holding=min_holding,
         n_trades=len(trades),
         n_long=n_long,
         n_short=n_short,
         total_pnl=total_pnl,
-        total_pnl_after_fees=total_pnl_after_fees,
+        total_pnl_after_fees=total_pnl_net,
         total_fees=total_fees,
         win_rate=win_rate,
         profit_factor=profit_factor,
@@ -344,74 +416,82 @@ def compute_stats(
         avg_duration=avg_duration,
         sharpe_ratio=sharpe,
         trades=trades,
-        n_exits_force_weak=n_exits_force_weak,
-        n_exits_holding_min=n_exits_holding_min,
-        n_exits_direction_flip=n_exits_direction_flip
+        asset_results=asset_results,
+        n_flips_executed=n_flips_executed,
+        n_flips_blocked=n_flips_blocked
     )
 
 
 # =============================================================================
-# AFFICHAGE
+# AFFICHAGE RÉSULTATS
 # =============================================================================
 
-def print_results(results: List[StrategyResult]):
-    """Affiche résultats comparatifs."""
-    logger.info("\n" + "="*100)
-    logger.info("COMPARAISON STRATÉGIES HOLDING MINIMUM")
-    logger.info("="*100)
-    logger.info(f"{'Stratégie':<20} {'Trades':>8} {'Win Rate':>9} {'PnL Net':>10} {'Sharpe':>8} {'Avg Dur':>9} {'Exits FW':>10} {'Exits HM':>10}")
-    logger.info("-"*100)
+def print_comparison_table(results: List[StrategyResult]):
+    """Affiche tableau comparatif."""
+    print(f"\n{'='*120}")
+    print("COMPARAISON STRATÉGIES HOLDING MINIMUM")
+    print("="*120)
 
     baseline = results[0]
 
-    for r in results:
-        delta_trades = r.n_trades - baseline.n_trades
-        delta_pct = (delta_trades / baseline.n_trades * 100) if baseline.n_trades > 0 else 0
+    header = f"{'Stratégie':<18} | {'Trades':>10} | {'Réduction':>10} | {'Win Rate':>10} | {'PnL Brut':>12} | {'PnL Net':>12} | {'Durée Moy':>10} | {'Flips Bloqués':>14}"
+    print(header)
+    print("-"*120)
 
-        logger.info(
-            f"{r.name:<20} {r.n_trades:>8,} {r.win_rate*100:>8.2f}% {r.total_pnl_after_fees*100:>9.2f}% "
-            f"{r.sharpe_ratio:>8.3f} {r.avg_duration:>8.1f}p {r.n_exits_force_weak:>10,} {r.n_exits_holding_min:>10,}"
-        )
+    for res in results:
+        if res == baseline:
+            reduction = "-"
+        else:
+            reduction = f"{(1 - res.n_trades/baseline.n_trades)*100:+.1f}%"
 
-        if r != baseline:
-            logger.info(
-                f"{'  └─ vs Baseline':<20} {delta_trades:>+8,} ({delta_pct:>+6.1f}%)"
-            )
+        print(f"{res.name:<18} | {res.n_trades:>10,} | {reduction:>10} | {res.win_rate*100:>9.1f}% | {res.total_pnl*100:>+11.2f}% | {res.total_pnl_after_fees*100:>+11.2f}% | {res.avg_duration:>9.1f}p | {res.n_flips_blocked:>14,}")
 
-    logger.info("\n📊 DÉTAILS PAR STRATÉGIE:")
+    print("="*120)
 
-    for r in results:
-        logger.info(f"\n{r.name}")
-        logger.info(f"  Trades: {r.n_trades:,} (LONG: {r.n_long:,}, SHORT: {r.n_short:,})")
-        logger.info(f"  Win Rate: {r.win_rate*100:.2f}%")
-        logger.info(f"  Profit Factor: {r.profit_factor:.3f}")
-        logger.info(f"  PnL Brut: {r.total_pnl*100:+.2f}%")
-        logger.info(f"  PnL Net: {r.total_pnl_after_fees*100:+.2f}%")
-        logger.info(f"  Frais Total: {r.total_fees*100:.2f}%")
-        logger.info(f"  Avg Win: {r.avg_win*100:+.3f}%")
-        logger.info(f"  Avg Loss: {r.avg_loss*100:+.3f}%")
-        logger.info(f"  Avg Duration: {r.avg_duration:.1f} périodes")
-        logger.info(f"  Sharpe Ratio: {r.sharpe_ratio:.3f}")
-        logger.info(f"  Exits:")
-        logger.info(f"    Force=WEAK: {r.n_exits_force_weak:,}")
-        logger.info(f"    Holding Min (bloqués): {r.n_exits_holding_min:,}")
-        logger.info(f"    Direction Flip: {r.n_exits_direction_flip:,}")
 
-    # Meilleure stratégie
-    best = max(results, key=lambda r: r.sharpe_ratio)
+def print_results(result: StrategyResult, indicator: str):
+    """Affiche les résultats détaillés."""
+    print(f"\n{'='*70}")
+    print(f"RÉSULTATS {result.name} - {indicator.upper()}")
+    print("="*70)
 
-    logger.info(f"\n✅ MEILLEURE STRATÉGIE: {best.name}")
-    logger.info(f"   Sharpe Ratio: {best.sharpe_ratio:.3f}")
-    logger.info(f"   PnL Net: {best.total_pnl_after_fees*100:+.2f}%")
-    logger.info(f"   Win Rate: {best.win_rate*100:.2f}%")
-    logger.info(f"   Avg Duration: {best.avg_duration:.1f} périodes")
+    print(f"\nTrades:")
+    print(f"  Total: {result.n_trades:,}")
+    print(f"  Long: {result.n_long:,}")
+    print(f"  Short: {result.n_short:,}")
+    print(f"  Durée moyenne: {result.avg_duration:.1f} périodes")
 
-    if best.total_pnl_after_fees > 0:
-        logger.info("\n🎉 STRATÉGIE RENTABLE! Le holding minimum fonctionne.")
-    else:
-        logger.info("\n⚠️  Toujours négatif. Le holding minimum n'a pas résolu le problème.")
+    print(f"\nPerformance:")
+    print(f"  PnL Brut: {result.total_pnl*100:+.2f}%")
+    print(f"  Frais: {result.total_fees*100:.2f}%")
+    print(f"  PnL Net: {result.total_pnl_after_fees*100:+.2f}%")
 
-    logger.info("\n" + "="*100 + "\n")
+    print(f"\nMétriques:")
+    print(f"  Win Rate: {result.win_rate*100:.1f}%")
+    print(f"  Profit Factor: {result.profit_factor:.2f}")
+    print(f"  Avg Win: {result.avg_win*100:+.3f}%")
+    print(f"  Avg Loss: {result.avg_loss*100:+.3f}%")
+    print(f"  Sharpe Ratio: {result.sharpe_ratio:.2f}")
+
+    print(f"\nFlips:")
+    print(f"  Exécutés: {result.n_flips_executed:,}")
+    print(f"  Bloqués (holding min): {result.n_flips_blocked:,}")
+
+
+def print_asset_results(asset_results: List[AssetResult]):
+    """Affiche les résultats par asset."""
+    asset_names = {0: 'BTC', 1: 'ETH', 2: 'BNB', 3: 'ADA', 4: 'LTC'}
+
+    print(f"\n{'='*70}")
+    print("RÉSULTATS PAR ASSET")
+    print("="*70)
+
+    print(f"\n{'Asset':<8} {'Trades':>10} {'PnL Brut':>12} {'PnL Net':>12} {'Win Rate':>10} {'Durée':>10}")
+    print("-"*70)
+
+    for ar in asset_results:
+        name = asset_names.get(ar.asset_id, f'Asset{ar.asset_id}')
+        print(f"{name:<8} {ar.n_trades:>10,} {ar.total_pnl*100:>+11.2f}% {ar.total_pnl_after_fees*100:>+11.2f}% {ar.win_rate*100:>9.1f}% {ar.avg_duration:>9.1f}p")
 
 
 # =============================================================================
@@ -419,57 +499,95 @@ def print_results(results: List[StrategyResult]):
 # =============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(
-        description='Test stratégie holding minimum',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__
-    )
-
+    parser = argparse.ArgumentParser(description='Test Holding Strategy v2.0')
     parser.add_argument('--indicator', type=str, default='macd',
-                        help='Indicateur (défaut: macd)')
+                        choices=['macd', 'rsi', 'cci'],
+                        help='Indicateur à tester')
     parser.add_argument('--split', type=str, default='test',
                         choices=['train', 'val', 'test'],
-                        help='Split (défaut: test)')
-    parser.add_argument('--fees', type=float, default=0.0015,
-                        help='Frais par side (défaut: 0.0015)')
+                        help='Split à utiliser')
+    parser.add_argument('--fees', type=float, default=0.001,
+                        help='Frais par side (défaut: 0.1%%)')
+    parser.add_argument('--use-predictions', action='store_true',
+                        help='Utiliser prédictions ML au lieu de labels Oracle')
 
     args = parser.parse_args()
 
-    logger.info("="*100)
-    logger.info(f"TEST HOLDING MINIMUM - {args.indicator.upper()}")
-    logger.info("="*100)
-    logger.info(f"Indicateur: {args.indicator}")
+    logger.info("="*70)
+    logger.info("TEST HOLDING STRATEGY v2.0")
+    logger.info("="*70)
+    logger.info(f"Indicateur: {args.indicator.upper()}")
     logger.info(f"Split: {args.split}")
-    logger.info(f"Fees: {args.fees*100:.2f}% par side ({args.fees*2*100:.2f}% round-trip)")
-    logger.info(f"Holding values testés: {MIN_HOLDING_VALUES}")
-    logger.info("="*100 + "\n")
+    logger.info(f"Frais: {args.fees*100:.2f}% par side")
+    logger.info(f"Holding values: {MIN_HOLDING_VALUES}")
 
     # Charger données
     data = load_dataset(args.indicator, args.split)
-    returns = extract_c_ret(data['X'], args.indicator)
 
-    logger.info(f"  Samples: {len(data['Y']):,}")
-    logger.info(f"  Prédictions disponibles: {'✅' if data['Y_pred'] is not None else '❌'}\n")
+    Y = data['Y']
+    OHLCV = data['OHLCV']
+    Y_pred = data['Y_pred']
 
-    if data['Y_pred'] is None:
-        logger.error("❌ Pas de prédictions disponibles!")
-        return
+    # Labels: colonne 2 = direction
+    labels = Y[:, 2].astype(int)
+
+    logger.info(f"\nDonnées:")
+    logger.info(f"  Samples: {len(labels):,}")
+    logger.info(f"  Labels UP: {(labels == 1).sum():,} ({(labels == 1).mean()*100:.1f}%)")
+
+    # Mode Oracle ou ML
+    if args.use_predictions and Y_pred is not None:
+        mode = "ML Predictions"
+        pred = Y_pred[:, 0] if Y_pred.ndim > 1 else Y_pred
+        labels_to_use = (pred > 0.5).astype(int)
+        logger.info(f"  Mode: Prédictions ML")
+    else:
+        mode = "Oracle"
+        labels_to_use = labels
+        logger.info(f"  Mode: Oracle (labels parfaits)")
 
     # Tester chaque holding value
-    results = []
+    all_results = []
 
     for min_holding in MIN_HOLDING_VALUES:
-        logger.info(f"🔧 Test Holding {min_holding} périodes...")
-        result = backtest_holding_strategy(
-            data['Y_pred'],
-            returns,
-            args.fees,
-            min_holding
+        logger.info(f"\n{'='*60}")
+        logger.info(f"Test: Holding {min_holding} périodes")
+        logger.info("="*60)
+
+        result = backtest_with_holding(
+            labels_to_use, OHLCV,
+            fees=args.fees,
+            min_holding=min_holding
         )
-        results.append(result)
+
+        all_results.append(result)
+
+        logger.info(f"  Trades: {result.n_trades:,}")
+        logger.info(f"  Win Rate: {result.win_rate*100:.1f}%")
+        logger.info(f"  PnL Net: {result.total_pnl_after_fees*100:+.2f}%")
+        logger.info(f"  Flips bloqués: {result.n_flips_blocked:,}")
 
     # Afficher résultats
-    print_results(results)
+    print_comparison_table(all_results)
+
+    # Afficher détails du baseline
+    print_results(all_results[0], args.indicator)
+    print_asset_results(all_results[0].asset_results)
+
+    # Afficher meilleur holding
+    non_baseline = [r for r in all_results if r.min_holding > 0]
+    if non_baseline:
+        best = max(non_baseline, key=lambda r: r.total_pnl_after_fees)
+        print(f"\n🏆 MEILLEUR HOLDING: {best.name}")
+        print_results(best, args.indicator)
+        print_asset_results(best.asset_results)
+
+        # Amélioration vs baseline
+        baseline = all_results[0]
+        print(f"\n📊 AMÉLIORATION vs Baseline:")
+        print(f"  Trades: {baseline.n_trades:,} → {best.n_trades:,} ({(1-best.n_trades/baseline.n_trades)*100:+.1f}%)")
+        print(f"  Win Rate: {baseline.win_rate*100:.1f}% → {best.win_rate*100:.1f}% ({(best.win_rate-baseline.win_rate)*100:+.1f}%)")
+        print(f"  PnL Net: {baseline.total_pnl_after_fees*100:+.2f}% → {best.total_pnl_after_fees*100:+.2f}%")
 
 
 if __name__ == '__main__':

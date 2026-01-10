@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
-Test Confidence-Based Veto Rules - Phase 2.7
+Test Confidence-Based Veto Rules - Phase 2.7 v2.0
+
+REWRITTEN: Utilise la bonne méthode de trading (Open prices, per-asset backtest)
 
 Implémente et teste les 3 règles de veto basées sur les scores de confiance:
 1. Zone Grise: Bloquer si décideur conf <0.20
@@ -8,20 +10,27 @@ Implémente et teste les 3 règles de veto basées sur les scores de confiance:
 3. Confirmation: Exiger témoin conf >0.50 si décideur conf 0.20-0.40
 
 Architecture:
-- MACD: Décideur principal (7.46% erreurs, 30.3% zone grise)
-- RSI + CCI: Témoins avec veto (60% détection combinée)
+- MACD: Décideur principal
+- RSI + CCI: Témoins avec veto
+
+Corrections v2.0:
+- Utilise Open prices (OHLCV[:, 2]) au lieu de c_ret
+- PnL = (exit_price - entry_price) / entry_price
+- Backtest per-asset (évite erreurs cross-asset)
+- Dataset direction_only au lieu de dual_binary
 
 Usage:
-    python tests/test_confidence_veto.py --split test --max-samples 20000 --enable-rule1 --enable-rule2 --enable-rule3
+    python tests/test_confidence_veto.py --split test --enable-all
 """
 
 import argparse
 import logging
 import numpy as np
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
+from datetime import datetime
 import sys
 
 # Setup logging
@@ -40,16 +49,47 @@ class Position(IntEnum):
 
 
 @dataclass
+class Trade:
+    """Un trade individuel."""
+    asset_id: int
+    entry_idx: int
+    exit_idx: int
+    entry_price: float
+    exit_price: float
+    direction: Position
+    pnl_gross: float
+    pnl_net: float
+    duration: int
+    exit_reason: str
+
+
+@dataclass
+class AssetResult:
+    """Résultats pour un asset."""
+    asset_id: int
+    trades: List[Trade]
+    pnl_gross: float
+    pnl_net: float
+    win_rate: float
+    n_trades: int
+    fees_paid: float
+
+
+@dataclass
 class StrategyResult:
     """Résultats d'une stratégie."""
     name: str
-    trades: int
+    total_trades: int
     win_rate: float
-    pnl_brut: float
+    pnl_gross: float
     pnl_net: float
     avg_duration: float
     sharpe: float
     max_dd: float
+    fees_paid: float
+
+    # Résultats per-asset
+    per_asset: Dict[int, AssetResult] = field(default_factory=dict)
 
     # Détails règles
     rule1_blocks: int = 0  # Zone grise
@@ -63,363 +103,397 @@ def compute_confidence(prob: float) -> float:
 
     Score = 0: très incertain (prob = 0.5)
     Score = 1: très confiant (prob = 0.0 ou 1.0)
-
-    Args:
-        prob: Probabilité brute [0.0, 1.0]
-
-    Returns:
-        Score de confiance [0.0, 1.0]
-
-    Examples:
-        prob=0.51 → confidence = 0.02 (zone grise)
-        prob=0.70 → confidence = 0.40 (moyen)
-        prob=0.85 → confidence = 0.70 (fort)
-        prob=0.95 → confidence = 0.90 (très fort)
     """
     return abs(prob - 0.5) * 2.0
 
 
-def extract_c_ret(X: np.ndarray, indicator: str) -> np.ndarray:
+def load_direction_only_data(
+    indicator: str,
+    split: str = 'test',
+    filter_type: str = 'kalman'
+) -> Dict:
     """
-    Extrait c_ret (Close return) de X.
-
-    Args:
-        X: Features (n_samples, sequence_length, n_features)
-        indicator: 'rsi', 'macd', ou 'cci'
+    Charge les données direction-only pour un indicateur.
 
     Returns:
-        c_ret pour chaque sample (n_samples,)
-        Utilise la dernière valeur de la séquence (t=-1)
+        Dict avec:
+        - Y: labels direction (n, 3) = [timestamp, asset_id, direction]
+        - OHLCV: (n, 7) = [timestamp, asset_id, O, H, L, C, V]
+        - Y_pred: probabilités prédites (n,)
     """
-    if indicator in ['rsi', 'macd']:
-        # 1 feature (c_ret) → index 0
-        c_ret = X[:, -1, 0]  # Shape: (n_samples,)
-    elif indicator == 'cci':
-        # 3 features (h_ret, l_ret, c_ret) → c_ret à index 2
-        c_ret = X[:, -1, 2]  # Shape: (n_samples,)
-    else:
-        raise ValueError(f"Indicateur inconnu: {indicator}")
+    base_path = Path('data/prepared')
 
-    return c_ret
+    # Trouver le fichier direction-only
+    pattern = f'dataset_*_{indicator}_direction_only_{filter_type}.npz'
+    files = list(base_path.glob(pattern))
+
+    if not files:
+        raise FileNotFoundError(f"Fichier non trouvé: {base_path}/{pattern}")
+
+    data_file = files[0]
+    logger.info(f"  Chargement {indicator}: {data_file.name}")
+
+    data = np.load(data_file, allow_pickle=True)
+
+    Y = data[f'Y_{split}']        # (n, 3) [timestamp, asset_id, direction]
+    OHLCV = data[f'OHLCV_{split}']  # (n, 7) [timestamp, asset_id, O, H, L, C, V]
+
+    # Charger prédictions si disponibles
+    Y_pred = data.get(f'Y_{split}_pred', None)
+    if Y_pred is not None:
+        # Y_pred peut être (n,) ou (n, 1)
+        if Y_pred.ndim == 2:
+            Y_pred = Y_pred[:, 0]
+
+    return {
+        'Y': Y,
+        'OHLCV': OHLCV,
+        'Y_pred': Y_pred
+    }
 
 
 def load_multi_indicator_data(
     split: str = 'test',
-    filter_type: str = 'kalman',
-    max_samples: int = None
+    filter_type: str = 'kalman'
 ) -> Dict:
     """
-    Charge les données des 3 indicateurs avec probabilités brutes.
-
-    Args:
-        split: 'train', 'val', ou 'test'
-        filter_type: 'kalman' ou 'octave20'
-        max_samples: Limiter le nombre de samples (None = tous)
+    Charge les données des 3 indicateurs (direction-only).
 
     Returns:
-        Dict avec:
-        - returns: Rendements close (extraits de X_macd)
-        - macd: {Y_oracle, Y_pred_probs}
-        - rsi: {Y_oracle, Y_pred_probs}
-        - cci: {Y_oracle, Y_pred_probs}
+        Dict avec données pour macd, rsi, cci
     """
-    base_path = Path('data/prepared')
+    logger.info(f"\n📊 Chargement données {split}...")
 
-    # Trouver les fichiers
-    pattern = f'dataset_*_dual_binary_{filter_type}.npz'
-    files = list(base_path.glob(pattern))
-
-    if not files:
-        raise FileNotFoundError(f"Aucun fichier trouvé: {base_path}/{pattern}")
-
-    # Charger chaque indicateur
     datasets = {}
-    returns = None
 
     for indicator in ['macd', 'rsi', 'cci']:
-        # Trouver fichier pour cet indicateur
-        indicator_file = None
-        for f in files:
-            if f'_{indicator}_' in f.name:
-                indicator_file = f
-                break
+        try:
+            datasets[indicator] = load_direction_only_data(
+                indicator=indicator,
+                split=split,
+                filter_type=filter_type
+            )
+        except FileNotFoundError as e:
+            logger.warning(f"  ⚠️ {indicator}: {e}")
+            datasets[indicator] = None
 
-        if not indicator_file:
-            raise FileNotFoundError(f"Fichier {indicator} non trouvé")
+    # Vérifier qu'on a au moins MACD
+    if datasets['macd'] is None:
+        raise FileNotFoundError("MACD requis comme décideur principal")
 
-        logger.info(f"Chargement {indicator}: {indicator_file.name}")
-        data = np.load(indicator_file, allow_pickle=True)
+    n_samples = len(datasets['macd']['Y'])
+    logger.info(f"  Total samples: {n_samples:,}")
 
-        # Extraire données du split
-        X = data[f'X_{split}']  # (n, seq_len, n_features)
-        Y_oracle = data[f'Y_{split}']  # (n, 2) [direction, force]
-        Y_pred = data.get(f'Y_{split}_pred', None)  # (n, 2) probabilités brutes
-
-        if Y_pred is None:
-            raise ValueError(f"Prédictions manquantes pour {indicator} ({split})")
-
-        # Limiter samples si demandé
-        if max_samples is not None and max_samples < len(Y_oracle):
-            X = X[:max_samples]
-            Y_oracle = Y_oracle[:max_samples]
-            Y_pred = Y_pred[:max_samples]
-
-        datasets[indicator] = {
-            'Y_oracle': Y_oracle,
-            'Y_pred_probs': Y_pred  # PROBABILITÉS BRUTES [0.0, 1.0]
-        }
-
-        # Extraire returns (une seule fois, depuis MACD)
-        if returns is None and indicator == 'macd':
-            returns = extract_c_ret(X, indicator)
-
-    n_samples = len(returns)
-    logger.info(f"\n📊 Données chargées:")
-    logger.info(f"  Split: {split}")
-    logger.info(f"  Samples: {n_samples:,}")
-    logger.info(f"  Indicateurs: MACD, RSI, CCI")
-
-    return {
-        'returns': returns,
-        'macd': datasets['macd'],
-        'rsi': datasets['rsi'],
-        'cci': datasets['cci']
-    }
+    return datasets
 
 
-def backtest_with_confidence_veto(
-    returns: np.ndarray,
-    macd_data: Dict,
-    rsi_data: Dict,
-    cci_data: Dict,
+def backtest_single_asset(
+    # Labels et prix pour tous les indicateurs
+    macd_labels: np.ndarray,
+    macd_preds: Optional[np.ndarray],
+    rsi_preds: Optional[np.ndarray],
+    cci_preds: Optional[np.ndarray],
+    opens: np.ndarray,
+    timestamps: np.ndarray,
+    asset_id: int,
+    # Paramètres stratégie
     enable_rule1: bool = False,
     enable_rule2: bool = False,
     enable_rule3: bool = False,
-    holding_min: int = 5,
-    fees: float = 0.1
-) -> StrategyResult:
+    holding_min: int = 0,
+    fees: float = 0.001
+) -> Tuple[List[Trade], Dict]:
     """
-    Backtest avec règles de veto basées sur confiance.
+    Backtest sur un seul asset avec règles de veto.
 
-    Architecture:
-    - MACD: Décideur principal
-    - RSI + CCI: Témoins avec veto
+    Logique causale:
+    - Signal à l'index i → Exécution à Open[i+1]
+    - Direction: 1=UP→LONG, 0=DOWN→SHORT
 
-    Règles:
-    1. Zone Grise: Bloquer si MACD conf <0.20
-    2. Veto Ultra-Fort: Bloquer si témoin conf >0.70 ET désaccord direction
-    3. Confirmation: Exiger témoin conf >0.50 si MACD conf 0.20-0.40
-
-    Args:
-        returns: Rendements close
-        macd_data: {Y_oracle, Y_pred_probs}
-        rsi_data: {Y_oracle, Y_pred_probs}
-        cci_data: {Y_oracle, Y_pred_probs}
-        enable_rule1: Activer règle zone grise
-        enable_rule2: Activer règle veto ultra-fort
-        enable_rule3: Activer règle confirmation
-        holding_min: Durée minimale de holding (périodes)
-        fees: Frais par trade (%)
+    Règles de veto (appliquées SEULEMENT sur les entrées):
+    1. Zone Grise: Bloquer si MACD conf < 0.20
+    2. Veto Ultra-Fort: Bloquer si témoin conf > 0.70 ET désaccord
+    3. Confirmation: Exiger témoin conf > 0.50 si MACD conf 0.20-0.40
 
     Returns:
-        StrategyResult avec métriques
+        (trades, stats_dict)
     """
-    n_samples = len(returns)
+    n_samples = len(macd_labels)
 
-    # Extraire probabilités brutes
-    macd_prob = macd_data['Y_pred_probs']  # (n, 2) [dir_prob, force_prob]
-    rsi_prob = rsi_data['Y_pred_probs']
-    cci_prob = cci_data['Y_pred_probs']
+    if n_samples < 2:
+        return [], {'rule1': 0, 'rule2': 0, 'rule3': 0}
 
-    # Variables trading
+    # Variables de trading
     position = Position.FLAT
-    entry_time = 0
-    current_pnl = 0.0  # ✅ Accumule les returns!
-    trades = []
+    entry_idx = 0
+    entry_price = 0.0
 
-    # Compteurs blocages
+    trades = []
     rule1_blocks = 0
     rule2_blocks = 0
     rule3_blocks = 0
 
-    for i in range(n_samples):
-        ret = returns[i]
+    for i in range(n_samples - 1):
+        # Direction MACD (labels)
+        macd_dir = int(macd_labels[i])  # 1=UP, 0=DOWN
+        target = Position.LONG if macd_dir == 1 else Position.SHORT
 
-        # === Accumuler PnL (comme test_holding_strategy.py) ===
-        if position != Position.FLAT:
-            if position == Position.LONG:
-                current_pnl += ret
-            else:  # SHORT
-                current_pnl -= ret
+        # === Calculer confiances (si prédictions disponibles) ===
+        macd_conf = 0.5  # défaut: incertain
+        rsi_conf = 0.5
+        cci_conf = 0.5
+        rsi_dir = macd_dir  # défaut: même direction
+        cci_dir = macd_dir
 
-        # === Calculer confiances et directions ===
+        if macd_preds is not None:
+            macd_conf = compute_confidence(macd_preds[i])
 
-        # MACD (décideur)
-        macd_prob_dir = macd_prob[i, 0]
-        macd_prob_force = macd_prob[i, 1]
-        macd_conf_dir = compute_confidence(macd_prob_dir)
-        macd_conf_force = compute_confidence(macd_prob_force)
-        macd_dir = 1 if macd_prob_dir > 0.5 else 0
-        macd_force = 1 if macd_prob_force > 0.5 else 0
+        if rsi_preds is not None:
+            rsi_conf = compute_confidence(rsi_preds[i])
+            rsi_dir = 1 if rsi_preds[i] > 0.5 else 0
 
-        # RSI (témoin)
-        rsi_prob_dir = rsi_prob[i, 0]
-        rsi_conf_dir = compute_confidence(rsi_prob_dir)
-        rsi_dir = 1 if rsi_prob_dir > 0.5 else 0
+        if cci_preds is not None:
+            cci_conf = compute_confidence(cci_preds[i])
+            cci_dir = 1 if cci_preds[i] > 0.5 else 0
 
-        # CCI (témoin)
-        cci_prob_dir = cci_prob[i, 0]
-        cci_conf_dir = compute_confidence(cci_prob_dir)
-        cci_dir = 1 if cci_prob_dir > 0.5 else 0
-
-        # === Logique de décision MACD avec veto ===
-
-        # Signal MACD baseline
-        if macd_dir == 1 and macd_force == 1:
-            target = Position.LONG
-        elif macd_dir == 0 and macd_force == 1:
-            target = Position.SHORT
-        else:
-            target = Position.FLAT
-
-        # === Appliquer règles de veto (SEULEMENT si on essaie d'entrer!) ===
-
+        # === Appliquer règles de veto (SEULEMENT sur entrées) ===
         veto = False
 
-        # Les règles s'appliquent UNIQUEMENT si position FLAT et signal d'entrée
-        if position == Position.FLAT and target != Position.FLAT:
-
-            # Règle #1: Zone Grise MACD (vérifier FORCE car signal utilise force==1)
-            if enable_rule1 and (macd_conf_dir < 0.20 or macd_conf_force < 0.20):
+        if position == Position.FLAT:
+            # Règle #1: Zone Grise MACD
+            if enable_rule1 and macd_conf < 0.20:
                 veto = True
                 rule1_blocks += 1
 
-            # Règle #2: Veto Ultra-Fort (si pas déjà veto par règle 1)
-            if not veto and enable_rule2 and macd_conf_force < 0.20:
-                # RSI ultra-confiant contredit MACD faible
-                if rsi_conf_dir > 0.70 and rsi_dir != macd_dir:
+            # Règle #2: Veto Ultra-Fort (si pas déjà bloqué)
+            if not veto and enable_rule2 and macd_conf < 0.20:
+                # RSI ultra-confiant contredit MACD
+                if rsi_conf > 0.70 and rsi_dir != macd_dir:
                     veto = True
                     rule2_blocks += 1
-                # CCI ultra-confiant contredit MACD faible
-                elif cci_conf_dir > 0.70 and cci_dir != macd_dir:
+                # CCI ultra-confiant contredit MACD
+                elif cci_conf > 0.70 and cci_dir != macd_dir:
                     veto = True
                     rule2_blocks += 1
 
-            # Règle #3: Confirmation Requise (si pas déjà veto)
-            if not veto and enable_rule3 and 0.20 <= macd_conf_force < 0.40:
-                # Au moins un témoin doit confirmer avec conf >0.50
+            # Règle #3: Confirmation requise (si pas déjà bloqué)
+            if not veto and enable_rule3 and 0.20 <= macd_conf < 0.40:
+                # Au moins un témoin doit confirmer avec conf > 0.50
                 has_confirmation = (
-                    (rsi_conf_dir > 0.50 and rsi_dir == macd_dir) or
-                    (cci_conf_dir > 0.50 and cci_dir == macd_dir)
+                    (rsi_conf > 0.50 and rsi_dir == macd_dir) or
+                    (cci_conf > 0.50 and cci_dir == macd_dir)
                 )
                 if not has_confirmation:
                     veto = True
                     rule3_blocks += 1
 
-            # Appliquer veto
-            if veto:
-                target = Position.FLAT
+        # === Gestion de position ===
 
-        # === Gestion position ===
+        trade_duration = i - entry_idx if position != Position.FLAT else 0
 
-        # Calculer durée trade
-        trade_duration = i - entry_time if position != Position.FLAT else 0
+        # Cas 1: Sortie sur DIRECTION_FLIP
+        if position != Position.FLAT and target != position:
+            # Vérifier holding minimum
+            if trade_duration >= holding_min:
+                exit_price = opens[i + 1]
+                pnl_gross = (exit_price - entry_price) / entry_price
+                if position == Position.SHORT:
+                    pnl_gross = -pnl_gross
 
-        # SORTIE - 3 cas possibles
-        exit_signal = False
-        exit_reason = None
+                fee = fees * 2  # Entrée + sortie
+                pnl_net = pnl_gross - fee
 
-        if position != Position.FLAT:
-            # Cas 1: Force=WEAK ET holding minimum atteint
-            if macd_force == 0 and trade_duration >= holding_min:
-                exit_signal = True
-                exit_reason = "FORCE_WEAK"
+                trades.append(Trade(
+                    asset_id=asset_id,
+                    entry_idx=entry_idx,
+                    exit_idx=i,
+                    entry_price=entry_price,
+                    exit_price=exit_price,
+                    direction=position,
+                    pnl_gross=pnl_gross,
+                    pnl_net=pnl_net,
+                    duration=trade_duration,
+                    exit_reason="DIRECTION_FLIP"
+                ))
 
-            # Cas 2: Retournement direction (bypass holding, toujours prioritaire)
-            elif target != Position.FLAT and target != position:
-                exit_signal = True
-                exit_reason = "DIRECTION_FLIP"
-
-        # Enregistrer trade si sortie
-        if exit_signal:
-            pnl = current_pnl - (fees / 100.0)  # ✅ Utilise PnL accumulé!
-
-            trades.append({
-                'entry': entry_time,
-                'exit': i,
-                'duration': trade_duration,
-                'pnl': pnl,
-                'win': pnl > 0
-            })
-
-            # Gérer sortie selon la raison
-            if exit_reason == "FORCE_WEAK":
-                # Sortie complète → FLAT
-                position = Position.FLAT
-                current_pnl = 0.0
-
-            elif exit_reason == "DIRECTION_FLIP":
-                # Flip immédiat → nouvelle position SANS passer par FLAT!
+                # Flip immédiat (pas de veto sur les flips!)
                 position = target
-                entry_time = i
-                current_pnl = 0.0
+                entry_idx = i
+                entry_price = opens[i + 1]
 
-        # ENTRÉE si FLAT et signal valide (pas de veto)
-        elif position == Position.FLAT and target != Position.FLAT:
-            position = target
-            entry_time = i
-            current_pnl = 0.0  # ✅ Reset à l'entrée aussi!
+        # Cas 2: Entrée depuis FLAT (avec veto possible)
+        elif position == Position.FLAT:
+            if not veto:
+                position = target
+                entry_idx = i
+                entry_price = opens[i + 1]
 
-    # Fermer position finale si ouverte
+    # Fermer position finale
     if position != Position.FLAT:
-        pnl = current_pnl - (fees / 100.0)  # ✅ Utilise PnL accumulé!
+        exit_idx = n_samples - 1
+        exit_price = opens[exit_idx]
+        trade_duration = exit_idx - entry_idx
 
-        trades.append({
-            'entry': entry_time,
-            'exit': n_samples - 1,
-            'duration': n_samples - 1 - entry_time,
-            'pnl': pnl,
-            'win': pnl > 0
-        })
+        pnl_gross = (exit_price - entry_price) / entry_price
+        if position == Position.SHORT:
+            pnl_gross = -pnl_gross
 
-    # === Calcul métriques ===
+        fee = fees * 2
+        pnl_net = pnl_gross - fee
 
-    if len(trades) == 0:
+        trades.append(Trade(
+            asset_id=asset_id,
+            entry_idx=entry_idx,
+            exit_idx=exit_idx,
+            entry_price=entry_price,
+            exit_price=exit_price,
+            direction=position,
+            pnl_gross=pnl_gross,
+            pnl_net=pnl_net,
+            duration=trade_duration,
+            exit_reason="END_OF_DATA"
+        ))
+
+    stats = {
+        'rule1': rule1_blocks,
+        'rule2': rule2_blocks,
+        'rule3': rule3_blocks
+    }
+
+    return trades, stats
+
+
+def backtest_with_confidence_veto(
+    datasets: Dict,
+    enable_rule1: bool = False,
+    enable_rule2: bool = False,
+    enable_rule3: bool = False,
+    holding_min: int = 0,
+    fees: float = 0.001
+) -> StrategyResult:
+    """
+    Backtest multi-indicateurs avec règles de veto.
+
+    Effectue un backtest PAR ASSET puis agrège les résultats.
+    """
+    macd_data = datasets['macd']
+    rsi_data = datasets.get('rsi')
+    cci_data = datasets.get('cci')
+
+    # Extraire données MACD (référence)
+    Y_macd = macd_data['Y']  # (n, 3) [timestamp, asset_id, direction]
+    OHLCV = macd_data['OHLCV']  # (n, 7) [timestamp, asset_id, O, H, L, C, V]
+    macd_preds = macd_data.get('Y_pred')
+
+    # Extraire prédictions RSI/CCI si disponibles
+    rsi_preds = rsi_data['Y_pred'] if rsi_data and rsi_data.get('Y_pred') is not None else None
+    cci_preds = cci_data['Y_pred'] if cci_data and cci_data.get('Y_pred') is not None else None
+
+    # Identifier les assets uniques
+    asset_ids = np.unique(OHLCV[:, 1].astype(int))
+    logger.info(f"  Assets trouvés: {len(asset_ids)} ({asset_ids.tolist()})")
+
+    # Backtest per-asset
+    all_trades = []
+    per_asset_results = {}
+    total_rule1 = 0
+    total_rule2 = 0
+    total_rule3 = 0
+
+    for asset_id in asset_ids:
+        # Masque pour cet asset
+        mask = OHLCV[:, 1].astype(int) == asset_id
+
+        # Extraire données asset
+        asset_labels = Y_macd[mask, 2]  # direction
+        asset_opens = OHLCV[mask, 2]    # Open prices
+        asset_timestamps = OHLCV[mask, 0]
+
+        # Prédictions pour cet asset
+        asset_macd_preds = macd_preds[mask] if macd_preds is not None else None
+        asset_rsi_preds = rsi_preds[mask] if rsi_preds is not None else None
+        asset_cci_preds = cci_preds[mask] if cci_preds is not None else None
+
+        # Backtest
+        trades, stats = backtest_single_asset(
+            macd_labels=asset_labels,
+            macd_preds=asset_macd_preds,
+            rsi_preds=asset_rsi_preds,
+            cci_preds=asset_cci_preds,
+            opens=asset_opens,
+            timestamps=asset_timestamps,
+            asset_id=asset_id,
+            enable_rule1=enable_rule1,
+            enable_rule2=enable_rule2,
+            enable_rule3=enable_rule3,
+            holding_min=holding_min,
+            fees=fees
+        )
+
+        all_trades.extend(trades)
+        total_rule1 += stats['rule1']
+        total_rule2 += stats['rule2']
+        total_rule3 += stats['rule3']
+
+        # Résultats per-asset
+        if trades:
+            pnl_gross = sum(t.pnl_gross for t in trades) * 100
+            pnl_net = sum(t.pnl_net for t in trades) * 100
+            fees_paid = len(trades) * fees * 2 * 100
+            wins = sum(1 for t in trades if t.pnl_net > 0)
+            win_rate = wins / len(trades) * 100
+
+            per_asset_results[asset_id] = AssetResult(
+                asset_id=asset_id,
+                trades=trades,
+                pnl_gross=pnl_gross,
+                pnl_net=pnl_net,
+                win_rate=win_rate,
+                n_trades=len(trades),
+                fees_paid=fees_paid
+            )
+
+    # === Calcul métriques globales ===
+
+    if not all_trades:
         return StrategyResult(
             name="No Trades",
-            trades=0,
+            total_trades=0,
             win_rate=0.0,
-            pnl_brut=0.0,
+            pnl_gross=0.0,
             pnl_net=0.0,
             avg_duration=0.0,
             sharpe=0.0,
             max_dd=0.0,
-            rule1_blocks=rule1_blocks,
-            rule2_blocks=rule2_blocks,
-            rule3_blocks=rule3_blocks
+            fees_paid=0.0,
+            per_asset={},
+            rule1_blocks=total_rule1,
+            rule2_blocks=total_rule2,
+            rule3_blocks=total_rule3
         )
 
-    n_trades = len(trades)
-    wins = [t for t in trades if t['win']]
-    win_rate = len(wins) / n_trades * 100
+    n_trades = len(all_trades)
+    wins = sum(1 for t in all_trades if t.pnl_net > 0)
+    win_rate = wins / n_trades * 100
 
-    pnl_brut = sum(t['pnl'] + fees / 100.0 for t in trades) * 100
-    pnl_net = sum(t['pnl'] for t in trades) * 100
+    pnl_gross = sum(t.pnl_gross for t in all_trades) * 100
+    pnl_net = sum(t.pnl_net for t in all_trades) * 100
+    fees_paid = n_trades * fees * 2 * 100
 
-    avg_duration = np.mean([t['duration'] for t in trades])
+    avg_duration = np.mean([t.duration for t in all_trades])
 
     # Sharpe
-    returns_trades = np.array([t['pnl'] for t in trades])
-    if len(returns_trades) > 1 and returns_trades.std() > 0:
-        sharpe = returns_trades.mean() / returns_trades.std() * np.sqrt(252)
+    returns = np.array([t.pnl_net for t in all_trades])
+    if len(returns) > 1 and returns.std() > 0:
+        sharpe = returns.mean() / returns.std() * np.sqrt(252 * 288)
     else:
         sharpe = 0.0
 
-    # Max Drawdown (reconstruire equity curve depuis trades)
-    equity_curve = [1.0]
-    for t in trades:
-        equity_curve.append(equity_curve[-1] * (1 + t['pnl']))
-    equity = np.array(equity_curve)
+    # Max Drawdown
+    equity = [1.0]
+    for t in all_trades:
+        equity.append(equity[-1] * (1 + t.pnl_net))
+    equity = np.array(equity)
     running_max = np.maximum.accumulate(equity)
     drawdown = (equity - running_max) / running_max
     max_dd = abs(drawdown.min()) * 100
@@ -432,93 +506,119 @@ def backtest_with_confidence_veto(
         rules_active.append("R2")
     if enable_rule3:
         rules_active.append("R3")
-
     name = "Baseline" if not rules_active else "+".join(rules_active)
 
     return StrategyResult(
         name=name,
-        trades=n_trades,
+        total_trades=n_trades,
         win_rate=win_rate,
-        pnl_brut=pnl_brut,
+        pnl_gross=pnl_gross,
         pnl_net=pnl_net,
         avg_duration=avg_duration,
         sharpe=sharpe,
         max_dd=max_dd,
-        rule1_blocks=rule1_blocks,
-        rule2_blocks=rule2_blocks,
-        rule3_blocks=rule3_blocks
+        fees_paid=fees_paid,
+        per_asset=per_asset_results,
+        rule1_blocks=total_rule1,
+        rule2_blocks=total_rule2,
+        rule3_blocks=total_rule3
     )
 
 
 def print_comparison(results: List[StrategyResult]):
     """Affiche comparaison des résultats."""
 
-    logger.info("\n" + "="*120)
-    logger.info("COMPARAISON STRATÉGIES - Veto Confiance")
-    logger.info("="*120)
+    logger.info("\n" + "="*130)
+    logger.info("COMPARAISON STRATÉGIES - Veto Confiance v2.0")
+    logger.info("="*130)
 
     # Header
     logger.info(f"{'Stratégie':<15} {'Trades':>8} {'Réduc':>7} {'WR':>7} {'Δ WR':>7} "
-                f"{'PnL Brut':>10} {'PnL Net':>10} {'Sharpe':>7} {'Avg Dur':>8} {'Blocages (R1/R2/R3)':>20}")
-    logger.info("-"*120)
+                f"{'PnL Brut':>12} {'PnL Net':>12} {'Frais':>10} {'Sharpe':>8} {'Blocages (R1/R2/R3)':>22}")
+    logger.info("-"*130)
 
-    # Baseline
     baseline = results[0]
-    logger.info(f"{baseline.name:<15} {baseline.trades:>8,} {'-':>7} "
-                f"{baseline.win_rate:>6.2f}% {'-':>7} "
-                f"{baseline.pnl_brut:>9.2f}% {baseline.pnl_net:>9.2f}% "
-                f"{baseline.sharpe:>7.2f} {baseline.avg_duration:>7.1f}p {'-':>20}")
 
-    # Autres stratégies
-    for result in results[1:]:
-        reduction = (baseline.trades - result.trades) / baseline.trades * 100
-        delta_wr = result.win_rate - baseline.win_rate
+    for i, result in enumerate(results):
+        if i == 0:
+            reduction = "-"
+            delta_wr = "-"
+        else:
+            reduction = f"{(baseline.total_trades - result.total_trades) / baseline.total_trades * 100:.1f}%"
+            delta_wr = f"{result.win_rate - baseline.win_rate:+.2f}%"
+
         blocages = f"{result.rule1_blocks}/{result.rule2_blocks}/{result.rule3_blocks}"
 
-        logger.info(f"{result.name:<15} {result.trades:>8,} {reduction:>6.1f}% "
-                    f"{result.win_rate:>6.2f}% {delta_wr:>+6.2f}% "
-                    f"{result.pnl_brut:>9.2f}% {result.pnl_net:>9.2f}% "
-                    f"{result.sharpe:>7.2f} {result.avg_duration:>7.1f}p {blocages:>20}")
+        logger.info(f"{result.name:<15} {result.total_trades:>8,} {reduction:>7} "
+                    f"{result.win_rate:>6.2f}% {delta_wr:>7} "
+                    f"{result.pnl_gross:>+11.2f}% {result.pnl_net:>+11.2f}% "
+                    f"{result.fees_paid:>9.2f}% {result.sharpe:>8.2f} {blocages:>22}")
 
-    logger.info("="*120)
+    logger.info("="*130)
 
-    # Légende
+    # Per-asset breakdown
+    logger.info("\n📊 RÉSULTATS PAR ASSET:")
+    logger.info("-"*100)
+    logger.info(f"{'Asset':<8} {'Trades':>8} {'Win Rate':>10} {'PnL Brut':>12} {'PnL Net':>12} {'Frais':>10}")
+    logger.info("-"*100)
+
+    # Afficher pour la meilleure stratégie (dernière)
+    best_result = results[-1] if len(results) > 1 else results[0]
+
+    for asset_id, asset_result in sorted(best_result.per_asset.items()):
+        status = "✅" if asset_result.pnl_net > 0 else "❌"
+        logger.info(f"  {status} {asset_id:<5} {asset_result.n_trades:>8,} "
+                    f"{asset_result.win_rate:>9.2f}% "
+                    f"{asset_result.pnl_gross:>+11.2f}% "
+                    f"{asset_result.pnl_net:>+11.2f}% "
+                    f"{asset_result.fees_paid:>9.2f}%")
+
+    logger.info("-"*100)
+
+    # Analyse
     logger.info("\n📖 LÉGENDE:")
     logger.info("  Réduc: Réduction trades vs Baseline")
     logger.info("  Δ WR: Changement Win Rate vs Baseline")
     logger.info("  Blocages: R1 = Zone Grise | R2 = Veto Ultra-Fort | R3 = Confirmation")
-    logger.info("  Avg Dur: Durée moyenne trade (périodes)")
 
-    # Analyse
-    best = max(results[1:], key=lambda r: r.pnl_net, default=None)
-
-    if best and best.pnl_net > baseline.pnl_net:
+    if len(results) > 1:
+        best = results[-1]
         improvement = best.pnl_net - baseline.pnl_net
-        logger.info(f"\n✅ MEILLEURE STRATÉGIE: {best.name}")
-        logger.info(f"  PnL Net: {baseline.pnl_net:.2f}% → {best.pnl_net:.2f}% (+{improvement:.2f}%)")
-        logger.info(f"  Trades: {baseline.trades:,} → {best.trades:,} ({(best.trades - baseline.trades) / baseline.trades * 100:+.1f}%)")
-        logger.info(f"  Win Rate: {baseline.win_rate:.2f}% → {best.win_rate:.2f}% ({best.win_rate - baseline.win_rate:+.2f}%)")
 
-        if best.pnl_net > 0:
-            logger.info(f"\n🎉 PnL NET POSITIF! (+{best.pnl_net:.2f}%)")
+        if improvement > 0:
+            logger.info(f"\n✅ AMÉLIORATION avec {best.name}:")
+            logger.info(f"  PnL Net: {baseline.pnl_net:+.2f}% → {best.pnl_net:+.2f}% ({improvement:+.2f}%)")
         else:
-            logger.info(f"\n⚠️  PnL Net encore négatif ({best.pnl_net:.2f}%), mais amélioration de +{improvement:.2f}%")
-    else:
-        logger.info(f"\n❌ Aucune amélioration vs Baseline")
+            logger.info(f"\n⚠️ Pas d'amélioration significative avec les règles de veto")
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Test Confidence-Based Veto Rules')
-    parser.add_argument('--split', type=str, default='test', choices=['train', 'val', 'test'],
+    parser = argparse.ArgumentParser(
+        description='Test Confidence-Based Veto Rules v2.0',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Exemples:
+  # Baseline (aucune règle)
+  python tests/test_confidence_veto.py --split test
+
+  # Avec toutes les règles
+  python tests/test_confidence_veto.py --split test --enable-all
+
+  # Avec holding minimum
+  python tests/test_confidence_veto.py --split test --enable-all --holding-min 10
+        """
+    )
+
+    parser.add_argument('--split', type=str, default='test',
+                        choices=['train', 'val', 'test'],
                         help='Split de données (défaut: test)')
-    parser.add_argument('--filter', type=str, default='kalman', choices=['kalman', 'octave20'],
+    parser.add_argument('--filter', type=str, default='kalman',
+                        choices=['kalman', 'octave20'],
                         help='Type de filtre (défaut: kalman)')
-    parser.add_argument('--max-samples', type=int, default=None,
-                        help='Limiter le nombre de samples (défaut: tous)')
-    parser.add_argument('--holding-min', type=int, default=5,
-                        help='Holding minimum (périodes, défaut: 5)')
-    parser.add_argument('--fees', type=float, default=0.1,
-                        help='Frais par trade % (défaut: 0.1)')
+    parser.add_argument('--holding-min', type=int, default=0,
+                        help='Holding minimum (périodes, défaut: 0)')
+    parser.add_argument('--fees', type=float, default=0.001,
+                        help='Frais par trade (défaut: 0.001 = 0.1%%)')
 
     # Règles
     parser.add_argument('--enable-rule1', action='store_true',
@@ -538,14 +638,14 @@ def main():
         args.enable_rule2 = True
         args.enable_rule3 = True
 
-    logger.info("="*120)
-    logger.info("TEST CONFIDENCE-BASED VETO - Phase 2.7")
-    logger.info("="*120)
+    logger.info("="*130)
+    logger.info("TEST CONFIDENCE-BASED VETO v2.0 - Phase 2.7")
+    logger.info("="*130)
     logger.info(f"\n⚙️  CONFIGURATION:")
     logger.info(f"  Split: {args.split}")
     logger.info(f"  Filter: {args.filter}")
     logger.info(f"  Holding Min: {args.holding_min}p")
-    logger.info(f"  Frais: {args.fees}%")
+    logger.info(f"  Frais: {args.fees*100:.2f}% par trade")
     logger.info(f"\n🎯 RÈGLES ACTIVÉES:")
     logger.info(f"  Règle #1 (Zone Grise): {'✅' if args.enable_rule1 else '❌'}")
     logger.info(f"  Règle #2 (Veto Ultra-Fort): {'✅' if args.enable_rule2 else '❌'}")
@@ -553,19 +653,15 @@ def main():
 
     # Charger données
     try:
-        data = load_multi_indicator_data(
+        datasets = load_multi_indicator_data(
             split=args.split,
-            filter_type=args.filter,
-            max_samples=args.max_samples
+            filter_type=args.filter
         )
     except Exception as e:
         logger.error(f"❌ Erreur chargement données: {e}")
+        import traceback
+        traceback.print_exc()
         return 1
-
-    returns = data['returns']
-    macd_data = data['macd']
-    rsi_data = data['rsi']
-    cci_data = data['cci']
 
     # Test configurations
     results = []
@@ -573,7 +669,7 @@ def main():
     # Baseline (aucune règle)
     logger.info("\n🔄 Test Baseline (aucune règle)...")
     baseline = backtest_with_confidence_veto(
-        returns, macd_data, rsi_data, cci_data,
+        datasets,
         enable_rule1=False,
         enable_rule2=False,
         enable_rule3=False,
@@ -586,7 +682,7 @@ def main():
     if args.enable_rule1 or args.enable_rule2 or args.enable_rule3:
         logger.info(f"\n🔄 Test avec règles activées...")
         custom = backtest_with_confidence_veto(
-            returns, macd_data, rsi_data, cci_data,
+            datasets,
             enable_rule1=args.enable_rule1,
             enable_rule2=args.enable_rule2,
             enable_rule3=args.enable_rule3,
@@ -594,30 +690,6 @@ def main():
             fees=args.fees
         )
         results.append(custom)
-
-    # Tester aussi les règles individuellement (si --enable-all)
-    if args.enable_all:
-        logger.info(f"\n🔄 Test Règle #1 seule...")
-        r1_only = backtest_with_confidence_veto(
-            returns, macd_data, rsi_data, cci_data,
-            enable_rule1=True,
-            enable_rule2=False,
-            enable_rule3=False,
-            holding_min=args.holding_min,
-            fees=args.fees
-        )
-        results.append(r1_only)
-
-        logger.info(f"\n🔄 Test Règles #1+#2...")
-        r1_r2 = backtest_with_confidence_veto(
-            returns, macd_data, rsi_data, cci_data,
-            enable_rule1=True,
-            enable_rule2=True,
-            enable_rule3=False,
-            holding_min=args.holding_min,
-            fees=args.fees
-        )
-        results.append(r1_r2)
 
     # Afficher résultats
     print_comparison(results)

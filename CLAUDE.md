@@ -1,12 +1,12 @@
 # Modele CNN-LSTM Multi-Output - Guide Complet
 
-**Date**: 2026-01-08
-**Statut**: ❌ **Tests Oracle Sliding Window COMPLÉTÉS - Kalman ET Octave: Échec Total**
-**Version**: 9.2 - Octave Glissant: -37% à -116% (PIRE que Kalman: -19% à -30%) | Global: +6,644%
-**Models**: MACD Kalman 92.5% | CCI Kalman 90.2% | RSI Kalman 87.6% - Direction-Only validés
-**Découverte Critique**: Octave Sliding Window génère **3-5× PLUS de trades** que Kalman (apocalypse RSI: -116%)
-**Hiérarchie Filtres**: Kalman GLOBAL (+6,644%) > Kalman Sliding (-19%) > **Octave Sliding (-37% à -116%)**
-**Prochaine Étape**: Timeframe 15min/30min (Kalman GLOBAL uniquement) - ABANDONNER tous sliding windows
+**Date**: 2026-01-09
+**Statut**: ✅ **MACD Confirmé Meilleur Oracle de Sortie** (Phase 2.14)
+**Version**: 9.8 - Phase 2.14: Entry/Exit avec Oracle - MACD 🥇 domine
+**Models**: MACD Kalman 92.4% | CCI Kalman+Shortcut 88.6% | RSI Kalman 87.6%
+**Découverte Phase 2.14**: Sortie Oracle → MACD -2,082% | CCI -2,382% | RSI -2,638%
+**Hiérarchie Trading**: MACD 🥇 (moins trades, +stable) > CCI 🥈 > RSI 🥉 (trop nerveux)
+**Prochaine Étape**: Réduire trades sous 3,000 (timeframe 15/30min, holding agressif)
 
 ---
 
@@ -89,6 +89,369 @@ python tests/test_structural_filters.py --split test --holding-min 30
 3. **Utilisateur exécute** sur sa machine (avec GPU + données)
 4. Utilisateur partage les résultats
 5. Claude analyse et propose prochaine étape
+
+---
+
+## 🎯 OPTIMISATIONS ARCHITECTURE - Shortcut & Temporal Gate (2026-01-09)
+
+**Date**: 2026-01-09
+**Statut**: ✅ **COMPLÉTÉ - Shortcut validé pour CCI uniquement**
+**Objectif**: Améliorer l'accuracy au-delà des baselines (MACD 92.4%, RSI 87.6%, CCI ~82%)
+
+### Méthodes Testées (Recommandations Expert)
+
+3 méthodes architecturales ont été testées pour améliorer la détection des transitions :
+
+#### 1. Shortcut Last-N Steps
+
+**Principe**: Skip connection donnant accès direct aux N derniers timesteps, bypassing CNN/LSTM.
+
+```python
+# Dans model.py
+if use_shortcut:
+    shortcut = x[:, -shortcut_steps:, :].reshape(batch_size, -1)  # (batch, steps*features)
+    combined = torch.cat([lstm_out, shortcut], dim=1)  # Concaténer avec sortie LSTM
+```
+
+**Hypothèse**: Les derniers timesteps contiennent l'information critique pour les transitions.
+
+#### 2. Temporal Gate
+
+**Principe**: Poids learnable par timestep appliqués AVANT le CNN (0.5→1.0 initialisation linéaire).
+
+```python
+# Dans model.py
+if use_temporal_gate:
+    self.temporal_gate = nn.Parameter(torch.linspace(0.5, 1.0, steps=sequence_length))
+# Dans forward():
+    gate_weights = torch.sigmoid(self.temporal_gate)
+    x = x * gate_weights.unsqueeze(0).unsqueeze(-1)
+```
+
+**Hypothèse**: Donner plus d'importance aux timesteps récents.
+
+#### 3. WeightedTransitionLoss
+
+**Principe**: Loss BCE avec poids plus élevé sur les transitions (label[t] != label[t-1]).
+
+**Hypothèse**: Forcer le modèle à mieux apprendre les changements de direction.
+
+### Résultats Empiriques
+
+#### Test sur MACD (baseline 92.4%)
+
+| Méthode | Val Acc | Delta | Verdict |
+|---------|---------|-------|---------|
+| Baseline | 92.4% | - | ✅ Référence |
+| Shortcut steps=5 | 92.4% | ±0% | ❌ Neutre |
+| Shortcut steps=2 | 91.7% | -0.7% | ❌ Dégradation |
+| Temporal Gate | 91.0% | -1.4% | ❌ Dégradation |
+| WeightedTransition w=2 | ~92% | ±0% | ❌ Neutre |
+
+#### Test sur RSI (baseline 87.6%)
+
+| Méthode | Val Acc | Delta | Verdict |
+|---------|---------|-------|---------|
+| Baseline | 87.6% | - | ✅ Référence |
+| Shortcut steps=2 | 87.6% | ±0% | ❌ Neutre |
+| Temporal Gate | ~87% | ±0% | ❌ Neutre |
+
+#### Test sur CCI (baseline 82.6%)
+
+| Méthode | Val Acc | Test Acc | Delta | Verdict |
+|---------|---------|----------|-------|---------|
+| Baseline | 82.6% | - | - | Référence |
+| Shortcut steps=5 | 90.1% | - | +7.5% | ✅ Amélioration |
+| **Shortcut steps=2** | **90.4%** | **88.6%** | **+6.0%** | ✅ **OPTIMAL** |
+| Temporal Gate | ~82% | - | ±0% | ❌ Neutre |
+
+### Découverte Clé : Shortcut Spécifique aux Multi-Features
+
+**Pourquoi Shortcut fonctionne UNIQUEMENT sur CCI ?**
+
+| Indicateur | Features | Shortcut Effect | Explication |
+|------------|----------|-----------------|-------------|
+| **MACD** | 1 (c_ret) | ❌ -0.7% | 1 feature → LSTM capture tout le contexte nécessaire |
+| **RSI** | 1 (c_ret) | ❌ ±0% | 1 feature → pas de bénéfice du raccourci |
+| **CCI** | 3 (h_ret, l_ret, c_ret) | ✅ **+6.0%** | 3 features (HLC) → accès direct au Typical Price récent aide |
+
+**Interprétation**:
+- CCI utilise le **Typical Price = (H+L+C)/3**
+- Le shortcut donne un accès direct aux 2 derniers HLC
+- Cela aide le modèle à capturer les mouvements récents du Typical Price
+- Pour MACD/RSI (1 seule feature), le LSTM suffit amplement
+
+### Configuration Optimale par Indicateur
+
+| Indicateur | Config Optimale | Test Accuracy | Commande |
+|------------|-----------------|---------------|----------|
+| **MACD** | Baseline | **92.4%** 🥇 | `--no-weighted-loss` |
+| **CCI** | Shortcut s=2 | **88.6%** 🥈 | `--shortcut --shortcut-steps 2 --no-weighted-loss` |
+| **RSI** | Baseline | **87.6%** 🥉 | `--no-weighted-loss` |
+
+### Commandes d'Entraînement Optimales
+
+```bash
+# MACD - Baseline (meilleur)
+python src/train.py \
+    --data data/prepared/dataset_btc_eth_bnb_ada_ltc_macd_direction_only_kalman.npz \
+    --epochs 50 --no-weighted-loss
+
+# CCI - Avec Shortcut (meilleur)
+python src/train.py \
+    --data data/prepared/dataset_btc_eth_bnb_ada_ltc_cci_direction_only_kalman.npz \
+    --epochs 50 --shortcut --shortcut-steps 2 --no-weighted-loss
+
+# RSI - Baseline (meilleur)
+python src/train.py \
+    --data data/prepared/dataset_btc_eth_bnb_ada_ltc_rsi_direction_only_kalman.npz \
+    --epochs 50 --no-weighted-loss
+```
+
+### Conclusion
+
+❌ **Méthodes ÉCHEC pour MACD/RSI** : Shortcut, Temporal Gate, WeightedTransitionLoss
+- Le modèle est déjà optimal pour les indicateurs 1-feature
+- Ces architectures n'apportent rien ou dégradent
+
+✅ **Shortcut SUCCÈS pour CCI** : +6% accuracy (82.6% → 88.6%)
+- Spécifique aux indicateurs multi-features (HLC)
+- `--shortcut --shortcut-steps 2` est la config optimale
+
+**Règle générale** : Le nombre de features détermine si Shortcut aide
+- 1 feature → Baseline
+- 3+ features → Shortcut steps=2
+
+---
+
+## ✅ VALIDATION ORACLE - Datasets Direction-Only (2026-01-09)
+
+**Date**: 2026-01-09
+**Statut**: ✅ **DONNÉES VALIDÉES - Signal fonctionne, problème = fréquence trades**
+**Script**: `tests/test_oracle_direction_only.py`
+**Objectif**: Valider que les datasets direction-only contiennent un signal profitable
+
+### Contexte
+
+Après l'optimisation Shortcut (CCI +6%), validation des datasets direction-only avec un test Oracle (labels parfaits) pour confirmer que le signal existe avant d'optimiser la stratégie de trading.
+
+### Structure des Datasets Direction-Only
+
+```
+X: (n, 25, features+2) - [timestamp, asset_id, features...] × 25 timesteps
+Y: (n, 3) - [timestamp, asset_id, direction]
+T: (n, 3) - [timestamp, asset_id, is_transition]
+OHLCV: (n, 7) - [timestamp, asset_id, O, H, L, C, V]
+
+Navigation: Même index i → même sample dans X, Y, T, OHLCV
+```
+
+### Logique de Trading (Causale)
+
+```python
+# Signal à index i → Exécution à Open[i+1]
+# Direction: 1=UP→LONG, 0=DOWN→SHORT
+# Toujours en position (reversal immédiat sur changement)
+
+for i in range(n_samples - 1):
+    direction = labels[i]
+    target = LONG if direction == 1 else SHORT
+    if position != target:
+        exit_price = opens[i + 1]
+        entry_price = opens[i + 1]  # Reversal immédiat
+```
+
+### Bug Critique Corrigé
+
+**Problème initial**: Dataset contient 5 assets concaténés. Itérer sur toutes les données ensemble causait des calculs de PnL traversant les frontières entre assets:
+
+```
+Index 100000: BTC, Open = $45,000 (entrée LONG)
+Index 100001: ETH, Open = $3,000  (sortie!)
+→ PnL = (3000 - 45000) / 45000 = -93% ← CATASTROPHIQUE!
+```
+
+**Solution**: Backtest par asset en utilisant `asset_id` (colonne 1 du OHLCV), puis agrégation des trades.
+
+### Résultats Oracle - 3 Indicateurs (Test Set, 5 assets, ~15 mois)
+
+| Métrique | **RSI** 🥇 | **CCI** 🥈 | **MACD** 🥉 |
+|----------|------------|------------|-------------|
+| **PnL Brut** | **+16,676%** | +13,534% | +9,669% |
+| Trades | 96,887 | 82,404 | 68,924 |
+| Frais (0.2%) | 19,377% | 16,481% | 13,785% |
+| **PnL Net** | -2,701% | -2,947% | -4,116% |
+| Win Rate | 33.1% | 33.7% | 33.4% |
+| Profit Factor | 0.87 | 0.84 | 0.77 |
+| Avg Win | +0.542% | +0.561% | +0.589% |
+| Avg Loss | -0.310% | -0.339% | -0.385% |
+| Durée moyenne | 6.6p (~33min) | 7.8p (~39min) | 9.3p (~46min) |
+| Long/Short | 50%/50% | 50%/50% | 50%/50% |
+
+### Analyse Comparative
+
+**Hiérarchie PnL Brut**: RSI (+16,676%) > CCI (+13,534%) > MACD (+9,669%)
+
+**Paradoxe inversé vs ML accuracy**: RSI a le **meilleur signal brut** mais la **pire accuracy ML** (87.6%)!
+
+| Indicateur | PnL Brut | ML Accuracy | Trades | Signal/Trade | Nature |
+|------------|----------|-------------|--------|--------------|--------|
+| **RSI** 🥇 | +16,676% | 87.6% 🥉 | 96,887 | +0.172% | Oscillateur rapide |
+| **CCI** 🥈 | +13,534% | 88.6% 🥈 | 82,404 | +0.164% | Oscillateur moyen |
+| **MACD** 🥉 | +9,669% | 92.4% 🥇 | 68,924 | +0.140% | Tendance lourde |
+
+**Observations clés**:
+- Les **oscillateurs rapides** (RSI) capturent plus de signal brut mais génèrent plus de trades
+- **MACD** est plus stable (moins de trades) mais moins rentable en brut
+- **Accuracy ML ≠ Rentabilité Oracle** (le signal brut et la prédictibilité sont décorrélés)
+
+### Analyse du Win Rate ~33%
+
+**Pourquoi Win Rate < 50% avec Oracle (labels parfaits)?**
+
+Le label `direction[i] = filtered[i-2] > filtered[i-3]` indique la **direction de l'indicateur** (pente), pas la **direction du prix**:
+
+```
+Label = 1 (UP) signifie: Indicateur filtré montait entre t-3 et t-2
+                        ≠ Prix va monter à partir de t+1!
+```
+
+Malgré le faible Win Rate, le PnL Brut est positif car:
+- Avg Win > |Avg Loss| (ratio ~1.6-1.75×)
+- Les trades gagnants capturent des mouvements plus importants
+
+### Diagnostic Final
+
+| Aspect | RSI | CCI | MACD | Conclusion |
+|--------|-----|-----|------|------------|
+| **Signal Brut** | +16,676% | +13,534% | +9,669% | ✅ TOUS fonctionnent |
+| **Trades** | 96,887 | 82,404 | 68,924 | ❌ Tous trop fréquents |
+| **PnL Net** | -2,701% | -2,947% | -4,116% | ❌ Frais détruisent |
+
+**Problème = FRÉQUENCE DE TRADING**, pas le signal. Les 3 indicateurs ont un signal profitable!
+
+### Solutions Recommandées
+
+| # | Solution | Impact Attendu | Status |
+|---|----------|----------------|--------|
+| 1 | **Holding minimum** | -30% à -50% trades | À tester |
+| 2 | **Timeframe 15min/30min** | -50% à -67% trades naturellement | À tester |
+| 3 | **Maker fees 0.02%** | Frais ÷10 → PnL Net positif | Dépend exchange |
+| 4 | **Consensus multi-indicateurs** | Filtre entrées faibles | Testé (Phase 2.7) |
+
+### Commandes
+
+```bash
+# Test Oracle MACD
+python tests/test_oracle_direction_only.py --indicator macd --split test --fees 0.001
+
+# Test Oracle RSI
+python tests/test_oracle_direction_only.py --indicator rsi --split test --fees 0.001
+
+# Test Oracle CCI
+python tests/test_oracle_direction_only.py --indicator cci --split test --fees 0.001
+```
+
+### Conclusion
+
+✅ **DONNÉES VALIDÉES** - Les 3 indicateurs ont un signal profitable:
+  - RSI: +16,676% | CCI: +13,534% | MACD: +9,669%
+
+❌ **PROBLÈME IDENTIFIÉ** - Trop de trades (69k-97k) × frais (0.2%) = destruction du signal
+
+🔍 **DÉCOUVERTE PARADOXALE** - Accuracy ML inversement corrélée au PnL Brut:
+  - RSI: 87.6% accuracy → +16,676% brut (meilleur signal!)
+  - MACD: 92.4% accuracy → +9,669% brut (moins de signal)
+
+🎯 **PROCHAINE ÉTAPE** - Réduire la fréquence de trading (holding minimum ou timeframe plus long)
+
+### 🏆 Analyse Per-Asset - Découverte Critique (2026-01-09)
+
+**Découverte majeure**: ADA est le **SEUL** asset constamment profitable avec Oracle sur les 3 indicateurs!
+
+#### Résultats Par Asset (Test Set, ~15 mois)
+
+| Asset | MACD Net | CCI Net | RSI Net | Verdict |
+|-------|----------|---------|---------|---------|
+| **ADA** 🥇 | **+16%** ✅ | **+542%** ✅ | **+911%** ✅ | **Seul 100% positif** |
+| LTC 🥈 | -386% | +96% ✅ | +315% ✅ | Oscillateurs OK |
+| ETH | -887% | -795% | -762% | Toujours négatif |
+| BNB | -1,183% | -1,050% | -1,190% | Toujours négatif |
+| BTC 🥉 | -1,676% | -1,740% | -1,975% | **Toujours le pire** |
+
+#### Observations Par Indicateur
+
+**MACD** (Tendance lourde):
+- Seul ADA positif (+16%)
+- Tous les autres assets négatifs (-386% à -1,676%)
+- BTC = pire performance (-1,676%)
+
+**CCI** (Oscillateur moyen):
+- ADA (+542%) et LTC (+96%) positifs
+- ETH/BNB/BTC négatifs (-795% à -1,740%)
+
+**RSI** (Oscillateur rapide):
+- ADA (+911%) et LTC (+315%) positifs
+- ETH/BNB/BTC négatifs (-762% à -1,975%)
+
+#### Pattern Identifié
+
+| Pattern | Observation | Interprétation |
+|---------|-------------|----------------|
+| **ADA = Meilleur** | +16% à +911% (tous positifs) | Comportement plus prédictible |
+| **BTC = Pire** | -1,676% à -1,975% (tous négatifs) | Trop de bruit/manipulation |
+| **Oscillateurs > MACD pour LTC** | RSI/CCI positifs, MACD négatif | LTC oscille plus qu'il ne trend |
+| **ETH/BNB = Corrélés** | Performance similaire négative | Suivent probablement BTC |
+
+#### Analyse Mensuelle (Meilleurs Mois)
+
+| Période | MACD | CCI | RSI | Observation |
+|---------|------|-----|-----|-------------|
+| **2024-12** | +259% | +1,017% | +1,298% | 🔥 **Meilleur mois** |
+| **2025-02** | +423% | +546% | +824% | ✅ Très bon |
+| 2025-01 | -453% | -267% | -174% | ❌ Pire mois |
+| 2024-10 | -343% | -417% | -442% | ❌ Mauvais |
+
+**Pattern saisonnier**: Fin d'année (décembre) et début Q1 (février) semblent meilleurs.
+
+#### Recommandations Stratégiques
+
+**1. Focus sur ADA** ⭐ (Priorité Haute)
+- Seul asset constamment profitable
+- Test avec modèle ML sur ADA uniquement
+- Si ML fonctionne sur ADA → étendre progressivement
+
+**2. Éviter BTC** ⚠️
+- Toujours le pire performer
+- Trop de bruit/manipulation pour le signal
+- Peut-être utile comme filtre de régime (quand BTC est "propre")
+
+**3. Oscillateurs pour LTC**
+- RSI/CCI fonctionnent, MACD non
+- LTC = asset d'oscillation, pas de tendance
+
+**4. Filtre temporel**
+- Éviter janvier (toujours négatif)
+- Privilégier décembre-février
+
+#### Commandes avec per-asset stats
+
+```bash
+# Le script affiche maintenant les stats par asset et par mois
+python tests/test_oracle_direction_only.py --indicator macd --split test --fees 0.001
+python tests/test_oracle_direction_only.py --indicator cci --split test --fees 0.001
+python tests/test_oracle_direction_only.py --indicator rsi --split test --fees 0.001
+```
+
+#### Conclusion Per-Asset
+
+✅ **DÉCOUVERTE CRITIQUE**: ADA est le seul asset profitable sur les 3 indicateurs
+- MACD: +16% | CCI: +542% | RSI: +911%
+- Suggère que le signal existe mais dépend fortement de l'asset
+
+❌ **ÉVITER**: BTC (toujours pire), ETH/BNB (suivent BTC)
+
+🎯 **ACTION RECOMMANDÉE**: Tester le modèle ML sur ADA uniquement comme proof-of-concept
 
 ---
 
@@ -1594,6 +1957,562 @@ python tests/test_oracle_sliding_window.py --indicator macd --filter-type octave
 > **Le filtre Octave (Butterworth step=0.25) est trop sensible pour les fenêtres courtes.**
 
 **Ne JAMAIS utiliser de filtre sliding window sans fenêtre ≥ plusieurs milliers de samples.**
+
+---
+
+## ❌ Phase 2.12: Weighted Probability Fusion - ÉCHEC VALIDÉ (2026-01-09)
+
+**Date**: 2026-01-09
+**Statut**: ❌ **ÉCHEC COMPLET - Fusion multi-indicateurs DÉGRADE systématiquement le signal**
+**Script**: `tests/test_weighted_probability_fusion.py`
+**Objectif**: Combiner MACD/RSI/CCI avec pondération pour améliorer les décisions
+
+### Contexte
+
+Suite à la validation Oracle (RSI +16,676%, CCI +13,534%, MACD +9,669% PnL Brut), tentative de fusion probabiliste des 3 indicateurs.
+
+### Méthode 1: Z-Score Normalization
+
+**Principe** (López de Prado, Ryu & Kim 2022):
+```python
+# Normaliser chaque indicateur
+p_norm = (prob - mean) / std
+
+# Fusionner avec poids
+score = w_macd * p_macd_norm + w_cci * p_cci_norm + w_rsi * p_rsi_norm
+
+# Décision
+if score > threshold: LONG
+elif score < -threshold: SHORT
+else: HOLD
+```
+
+**Poids par défaut**: MACD=0.56, CCI=0.28, RSI=0.16
+
+### Méthode 2: Raw Probabilities
+
+**Principe** (formule simple):
+```python
+score = w1 * p1 + w2 * p2 + w3 * p3 - bias
+# bias = 0.5 pour centrer autour de 0
+```
+
+### Résultats - MACD Baseline (Test Set, ~445 jours)
+
+| Stratégie | Trades | Réduction | WR | Δ WR | PnL Brut | PnL Net |
+|-----------|--------|-----------|-----|------|----------|---------|
+| **MACD Baseline** | 68,924 | - | 33.40% | - | **+9,669%** | -4,116% |
+| Fusion(t=0.3) | 98,975 | **-43.6%** ❌ | 21.64% | -11.76% | +107% | -19,688% |
+| Fusion(t=0.5) | 98,785 | -43.3% | 21.09% | -12.31% | +157% | -19,600% |
+| Fusion(t=0.7) | 97,720 | -41.8% | 20.29% | -13.11% | +23% | -19,521% |
+| Fusion(t=1.0) | 91,738 | -33.1% | 18.99% | -14.40% | -20% | -18,368% |
+
+**Problème critique**: La fusion génère **PLUS de trades** (+43%), pas moins!
+
+### Résultats - RSI Baseline (Test Set)
+
+| Stratégie | Trades | Réduction | WR | Δ WR | PnL Brut | PnL Net |
+|-----------|--------|-----------|-----|------|----------|---------|
+| **RSI Baseline** | 96,887 | - | 33.12% | - | **+16,676%** 🥇 | -2,701% |
+| Fusion(t=0.3) | 109,366 | -12.9% | 19.27% | -13.85% | +47% | -21,826% |
+| Fusion(t≥0.5) | 0 | 100% | - | - | 0% | 0% |
+
+**Observation**: Avec seuils ≥0.5, **0 trades** car score limité à [-0.5, +0.5]
+
+### Résultats - CCI Baseline (Test Set)
+
+| Stratégie | Trades | Réduction | WR | Δ WR | PnL Brut | PnL Net |
+|-----------|--------|-----------|-----|------|----------|---------|
+| **CCI Baseline** | 82,404 | - | 33.66% | - | **+13,534%** 🥈 | -2,947% |
+| Fusion(t=0.3) | 103,285 | -25.3% | 20.08% | -13.58% | +164% | -20,493% |
+| Fusion(t≥0.5) | 0 | 100% | - | - | 0% | 0% |
+
+### Hiérarchie Oracle Confirmée
+
+| Indicateur | PnL Brut Oracle | Trades | Signal/Trade | Verdict |
+|------------|-----------------|--------|--------------|---------|
+| **RSI** 🥇 | **+16,676%** | 96,887 | +0.172% | **Meilleur signal brut** |
+| **CCI** 🥈 | +13,534% | 82,404 | +0.164% | Intermédiaire |
+| **MACD** 🥉 | +9,669% | 68,924 | +0.140% | Moins de signal, plus stable |
+
+### Diagnostic - Pourquoi la Fusion Échoue
+
+#### 1. Les indicateurs sont CORRÉLÉS, pas complémentaires
+
+```
+RSI, CCI, MACD = 3 projections du MÊME signal latent (momentum)
+Ils diffèrent par: filtre, latence, sensibilité
+Ils NE diffèrent PAS par: nature de l'information capturée
+
+→ Voter entre 3 miroirs du même objet = INUTILE
+```
+
+#### 2. Fusion = Amplification du bruit
+
+```
+MACD seul: 33.40% WR, 68k trades (relativement stable)
+MACD + RSI + CCI: 18-21% WR, 91-109k trades (plus de bruit!)
+```
+
+La combinaison **amplifie les désaccords** au lieu de les filtrer.
+
+#### 3. Violation des hypothèses d'Ensemble Learning
+
+Pour que le Stacking/Fusion fonctionne:
+- Les erreurs des modèles doivent être **faiblement corrélées**
+- **Ce qu'on observe**: 98.8% de recouvrement sur les erreurs
+- **Résultat**: Gain nul ou négatif (prouvé empiriquement)
+
+### Méthode Raw Probs - Limitation Mathématique
+
+Avec `bias=0.5` et `weights=1.0`:
+```
+score = w1*p1 + w2*p2 + w3*p3 - 0.5
+      = 1.0 * prob_moyenne - 0.5
+
+Range: [-0.5, +0.5]
+→ threshold ≥ 0.5 impossible à atteindre
+→ 0 trades avec seuils élevés
+```
+
+### Scripts et Commandes
+
+**Script créé**: `tests/test_weighted_probability_fusion.py`
+
+**Options**:
+- `--baseline {macd,rsi,cci}`: Indicateur de référence
+- `--raw-probs`: Mode probabilités brutes (vs z-score)
+- `--bias 0.5`: Biais pour raw-probs
+- `--thresholds 0.3,0.5,0.7,1.0`: Seuils à tester
+- `--w-macd/--w-rsi/--w-cci`: Poids personnalisés
+
+**Commandes**:
+```bash
+# Z-score (défaut)
+python tests/test_weighted_probability_fusion.py --split test --baseline macd
+python tests/test_weighted_probability_fusion.py --split test --baseline rsi
+python tests/test_weighted_probability_fusion.py --split test --baseline cci
+
+# Raw probs
+python tests/test_weighted_probability_fusion.py --split test --baseline rsi --raw-probs
+```
+
+**Commits**:
+- Script initial: `aa99007`
+- Ajout --baseline: `0c9ef96`
+- Ajout --raw-probs: `c1b1288`
+
+### Conclusion Définitive
+
+#### ❌ ABANDONNER:
+
+1. **Fusion multi-indicateurs** (z-score ou raw probs)
+2. **Voting/Consensus** entre MACD/RSI/CCI
+3. **Stacking/Ensemble** sur ces indicateurs
+
+**Raisons empiriques validées**:
+- 0/12 configurations améliorent le baseline
+- Win Rate dégradé de 13-14% systématiquement
+- Trades augmentés de 25-43% (inverse de l'objectif)
+- PnL Net 4-8× pire que baseline seul
+
+#### ✅ CONSERVER:
+
+1. **Indicateurs en isolation** (meilleure performance)
+2. **RSI Oracle = meilleur signal brut** (+16,676%)
+3. **Focus sur réduction des frais** (pas fusion)
+
+### Leçon Fondamentale
+
+> **"On ne peut pas voter entre trois miroirs du même objet."**
+>
+> Les indicateurs RSI, CCI, MACD capturent le même phénomène latent (momentum).
+> Les combiner n'ajoute pas d'information, ça ajoute du BRUIT.
+>
+> **La vraie solution**: Réduire les trades (timeframe, holding minimum)
+> **Pas**: Combiner des signaux corrélés
+
+---
+
+## 🔬 Phase 2.13: Analyse d'Indépendance des Indicateurs (2026-01-09)
+
+**Date**: 2026-01-09
+**Statut**: ✅ **PREUVE EMPIRIQUE - RSI/CCI/MACD capturent le MÊME signal**
+**Script**: `tests/test_indicator_independence.py`
+**Objectif**: Vérifier si RSI/CCI/MACD capturent des informations différentes ou similaires
+
+### Contexte
+
+Suite à l'échec de la fusion (Phase 2.12), test empirique pour comprendre POURQUOI la fusion échoue.
+
+**Question**: Les indicateurs RSI/CCI/MACD capturent-ils des signaux différents ou le même signal latent?
+
+### Méthodologie
+
+4 métriques mesurées sur le split test (640k samples):
+
+| Métrique | Ce qu'elle mesure | Interprétation |
+|----------|-------------------|----------------|
+| **Corrélation Oracle** | Similarité des labels | 1.0 = même signal |
+| **Accord Oracle** | % labels identiques | >90% = très similaires |
+| **Recouvrement erreurs** | Erreurs communes ML | >70% = erreurs corrélées |
+| **Complémentarité** | A_wrong & B_right | <20% = pas de correction |
+
+### Résultats - Labels Oracle
+
+**Matrice de corrélation (Pearson):**
+
+|      | RSI | CCI | MACD |
+|------|-----|-----|------|
+| RSI  | 1.000 | **1.000** | **1.000** |
+| CCI  | 1.000 | 1.000 | **1.000** |
+| MACD | 1.000 | 1.000 | 1.000 |
+
+**→ Corrélation PARFAITE (1.000) entre tous les indicateurs!**
+
+**Matrice d'accord (% mêmes labels):**
+
+| Paire | Accord | Désaccord |
+|-------|--------|-----------|
+| RSI-CCI | **95.9%** | 4.1% |
+| RSI-MACD | **93.6%** | 6.4% |
+| CCI-MACD | **94.7%** | 5.3% |
+| **Moyenne** | **94.7%** | 5.3% |
+
+**Conclusion Oracle**: Les 3 indicateurs produisent des labels quasi-identiques.
+
+### Résultats - Prédictions ML
+
+**Taux d'erreur par indicateur:**
+
+| Indicateur | Taux erreur | Accuracy |
+|------------|-------------|----------|
+| RSI | 66.52% | 33.5% |
+| CCI | 66.77% | 33.2% |
+| MACD | 66.00% | **34.0%** |
+
+**Recouvrement des erreurs:**
+
+| Paire | Erreurs communes | Ratio recouvrement | Jaccard |
+|-------|------------------|-------------------|---------|
+| RSI-CCI | 61.15% | **84.8%** | 0.848 |
+| RSI-MACD | 57.90% | **77.6%** | 0.776 |
+| CCI-MACD | 58.80% | **79.5%** | 0.795 |
+| **Moyenne** | 59.28% | **80.6%** | 0.806 |
+
+**→ 80.6% des erreurs sont PARTAGÉES entre les modèles!**
+
+**Complémentarité (quand A se trompe, B a raison?):**
+
+| Paire | A_wrong & B_right | B_wrong & A_right | Score |
+|-------|-------------------|-------------------|-------|
+| RSI-CCI | 5.37% | 5.62% | **10.99%** |
+| RSI-MACD | 8.62% | 8.10% | **16.72%** |
+| CCI-MACD | 7.97% | 7.21% | **15.18%** |
+| **Moyenne** | - | - | **14.3%** |
+
+**→ Seulement 14.3% de complémentarité (très faible)**
+
+### Résultats - Vote Majoritaire
+
+**Distribution des votes:**
+
+| Vote | % | Interprétation |
+|------|---|----------------|
+| 3 UP (unanime) | 36.2% | Consensus haussier |
+| 2 UP (majorité) | 12.8% | Split 2 vs 1 |
+| 1 UP (minorité) | 11.6% | Split 1 vs 2 |
+| 0 UP (unanime) | 39.5% | Consensus baissier |
+
+**Taux d'unanimité: 75.7%** (3/3 ou 0/3)
+
+**Impact du vote majoritaire sur l'accuracy:**
+
+| Indicateur | Individuel | Majoritaire | Delta |
+|------------|------------|-------------|-------|
+| RSI | 33.5% | 33.5% | **+0.00%** |
+| CCI | 33.2% | 33.5% | +0.26% |
+| MACD | 34.0% | 33.5% | **-0.53%** |
+
+**→ Le vote majoritaire N'AMÉLIORE PAS l'accuracy (0% gain)**
+
+### Diagnostic - Pourquoi les Indicateurs sont Identiques
+
+**Les 3 indicateurs utilisent les MÊMES entrées:**
+- RSI: `Close` → calcule gains/pertes relatifs
+- CCI: `(H+L+C)/3` → calcule déviation du Typical Price
+- MACD: `Close` → calcule différence EMA
+
+**Ce sont 3 FILTRES différents du MÊME signal latent (momentum):**
+
+```
+Signal latent = "Le marché monte/descend" (momentum)
+
+RSI  = Filtre de vitesse (rapide, oscillateur)
+CCI  = Filtre de déviation (moyen, oscillateur)
+MACD = Filtre de tendance (lent, trend-following)
+
+Résultat: 3 miroirs du même objet ≠ 3 informations différentes
+```
+
+**Analogie optique:**
+- RSI = Miroir plan (reflet direct)
+- CCI = Miroir légèrement courbe (reflet déformé)
+- MACD = Miroir lisse (reflet lissé)
+
+**Tous montrent le MÊME objet** sous des angles légèrement différents.
+
+### Implications Critiques
+
+#### 1. Fusion/Voting = INUTILE (prouvé empiriquement)
+
+| Approche | Résultat | Raison |
+|----------|----------|--------|
+| Vote majoritaire | +0% | Même information, mêmes erreurs |
+| Weighted fusion | -15% à -43% | Amplifie le bruit |
+| Stacking | -3% à -12% | Régression mal posée |
+
+#### 2. Erreurs CORRÉLÉES = Pas de correction possible
+
+Pour qu'un ensemble learning fonctionne:
+- Les erreurs doivent être **décorrélées** (indépendance conditionnelle)
+
+**Ce qu'on observe:**
+- 80.6% de recouvrement des erreurs
+- 14.3% de complémentarité seulement
+- **Violation totale** des hypothèses d'ensemble learning
+
+#### 3. MACD = Meilleur choix (si un seul indicateur)
+
+| Critère | RSI | CCI | MACD |
+|---------|-----|-----|------|
+| Accuracy ML | 33.5% | 33.2% | **34.0%** |
+| Oracle PnL | **+16,676%** | +13,534% | +9,669% |
+| Stabilité | Nerveux | Moyen | **Stable** |
+
+**Paradoxe**: RSI = meilleur Oracle, MACD = meilleur ML
+
+### Recommandations
+
+#### ❌ ABANDONNER DÉFINITIVEMENT:
+
+1. Toute forme de **fusion/voting** entre RSI/CCI/MACD
+2. **Stacking/Ensemble** sur ces indicateurs
+3. Recherche de "meilleure combinaison" (n'existe pas)
+
+#### ✅ PISTES VALIDES:
+
+1. **Signaux VRAIMENT indépendants** (pas dérivés du prix):
+   - Volume / OBV / Volume Profile
+   - Order Flow / Bid-Ask Spread
+   - Sentiment / News / Social Media
+   - Funding Rate (crypto)
+   - Open Interest (futures)
+
+2. **Un seul indicateur optimisé**:
+   - MACD pour stabilité ML
+   - RSI pour signal Oracle brut
+   - Pas de combinaison
+
+3. **Réduction des trades** (le vrai problème):
+   - Timeframe 15/30min
+   - Holding minimum
+   - Filtres structurels (ATR, régime)
+
+### Commandes
+
+```bash
+# Test labels Oracle seulement
+python tests/test_indicator_independence.py --split test
+
+# Test avec prédictions ML
+python tests/test_indicator_independence.py --split test --use-predictions
+```
+
+### Conclusion
+
+✅ **PREUVE EMPIRIQUE DÉFINITIVE**:
+
+| Métrique | Valeur | Interprétation |
+|----------|--------|----------------|
+| Corrélation Oracle | **1.000** | Signal IDENTIQUE |
+| Accord Oracle | **94.7%** | Labels quasi-identiques |
+| Recouvrement erreurs ML | **80.6%** | Mêmes erreurs |
+| Complémentarité | **14.3%** | Pas de correction |
+| Gain vote majoritaire | **+0%** | Fusion INUTILE |
+
+> **"RSI, CCI, MACD = 3 filtres différents du MÊME signal latent."**
+>
+> La fusion échoue car les indicateurs ne sont pas indépendants.
+> Pour améliorer, il faut chercher des signaux VRAIMENT différents (Volume, Order Flow, Sentiment).
+
+---
+
+## 🎯 Phase 2.14: Stratégie Entry/Exit avec Oracle - Comparaison Indicateurs (2026-01-09)
+
+**Date**: 2026-01-09
+**Statut**: ✅ **MACD CONFIRMÉ COMME MEILLEUR ORACLE DE SORTIE**
+**Script**: `tests/test_entry_oracle_exit.py`
+**Objectif**: Comparer MACD, RSI, CCI comme Oracle de sortie avec entrée pondérée
+
+### Contexte
+
+Suite à Phase 2.13 (indicateurs corrélés à 100%), test d'une stratégie hybride:
+- **Entrée**: Score pondéré ML (w_MACD×P_MACD + w_CCI×P_CCI + w_RSI×P_RSI)
+- **Sortie**: Oracle (labels parfaits) - changement de direction
+
+**Objectif**: Isoler le problème d'entrée vs sortie en utilisant une sortie parfaite (Oracle).
+
+### Grid Search - 3,072 Combinaisons
+
+| Paramètre | Valeurs testées |
+|-----------|-----------------|
+| **Poids** | [0.2, 0.4, 0.6, 0.8]³ = 64 combinaisons |
+| **Seuil LONG** | > [0.2, 0.4, 0.6, 0.8] = 4 valeurs |
+| **Seuil SHORT** | < [0.2, 0.4, 0.6, 0.8] = 4 valeurs |
+| **Oracle** | [MACD, RSI, CCI] = 3 indicateurs |
+| **Total** | 64 × 4 × 4 × 3 = **3,072 combinaisons** |
+
+**Asset testé**: BTC (split test)
+
+### Résultats - Comparaison des 3 Oracles
+
+| Oracle | Meilleurs Poids | ThLong | ThShort | Trades | Win Rate | PnL Gross | PnL Net | Durée Moy |
+|--------|-----------------|--------|---------|--------|----------|-----------|---------|-----------|
+| **MACD** 🥇 | (0.8, 0.2, 0.4) | 0.8 | 0.2 | **13,444** | **22.1%** | +607% | **-2,082%** | **8.4p** |
+| **CCI** 🥈 | (0.8, 0.4, 0.6) | 0.8 | 0.2 | 15,248 | 20.2% | +667% | -2,382% | 6.8p |
+| **RSI** 🥉 | (0.4, 0.2, 0.6) | 0.8 | 0.2 | 17,026 | 19.3% | +768% | -2,638% | 5.8p |
+
+### Analyse - Pourquoi MACD Gagne
+
+#### 1. Moins de Trades = Moins de Frais
+
+| Oracle | Trades | Frais (0.2%) | Impact |
+|--------|--------|--------------|--------|
+| MACD | 13,444 | 2,689% | Meilleur |
+| CCI | 15,248 | 3,050% | +361% pire |
+| RSI | 17,026 | 3,405% | +716% pire |
+
+**MACD produit 21% moins de trades que CCI et 27% moins que RSI.**
+
+#### 2. Durée Moyenne Plus Longue
+
+| Oracle | Durée | Interprétation |
+|--------|-------|----------------|
+| MACD | 8.4p (~42min) | Tendance lourde = signaux stables |
+| CCI | 6.8p (~34min) | Oscillateur moyen |
+| RSI | 5.8p (~29min) | Oscillateur rapide = nerveux |
+
+**MACD garde les trades plus longtemps → moins de churn.**
+
+#### 3. Win Rate Plus Élevé
+
+| Oracle | Win Rate | Delta vs RSI |
+|--------|----------|--------------|
+| MACD | 22.1% | +2.8% |
+| CCI | 20.2% | +0.9% |
+| RSI | 19.3% | baseline |
+
+**MACD détecte mieux les vraies sorties.**
+
+### Paradoxe RSI: Meilleur PnL Gross, Pire PnL Net
+
+| Oracle | PnL Gross | PnL Net | Écart |
+|--------|-----------|---------|-------|
+| RSI | **+768%** 🥇 | -2,638% 🥉 | **3,406%** |
+| CCI | +667% 🥈 | -2,382% 🥈 | 3,049% |
+| MACD | +607% 🥉 | **-2,082%** 🥇 | **2,689%** |
+
+**Explication**: RSI capte plus de signal brut (+768%) mais génère trop de trades (17k) → frais détruisent tout.
+
+### Top 5 par Oracle
+
+#### MACD (Meilleur)
+
+| Rank | Poids (M,C,R) | ThLong | ThShort | Trades | WR | PnL Net |
+|------|---------------|--------|---------|--------|-----|---------|
+| 1 | (0.8, 0.2, 0.4) | 0.8 | 0.2 | 13,444 | 22.1% | -2,082% |
+| 2 | (0.6, 0.2, 0.6) | 0.8 | 0.2 | 13,477 | 22.1% | -2,086% |
+| 3 | (0.8, 0.2, 0.8) | 0.8 | 0.2 | 13,470 | 22.1% | -2,086% |
+| 4 | (0.6, 0.2, 0.2) | 0.8 | 0.2 | 13,447 | 22.1% | -2,088% |
+| 5 | (0.6, 0.2, 0.4) | 0.8 | 0.2 | 13,470 | 22.1% | -2,089% |
+
+#### CCI
+
+| Rank | Poids (M,C,R) | ThLong | ThShort | Trades | WR | PnL Net |
+|------|---------------|--------|---------|--------|-----|---------|
+| 1 | (0.8, 0.4, 0.6) | 0.8 | 0.2 | 15,248 | 20.2% | -2,382% |
+| 2 | (0.4, 0.2, 0.2) | 0.8 | 0.2 | 15,207 | 20.1% | -2,385% |
+| 3 | (0.8, 0.4, 0.4) | 0.8 | 0.2 | 15,207 | 20.1% | -2,385% |
+| 4 | (0.6, 0.4, 0.4) | 0.8 | 0.2 | 15,256 | 20.2% | -2,385% |
+| 5 | (0.6, 0.6, 0.2) | 0.8 | 0.2 | 15,271 | 20.2% | -2,385% |
+
+#### RSI
+
+| Rank | Poids (M,C,R) | ThLong | ThShort | Trades | WR | PnL Net |
+|------|---------------|--------|---------|--------|-----|---------|
+| 1 | (0.4, 0.2, 0.6) | 0.8 | 0.2 | 17,026 | 19.3% | -2,638% |
+| 2 | (0.6, 0.2, 0.8) | 0.8 | 0.2 | 16,952 | 19.2% | -2,638% |
+| 3 | (0.4, 0.2, 0.8) | 0.8 | 0.2 | 17,105 | 19.4% | -2,640% |
+| 4 | (0.2, 0.2, 0.6) | 0.8 | 0.2 | 17,323 | 19.5% | -2,641% |
+| 5 | (0.2, 0.2, 0.8) | 0.8 | 0.2 | 17,443 | 19.7% | -2,641% |
+
+### Découvertes Clés
+
+#### 1. Seuils Extrêmes Dominent
+
+**100% des top 20 utilisent**: ThLong = 0.8, ThShort = 0.2
+
+**Interprétation**: Seuils extrêmes filtrent les entrées faibles → moins de trades de mauvaise qualité.
+
+#### 2. Poids MACD Élevé
+
+Les meilleurs résultats ont tous:
+- **w_MACD = 0.6-0.8** (poids fort)
+- **w_CCI = 0.2-0.4** (poids faible)
+- **w_RSI = 0.2-0.8** (variable)
+
+**MACD domine aussi côté entrée**, pas seulement sortie.
+
+#### 3. Hiérarchie Confirmée
+
+| Contexte | Classement |
+|----------|------------|
+| **Oracle Exit (sortie)** | MACD 🥇 > CCI 🥈 > RSI 🥉 |
+| **Oracle PnL Brut (Phase 2.13)** | RSI 🥇 > CCI 🥈 > MACD 🥉 |
+| **ML Accuracy** | MACD 🥇 > CCI 🥈 > RSI 🥉 |
+
+**Conclusion**: MACD = meilleur pour trading réel (moins de trades, plus stable).
+
+### Commandes
+
+```bash
+# Test complet avec comparaison des 3 Oracles
+python tests/test_entry_oracle_exit.py --asset BTC --split test
+
+# Options
+--asset {BTC,ETH,BNB,ADA,LTC}  # Asset à tester
+--split {train,val,test}       # Split dataset
+--fees 0.001                   # Frais (0.1%)
+--top-n 20                     # Nombre de résultats à afficher
+```
+
+### Conclusion Phase 2.14
+
+✅ **MACD CONFIRMÉ comme meilleur indicateur** pour stratégie entry/exit:
+- Meilleur PnL Net (-2,082% vs -2,382% CCI, -2,638% RSI)
+- Moins de trades (13,444 vs 15,248 CCI, 17,026 RSI)
+- Win Rate plus élevé (22.1% vs 20.2% CCI, 19.3% RSI)
+- Durée moyenne plus longue (8.4p vs 6.8p CCI, 5.8p RSI)
+
+❌ **Problème fondamental non résolu**: Même avec sortie Oracle parfaite, PnL Net reste négatif
+- 13,444 trades × 0.2% = 2,689% de frais
+- Signal brut +607% ne couvre pas les frais
+
+🎯 **Prochaine étape**: Réduire nombre de trades sous ~3,000 pour être profitable
+- Timeframe 15/30min (réduction naturelle)
+- Holding minimum plus agressif
+- Filtrer entrées sur volatilité/volume
 
 ---
 

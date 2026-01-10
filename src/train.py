@@ -168,8 +168,9 @@ def train_epoch(
         optimizer.zero_grad()
         outputs = model(X_batch)
 
-        # Loss (passer transitions si WeightedTransitionBCELoss)
-        if T_batch is not None:
+        # Loss (passer transitions SEULEMENT si WeightedTransitionBCELoss)
+        # Note: T_batch peut exister mais loss_fn peut être baseline (--no-weighted-loss)
+        if T_batch is not None and hasattr(loss_fn, 'transition_weight'):
             loss = loss_fn(outputs, Y_batch, T_batch)
         else:
             loss = loss_fn(outputs, Y_batch)
@@ -238,8 +239,9 @@ def validate_epoch(
             # Forward
             outputs = model(X_batch)
 
-            # Loss (passer transitions si WeightedTransitionBCELoss)
-            if T_batch is not None:
+            # Loss (passer transitions SEULEMENT si WeightedTransitionBCELoss)
+            # Note: T_batch peut exister mais loss_fn peut être baseline (--no-weighted-loss)
+            if T_batch is not None and hasattr(loss_fn, 'transition_weight'):
                 loss = loss_fn(outputs, Y_batch, T_batch)
             else:
                 loss = loss_fn(outputs, Y_batch)
@@ -449,6 +451,22 @@ def parse_args():
     parser.add_argument('--device', type=str, default='auto',
                         choices=['auto', 'cuda', 'cpu'],
                         help='Device à utiliser (auto détecte automatiquement)')
+
+    # Weighted Loss Control
+    parser.add_argument('--no-weighted-loss', action='store_true',
+                        help='Désactiver WeightedTransitionBCELoss même si transitions disponibles (baseline mode)')
+    parser.add_argument('--transition-weight', type=float, default=5.0,
+                        help='Poids pour les transitions dans WeightedTransitionBCELoss (défaut: 5.0)')
+
+    # Shortcut Last-N Steps
+    parser.add_argument('--shortcut', action='store_true',
+                        help='Activer shortcut last-5 steps (améliore détection transitions)')
+    parser.add_argument('--shortcut-steps', type=int, default=5,
+                        help='Nombre de steps pour le shortcut (défaut: 5)')
+
+    # Temporal Gate (poids learnable par timestep)
+    parser.add_argument('--temporal-gate', action='store_true',
+                        help='Activer temporal gate (poids learnable par timestep, favorise récents)')
 
     return parser.parse_args()
 
@@ -888,8 +906,13 @@ def main():
     logger.info(f"  use_layer_norm={use_layer_norm}, use_bce_with_logits={use_bce_with_logits}")
 
     # Phase 2.11: Utiliser WeightedTransitionBCELoss si transitions disponibles
-    if has_transitions:
-        logger.info(f"  🎯 Phase 2.11: WeightedTransitionBCELoss ACTIVÉ (transition_weight=5.0×)")
+    # Flag --no-weighted-loss permet de forcer le mode baseline
+    use_weighted_loss = has_transitions and not args.no_weighted_loss
+    if args.no_weighted_loss and has_transitions:
+        logger.info(f"  ⚠️ WeightedTransitionBCELoss DÉSACTIVÉ (--no-weighted-loss)")
+
+    if use_weighted_loss:
+        logger.info(f"  🎯 Phase 2.11: WeightedTransitionBCELoss ACTIVÉ (transition_weight={args.transition_weight}×)")
         from model import WeightedTransitionBCELoss
 
         # Créer le modèle (sans loss, on la remplace)
@@ -904,13 +927,16 @@ def main():
             dense_hidden_size=args.dense_hidden,
             dense_dropout=args.dense_dropout,
             use_layer_norm=use_layer_norm,
-            use_bce_with_logits=use_bce_with_logits
+            use_bce_with_logits=use_bce_with_logits,
+            use_shortcut=args.shortcut,
+            shortcut_steps=args.shortcut_steps,
+            use_temporal_gate=args.temporal_gate
         )
 
         # Remplacer par WeightedTransitionBCELoss
         loss_fn = WeightedTransitionBCELoss(
             num_outputs=num_outputs_final,
-            transition_weight=5.0,  # 5× poids pour les transitions
+            transition_weight=args.transition_weight,
             use_bce_with_logits=use_bce_with_logits
         )
     else:
@@ -926,8 +952,17 @@ def main():
             dense_hidden_size=args.dense_hidden,
             dense_dropout=args.dense_dropout,
             use_layer_norm=use_layer_norm,
-            use_bce_with_logits=use_bce_with_logits
+            use_bce_with_logits=use_bce_with_logits,
+            use_shortcut=args.shortcut,
+            shortcut_steps=args.shortcut_steps,
+            use_temporal_gate=args.temporal_gate
         )
+
+    # Log features actives
+    if args.shortcut:
+        logger.info(f"🔗 Shortcut Last-{args.shortcut_steps} Steps ACTIVÉ (skip connection)")
+    if args.temporal_gate:
+        logger.info(f"⏱️ Temporal Gate ACTIVÉ (poids learnable par timestep)")
 
     # Optimizer
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
@@ -963,6 +998,9 @@ def main():
         'indicator_for_metrics': indicator_for_metrics,
         'use_layer_norm': use_layer_norm,
         'use_bce_with_logits': use_bce_with_logits,
+        'use_shortcut': args.shortcut,
+        'shortcut_steps': args.shortcut_steps,
+        'use_temporal_gate': args.temporal_gate,
     }
 
     # =========================================================================
@@ -978,9 +1016,6 @@ def main():
         suffix_parts.append(detected_filter)
     if is_dual_binary:
         suffix_parts.append('dual_binary')
-    # Phase 2.11: Ajouter _wt si transitions (ne pas écraser modèles existants)
-    if has_transitions:
-        suffix_parts.append('wt')
 
     if suffix_parts:
         suffix = '_'.join(suffix_parts)
@@ -991,8 +1026,6 @@ def main():
     logger.info(f"\n💾 Modèle sauvegardé:")
     logger.info(f"  Indicateur détecté: {detected_indicator or 'aucun'}")
     logger.info(f"  Filtre détecté: {detected_filter or 'aucun'}")
-    if has_transitions:
-        logger.info(f"  ✅ Weighted Transitions: OUI (suffixe _wt ajouté)")
 
     logger.info(f"  Modèle sera sauvegardé: {save_path}")
 
