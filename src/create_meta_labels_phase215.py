@@ -98,6 +98,7 @@ def simulate_oracle_backtest(
     pnl_net = 0.0
 
     opens = ohlcv[:, 2]  # Open prices
+    closes = ohlcv[:, 5]  # Close prices
     asset_ids = ohlcv[:, 1]  # Asset IDs
     n_samples = len(labels)
 
@@ -111,7 +112,10 @@ def simulate_oracle_backtest(
         if current_asset != next_asset:
             if position != 'FLAT':
                 # Sortie forcée en fin d'asset
-                exit_price = opens[i + 1]
+                # CRITIQUE: Utiliser closes[i] (Close bougie actuelle), PAS opens[i+1] (premier Open prochain asset)!
+                # - opens[i+1] = prix du prochain asset (ETH) alors qu'on trade l'asset actuel (BTC) → catastrophique!
+                # - closes[i] = Close bougie actuelle, disponible à la fin de période i → causal ✓
+                exit_price = closes[i]
                 direction_multiplier = 1 if position == 'LONG' else -1
                 ret = direction_multiplier * (exit_price - entry_price) / entry_price
 
