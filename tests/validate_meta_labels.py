@@ -293,6 +293,8 @@ def validate_meta_labels_consistency(meta_data: Dict) -> bool:
 
     # Reconstruire meta_labels depuis trades pour vérification
     reconstructed_labels = np.full(n_samples, -2, dtype=np.int32)  # -2 = pas encore assigné
+    last_exit = -1
+    n_reversals = 0
 
     for trade_idx, trade in enumerate(trades):
         entry_idx = trade['entry_idx']
@@ -309,20 +311,31 @@ def validate_meta_labels_consistency(meta_data: Dict) -> bool:
         else:
             expected_label = 0
 
+        # IMPORTANT: Gérer les reversals comme dans le code de génération
+        # Si entry == last_exit, le timestep de transition appartient au trade précédent
+        if entry_idx == last_exit:
+            entry_idx = entry_idx + 1
+            n_reversals += 1
+
         # Vérifier que tous les timesteps du trade ont le bon label
-        trade_labels = meta_labels[entry_idx:exit_idx+1]
+        if entry_idx <= exit_idx:  # Vérifier range valide
+            trade_labels = meta_labels[entry_idx:exit_idx+1]
 
-        if not np.all(trade_labels == expected_label):
-            errors.append(f"Trade {trade_idx}: labels incohérents dans [entry={entry_idx}, exit={exit_idx}]")
-            errors.append(f"  PnL={pnl:.4f}, duration={duration}, expected={expected_label}")
-            errors.append(f"  Actual labels: {np.unique(trade_labels, return_counts=True)}")
+            if not np.all(trade_labels == expected_label):
+                errors.append(f"Trade {trade_idx}: labels incohérents dans [entry={entry_idx}, exit={exit_idx}]")
+                errors.append(f"  PnL={pnl:.4f}, duration={duration}, expected={expected_label}")
+                errors.append(f"  Actual labels: {np.unique(trade_labels, return_counts=True)}")
 
-        # Vérifier pas de chevauchement pendant reconstruction
-        if np.any(reconstructed_labels[entry_idx:exit_idx+1] != -2):
-            errors.append(f"Trade {trade_idx}: chevauchement détecté à [entry={entry_idx}, exit={exit_idx}]")
+            # Vérifier pas de chevauchement pendant reconstruction
+            if np.any(reconstructed_labels[entry_idx:exit_idx+1] != -2):
+                errors.append(f"Trade {trade_idx}: chevauchement détecté à [entry={entry_idx}, exit={exit_idx}]")
 
-        # Marquer dans reconstructed
-        reconstructed_labels[entry_idx:exit_idx+1] = expected_label
+            # Marquer dans reconstructed
+            reconstructed_labels[entry_idx:exit_idx+1] = expected_label
+
+        last_exit = exit_idx
+
+    print_info(f"Reversals détectés: {n_reversals}")
 
     # Vérifier qu'il n'y a pas de timesteps non couverts
     uncovered = np.sum(reconstructed_labels == -2)
