@@ -52,7 +52,7 @@ def load_dataset(indicator: str, filter_type: str, split: str) -> dict:
     # Extraire les données du split demandé
     result = {
         'sequences': data[X_key],           # (n, 25, features)
-        'labels': data[Y_key],              # (n, 1) - direction
+        'labels': data[Y_key],              # (n, 3) - [timestamp, asset_id, direction]
         'timestamps': data[T_key],          # (n, 3) - [timestamp, asset_id, is_transition]
         'ohlcv': data[OHLCV_key],          # (n, 7) - [timestamp, asset_id, O, H, L, C, V]
         'metadata': json.loads(data['metadata'].item()) if 'metadata' in data else {}
@@ -77,7 +77,7 @@ def simulate_oracle_backtest(
     Simule backtest Oracle (labels parfaits) pour obtenir les trades.
 
     Args:
-        labels: Labels Oracle (n, 1) - direction
+        labels: Labels Oracle (n, 3) - [timestamp, asset_id, direction]
         ohlcv: Prix OHLCV (n, 7) - [timestamp, asset_id, O, H, L, C, V]
         timestamps: Timestamps (n, 3) - [timestamp, asset_id, is_transition]
         fees: Frais par trade (0.001 = 0.1%)
@@ -102,7 +102,7 @@ def simulate_oracle_backtest(
     n_samples = len(labels)
 
     for i in range(n_samples - 1):
-        current_label = labels[i, 0]
+        current_label = labels[i, 2]  # Colonne 2 = direction (0=DOWN, 1=UP)
         target = 'LONG' if current_label == 1 else 'SHORT'
         current_asset = asset_ids[i]
         next_asset = asset_ids[i + 1]
@@ -317,7 +317,7 @@ def save_meta_dataset(
         **metadata,
         'meta_labeling': meta_config,
         'indicator': args.indicator,
-        'filter_type': args.filter_type
+        'filter_type': args.filter
     }
 
     # Sauvegarder avec MÊME structure + nouvelles données
