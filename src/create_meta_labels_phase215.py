@@ -374,6 +374,43 @@ def map_trade_labels_to_timesteps(
     return timestep_labels
 
 
+def load_predictions(indicator: str, filter_type: str, split: str) -> np.ndarray:
+    """
+    Charge les prédictions depuis le fichier .npz d'un indicateur.
+
+    Args:
+        indicator: 'macd', 'rsi', ou 'cci'
+        filter_type: 'kalman' ou 'octave'
+        split: 'train', 'val', ou 'test'
+
+    Returns:
+        Prédictions (n,) - probabilités [0,1]
+    """
+    dataset_path = Path(f'data/prepared/dataset_btc_eth_bnb_ada_ltc_{indicator}_direction_only_{filter_type}.npz')
+
+    if not dataset_path.exists():
+        raise FileNotFoundError(f"Dataset not found: {dataset_path}")
+
+    print(f"  Loading predictions from: {dataset_path.name}")
+    data = np.load(dataset_path, allow_pickle=True)
+
+    pred_key = f'Y_{split}_pred'
+
+    if pred_key not in data:
+        raise KeyError(f"Predictions not found in {dataset_path}. Key '{pred_key}' missing. "
+                      f"Make sure the model has been trained and predictions saved.")
+
+    predictions = data[pred_key]
+
+    # Les prédictions sont (n, 1) pour direction-only, on extrait la colonne
+    if predictions.ndim == 2 and predictions.shape[1] == 1:
+        predictions = predictions[:, 0]
+
+    print(f"    Shape: {predictions.shape}, mean: {predictions.mean():.3f}")
+
+    return predictions
+
+
 def save_meta_dataset(
     output_path: Path,
     sequences: np.ndarray,
@@ -381,12 +418,15 @@ def save_meta_dataset(
     timestamps: np.ndarray,
     ohlcv: np.ndarray,
     meta_labels: np.ndarray,
+    predictions_macd: np.ndarray,
+    predictions_rsi: np.ndarray,
+    predictions_cci: np.ndarray,
     trades: List[dict],
     metadata: dict,
     args: argparse.Namespace
 ):
     """
-    Sauvegarde nouveau dataset avec meta-labels.
+    Sauvegarde nouveau dataset avec meta-labels et prédictions.
 
     CRITIQUE: Préserve la structure originale + ajoute nouvelles données.
     """
@@ -418,7 +458,10 @@ def save_meta_dataset(
         T=timestamps,
         OHLCV=ohlcv,
         # Nouvelles données
-        meta_labels=meta_labels,      # (n,) - 0, 1, ou -1
+        meta_labels=meta_labels,              # (n,) - 0, 1, ou -1
+        predictions_macd=predictions_macd,    # (n,) - proba MACD
+        predictions_rsi=predictions_rsi,      # (n,) - proba RSI
+        predictions_cci=predictions_cci,      # (n,) - proba CCI
         # Métadonnées
         metadata=json.dumps(metadata_enriched),
         trades=trades  # Liste de dict (sauvegardé comme objet)
@@ -491,7 +534,23 @@ def main():
     )
     print()
 
-    # 6. Sauvegarder nouveau dataset
+    # 7. Charger prédictions des 3 modèles primaires
+    print("="*80)
+    print("LOADING MODEL PREDICTIONS")
+    print("="*80)
+    predictions_macd = load_predictions('macd', args.filter, args.split)
+    predictions_rsi = load_predictions('rsi', args.filter, args.split)
+    predictions_cci = load_predictions('cci', args.filter, args.split)
+    print()
+
+    # Vérifier synchronisation (même nombre de samples)
+    assert len(predictions_macd) == len(sequences), f"MACD predictions mismatch: {len(predictions_macd)} != {len(sequences)}"
+    assert len(predictions_rsi) == len(sequences), f"RSI predictions mismatch: {len(predictions_rsi)} != {len(sequences)}"
+    assert len(predictions_cci) == len(sequences), f"CCI predictions mismatch: {len(predictions_cci)} != {len(sequences)}"
+    print(f"✓ Predictions synchronized: {len(sequences)} samples")
+    print()
+
+    # 8. Sauvegarder nouveau dataset
     output_path = Path(args.output_dir) / f'meta_labels_{args.indicator}_{args.filter}_{args.split}.npz'
     save_meta_dataset(
         output_path=output_path,
@@ -500,6 +559,9 @@ def main():
         timestamps=timestamps,
         ohlcv=ohlcv,
         meta_labels=timestep_meta_labels,
+        predictions_macd=predictions_macd,
+        predictions_rsi=predictions_rsi,
+        predictions_cci=predictions_cci,
         trades=trades,
         metadata=metadata,
         args=args
