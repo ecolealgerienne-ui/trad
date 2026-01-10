@@ -408,9 +408,9 @@ def add_dual_labels_for_indicator(df: pd.DataFrame, indicator: str,
 
     # 2. Label Direction
     pos_series = pd.Series(position, index=df.index)
-    pos_t2 = pos_series.shift(2)
-    pos_t3 = pos_series.shift(3)
-    df[f'{indicator}_dir'] = (pos_t2 > pos_t3).astype(int)
+    pos_t0 = pos_series.shift(0)
+    pos_t1 = pos_series.shift(1)
+    df[f'{indicator}_dir'] = (pos_t0 > pos_t1).astype(int)
 
     # 2.5 Détection Transitions (Phase 2.11 - Weighted Loss)
     # Transition = label[i] != label[i-1]
@@ -944,7 +944,7 @@ def prepare_and_save_all(assets: list = None,
             'labels': 1,
             'label_names': [f'{indicator}_dir'],
             'label_definitions': {
-                'direction': 'filtered[t-2] > filtered[t-3]'
+                'direction': 'filtered[t] > filtered[t-1]'
             },
             'motivation': 'Force n\'apporte aucun bénéfice (-354% à -800% PnL). Focus Direction seulement.',
             'clip_value': clip_value,
