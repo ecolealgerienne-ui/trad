@@ -669,6 +669,209 @@ python tests/test_entry_oracle_exit.py --asset BNB --split test  # -319%
 
 ---
 
+## 🎯 Phase 2.17: Meta-Labeling - Filtrage Qualité des Trades (2026-01-10)
+
+**Date**: 2026-01-10
+**Statut**: ⏳ **EN DÉVELOPPEMENT - Script création meta-labels créé**
+**Script**: `src/create_meta_labels_phase215.py`
+**Objectif**: Filtrer les trades non-profitables avec Meta-Labeling (López de Prado)
+**Approche**: Séparer prédiction direction (modèles existants) vs prédiction profitabilité (meta-modèle)
+
+### Motivation - Diagnostic Phase 2.16
+
+Phase 2.16 a confirmé que **73% du problème vient des ENTRÉES ML**:
+- Oracle: Win Rate 53-57%, PnL Net +14k-23k% ✅
+- ML: Win Rate 22-23%, PnL Net -21k à -25k% ❌
+- Gap: **-31 à -35%** (Oracle → ML)
+
+**Cause racine identifiée**:
+- Modèles primaires: bonne accuracy (MACD 81.1%, RSI 69.0%, CCI 75.9%)
+- **Problème**: 10-30% d'erreurs créent des **MICRO-SORTIES** (avg 1.6 périodes = 8 min)
+- **Impact**: 108,007 trades × 0.2% frais = -21,600% en frais seuls
+
+### Principe Meta-Labeling
+
+**Architecture à 2 niveaux** (López de Prado, Advances in Financial ML):
+
+```
+NIVEAU 1 - Modèles Primaires (existants):
+  - MACD Kalman: 81.1% accuracy → Direction UP/DOWN
+  - RSI Kalman: 69.0% accuracy → Direction UP/DOWN
+  - CCI Kalman: 75.9% accuracy → Direction UP/DOWN
+
+NIVEAU 2 - Meta-Modèle (nouveau):
+  - Input: Probabilités primaires + Confidence + Market Regime
+  - Output: AGIR (1) ou NE PAS AGIR (0)
+  - Objectif: Filtrer les trades non-profitables
+```
+
+**Séparation des objectifs**:
+- **Primaire**: Quelle direction? (UP/DOWN)
+- **Meta**: Ce trade sera-t-il profitable? (OUI/NON)
+
+### Méthodologie de Création des Labels
+
+#### Triple Barrier Method Adapté Phase 2.15
+
+**Règle critique pour filtrer micro-sorties**:
+```python
+Label = 1 SI:
+  - Trade profitable (PnL > 0)
+  - Duration >= 5 périodes (pas micro-sortie)
+
+Label = 0 SI:
+  - Trade perdant (PnL <= 0)
+  - Duration < 5 périodes (micro-sortie, MÊME si rentable)
+```
+
+**Objectif**: Rejeter les micro-sorties (< 5 périodes = < 25 min) qui détruisent le PnL.
+
+#### Synchronisation Timestamps (CRITIQUE)
+
+**Approche validée**:
+1. **Charger dataset existant** `.npz` (contient timestamps)
+2. **Simuler backtest Oracle** pour obtenir entry/exit points
+3. **Calculer meta-labels** avec Triple Barrier
+4. **Sauvegarder MÊME structure** + meta_labels + predictions
+5. **Préserver timestamps** pour éviter data leakage
+
+### Features Meta-Modèle (Phase 1 - Kalman Seul)
+
+**6 features - Kalman uniquement** (Octave sera ajouté après comme 7ème feature):
+
+```python
+X_meta = [
+    # Probabilités primaires (3)
+    macd_prob,   # From best_model_macd_kalman_dual_binary.pth
+    rsi_prob,    # From best_model_rsi_kalman_dual_binary.pth
+    cci_prob,    # From best_model_cci_kalman_dual_binary.pth
+
+    # Confidence metrics (2)
+    confidence_spread,  # max(probs) - min(probs)
+    confidence_mean,    # mean(probs)
+
+    # Market regime (1)
+    volatility_atr     # ATR normalisé (Kalman only)
+]
+```
+
+**Note**: Octave disagreement sera ajouté APRÈS validation Kalman comme 7ème feature.
+
+### Modèle Meta-Labeling
+
+**Progression recommandée** (López de Prado):
+
+| Étape | Modèle | Objectif | Interprétation |
+|-------|--------|----------|----------------|
+| **1. Baseline** | Logistic Regression | Validation features | Poids features explicites |
+| 2. Robustesse | XGBoost | Non-linéarités | Interactions features |
+| 3. Deep Learning | MLP (3 layers) | Patterns complexes | Si gain > +5% vs XGBoost |
+
+**Commencer par Logistic Regression** pour:
+- Vérifier que les features ont du sens
+- Obtenir poids interprétables
+- Baseline simple et rapide
+
+### Gains Attendus
+
+**Baseline actuelle (Phase 2.15 ML)**:
+- Trades: 108,007
+- Win Rate: 22.5% (MACD)
+- PnL Net: -21,382%
+- Avg Duration: 1.6 périodes (~8 min)
+
+**Cible Meta-Labeling**:
+- Trades: **30,000-50,000** (-70%)
+- Win Rate: **35-40%** (+12-17%)
+- PnL Net: **+1,500% à +5,000%** (positif)
+- Avg Duration: **10+ périodes** (pas de micro-exits)
+
+**Mécanisme du gain**:
+- Filtrer 70% des trades (les moins profitables)
+- Garder 30% des meilleurs trades
+- Win Rate augmente (on rejette les perdants)
+- PnL Net devient positif (frais réduits + meilleurs trades)
+
+### Script Créé - create_meta_labels_phase215.py
+
+**Fonctionnalités**:
+1. ✅ Charge datasets direction-only existants (.npz)
+2. ✅ Préserve synchronisation timestamps
+3. ✅ Charge modèles entraînés pour générer prédictions
+4. ✅ Simule backtest Oracle pour obtenir trades
+5. ✅ Applique Triple Barrier Method avec min_duration=5
+6. ✅ Mappe labels trades → timesteps individuels
+7. ✅ Sauvegarde MÊME structure + meta_labels + predictions
+
+**Commandes d'exécution**:
+
+```bash
+# Test sur MACD Kalman (meilleure accuracy 81.1%)
+python src/create_meta_labels_phase215.py \
+    --indicator macd \
+    --filter kalman \
+    --split test \
+    --min-duration 5 \
+    --pnl-threshold 0.0 \
+    --fees 0.001
+
+# Output généré:
+# data/prepared/meta_labels_macd_kalman_test.npz
+#   - sequences (préservées)
+#   - labels (préservées)
+#   - timestamps (préservées)
+#   - ohlcv (préservées)
+#   - meta_labels (NOUVEAU - 0, 1, ou -1)
+#   - predictions (NOUVEAU - probabilités)
+#   - metadata (enrichies)
+```
+
+### Résultats Attendus
+
+**Distribution meta-labels**:
+- Positive (1): ~30-40% (trades acceptés - profitables ET duration >= 5)
+- Negative (0): ~60-70% (rejetés - perdants OU micro-sorties)
+- Ignored (-1): Timesteps hors trade (flat)
+
+**Rejection reasons**:
+- Micro-exits (< 5 périodes): ~60-70% des rejets
+- Losing trades: ~30-40% des rejets
+
+### Méthodologie Critique - Éviter Data Leakage
+
+**Purge & Embargo** (López de Prado):
+- Purge: Retirer X périodes après chaque trade (éviter overlap)
+- Embargo: Gap temporel entre train et test
+- Walk-forward validation: Test sur fenêtres temporelles séquentielles
+
+**Class Imbalance**:
+- Ratio 30/70 (positive/negative)
+- `class_weight='balanced'` dans Logistic Regression
+- SMOTE si nécessaire (sur-échantillonnage minoritaire)
+
+**Calibration des Probabilités**:
+- Platt Scaling pour calibrer outputs
+- Vérifier reliability diagrams
+- Crucial pour seuils de décision
+
+### Prochaines Étapes
+
+1. ✅ **Script création meta-labels** - CRÉÉ (commit a26c22c)
+2. ⏳ **Exécuter sur MACD Kalman test** - Génération meta-labels
+3. ⏳ **Train meta-model baseline** - Logistic Regression
+4. ⏳ **Valider gains** - Comparer Win Rate, Trades, PnL
+5. ⏳ **Étendre RSI/CCI** - Si MACD validation OK
+6. ⏳ **Ajouter Octave** - Comme 7ème feature après validation Kalman
+7. ⏳ **XGBoost/MLP** - Si Logistic Regression fonctionne
+
+### Références
+
+- López de Prado, M. (2018). *Advances in Financial ML*. Wiley. (Chapitre 3: Meta-Labeling)
+- Wikipedia: Meta-learning (https://en.wikipedia.org/wiki/Meta-learning)
+- Quantreo: Meta-Labeling Tutorial (https://www.quantreo.com/meta-labeling)
+
+---
+
 ## 🎯 OPTIMISATIONS ARCHITECTURE - Shortcut & Temporal Gate (2026-01-09)
 
 **Date**: 2026-01-09
