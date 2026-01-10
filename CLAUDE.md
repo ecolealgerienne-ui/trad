@@ -1,12 +1,12 @@
 # Modele CNN-LSTM Multi-Output - Guide Complet
 
-**Date**: 2026-01-09
-**Statut**: ✅ **MACD Confirmé Meilleur Oracle de Sortie** (Phase 2.14)
-**Version**: 9.8 - Phase 2.14: Entry/Exit avec Oracle - MACD 🥇 domine
+**Date**: 2026-01-10
+**Statut**: ✅ **Phase 2.15 - Changement Formule Labels: t vs t-1** (Décision Majeure)
+**Version**: 10.0 - Phase 2.15: Nouvelle formule labels + Shortcut steps=2
 **Models**: MACD Kalman 92.4% | CCI Kalman+Shortcut 88.6% | RSI Kalman 87.6%
-**Découverte Phase 2.14**: Sortie Oracle → MACD -2,082% | CCI -2,382% | RSI -2,638%
-**Hiérarchie Trading**: MACD 🥇 (moins trades, +stable) > CCI 🥈 > RSI 🥉 (trop nerveux)
-**Prochaine Étape**: Réduire trades sous 3,000 (timeframe 15/30min, holding agressif)
+**Changement Critique**: `filtered[t-2] > filtered[t-3]` → `filtered[t] > filtered[t-1]`
+**Motivation**: Signal plus réactif, Shortcut devient pertinent
+**Prochaine Étape**: Réentraîner avec nouvelle formule + Shortcut steps=2
 
 ---
 
@@ -89,6 +89,185 @@ python tests/test_structural_filters.py --split test --holding-min 30
 3. **Utilisateur exécute** sur sa machine (avec GPU + données)
 4. Utilisateur partage les résultats
 5. Claude analyse et propose prochaine étape
+
+---
+
+## 🔄 Phase 2.15: CHANGEMENT FORMULE LABELS - Signal Immédiat (2026-01-10)
+
+**Date**: 2026-01-10
+**Statut**: ✅ **IMPLÉMENTÉ - Pivot stratégique majeur**
+**Script modifié**: `src/prepare_data_direction_only.py`
+**Commit**: `b1490e6`
+
+### Décision Stratégique
+
+**Repartir de zéro avec une nouvelle formule de calcul des labels.**
+
+#### Changement Critique
+
+| Aspect | **AVANT (Phase 2.14 et antérieures)** | **APRÈS (Phase 2.15)** |
+|--------|--------------------------------------|------------------------|
+| **Formule** | `filtered[t-2] > filtered[t-3]` | `filtered[t] > filtered[t-1]` |
+| **Timing** | Pente **PASSÉE** (décalée -2 périodes) | Pente **IMMÉDIATE/ACTUELLE** |
+| **Décalage** | 2 périodes de retard (~10 min sur 5min data) | 1 période de retard (~5 min) |
+| **Signal** | Plus lissé, moins réactif | Plus réactif, capture mieux les retournements |
+
+#### Code Modifié
+
+**Lignes 410-413** de `prepare_data_direction_only.py`:
+
+```python
+# AVANT (t-2 vs t-3)
+pos_series = pd.Series(position, index=df.index)
+pos_t2 = pos_series.shift(2)
+pos_t3 = pos_series.shift(3)
+df[f'{indicator}_dir'] = (pos_t2 > pos_t3).astype(int)
+
+# APRÈS (t vs t-1)
+pos_series = pd.Series(position, index=df.index)
+pos_t0 = pos_series.shift(0)
+pos_t1 = pos_series.shift(1)
+df[f'{indicator}_dir'] = (pos_t0 > pos_t1).astype(int)
+```
+
+**Ligne 947** (métadonnées):
+```python
+# AVANT
+'direction': 'filtered[t-2] > filtered[t-3]'
+
+# APRÈS
+'direction': 'filtered[t] > filtered[t-1]'
+```
+
+### Motivation
+
+#### 1. Signal Plus Réactif
+
+```
+Avant: Label = "Quelle était la pente il y a 2-3 périodes?"
+       → Signal déjà "vieux" de 2 périodes
+       → Retard cumulé dans les décisions de trading
+
+Maintenant: Label = "Quelle est la pente actuelle (t vs t-1)?"
+            → Signal immédiat
+            → Meilleure capture des retournements
+```
+
+#### 2. Shortcut Devient Pertinent
+
+Avec la nouvelle formule, le **Shortcut (steps=2)** devient **logique et puissant** :
+
+```python
+Séquence: [t-24, t-23, ..., t-2, t-1]
+           ↓
+         CNN + LSTM (contexte global)
+           ↓
+    Shortcut: [t-2, t-1]  ← Accès DIRECT aux 2 timesteps critiques!
+           ↓
+      Concatenate
+           ↓
+    Dense → Prédiction (t vs t-1)
+```
+
+**Avant (t-2 vs t-3)**:
+- Shortcut donnait accès à [t-2, t-1]
+- Mais label comparait t-2 vs t-3
+- **Décalage**: t-1 pas utilisé dans le label!
+- **Résultat**: Shortcut neutre pour MACD/RSI (±0%)
+
+**Maintenant (t vs t-1)**:
+- Shortcut donne accès à [t-2, t-1]
+- Label compare **t vs t-1**
+- **Alignement parfait**: Les 2 derniers timesteps sont EXACTEMENT ce qu'on prédit!
+- **Résultat attendu**: Shortcut devrait aider (+1-3% potentiel)
+
+#### 3. Cohérence avec Phase 2.10 (Transition Sync)
+
+Phase 2.10 a montré que le modèle **rate 42% des transitions** (retournements):
+- Transition Accuracy MACD: 58% (vs 92.5% global)
+- **Cause**: Le modèle prédit bien la continuation mais mal les changements
+
+Avec `filtered[t] > filtered[t-1]`:
+- Le label capture la **transition immédiate**
+- Le modèle apprend à détecter les **retournements récents**
+- Potentiel: Meilleure Transition Accuracy
+
+### Impact Attendu
+
+| Métrique | Avant (t-2 vs t-3) | Après (t vs t-1) | Hypothèse |
+|----------|-------------------|------------------|-----------|
+| **Accuracy Globale** | 92.4% MACD | À tester | ±0% à -2% (signal plus dur) |
+| **Transition Accuracy** | 58% | À tester | **+5-10%** (focus sur l'immédiat) |
+| **Shortcut Gain** | ±0% (neutre) | **+1-3%** | Alignement t-1 avec label |
+| **Trading PnL** | -2,082% (Oracle) | À tester | Meilleur si transitions détectées |
+
+### Risques et Mitigations
+
+| Risque | Impact | Mitigation |
+|--------|--------|------------|
+| **Plus de bruit** | Labels plus volatils | Shortcut aide à filtrer |
+| **Accuracy baisse** | Signal plus dur à prédire | Architecture renforcée (96 filters, dropout) |
+| **Overfitting** | Modèle mémorise bruit | Dropout 0.35/0.4, batch 512 |
+
+### Configuration d'Entraînement Recommandée
+
+**MACD avec Shortcut steps=2** (configuration optimale):
+
+```bash
+# 1. Régénérer datasets avec NOUVELLE formule
+python src/prepare_data_direction_only.py --assets BTC ETH BNB ADA LTC --filter kalman
+
+# 2. Entraîner MACD avec Shortcut
+python src/train.py \
+    --data data/prepared/dataset_btc_eth_bnb_ada_ltc_macd_direction_only_kalman.npz \
+    --epochs 50 \
+    --batch-size 512 \
+    --no-weighted-loss \
+    --lstm-dropout 0.35 \
+    --dense-dropout 0.4 \
+    --cnn-filters 96 \
+    --lstm-hidden 96 \
+    --dense-hidden 64 \
+    --shortcut --shortcut-steps 2
+```
+
+### Aucun Impact sur les Autres Scripts
+
+✅ **Scripts inchangés** (agnostiques à la formule de labels):
+- `src/train.py` - Charge Y depuis .npz, ne connaît pas la formule
+- `src/evaluate.py` - Charge Y depuis .npz, ne connaît pas la formule
+- `tests/test_*.py` - Utilisent les labels du .npz
+
+### Fichiers Générés (Noms Identiques)
+
+Aucun changement de nomenclature:
+- `dataset_btc_eth_bnb_ada_ltc_macd_direction_only_kalman.npz`
+- `dataset_btc_eth_bnb_ada_ltc_rsi_direction_only_kalman.npz`
+- `dataset_btc_eth_bnb_ada_ltc_cci_direction_only_kalman.npz`
+
+**Seule différence**: Contenu de `Y` (labels calculés différemment)
+
+### Prochaines Étapes
+
+1. ✅ **Régénérer les 3 datasets** avec nouvelle formule
+2. ✅ **Entraîner MACD** avec Shortcut steps=2
+3. ⏳ **Comparer les résultats**:
+   - Accuracy globale vs baseline 92.4%
+   - Transition Accuracy (script `test_transition_sync.py`)
+   - Trading PnL (script `test_oracle_direction_only.py`)
+4. ⏳ **Décider**: Conserver nouvelle formule ou revenir à l'ancienne
+
+### Validation
+
+**Critères de succès**:
+- ✅ Transition Accuracy ≥ 65% (+7% vs 58% baseline)
+- ✅ Accuracy globale ≥ 90% (-2.4% max acceptable)
+- ✅ Oracle PnL reste positif (+600%+)
+
+**Critères d'échec** (revenir à t-2 vs t-3):
+- ❌ Transition Accuracy < 60%
+- ❌ Accuracy globale < 88%
+- ❌ Oracle PnL devient négatif
 
 ---
 

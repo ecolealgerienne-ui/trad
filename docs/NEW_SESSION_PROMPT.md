@@ -1,8 +1,8 @@
 # 🚀 Prompt Nouvelle Session - Trading ML
 
 **Date**: 2026-01-10
-**Version**: 9.8 - Phase 2.14 complétée
-**Branch Git**: `claude/review-project-context-QHJwT`
+**Version**: 10.0 - Phase 2.15: Nouvelle Formule Labels (t vs t-1)
+**Branch Git**: `claude/review-context-update-main-844S0`
 
 ---
 
@@ -23,6 +23,23 @@ Je continue le projet **CNN-LSTM Direction-Only** pour prédiction de tendance c
 | **MACD** | **92.4%** 🥇 | Kalman, baseline | **Indicateur PIVOT** |
 | **CCI** | 88.6% 🥈 | Kalman + Shortcut s=2 | Modulateur |
 | **RSI** | 87.6% 🥉 | Kalman, baseline | Modulateur |
+
+### 🔄 Phase 2.15 (EN COURS): Nouvelle Formule Labels
+
+**CHANGEMENT MAJEUR - Pivot Stratégique**
+
+| Aspect | AVANT | APRÈS |
+|--------|-------|-------|
+| **Formule** | `filtered[t-2] > filtered[t-3]` | `filtered[t] > filtered[t-1]` |
+| **Signal** | Pente passée (décalée -2) | **Pente immédiate** |
+| **Shortcut** | Neutre (±0%) | **Pertinent (+1-3%)** |
+
+**Commit**: `b1490e6` - Script modifié: `src/prepare_data_direction_only.py`
+
+**Prochaines étapes**:
+1. Régénérer datasets avec nouvelle formule
+2. Entraîner MACD + Shortcut steps=2
+3. Comparer vs baseline 92.4%
 
 ### Découverte Majeure - Phase 2.13
 
@@ -160,7 +177,8 @@ Chercher logique dans scripts existants avant réécrire.
 | 2.11 Weighted Loss | -6.5% | Dégradation |
 | 2.12 Prob Fusion | -15% à -43% | Échec total |
 | 2.13 Indépendance | Corr=1.0 | Même signal prouvé |
-| **2.14 Entry/Exit Oracle** | **MACD -2,082%** | **MACD meilleur** |
+| 2.14 Entry/Exit Oracle | MACD -2,082% | MACD meilleur |
+| **2.15 Formule Labels** | **t vs t-1** | **Pivot majeur - À tester** |
 
 ---
 
