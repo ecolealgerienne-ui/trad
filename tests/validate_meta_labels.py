@@ -400,8 +400,9 @@ def validate_trades_consistency(meta_data: Dict) -> bool:
         if duration != expected_duration:
             errors.append(f"Trade {i}: duration ({duration}) != exit - entry ({expected_duration})")
 
-        # Vérifier pas de chevauchement
-        if entry_idx <= last_exit:
+        # Vérifier pas de chevauchement (entry < last_exit)
+        # Note: entry_idx == last_exit est un reversal normal, pas un overlap
+        if entry_idx < last_exit:
             overlaps.append(f"Trade {i}: overlap avec trade précédent (entry={entry_idx}, last_exit={last_exit})")
         last_exit = exit_idx
 
@@ -552,27 +553,33 @@ def validate_statistics(meta_data: Dict) -> bool:
         print_pass(f"Nombre de trades cohérent: {len(trades)}")
 
     # Vérifier n_positive / n_negative
+    # NOTE: metadata contient le nombre de TIMESTEPS avec label 1/0, pas le nombre de TRADES
     label_counts = Counter(meta_labels)
 
-    # Note: Les stats dans SUMMARY sont calculées sur les TIMESTEPS, pas sur les TRADES
-    # C'est normal d'avoir une différence
+    expected_positive_timesteps = meta_config['n_positive']
+    expected_negative_timesteps = meta_config['n_negative']
 
-    expected_positive_trades = meta_config['n_positive']
-    expected_negative_trades = meta_config['n_negative']
+    actual_positive_timesteps = label_counts[1]
+    actual_negative_timesteps = label_counts[0]
 
+    if actual_positive_timesteps != expected_positive_timesteps:
+        errors.append(f"Timesteps positifs ({actual_positive_timesteps}) != metadata ({expected_positive_timesteps})")
+    else:
+        print_pass(f"Nombre de timesteps positifs cohérent: {actual_positive_timesteps}")
+
+    if actual_negative_timesteps != expected_negative_timesteps:
+        errors.append(f"Timesteps négatifs ({actual_negative_timesteps}) != metadata ({expected_negative_timesteps})")
+    else:
+        print_pass(f"Nombre de timesteps négatifs cohérent: {actual_negative_timesteps}")
+
+    # Vérifier aussi le nombre de trades positifs/négatifs (calcul séparé)
     actual_positive_trades = sum(1 for t in trades if t['pnl'] > meta_config['pnl_threshold']
                                   and t['duration'] >= meta_config['min_duration'])
     actual_negative_trades = len(trades) - actual_positive_trades
 
-    if actual_positive_trades != expected_positive_trades:
-        errors.append(f"Trades positifs ({actual_positive_trades}) != metadata ({expected_positive_trades})")
-    else:
-        print_pass(f"Nombre de trades positifs cohérent: {actual_positive_trades}")
-
-    if actual_negative_trades != expected_negative_trades:
-        errors.append(f"Trades négatifs ({actual_negative_trades}) != metadata ({expected_negative_trades})")
-    else:
-        print_pass(f"Nombre de trades négatifs cohérent: {actual_negative_trades}")
+    print_info(f"\nStatistiques par trades:")
+    print_info(f"  Trades positifs (profitable + duration>=min): {actual_positive_trades} ({100*actual_positive_trades/len(trades):.1f}%)")
+    print_info(f"  Trades négatifs: {actual_negative_trades} ({100*actual_negative_trades/len(trades):.1f}%)")
 
     # Comparer avec Phase 2.15 Oracle results (référence)
     print_info("\nComparaison avec Phase 2.15 Oracle (référence):")
@@ -588,14 +595,23 @@ def validate_statistics(meta_data: Dict) -> bool:
     pnl_gross = sum(t['pnl'] for t in trades) * 100
     fees_total = len(trades) * 2 * meta_config['fees'] * 100  # Entry + exit
     pnl_net = pnl_gross - fees_total
-    winning_trades = sum(1 for t in trades if t['pnl'] > 0)
+
+    # Win Rate selon définition Triple Barrier: profitable ET duration >= min_duration
+    winning_trades = sum(1 for t in trades
+                         if t['pnl'] > meta_config['pnl_threshold']
+                         and t['duration'] >= meta_config['min_duration'])
     win_rate = 100 * winning_trades / total_trades if total_trades > 0 else 0
     avg_duration = np.mean([t['duration'] for t in trades])
+
+    # Pour comparaison: Win Rate brut (juste PnL > 0)
+    winning_trades_raw = sum(1 for t in trades if t['pnl'] > 0)
+    win_rate_raw = 100 * winning_trades_raw / total_trades if total_trades > 0 else 0
 
     print_info(f"  Trades: {total_trades:,} (référence: 68,924)")
     print_info(f"  PnL Brut: {pnl_gross:+.2f}% (référence: +9,669%)")
     print_info(f"  PnL Net: {pnl_net:+.2f}% (référence: -4,116%)")
-    print_info(f"  Win Rate: {win_rate:.1f}% (référence: 33.4%)")
+    print_info(f"  Win Rate (Triple Barrier): {win_rate:.1f}% (référence: 33.4%)")
+    print_info(f"  Win Rate (raw PnL>0): {win_rate_raw:.1f}%")
     print_info(f"  Avg Duration: {avg_duration:.1f}p (référence: 9.3p)")
 
     # Vérifier cohérence avec Phase 2.15

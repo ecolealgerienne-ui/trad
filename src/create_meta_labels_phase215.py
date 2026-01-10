@@ -257,6 +257,9 @@ def map_trade_labels_to_timesteps(
     Chaque timestep reçoit le label du trade auquel il appartient.
     Si un timestep n'appartient à aucun trade (flat), label = -1 (ignore).
 
+    IMPORTANT: Pour les reversals (entry_idx == last_exit), le timestep de
+    transition appartient au trade sortant. Le nouveau trade commence après.
+
     Args:
         trades: Liste de trades avec entry_idx et exit_idx
         meta_labels: Labels des trades (n_trades,)
@@ -268,19 +271,31 @@ def map_trade_labels_to_timesteps(
     print("Mapping trade labels to timesteps...")
 
     timestep_labels = np.full(n_timesteps, -1, dtype=np.int32)
+    last_exit = -1
+    n_reversals = 0
 
     for trade, label in zip(trades, meta_labels):
         entry_idx = trade['entry_idx']
         exit_idx = trade['exit_idx']
 
+        # Si c'est un reversal (entry == last_exit), le timestep de transition
+        # appartient au trade précédent. On commence après.
+        if entry_idx == last_exit:
+            entry_idx = entry_idx + 1
+            n_reversals += 1
+
         # Assigner label à tous les timesteps du trade
-        timestep_labels[entry_idx:exit_idx+1] = label
+        if entry_idx <= exit_idx:  # Vérifier que le range est valide
+            timestep_labels[entry_idx:exit_idx+1] = label
+
+        last_exit = exit_idx
 
     n_labeled = np.sum(timestep_labels != -1)
     n_ignored = np.sum(timestep_labels == -1)
 
     print(f"  Labeled timesteps: {n_labeled}/{n_timesteps} ({100*n_labeled/n_timesteps:.1f}%)")
     print(f"  Ignored timesteps: {n_ignored} ({100*n_ignored/n_timesteps:.1f}%)")
+    print(f"  Reversals detected: {n_reversals}")
 
     return timestep_labels
 
