@@ -1241,6 +1241,184 @@ Le script génère:
 **Si objectifs atteints**: Meta-labeling validé pour production
 **Si objectifs ratés**: Analyser FP/FN patterns (Phase 2.19)
 
+#### Résultats Réels et Diagnostic Expert Critique (2026-01-10)
+
+**Date**: 2026-01-10
+**Statut**: ❌ **ÉCHEC VALIDÉ - Problème Architecture Fondamentale Identifié**
+
+##### Bugs Corrigés dans le Script
+
+**Bug #1: Fees ×100**
+- **Problème**: Multiplication par 100 pendant le calcul des frais
+- **Impact**: 2 * 0.001 * 100 = 0.2 = 20% frais par trade (au lieu de 0.2%)
+- **Résultat**: 64,216 trades × 20% = 12,843% en frais
+- **Fix**: Commit `4815ba9` - Retirer `* 100` du calcul, garder seulement pour l'affichage
+
+**Bug #2: Trading Logic Fatal**
+- **Problème**: `continue` statement quand `meta_prob <= threshold` pendant une position
+- **Impact**: Système ne sortait JAMAIS de position quand signal changeait
+- **Résultat**: Pertes catastrophiques quand marché allait contre la position
+- **Fix**: Commit `ea672e8` - Implémentation Option B (permettre FLAT)
+  - CAS 1: Si FLAT, entrer seulement si `meta_prob > threshold`
+  - CAS 2: Si EN POSITION et signal change, TOUJOURS sortir (protéger capital)
+  - Retour à FLAT après sortie, décider re-entrée basé sur `meta_prob`
+
+##### Résultats Backtest (Après Corrections)
+
+| Stratégie | Trades | Filtrés | Win Rate | PnL Net | Observation |
+|-----------|--------|---------|----------|---------|-------------|
+| **Baseline (no filter)** | 108,702 | 0 | 22.49% | **-21,382%** | Référence catastrophique |
+| **Meta-Filter (0.5)** | 76,881 | 210,115 | 22.32% | **-14,924%** | -29% trades, WR stable |
+| **Meta-Filter (0.6)** | 40,315 | 476,449 | 20.34% | **-7,790%** | -63% trades, **WR baisse** ❌ |
+| **Meta-Filter (0.7)** | 16,277 | 602,131 | 19.22% | **-3,034%** | -85% trades, **WR baisse** ❌ |
+
+**Observations critiques**:
+- ✅ Trades réduits de 29-85% (objectif atteint)
+- ❌ **Win Rate DIMINUE au lieu d'augmenter** (22.5% → 19.2%)
+- ❌ PnL Net toujours négatif (objectif raté)
+- ❌ Plus on filtre, plus le Win Rate empire
+
+##### Diagnostic Expert - Problème Architecture Fondamentale
+
+**Verdict de l'expert**:
+> "le problème NE vient pas du méta-modèle. Il vient AVANT."
+
+**1. Modèles Primaires Catastrophiques**
+
+```
+Baseline ML:
+- PnL Net: -21,382%
+- Win Rate: 22%
+- Trades: 108,702
+
+Oracle (Phase 2.15):
+- PnL Net: +14,359% (MACD) à +23,039% (RSI)
+- Win Rate: 53-57%
+→ Le signal EXISTE avec labels parfaits!
+```
+
+**Citation clé (López de Prado)**:
+> "un meta-model ne transforme jamais un modèle perdant en modèle gagnant"
+
+**2. Meta-Modèle Techniquement Correct**
+
+Le meta-modèle lui-même fonctionne correctement:
+- ROC AUC: 0.5846 (signal détectable)
+- Precision: 68.41% (niveau institutionnel)
+- confidence_spread: +2.6584 (10× autres features, valide théorie)
+
+**MAIS**: Il prédit la mauvaise chose!
+
+**3. Mismatch Fondamental: Labels ≠ Stratégie**
+
+| Aspect | Triple Barrier (meta-labels) | Backtest Réel |
+|--------|------------------------------|---------------|
+| **Sortie** | Barrières prix + duration | Changement signal |
+| **PnL** | (exit_price - entry_price) avec barrières | (exit_price - entry_price) au signal change |
+| **Duration** | Contrainte min_duration=5 | Variable selon signal |
+| **Exits** | 3 conditions (TP, SL, time) | 1 condition (signal flip) |
+
+**Explication du problème**:
+```
+Meta-modèle apprend:
+  "Ce trade sera profitable selon Triple Barrier"
+  (avec barrières fixes et contraintes de durée)
+
+Backtest calcule:
+  "Ce trade est profitable selon signal reversal"
+  (sortie immédiate quand direction change)
+
+→ Le meta-modèle filtre les "mauvais" trades selon Triple Barrier
+→ Mais ces trades peuvent être BONS selon la vraie stratégie
+→ Résultat: Filtrage INVERSE (Win Rate baisse au lieu de monter)
+```
+
+**4. Pourquoi le Win Rate Diminue**
+
+Le meta-modèle avec Precision 68.41% dit:
+- "68% des trades que je recommande sont profitables... selon Triple Barrier"
+
+Mais le backtest utilise une logique différente:
+- Trades recommandés peuvent être perdants dans le backtest réel
+- Trades rejetés peuvent être gagnants dans le backtest réel
+
+**Résultat**: Le filtrage sélectionne les MAUVAIS trades du point de vue du backtest.
+
+**5. Validation Littérature**
+
+**López de Prado (Advances in Financial ML, Chap. 3)**:
+> "Meta-labeling improves profitable primary models. It cannot invert the sign of a losing model."
+
+**Dixon, Halperin, Bilokon (2020)**:
+- Modèles directionnels trop bruités pour méta-modèles
+- Besoin de modèles primaires avec edge positif
+
+**Krauss, Do & Huck (2017)**:
+- Signaux primaires faibles ne peuvent pas être sauvés
+- Meta-learning nécessite base solide
+
+##### Solution Prescrite
+
+**Créer des meta-labels alignés avec la vraie stratégie de backtest**:
+
+```python
+# Au lieu de Triple Barrier:
+direction = modèle_primaire[i]
+entry_price = open[i+1]
+
+# Trouver quand direction change
+j = prochain_index_où_direction_change
+
+exit_price = open[j+1]
+
+# Calculer PnL exactement comme dans le backtest
+if direction == UP:
+    pnl = (exit_price - entry_price) / entry_price
+else:  # SHORT
+    pnl = (entry_price - exit_price) / entry_price
+
+pnl_after_fees = pnl - (2 * fees)
+
+# Label meta simple et aligné
+label_meta = 1 if pnl_after_fees > 0 else 0
+```
+
+**Avantages**:
+- Labels correspondent EXACTEMENT au calcul PnL du backtest
+- Pas de barrières artificielles
+- Pas de contraintes de durée arbitraires
+- Le meta-modèle apprend à prédire la profitabilité RÉELLE
+
+##### Prochaines Étapes
+
+1. ✅ **Documenter diagnostic expert dans CLAUDE.md** (fait)
+2. ⏳ **Créer script meta-labels aligné** - `src/create_meta_labels_aligned.py`
+   - Simuler backtest exact (signal reversal)
+   - Générer labels basés sur PnL réel
+   - Sauvegarder avec même structure .npz
+3. ⏳ **Réentraîner meta-model** avec nouveaux labels corrects
+4. ⏳ **Re-backtest** pour valider alignement
+
+**Commande pour nouveau script** (à créer):
+```bash
+python src/create_meta_labels_aligned.py \
+    --indicator macd \
+    --filter kalman \
+    --split train \
+    --fees 0.001
+```
+
+##### Conclusion Phase 2.18
+
+❌ **ÉCHEC VALIDÉ** - Problème architecture fondamentale identifié:
+- Le meta-modèle fonctionne techniquement (68% Precision, 0.58 AUC)
+- Mais il prédit selon Triple Barrier, pas selon la vraie stratégie
+- **Triple Barrier labels ≠ Backtest PnL calculation**
+- Solution: Recréer labels alignés avec stratégie réelle
+
+**Leçon Critique**:
+> "Les labels de meta-labeling doivent correspondre EXACTEMENT à la stratégie de trading utilisée en backtest. Toute différence créera un mismatch qui rendra le filtrage inefficace ou inverse."
+
 ---
 
 ## 🎯 OPTIMISATIONS ARCHITECTURE - Shortcut & Temporal Gate (2026-01-09)
