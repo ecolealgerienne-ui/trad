@@ -226,11 +226,23 @@ def validate_temporal_sync(meta_data: Dict, original_data: Dict) -> bool:
     if not errors:
         print_pass("Timestamps Y, T, OHLCV synchronisés")
 
-    # Vérifier ordre chronologique
-    if not np.all(np.diff(Y_timestamps) >= 0):
-        errors.append("Timestamps Y ne sont pas en ordre chronologique")
-    else:
-        print_pass("Timestamps Y en ordre chronologique")
+    # Vérifier ordre chronologique PAR ASSET (multi-asset dataset)
+    # Pour un dataset multi-asset, timestamps reset à chaque frontière d'asset
+    # Il faut vérifier l'ordre chronologique DANS chaque asset, pas globalement
+    asset_ids = meta_data['Y'][:, 1]
+    unique_assets = np.unique(asset_ids)
+
+    all_chronological = True
+    for asset_id in unique_assets:
+        mask = (asset_ids == asset_id)
+        asset_timestamps = Y_timestamps[mask]
+
+        if not np.all(np.diff(asset_timestamps) >= 0):
+            errors.append(f"Asset {int(asset_id)}: timestamps non chronologiques")
+            all_chronological = False
+
+    if all_chronological:
+        print_pass(f"Timestamps chronologiques pour tous les assets ({len(unique_assets)} assets)")
 
     # Vérifier asset_ids identiques entre Y, T, OHLCV
     Y_assets = meta_data['Y'][:, 1]
