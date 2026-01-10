@@ -464,6 +464,304 @@ python tests/test_oracle_direction_only.py --indicator cci --split test --fees 0
 
 ---
 
+## ⚠️ Phase 2.16: ML Entry + Oracle Exit - Tests Asset-Specific (2026-01-10)
+
+**Date**: 2026-01-10
+**Statut**: ⏳ **RÉSULTATS PRÉLIMINAIRES - VALIDATION REQUISE**
+**Script**: `tests/test_entry_oracle_exit.py`
+**Objectif**: Isoler le problème - Entrées ML vs Sorties ML
+
+### 🚨 AVERTISSEMENT CRITIQUE - Risque de Suroptimisation
+
+**⚠️ CES RÉSULTATS SONT PRÉLIMINAIRES ET NÉCESSITENT UNE VALIDATION RIGOUREUSE**
+
+**Problèmes méthodologiques:**
+1. **Échantillon limité**: Seulement 3 assets testés (BTC, ADA, LTC) sur 5 disponibles
+2. **Même split test**: Configuration optimisée sur le MÊME dataset que l'évaluation
+3. **Data snooping potentiel**: Risque de sur-ajustement aux particularités de ces 3 assets
+4. **Pas de validation out-of-sample**: Aucun test sur période/split différent
+
+**Actions requises pour validation:**
+- ✅ Tester sur ETH et BNB (completer la couverture)
+- ❌ Walk-forward validation (tester sur période future)
+- ❌ Cross-validation temporelle (splits différents)
+- ❌ Validation statistique (bootstrap, permutation tests)
+
+**À ce stade, ces résultats doivent être considérés comme EXPLORATOIRES, pas conclusifs.**
+
+### Contexte - Décomposition du Problème
+
+**Phase 2.15 a prouvé que l'Oracle fonctionne** (Win Rate 53-57%, PnL Net +14k-23k%).
+
+**Mais ML Entry + ML Exit échoue** (Win Rate 22-23%, PnL Net -21k% à -25k%).
+
+**Question**: Le problème vient-il des **ENTRÉES ML** ou des **SORTIES ML** ?
+
+**Hypothèse testée**: Utiliser Oracle pour les sorties (changements de direction détectés parfaitement) et ML pour les entrées (score pondéré des 3 indicateurs).
+
+### Méthodologie
+
+**Stratégie Hybride:**
+```python
+# ENTRÉES ML: Score pondéré avec seuils
+score = (w_macd * p_macd + w_cci * p_cci + w_rsi * p_rsi) / sum(weights)
+if score > threshold_long:
+    ENTER LONG
+elif score < threshold_short:
+    ENTER SHORT
+
+# SORTIES ORACLE: Changement de direction (labels parfaits)
+if oracle_label[t] != oracle_label[t-1]:
+    EXIT
+```
+
+**Grid Search**: 3,072 combinaisons
+- Poids: [0.2, 0.4, 0.6, 0.8]³ = 64 combinaisons
+- Threshold Long: [0.2, 0.4, 0.6, 0.8] = 4 valeurs
+- Threshold Short: [0.2, 0.4, 0.6, 0.8] = 4 valeurs
+- Oracle Exit: [MACD, RSI, CCI] = 3 choix
+
+### Résultats Préliminaires - 3 Assets (Test Set BTC)
+
+#### Comparaison Oracle vs ML vs Hybride
+
+| Configuration | Trades | Win Rate | PnL Brut | PnL Net | Verdict |
+|---------------|--------|----------|----------|---------|---------|
+| **Oracle Entry + Oracle Exit** | 68,924 | **53.4%** ✅ | +28,144% | **+14,359%** ✅ | SIGNAL EXISTE |
+| **ML Entry + Oracle Exit** | **9,598** | **30.9%** ⚠️ | +1,202% | **-717%** ❌ | Entrées ML mauvaises |
+| **ML Entry + ML Exit** | 108,007 | **22.5%** ❌ | -1,354% | **-21,382%** ❌ | Tout mauvais |
+
+**Décomposition du Gap Oracle→ML:**
+```
+Oracle → ML Entry (Exit Oracle): 53.4% → 30.9% = -22.5% gap ← 73% du problème
+ML Entry + Oracle Exit → ML Full: 30.9% → 22.5% = -8.4% gap  ← 27% du problème
+```
+
+**Conclusion préliminaire**: Le problème MAJEUR vient des **ENTRÉES ML** (73% de la dégradation).
+
+#### Hiérarchie des Assets (Test Set)
+
+**⚠️ ATTENTION: Validé sur SEULEMENT 3 assets (60% du total)**
+
+| Asset | Oracle Full PnL* | ML Entry + Oracle Exit | Win Rate | Gap Oracle→ML | % Capturé | Tests |
+|-------|-----------------|------------------------|----------|---------------|-----------|-------|
+| **ADA** 🥇 | +6,475% | **+1,167%** ✅ | **46.2%** | -5,308% | **18.0%** | ✅ Testé |
+| **LTC** 🥈 | +5,272% | **+663%** ✅ | **44.0%** | -4,609% | **12.6%** | ✅ Testé |
+| **ETH** | +3,419% | **?** | **?** | ? | ? | ❌ **NON TESTÉ** |
+| **BNB** | +2,093% | **?** | **?** | ? | ? | ❌ **NON TESTÉ** |
+| **BTC** 🥉 | +985% | **-717%** ❌ | **30.9%** | -1,702% | **-72.8%** | ✅ Testé |
+
+*Oracle Full = PnL Net moyen 3 indicateurs (Phase 2.15)
+
+**Observations (PRÉLIMINAIRES):**
+1. ✅ La hiérarchie Oracle est conservée (ADA > LTC > BTC)
+2. ✅ ADA et LTC donnent des résultats POSITIFS
+3. ❌ BTC reste NÉGATIF même avec Oracle Exit
+4. ⚠️ **40% des assets non testés** (ETH, BNB)
+
+### Résultats Détaillés par Asset (PRÉLIMINAIRES)
+
+#### BTC (Pire Asset)
+
+**Meilleure configuration:**
+```
+Weights: (0.2, 0.2, 0.8)  # RSI dominant
+Thresholds: (0.8, 0.2)    # Ultra-sélectifs
+Oracle Exit: MACD
+```
+
+**Résultats:**
+- Trades: 9,598
+- Win Rate: 30.9%
+- PnL Gross: +1,202%
+- PnL Net: **-717%** ❌
+- Durée moyenne: 8.5p
+
+**Edge économique:**
+```
+Edge/trade = +1,202% / 9,598 = +0.125%
+Frais/trade = 0.2%
+Net = +0.125% - 0.2% = -0.075% par trade ❌
+```
+
+#### ADA (Meilleur Asset)
+
+**Meilleure configuration:**
+```
+Weights: (0.2, 0.2, 0.8)  # RSI dominant (identique BTC)
+Thresholds: (0.6, 0.4)    # Modérés (vs extrêmes BTC)
+Oracle Exit: MACD
+```
+
+**Résultats:**
+- Trades: 12,523
+- Win Rate: **46.2%** ✅
+- PnL Gross: +3,672%
+- PnL Net: **+1,167%** ✅
+- Durée moyenne: 8.4p
+
+**Edge économique:**
+```
+Edge/trade = +3,672% / 12,523 = +0.293%
+Frais/trade = 0.2%
+Net = +0.293% - 0.2% = +0.093% par trade ✅ POSITIF
+```
+
+#### LTC (Intermédiaire)
+
+**Meilleure configuration:**
+```
+Weights: (0.2, 0.2, 0.8)  # RSI dominant (identique)
+Thresholds: (0.6, 0.4)    # Modérés (identique ADA)
+Oracle Exit: MACD
+```
+
+**Résultats:**
+- Trades: 13,006
+- Win Rate: **44.0%** ✅
+- PnL Gross: +3,264%
+- PnL Net: **+663%** ✅
+- Durée moyenne: 8.4p
+
+**Edge économique:**
+```
+Edge/trade = +3,264% / 13,006 = +0.251%
+Frais/trade = 0.2%
+Net = +0.251% - 0.2% = +0.051% par trade ✅ POSITIF
+```
+
+### Patterns Observés (AVEC RÉSERVES)
+
+#### 1. Configuration Optimale Identique sur Assets Propres
+
+**⚠️ ATTENTION: Observé sur 2 assets seulement (ADA, LTC)**
+
+| Paramètre | ADA | LTC | BTC | Conclusion PRÉLIMINAIRE |
+|-----------|-----|-----|-----|------------------------|
+| **Weights** | (0.2, 0.2, 0.8) | (0.2, 0.2, 0.8) | (0.2, 0.2, 0.8) | RSI=0.8 universel? |
+| **Threshold Long** | 0.6 | 0.6 | **0.8** ❌ | Assets propres = modéré? |
+| **Threshold Short** | 0.4 | 0.4 | **0.2** ❌ | BTC = ultra-sélectif? |
+| **Oracle Exit** | MACD | MACD | MACD | MACD universel ✅ |
+
+**Hypothèse (À VALIDER)**: Les seuils optimaux dépendent de la qualité du signal, pas de l'asset.
+
+#### 2. RSI ML Domine les Poids d'Entrée (100% Top 20)
+
+**Pattern observé sur TOUS les assets testés (3/5):**
+- RSI poids = 0.6-0.8 (dominant dans 100% des top 20)
+- MACD poids = 0.2 (faible)
+- CCI poids = 0.2-0.6 (modulateur)
+
+**Hypothèse**: RSI ML est plus réactif (oscillateur rapide) → meilleur pour détecter transitions, malgré lower accuracy.
+
+#### 3. MACD Oracle Exit = Meilleur (Universel Validé)
+
+**Comparaison 3 Oracles de sortie (3 assets testés):**
+
+| Asset | MACD Exit | CCI Exit | RSI Exit | Écart MACD-RSI |
+|-------|-----------|----------|----------|----------------|
+| **ADA** | **+1,167%** 🥇 | +720% | +469% 🥉 | **+698%** |
+| **LTC** | **+663%** 🥇 | +230% | +96% 🥉 | **+567%** |
+| **BTC** | **-717%** 🥇 | -854% | -1,001% 🥉 | **+284%** |
+
+**Pattern robuste**: MACD > CCI > RSI pour les sorties (Phase 2.14 validée sur 3/5 assets).
+
+### ⚠️ Limites et Validations Nécessaires
+
+#### Limites Méthodologiques CRITIQUES
+
+| Problème | Impact | Action Requise |
+|----------|--------|----------------|
+| **Échantillon partiel** | 3/5 assets = 60% | ❌ Tester ETH et BNB |
+| **Même split** | Optimisation = évaluation | ❌ Validation cross-temporelle |
+| **Data snooping** | Configs suroptimisées? | ❌ Bootstrap, permutation tests |
+| **Pas d'out-of-sample** | Généralisation inconnue | ❌ Walk-forward analysis |
+| **Biais de sélection** | Assets choisis = meilleurs? | ⚠️ Random sampling requis |
+
+#### Checklist de Validation (0/5 ✅)
+
+- [ ] **Tester ETH** (3ème meilleur Oracle +3,419%)
+- [ ] **Tester BNB** (4ème Oracle +2,093%)
+- [ ] **Walk-forward validation** (train sur période 1, test sur période 2)
+- [ ] **Cross-validation temporelle** (splits différents)
+- [ ] **Tests statistiques** (significativité des différences observées)
+
+#### Questions Sans Réponse
+
+1. **ETH et BNB suivent-ils le pattern ADA/LTC?**
+   - Si OUI: Configuration (0.2, 0.2, 0.8) + seuils (0.6, 0.4) est robuste
+   - Si NON: Suroptimisation sur ADA/LTC confirmée
+
+2. **La hiérarchie est-elle stable dans le temps?**
+   - À tester sur périodes différentes (train, val, test)
+
+3. **Les seuils (0.6, 0.4) généralisent-ils?**
+   - Ou sont-ils spécifiques au test set de ces 2 assets?
+
+### Commandes de Test (À Exécuter)
+
+```bash
+# Tests manquants pour validation
+python tests/test_entry_oracle_exit.py --asset ETH --split test
+python tests/test_entry_oracle_exit.py --asset BNB --split test
+
+# Validation cross-temporelle (si possible)
+python tests/test_entry_oracle_exit.py --asset ADA --split val  # Comparer avec test
+python tests/test_entry_oracle_exit.py --asset LTC --split val
+
+# Tests déjà exécutés (référence)
+python tests/test_entry_oracle_exit.py --asset BTC --split test  # -717%
+python tests/test_entry_oracle_exit.py --asset ADA --split test  # +1,167%
+python tests/test_entry_oracle_exit.py --asset LTC --split test  # +663%
+```
+
+### Conclusion Préliminaire Phase 2.16
+
+#### ✅ Ce Qui Est Validé (avec confiance)
+
+1. **Le problème vient des ENTRÉES ML** (73% de la dégradation Oracle→ML)
+2. **MACD Oracle Exit > CCI/RSI Oracle Exit** (pattern cohérent sur 3 assets)
+3. **RSI ML domine les poids d'entrée** (100% des top 20 sur 3 assets)
+4. **La hiérarchie Oracle est conservée** (ADA > LTC > BTC dans les deux cas)
+
+#### ⚠️ Ce Qui NÉCESSITE Validation
+
+1. **Configuration optimale (0.2, 0.2, 0.8) + seuils (0.6, 0.4)**
+   - Validé sur 2 assets seulement (ADA, LTC)
+   - Risque de suroptimisation élevé
+   - **Action**: Tester ETH, BNB, walk-forward
+
+2. **ADA et LTC sont rentables avec ML Entry + Oracle Exit**
+   - Positif sur test set
+   - Généralisation sur val/train inconnue
+   - **Action**: Cross-validation temporelle
+
+3. **Seuils dépendent de la qualité du signal**
+   - Hypothèse logique mais non prouvée
+   - Basée sur 3 points de données
+   - **Action**: Tests statistiques, plus d'assets
+
+#### 🚫 Ce Qu'il NE Faut PAS Conclure
+
+1. ❌ "ADA et LTC sont toujours rentables" → Validé sur 1 split uniquement
+2. ❌ "Configuration (0.2, 0.2, 0.8) est optimale" → Potentiel suroptimisation
+3. ❌ "BTC est toujours perdant" → Peut-être spécifique au test set
+4. ❌ "Cette stratégie fonctionne en production" → Aucune validation out-of-sample
+
+#### 📋 Prochaines Étapes Obligatoires
+
+**Avant toute utilisation en production:**
+
+1. ✅ **Compléter les tests** (ETH, BNB)
+2. ✅ **Validation croisée** (splits train/val/test)
+3. ✅ **Tests statistiques** (bootstrap confidence intervals)
+4. ✅ **Walk-forward** (périodes futures)
+5. ✅ **Paper trading** (données live, pas de backtest)
+
+**Ce n'est qu'avec ces validations qu'on pourra affirmer si ces résultats sont robustes ou sur-optimisés.**
+
+---
+
 ## 🎯 OPTIMISATIONS ARCHITECTURE - Shortcut & Temporal Gate (2026-01-09)
 
 **Date**: 2026-01-09
