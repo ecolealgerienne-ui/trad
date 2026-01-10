@@ -1,40 +1,29 @@
 #!/usr/bin/env python3
 """
-Test Meta-Model Backtest - Validation du filtrage meta-labeling.
+Test Meta-Model Backtest - Phase 2.18
 
-OBJECTIF:
-Tester l'impact du meta-model pour filtrer les trades non-profitables.
-Comparer plusieurs seuils de probabilité (0.5, 0.6, 0.7) vs baseline.
+Backtest avec filtrage meta-model pour valider l'impact du filtrage
+sur les trades (réduction trades, amélioration Win Rate, PnL Net positif).
 
-ARCHITECTURE:
-- Modèles primaires (MACD, RSI, CCI) → Prédisent direction (UP/DOWN)
-- Meta-model (Logistic Regression) → Prédit si trade sera profitable (OUI/NON)
-- Stratégie: N'agir QUE si meta-prob > threshold
-
-LOGIQUE CAUSALE:
-- Signal primaire à temps t (MACD prediction[t])
-- Meta-prediction à temps t (profitable?)
-- Si meta-prob > threshold → Exécution à Open[t+1]
-- Sinon → HOLD (pas de trade)
-
-STRUCTURE DONNÉES:
-- dataset_*_direction_only_kalman.npz: Y_pred (prédictions MACD primaires)
-- meta_labels_*_kalman_test.npz: Features meta (6) + predictions (3 indicateurs)
-- models/meta_model/meta_model_baseline_kalman.pkl: Meta-model entraîné
+Pipeline SIMPLIFIÉ:
+1. Charger meta_labels_*.npz (contient TOUT: predictions, OHLCV, meta_labels)
+2. Charger meta-model (Logistic Regression)
+3. Construire features meta (6: probs + confidence + ATR)
+4. Backt avec filtrage par threshold
+5. Comparer stratégies (baseline vs thresholds 0.5, 0.6, 0.7)
 
 Usage:
-    # Baseline (sans filtrage)
-    python tests/test_meta_model_backtest.py --indicator macd --split test
-
-    # Avec threshold 0.6 (recommandé)
-    python tests/test_meta_model_backtest.py --indicator macd --split test --threshold 0.6
-
-    # Comparer plusieurs thresholds
+    # Comparer toutes les stratégies
     python tests/test_meta_model_backtest.py --indicator macd --split test --compare-thresholds
+
+    # Test un seul threshold
+    python tests/test_meta_model_backtest.py --indicator macd --split test --threshold 0.6
 """
 
 import sys
 from pathlib import Path
+
+# Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
 import numpy as np
@@ -104,53 +93,14 @@ class BacktestResult:
 # CHARGEMENT DONNÉES
 # =============================================================================
 
-def load_primary_predictions(indicator: str, split: str = 'test') -> Dict:
+def load_meta_labels_data(indicator: str, filter_type: str = 'kalman', split: str = 'test') -> Dict:
     """
-    Charge les prédictions du modèle primaire (MACD, RSI, ou CCI).
+    Charge TOUTES les données depuis meta_labels_*.npz.
 
-    Args:
-        indicator: 'macd', 'rsi', ou 'cci'
-        split: 'train', 'val', ou 'test'
-
-    Returns:
-        Dict avec Y_pred (prédictions primaires) et OHLCV
-    """
-    path = Path(f'data/prepared/dataset_btc_eth_bnb_ada_ltc_{indicator}_direction_only_kalman.npz')
-
-    if not path.exists():
-        raise FileNotFoundError(f"Dataset primaire introuvable: {path}")
-
-    logger.info(f"Chargement prédictions primaires: {path}")
-    data = np.load(path, allow_pickle=True)
-
-    # Prédictions primaires (probabilités 0-1)
-    pred_key = f'Y_{split}_pred'
-    if pred_key not in data:
-        raise KeyError(
-            f"Prédictions primaires introuvables!\n"
-            f"Clé attendue: {pred_key}\n\n"
-            f"SOLUTION: Régénérer avec:\n"
-            f"  python src/regenerate_predictions.py --data {path} --indicator {indicator}"
-        )
-
-    Y_pred = data[pred_key]
-    Y = data[f'Y_{split}']  # Labels Oracle (pour comparaison)
-    OHLCV = data[f'OHLCV_{split}']
-
-    logger.info(f"  Y_pred shape: {Y_pred.shape} - Probabilités primaires")
-    logger.info(f"  Y shape: {Y.shape} - [timestamp, asset_id, direction]")
-    logger.info(f"  OHLCV shape: {OHLCV.shape}")
-
-    return {
-        'Y_pred': Y_pred,
-        'Y': Y,
-        'OHLCV': OHLCV
-    }
-
-
-def load_meta_features(indicator: str, filter_type: str = 'kalman', split: str = 'test') -> Dict:
-    """
-    Charge les features meta-model.
+    Ce fichier contient TOUT ce dont on a besoin:
+    - predictions (MACD, RSI, CCI)
+    - OHLCV (pour backtest)
+    - meta_labels (pour validation)
 
     Args:
         indicator: 'macd', 'rsi', ou 'cci'
@@ -158,7 +108,7 @@ def load_meta_features(indicator: str, filter_type: str = 'kalman', split: str =
         split: 'train', 'val', ou 'test'
 
     Returns:
-        Dict avec features meta (6), predictions (3), meta_labels
+        Dict avec predictions, OHLCV, meta_labels
     """
     path = Path(f'data/prepared/meta_labels_{indicator}_{filter_type}_{split}.npz')
 
@@ -170,37 +120,39 @@ def load_meta_features(indicator: str, filter_type: str = 'kalman', split: str =
             f"    --indicator {indicator} --filter {filter_type} --split {split}"
         )
 
-    logger.info(f"Chargement features meta: {path}")
+    logger.info(f"Chargement données: {path}")
     data = np.load(path, allow_pickle=True)
 
-    # Extraire features meta (6 features)
-    features = data['features']
+    # Extraire predictions (3 indicateurs)
+    predictions_macd = data['predictions_macd']
+    predictions_rsi = data['predictions_rsi']
+    predictions_cci = data['predictions_cci']
+
+    # OHLCV pour backtest
+    ohlcv = data['OHLCV']
+
+    # Meta-labels (pour validation)
     meta_labels = data['meta_labels']
 
-    # Predictions des 3 modèles primaires
-    predictions = data['predictions']
-
-    logger.info(f"  Features shape: {features.shape} - 6 features meta")
-    logger.info(f"  Meta-labels shape: {meta_labels.shape}")
-    logger.info(f"  Predictions shape: {predictions.shape} - 3 indicateurs")
+    logger.info(f"  Predictions MACD: {predictions_macd.shape}")
+    logger.info(f"  Predictions RSI: {predictions_rsi.shape}")
+    logger.info(f"  Predictions CCI: {predictions_cci.shape}")
+    logger.info(f"  OHLCV: {ohlcv.shape}")
+    logger.info(f"  Meta-labels: {meta_labels.shape}")
+    logger.info(f"  Positive: {np.sum(meta_labels == 1)}")
+    logger.info(f"  Negative: {np.sum(meta_labels == 0)}")
 
     return {
-        'features': features,
-        'meta_labels': meta_labels,
-        'predictions': predictions
+        'predictions_macd': predictions_macd,
+        'predictions_rsi': predictions_rsi,
+        'predictions_cci': predictions_cci,
+        'ohlcv': ohlcv,
+        'meta_labels': meta_labels
     }
 
 
 def load_meta_model(filter_type: str = 'kalman') -> object:
-    """
-    Charge le meta-model entraîné.
-
-    Args:
-        filter_type: 'kalman' ou 'octave'
-
-    Returns:
-        Meta-model (Logistic Regression)
-    """
+    """Charge le meta-model entraîné."""
     path = Path(f'models/meta_model/meta_model_baseline_{filter_type}.pkl')
 
     if not path.exists():
@@ -211,173 +163,267 @@ def load_meta_model(filter_type: str = 'kalman') -> object:
         )
 
     logger.info(f"Chargement meta-model: {path}")
-    meta_model = joblib.load(path)
-    logger.info(f"  Type: {type(meta_model).__name__}")
+    model = joblib.load(path)
+    logger.info(f"  Type: {type(model).__name__}")
+    logger.info(f"  Classes: {model.classes_}")
 
-    return meta_model
+    return model
+
+
+def calculate_atr(ohlcv: np.ndarray, period: int = 14) -> np.ndarray:
+    """
+    Calcule l'ATR (Average True Range) normalisé.
+
+    Args:
+        ohlcv: Array (n, 7) [timestamp, asset_id, O, H, L, C, V]
+        period: Période ATR (défaut 14)
+
+    Returns:
+        ATR normalisé (n,) - ATR / Close
+    """
+    highs = ohlcv[:, 3]  # H
+    lows = ohlcv[:, 4]   # L
+    closes = ohlcv[:, 5] # C
+
+    # True Range = max(H-L, |H-C_prev|, |L-C_prev|)
+    tr1 = highs - lows
+    tr2 = np.abs(highs - np.roll(closes, 1))
+    tr3 = np.abs(lows - np.roll(closes, 1))
+    tr2[0] = tr1[0]  # Pas de précédent pour le premier
+    tr3[0] = tr1[0]
+
+    true_range = np.maximum.reduce([tr1, tr2, tr3])
+
+    # ATR = EMA du True Range
+    atr = np.zeros_like(true_range)
+    atr[0] = true_range[0]
+
+    alpha = 1.0 / period
+    for i in range(1, len(true_range)):
+        atr[i] = alpha * true_range[i] + (1 - alpha) * atr[i-1]
+
+    # Normaliser par le prix
+    atr_normalized = atr / closes
+
+    return atr_normalized
+
+
+def build_meta_features(
+    predictions_macd: np.ndarray,
+    predictions_rsi: np.ndarray,
+    predictions_cci: np.ndarray,
+    ohlcv: np.ndarray
+) -> np.ndarray:
+    """
+    Construit les 6 features meta depuis predictions + OHLCV.
+
+    Args:
+        predictions_*: Probabilités des modèles primaires (n,)
+        ohlcv: Données OHLCV (n, 7)
+
+    Returns:
+        Features (n, 6):
+            [macd_prob, rsi_prob, cci_prob,
+             confidence_spread, confidence_mean, volatility_atr]
+    """
+    logger.info("Construction features meta (6)...")
+
+    # 1. Probabilités primaires
+    macd_prob = predictions_macd
+    rsi_prob = predictions_rsi
+    cci_prob = predictions_cci
+
+    # 2. Confidence metrics
+    probs = np.stack([macd_prob, rsi_prob, cci_prob], axis=1)  # (n, 3)
+    confidence_spread = np.max(probs, axis=1) - np.min(probs, axis=1)  # (n,)
+    confidence_mean = np.mean(probs, axis=1)  # (n,)
+
+    # 3. Volatilité ATR
+    volatility_atr = calculate_atr(ohlcv, period=14)
+
+    # 4. Stack features
+    X_meta = np.stack([
+        macd_prob,
+        rsi_prob,
+        cci_prob,
+        confidence_spread,
+        confidence_mean,
+        volatility_atr
+    ], axis=1)  # (n, 6)
+
+    logger.info(f"  Features shape: {X_meta.shape}")
+    logger.info(f"  MACD prob: [{macd_prob.min():.3f}, {macd_prob.max():.3f}]")
+    logger.info(f"  Confidence spread: [{confidence_spread.min():.3f}, {confidence_spread.max():.3f}]")
+    logger.info(f"  ATR: [{volatility_atr.min():.6f}, {volatility_atr.max():.6f}]")
+
+    return X_meta
 
 
 # =============================================================================
-# BACKTEST AVEC META-FILTRAGE
+# BACKTEST
 # =============================================================================
 
 def backtest_with_meta_filter(
-    primary_preds: np.ndarray,
+    primary_indicator: str,
+    predictions_primary: np.ndarray,
     meta_features: np.ndarray,
     meta_model: object,
-    opens: np.ndarray,
-    timestamps: np.ndarray,
-    asset_ids: np.ndarray,
+    ohlcv: np.ndarray,
     threshold: float = 0.5,
     fees: float = 0.001
 ) -> BacktestResult:
     """
     Backtest avec filtrage meta-model.
 
-    LOGIQUE:
-    1. Prédiction primaire à index i (MACD → UP ou DOWN)
-    2. Meta-prediction: Est-ce que ce trade sera profitable?
-    3. Si meta_prob > threshold → Exécution à Open[i+1]
-    4. Sinon → HOLD (pas de trade, pas de frais)
+    LOGIC:
+    1. Primary prediction at index i (MACD → UP or DOWN)
+    2. Meta-prediction: Will this trade be profitable?
+    3. If meta_prob > threshold → Execute at Open[i+1]
+    4. Else → HOLD (no trade, no fees)
 
     Args:
-        primary_preds: (n,) Probabilités primaires (0-1)
-        meta_features: (n, 6) Features meta-model
+        primary_indicator: 'macd', 'rsi', ou 'cci'
+        predictions_primary: Prédictions primaires (n,) - probas [0,1]
+        meta_features: Features meta (n, 6)
         meta_model: Meta-model entraîné
-        opens: (n,) Prix Open
-        timestamps: (n,) Timestamps
-        asset_ids: (n,) Asset IDs
-        threshold: Seuil meta-prob pour agir
-        fees: Frais par side
+        ohlcv: Données OHLCV (n, 7) - [timestamp, asset_id, O, H, L, C, V]
+        threshold: Seuil meta-prob (défaut 0.5)
+        fees: Frais par trade (défaut 0.001 = 0.1%)
 
     Returns:
-        BacktestResult avec métriques complètes
+        BacktestResult avec tous les trades et métriques
     """
-    n_samples = len(primary_preds)
+    strategy_name = f"Meta-Filter (threshold={threshold:.1f})" if threshold > 0 else "Baseline (no filter)"
+    logger.info(f"\n{'='*80}")
+    logger.info(f"BACKTEST: {strategy_name}")
+    logger.info(f"{'='*80}")
 
-    # Prédire probabilités meta pour tous les timesteps
-    meta_probs = meta_model.predict_proba(meta_features)[:, 1]  # Classe 1 = profitable
+    # Générer meta-probabilities pour tous les timesteps
+    meta_probs = meta_model.predict_proba(meta_features)[:, 1]
+    logger.info(f"Meta-probs: [{meta_probs.min():.3f}, {meta_probs.max():.3f}]")
 
-    # Convertir prédictions primaires en directions (>0.5 = UP)
-    primary_directions = (primary_preds > 0.5).astype(int)
+    # Convertir primary predictions en directions
+    primary_directions = (predictions_primary > 0.5).astype(int)
 
-    trades = []
-    position = Position.FLAT
-    entry_idx = 0
-    entry_price = 0.0
-    entry_timestamp = 0.0
-    entry_meta_prob = 0.0
-    n_filtered = 0  # Compteur trades bloqués
+    # Extraire colonnes OHLCV
+    timestamps = ohlcv[:, 0]
+    asset_ids = ohlcv[:, 1]
+    opens = ohlcv[:, 2]
 
-    # Backtest par asset (pour éviter pollution entre assets)
-    unique_assets = np.unique(asset_ids)
+    # Backtest per asset (évite cross-contamination)
     all_trades = []
+    n_filtered = 0
+
+    unique_assets = np.unique(asset_ids)
+    logger.info(f"Assets: {len(unique_assets)} ({unique_assets})")
 
     for asset_id in unique_assets:
-        # Mask pour cet asset
         mask = asset_ids == asset_id
         asset_preds = primary_directions[mask]
         asset_meta_probs = meta_probs[mask]
         asset_opens = opens[mask]
         asset_timestamps = timestamps[mask]
-        n_asset = len(asset_preds)
 
-        # Reset position pour chaque asset
+        n_asset = len(asset_preds)
         position = Position.FLAT
+        entry_idx = -1
+        entry_price = 0.0
+        entry_meta_prob = 0.0
 
         for i in range(n_asset - 1):
             direction = int(asset_preds[i])
             meta_prob = asset_meta_probs[i]
             target = Position.LONG if direction == 1 else Position.SHORT
 
-            # Première entrée
+            # First entry - filter by meta-prob
             if position == Position.FLAT:
-                # Filtrage meta: n'entrer QUE si meta_prob > threshold
                 if meta_prob <= threshold:
                     n_filtered += 1
                     continue
 
+                # Execute entry
                 position = target
                 entry_idx = i
                 entry_price = asset_opens[i + 1]
-                entry_timestamp = asset_timestamps[i + 1]
                 entry_meta_prob = meta_prob
-                continue
 
-            # Changement de position (reversal)
-            if position != target:
-                # Filtrage meta: ne reverser QUE si nouveau signal > threshold
+            # Position reversal - filter by meta-prob
+            elif position != target:
                 if meta_prob <= threshold:
                     n_filtered += 1
                     continue
 
-                # Sortie
+                # Execute exit and new entry
+                exit_idx = i
                 exit_price = asset_opens[i + 1]
+                duration = exit_idx - entry_idx
 
+                # Calculate PnL
                 if position == Position.LONG:
-                    pnl = (exit_price - entry_price) / entry_price
-                else:
-                    pnl = (entry_price - exit_price) / entry_price
+                    pnl = ((exit_price - entry_price) / entry_price) * 100
+                else:  # SHORT
+                    pnl = ((entry_price - exit_price) / entry_price) * 100
 
-                trade_fees = 2 * fees
-                pnl_after_fees = pnl - trade_fees
+                pnl_after_fees = pnl - (2 * fees * 100)  # Entry + exit fees
 
-                all_trades.append(Trade(
+                trade = Trade(
                     entry_idx=entry_idx,
-                    exit_idx=i,
-                    duration=i - entry_idx,
+                    exit_idx=exit_idx,
+                    duration=duration,
                     position='LONG' if position == Position.LONG else 'SHORT',
                     entry_price=entry_price,
                     exit_price=exit_price,
                     pnl=pnl,
                     pnl_after_fees=pnl_after_fees,
                     asset_id=int(asset_id),
-                    entry_timestamp=entry_timestamp,
+                    entry_timestamp=asset_timestamps[entry_idx],
                     meta_prob=entry_meta_prob
-                ))
+                )
+                all_trades.append(trade)
 
-                # Nouvelle position
+                # New entry
                 position = target
                 entry_idx = i
                 entry_price = asset_opens[i + 1]
-                entry_timestamp = asset_timestamps[i + 1]
                 entry_meta_prob = meta_prob
 
-        # Fermer position finale
+        # Close final position (if any)
         if position != Position.FLAT:
+            exit_idx = n_asset - 1
             exit_price = asset_opens[-1]
+            duration = exit_idx - entry_idx
 
             if position == Position.LONG:
-                pnl = (exit_price - entry_price) / entry_price
+                pnl = ((exit_price - entry_price) / entry_price) * 100
             else:
-                pnl = (entry_price - exit_price) / entry_price
+                pnl = ((entry_price - exit_price) / entry_price) * 100
 
-            trade_fees = 2 * fees
-            pnl_after_fees = pnl - trade_fees
+            pnl_after_fees = pnl - (2 * fees * 100)
 
-            all_trades.append(Trade(
+            trade = Trade(
                 entry_idx=entry_idx,
-                exit_idx=n_asset - 1,
-                duration=n_asset - 1 - entry_idx,
+                exit_idx=exit_idx,
+                duration=duration,
                 position='LONG' if position == Position.LONG else 'SHORT',
                 entry_price=entry_price,
                 exit_price=exit_price,
                 pnl=pnl,
                 pnl_after_fees=pnl_after_fees,
                 asset_id=int(asset_id),
-                entry_timestamp=entry_timestamp,
+                entry_timestamp=asset_timestamps[entry_idx],
                 meta_prob=entry_meta_prob
-            ))
+            )
+            all_trades.append(trade)
 
-    # Calculer métriques
-    return calculate_metrics(all_trades, n_filtered, threshold)
+    # Calculate metrics
+    return calculate_metrics(strategy_name, all_trades, n_filtered)
 
 
-def calculate_metrics(trades: List[Trade], n_filtered: int, threshold: float) -> BacktestResult:
-    """Calcule les métriques de backtest."""
+def calculate_metrics(strategy_name: str, trades: List[Trade], n_filtered: int) -> BacktestResult:
+    """Calcule les métriques du backtest."""
     if not trades:
         return BacktestResult(
-            strategy_name=f'Meta-Filter (threshold={threshold:.2f})',
+            strategy_name=strategy_name,
             n_trades=0,
             n_long=0,
             n_short=0,
@@ -399,138 +445,133 @@ def calculate_metrics(trades: List[Trade], n_filtered: int, threshold: float) ->
     n_long = sum(1 for t in trades if t.position == 'LONG')
     n_short = sum(1 for t in trades if t.position == 'SHORT')
 
-    # PnL
+    pnls = np.array([t.pnl_after_fees for t in trades])
+    wins = pnls[pnls > 0]
+    losses = pnls[pnls <= 0]
+
     total_pnl = sum(t.pnl for t in trades)
     total_pnl_after_fees = sum(t.pnl_after_fees for t in trades)
     total_fees = total_pnl - total_pnl_after_fees
 
-    # Win Rate
-    winners = [t for t in trades if t.pnl_after_fees > 0]
-    losers = [t for t in trades if t.pnl_after_fees <= 0]
-    win_rate = len(winners) / n_trades if n_trades > 0 else 0.0
+    win_rate = len(wins) / n_trades * 100 if n_trades > 0 else 0.0
 
     # Profit Factor
-    total_wins = sum(t.pnl_after_fees for t in winners) if winners else 0.0
-    total_losses = abs(sum(t.pnl_after_fees for t in losers)) if losers else 0.0
-    profit_factor = total_wins / total_losses if total_losses > 0 else float('inf')
+    sum_wins = wins.sum() if len(wins) > 0 else 0.0
+    sum_losses = -losses.sum() if len(losses) > 0 else 0.0
+    profit_factor = sum_wins / sum_losses if sum_losses > 0 else 0.0
 
-    # Moyennes
-    avg_win = np.mean([t.pnl_after_fees for t in winners]) if winners else 0.0
-    avg_loss = np.mean([t.pnl_after_fees for t in losers]) if losers else 0.0
+    avg_win = wins.mean() if len(wins) > 0 else 0.0
+    avg_loss = losses.mean() if len(losses) > 0 else 0.0
     avg_duration = np.mean([t.duration for t in trades])
 
-    # Sharpe Ratio (simplifié)
-    pnls = np.array([t.pnl_after_fees for t in trades])
-    sharpe = np.mean(pnls) / np.std(pnls) if np.std(pnls) > 0 else 0.0
-    sharpe_annualized = sharpe * np.sqrt(252 * 24 * 12)  # 5min bars
+    # Sharpe Ratio
+    sharpe_ratio = pnls.mean() / pnls.std() if pnls.std() > 0 else 0.0
 
     # Max Drawdown
-    cumulative = np.cumsum([t.pnl_after_fees for t in trades])
+    cumulative = np.cumsum(pnls)
     running_max = np.maximum.accumulate(cumulative)
     drawdown = cumulative - running_max
-    max_drawdown = np.min(drawdown) if len(drawdown) > 0 else 0.0
+    max_drawdown = drawdown.min()
 
     return BacktestResult(
-        strategy_name=f'Meta-Filter (threshold={threshold:.2f})',
+        strategy_name=strategy_name,
         n_trades=n_trades,
         n_long=n_long,
         n_short=n_short,
         n_filtered=n_filtered,
-        total_pnl=total_pnl * 100,  # En %
-        total_pnl_after_fees=total_pnl_after_fees * 100,
-        total_fees=total_fees * 100,
-        win_rate=win_rate * 100,
+        total_pnl=total_pnl,
+        total_pnl_after_fees=total_pnl_after_fees,
+        total_fees=total_fees,
+        win_rate=win_rate,
         profit_factor=profit_factor,
-        avg_win=avg_win * 100,
-        avg_loss=avg_loss * 100,
+        avg_win=avg_win,
+        avg_loss=avg_loss,
         avg_duration=avg_duration,
-        sharpe_ratio=sharpe_annualized,
-        max_drawdown=max_drawdown * 100,
+        sharpe_ratio=sharpe_ratio,
+        max_drawdown=max_drawdown,
         trades=trades
     )
 
 
 def print_results(result: BacktestResult):
-    """Affiche les résultats."""
-    print(f"\n{'='*80}")
-    print(f"RÉSULTATS: {result.strategy_name}")
+    """Affiche les résultats du backtest."""
+    print(f"\n{result.strategy_name}")
     print(f"{'='*80}")
-    print(f"Trades totaux:        {result.n_trades:,}")
-    print(f"  - LONG:             {result.n_long:,}")
-    print(f"  - SHORT:            {result.n_short:,}")
-    print(f"  - Filtrés:          {result.n_filtered:,}")
-    print(f"\nPnL Brut:             {result.total_pnl:+.2f}%")
-    print(f"Frais totaux:         {result.total_fees:.2f}%")
-    print(f"PnL Net:              {result.total_pnl_after_fees:+.2f}%")
-    print(f"\nWin Rate:             {result.win_rate:.2f}%")
-    print(f"Profit Factor:        {result.profit_factor:.2f}")
-    print(f"Avg Win:              {result.avg_win:+.3f}%")
-    print(f"Avg Loss:             {result.avg_loss:+.3f}%")
-    print(f"Avg Duration:         {result.avg_duration:.1f} périodes (~{result.avg_duration*5:.0f}min)")
-    print(f"\nSharpe Ratio:         {result.sharpe_ratio:.2f}")
-    print(f"Max Drawdown:         {result.max_drawdown:.2f}%")
-    print(f"{'='*80}\n")
+    print(f"Trades: {result.n_trades:,} (LONG: {result.n_long:,}, SHORT: {result.n_short:,})")
+    print(f"Filtrés: {result.n_filtered:,}")
+    print(f"Win Rate: {result.win_rate:.2f}%")
+    print(f"PnL Brut: {result.total_pnl:+.2f}%")
+    print(f"PnL Net: {result.total_pnl_after_fees:+.2f}%")
+    print(f"Frais: {result.total_fees:.2f}%")
+    print(f"Profit Factor: {result.profit_factor:.2f}")
+    print(f"Avg Win: {result.avg_win:+.3f}%")
+    print(f"Avg Loss: {result.avg_loss:+.3f}%")
+    print(f"Avg Duration: {result.avg_duration:.1f} périodes")
+    print(f"Sharpe Ratio: {result.sharpe_ratio:.2f}")
+    print(f"Max Drawdown: {result.max_drawdown:.2f}%")
 
 
 def compare_strategies(
-    primary_data: Dict,
-    meta_data: Dict,
+    primary_indicator: str,
+    data: Dict,
     meta_model: object,
     thresholds: List[float],
     fees: float
 ):
-    """Compare plusieurs stratégies avec différents thresholds."""
-    opens = primary_data['OHLCV'][:, 2]  # Colonne Open
-    timestamps = primary_data['OHLCV'][:, 0]
-    asset_ids = primary_data['OHLCV'][:, 1]
+    """Compare baseline vs multiple thresholds."""
+    print(f"\n{'='*80}")
+    print(f"COMPARAISON DES STRATÉGIES")
+    print(f"{'='*80}")
+
+    # Sélectionner primary predictions
+    predictions_primary = data[f'predictions_{primary_indicator}']
+
+    # Build meta-features
+    meta_features = build_meta_features(
+        data['predictions_macd'],
+        data['predictions_rsi'],
+        data['predictions_cci'],
+        data['ohlcv']
+    )
 
     results = []
 
-    # Baseline: Pas de filtrage meta (threshold=0.0)
-    logger.info("Test Baseline (pas de filtrage meta)...")
+    # Baseline (no filtering)
     result = backtest_with_meta_filter(
-        primary_preds=primary_data['Y_pred'],
-        meta_features=meta_data['features'],
+        primary_indicator=primary_indicator,
+        predictions_primary=predictions_primary,
+        meta_features=meta_features,
         meta_model=meta_model,
-        opens=opens,
-        timestamps=timestamps,
-        asset_ids=asset_ids,
-        threshold=0.0,
+        ohlcv=data['ohlcv'],
+        threshold=0.0,  # Accept all trades
         fees=fees
     )
-    result.strategy_name = 'Baseline (no filter)'
     results.append(result)
     print_results(result)
 
-    # Tests avec différents thresholds
+    # Test each threshold
     for threshold in thresholds:
-        logger.info(f"Test avec threshold={threshold:.2f}...")
         result = backtest_with_meta_filter(
-            primary_preds=primary_data['Y_pred'],
-            meta_features=meta_data['features'],
+            primary_indicator=primary_indicator,
+            predictions_primary=predictions_primary,
+            meta_features=meta_features,
             meta_model=meta_model,
-            opens=opens,
-            timestamps=timestamps,
-            asset_ids=asset_ids,
+            ohlcv=data['ohlcv'],
             threshold=threshold,
             fees=fees
         )
         results.append(result)
         print_results(result)
 
-    # Tableau comparatif
-    print(f"\n{'='*120}")
-    print(f"{'COMPARAISON DES STRATÉGIES':^120}")
-    print(f"{'='*120}")
-    print(f"{'Stratégie':<30} {'Trades':>10} {'Filtrés':>10} {'WR%':>8} {'PnL Brut%':>12} {'PnL Net%':>12} {'PF':>8} {'Sharpe':>10}")
-    print(f"{'-'*120}")
+    # Summary table
+    print(f"\n{'='*80}")
+    print(f"RÉSUMÉ COMPARATIF")
+    print(f"{'='*80}")
+    print(f"{'Stratégie':<30} {'Trades':>10} {'Filtrés':>10} {'WR%':>8} {'PnL Net%':>12}")
+    print(f"{'-'*80}")
 
     for r in results:
-        print(f"{r.strategy_name:<30} {r.n_trades:>10,} {r.n_filtered:>10,} "
-              f"{r.win_rate:>8.2f} {r.total_pnl:>12.2f} {r.total_pnl_after_fees:>12.2f} "
-              f"{r.profit_factor:>8.2f} {r.sharpe_ratio:>10.2f}")
-
-    print(f"{'='*120}\n")
+        print(f"{r.strategy_name:<30} {r.n_trades:>10,} {r.n_filtered:>10,} {r.win_rate:>8.2f} {r.total_pnl_after_fees:>12.2f}")
 
 
 # =============================================================================
@@ -538,69 +579,76 @@ def compare_strategies(
 # =============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description='Test Meta-Model Backtest')
+    parser = argparse.ArgumentParser(description='Backtest meta-model filtering')
     parser.add_argument('--indicator', type=str, default='macd', choices=['macd', 'rsi', 'cci'],
-                        help='Indicateur primaire')
+                        help='Indicateur primaire (défaut: macd)')
     parser.add_argument('--filter', type=str, default='kalman', choices=['kalman', 'octave'],
-                        help='Type de filtre')
+                        help='Type de filtre (défaut: kalman)')
     parser.add_argument('--split', type=str, default='test', choices=['train', 'val', 'test'],
-                        help='Split à tester')
+                        help='Split à tester (défaut: test)')
     parser.add_argument('--threshold', type=float, default=None,
-                        help='Seuil meta-prob (None = compare plusieurs)')
+                        help='Seuil unique à tester (défaut: None)')
     parser.add_argument('--compare-thresholds', action='store_true',
-                        help='Comparer 0.5, 0.6, 0.7')
+                        help='Comparer plusieurs thresholds (0.5, 0.6, 0.7)')
     parser.add_argument('--fees', type=float, default=0.001,
-                        help='Frais par side (0.001 = 0.1%)')
+                        help='Frais par trade (défaut: 0.001 = 0.1%%)')
+
     args = parser.parse_args()
 
     print(f"{'='*80}")
     print(f"META-MODEL BACKTEST - Phase 2.18")
     print(f"{'='*80}")
-    print(f"Indicateur: {args.indicator.upper()}")
-    print(f"Filtre: {args.filter}")
+    print(f"Indicateur primaire: {args.indicator}")
+    print(f"Filter: {args.filter}")
     print(f"Split: {args.split}")
-    print(f"Frais: {args.fees*100:.2f}% par side")
-    print(f"{'='*80}\n")
+    print(f"Frais: {args.fees * 100:.2f}%")
 
-    # Charger données
-    logger.info("Chargement des données...")
-    primary_data = load_primary_predictions(args.indicator, args.split)
-    meta_data = load_meta_features(args.indicator, args.filter, args.split)
+    # Load data (TOUT depuis meta_labels_*.npz)
+    data = load_meta_labels_data(args.indicator, args.filter, args.split)
+
+    # Load meta-model
     meta_model = load_meta_model(args.filter)
 
-    # Vérifier alignement
-    assert len(primary_data['Y_pred']) == len(meta_data['features']), \
-        "Désalignement primary vs meta features!"
-
-    # Comparer stratégies
-    if args.compare_thresholds or args.threshold is None:
+    if args.compare_thresholds:
+        # Compare multiple thresholds
         thresholds = [0.5, 0.6, 0.7]
         compare_strategies(
-            primary_data=primary_data,
-            meta_data=meta_data,
+            primary_indicator=args.indicator,
+            data=data,
             meta_model=meta_model,
             thresholds=thresholds,
             fees=args.fees
         )
-    else:
-        # Test un seul threshold
-        opens = primary_data['OHLCV'][:, 2]
-        timestamps = primary_data['OHLCV'][:, 0]
-        asset_ids = primary_data['OHLCV'][:, 1]
+
+    elif args.threshold is not None:
+        # Test single threshold
+        predictions_primary = data[f'predictions_{args.indicator}']
+
+        meta_features = build_meta_features(
+            data['predictions_macd'],
+            data['predictions_rsi'],
+            data['predictions_cci'],
+            data['ohlcv']
+        )
 
         result = backtest_with_meta_filter(
-            primary_preds=primary_data['Y_pred'],
-            meta_features=meta_data['features'],
+            primary_indicator=args.indicator,
+            predictions_primary=predictions_primary,
+            meta_features=meta_features,
             meta_model=meta_model,
-            opens=opens,
-            timestamps=timestamps,
-            asset_ids=asset_ids,
+            ohlcv=data['ohlcv'],
             threshold=args.threshold,
             fees=args.fees
         )
         print_results(result)
 
-    logger.info("✅ Backtest terminé!")
+    else:
+        print("ERROR: Spécifier --threshold ou --compare-thresholds")
+        sys.exit(1)
+
+    print(f"\n{'='*80}")
+    print(f"✅ BACKTEST TERMINÉ")
+    print(f"{'='*80}")
 
 
 if __name__ == '__main__':
