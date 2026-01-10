@@ -67,6 +67,109 @@ def load_dataset(indicator: str, filter_type: str, split: str) -> dict:
     return result
 
 
+def backtest_single_asset(
+    asset_labels: np.ndarray,
+    asset_opens: np.ndarray,
+    start_idx: int,
+    fees: float = 0.001
+) -> Tuple[List[dict], float, float]:
+    """
+    Backtest pour UN SEUL asset.
+
+    LOGIQUE CAUSALE:
+    - Signal à index i → Exécution à Open[i+1]
+    - Toujours en position (LONG ou SHORT, jamais FLAT)
+    - Direction: 1=UP→LONG, 0=DOWN→SHORT
+
+    Args:
+        asset_labels: (n,) Direction labels pour cet asset
+        asset_opens: (n,) Prix Open pour cet asset
+        start_idx: Index de départ global (pour entry_idx/exit_idx)
+        fees: Frais par side
+
+    Returns:
+        (trades, pnl_gross, pnl_net)
+    """
+    n_samples = len(asset_labels)
+    trades = []
+    position = 'FLAT'
+    entry_idx = 0
+    entry_price = 0.0
+    pnl_gross = 0.0
+    pnl_net = 0.0
+
+    # Boucle principale
+    for i in range(n_samples - 1):  # -1 car besoin de Open[i+1]
+        direction = int(asset_labels[i])
+        target = 'LONG' if direction == 1 else 'SHORT'
+
+        # Première entrée
+        if position == 'FLAT':
+            position = target
+            entry_idx = i
+            entry_price = asset_opens[i + 1]  # Entrée à Open[i+1]
+            continue
+
+        # Changement de position (reversal)
+        if position != target:
+            # Sortie à Open[i+1]
+            exit_price = asset_opens[i + 1]
+
+            # Calcul PnL
+            if position == 'LONG':
+                pnl = (exit_price - entry_price) / entry_price
+            else:  # SHORT
+                pnl = (entry_price - exit_price) / entry_price
+
+            # Frais: entrée + sortie
+            trade_fees = 2 * fees
+            pnl_after_fees = pnl - trade_fees
+
+            pnl_gross += pnl
+            pnl_net += pnl_after_fees
+
+            # Enregistrer trade (avec indices globaux)
+            trades.append({
+                'entry_idx': start_idx + entry_idx,
+                'exit_idx': start_idx + i,
+                'direction': position,
+                'pnl': pnl,
+                'duration': i - entry_idx,
+                'exit_reason': 'DIRECTION_FLIP'
+            })
+
+            # Nouvelle position (reversal immédiat)
+            position = target
+            entry_idx = i
+            entry_price = asset_opens[i + 1]
+
+    # Fermer position finale
+    if position != 'FLAT':
+        exit_price = asset_opens[-1]
+
+        if position == 'LONG':
+            pnl = (exit_price - entry_price) / entry_price
+        else:
+            pnl = (entry_price - exit_price) / entry_price
+
+        trade_fees = 2 * fees
+        pnl_after_fees = pnl - trade_fees
+
+        pnl_gross += pnl
+        pnl_net += pnl_after_fees
+
+        trades.append({
+            'entry_idx': start_idx + entry_idx,
+            'exit_idx': start_idx + n_samples - 1,
+            'direction': position,
+            'pnl': pnl,
+            'duration': n_samples - 1 - entry_idx,
+            'exit_reason': 'END_OF_ASSET'
+        })
+
+    return trades, pnl_gross, pnl_net
+
+
 def simulate_oracle_backtest(
     labels: np.ndarray,
     ohlcv: np.ndarray,
@@ -75,6 +178,10 @@ def simulate_oracle_backtest(
 ) -> Tuple[List[dict], float, float]:
     """
     Simule backtest Oracle (labels parfaits) pour obtenir les trades.
+
+    CRITIQUE: Le dataset contient PLUSIEURS assets concaténés!
+    On doit faire le backtest PAR ASSET pour éviter de calculer
+    des PnL entre prix BTC et ETH.
 
     Args:
         labels: Labels Oracle (n, 3) - [timestamp, asset_id, direction]
@@ -88,107 +195,50 @@ def simulate_oracle_backtest(
         pnl_gross: PnL brut cumulé
         pnl_net: PnL net après frais
     """
-    print("Simulating Oracle backtest...")
+    print("Simulating Oracle backtest (per-asset)...")
 
-    trades = []
-    position = 'FLAT'
-    entry_idx = None
-    entry_price = None
-    pnl_gross = 0.0
-    pnl_net = 0.0
+    # Extraire colonnes
+    asset_ids = ohlcv[:, 1].astype(int)  # Colonne 1 = asset_id
+    opens = ohlcv[:, 2]  # Colonne 2 = Open
+    direction_labels = labels[:, 2].astype(int)  # Colonne 2 = direction
 
-    opens = ohlcv[:, 2]  # Open prices
-    closes = ohlcv[:, 5]  # Close prices
-    asset_ids = ohlcv[:, 1]  # Asset IDs
-    n_samples = len(labels)
+    # Identifier les assets uniques
+    unique_assets = np.unique(asset_ids)
+    print(f"  Assets detected: {len(unique_assets)} ({unique_assets})")
 
-    for i in range(n_samples - 1):
-        current_label = labels[i, 2]  # Colonne 2 = direction (0=DOWN, 1=UP)
-        target = 'LONG' if current_label == 1 else 'SHORT'
-        current_asset = asset_ids[i]
-        next_asset = asset_ids[i + 1]
+    all_trades = []
+    total_pnl_gross = 0.0
+    total_pnl_net = 0.0
 
-        # Vérifier frontière asset (ne pas trader entre assets)
-        if current_asset != next_asset:
-            if position != 'FLAT':
-                # Sortie forcée en fin d'asset
-                # CRITIQUE: Utiliser closes[i] (Close bougie actuelle), PAS opens[i+1] (premier Open prochain asset)!
-                # - opens[i+1] = prix du prochain asset (ETH) alors qu'on trade l'asset actuel (BTC) → catastrophique!
-                # - closes[i] = Close bougie actuelle, disponible à la fin de période i → causal ✓
-                exit_price = closes[i]
-                direction_multiplier = 1 if position == 'LONG' else -1
-                ret = direction_multiplier * (exit_price - entry_price) / entry_price
+    # Backtest PAR ASSET
+    for asset_id in unique_assets:
+        # Masque pour cet asset
+        mask = asset_ids == asset_id
+        asset_labels = direction_labels[mask]
+        asset_opens = opens[mask]
 
-                pnl_gross += ret
-                pnl_net += ret - 2 * fees  # Entry + exit
+        # Index de départ global (pour entry_idx/exit_idx)
+        start_idx = np.where(mask)[0][0]
 
-                trades.append({
-                    'entry_idx': entry_idx,
-                    'exit_idx': i,
-                    'direction': position,
-                    'pnl': ret,
-                    'duration': i - entry_idx,
-                    'exit_reason': 'ASSET_BOUNDARY'
-                })
+        print(f"    Asset {int(asset_id)}: {len(asset_labels):,} samples (start_idx={start_idx})")
 
-                position = 'FLAT'
-            continue
+        # Backtest cet asset
+        trades, pnl_gross, pnl_net = backtest_single_asset(
+            asset_labels, asset_opens, start_idx, fees
+        )
 
-        # Logique de trading
-        if position == 'FLAT':
-            # Entrée
-            position = target
-            entry_idx = i
-            entry_price = opens[i + 1]
+        all_trades.extend(trades)
+        total_pnl_gross += pnl_gross
+        total_pnl_net += pnl_net
 
-        elif position != target:
-            # Sortie + reversal
-            exit_price = opens[i + 1]
-            direction_multiplier = 1 if position == 'LONG' else -1
-            ret = direction_multiplier * (exit_price - entry_price) / entry_price
+    print(f"\n  Oracle backtest completed:")
+    print(f"    Total trades: {len(all_trades)}")
+    print(f"    PnL Gross: {total_pnl_gross*100:.2f}%")
+    print(f"    PnL Net: {total_pnl_net*100:.2f}%")
+    if len(all_trades) > 0:
+        print(f"    Avg duration: {np.mean([t['duration'] for t in all_trades]):.1f} periods")
 
-            pnl_gross += ret
-            pnl_net += ret - 2 * fees  # Entry + exit
-
-            trades.append({
-                'entry_idx': entry_idx,
-                'exit_idx': i,
-                'direction': position,
-                'pnl': ret,
-                'duration': i - entry_idx,
-                'exit_reason': 'DIRECTION_FLIP'
-            })
-
-            # Nouvelle entrée (reversal)
-            position = target
-            entry_idx = i
-            entry_price = opens[i + 1]
-
-    # Fermer position finale si ouverte
-    if position != 'FLAT':
-        exit_price = opens[-1]
-        direction_multiplier = 1 if position == 'LONG' else -1
-        ret = direction_multiplier * (exit_price - entry_price) / entry_price
-
-        pnl_gross += ret
-        pnl_net += ret - 2 * fees
-
-        trades.append({
-            'entry_idx': entry_idx,
-            'exit_idx': n_samples - 1,
-            'direction': position,
-            'pnl': ret,
-            'duration': n_samples - 1 - entry_idx,
-            'exit_reason': 'END_OF_DATA'
-        })
-
-    print(f"  Oracle backtest completed:")
-    print(f"    Total trades: {len(trades)}")
-    print(f"    PnL Gross: {pnl_gross*100:.2f}%")
-    print(f"    PnL Net: {pnl_net*100:.2f}%")
-    print(f"    Avg duration: {np.mean([t['duration'] for t in trades]):.1f} periods")
-
-    return trades, pnl_gross, pnl_net
+    return all_trades, total_pnl_gross, total_pnl_net
 
 
 def create_meta_labels_triple_barrier(
