@@ -19,8 +19,16 @@ Usage:
 import argparse
 import numpy as np
 from pathlib import Path
-from typing import Tuple, List
+from typing import Tuple, List, Optional
 import json
+import torch
+import sys
+
+# Ajouter le répertoire parent au path pour importer les modules
+sys.path.append(str(Path(__file__).parent.parent))
+
+from src.model import CNNLSTMMultiOutput
+from src.constants import DEVICE
 
 
 def load_dataset(indicator: str, filter_type: str, split: str) -> dict:
@@ -65,6 +73,63 @@ def load_dataset(indicator: str, filter_type: str, split: str) -> dict:
     print(f"  OHLCV: {result['ohlcv'].shape}")
 
     return result
+
+
+def load_model(model_path: Path, n_features: int) -> Optional[CNNLSTMMultiOutput]:
+    """
+    Charge un modèle primaire entraîné.
+
+    Args:
+        model_path: Chemin vers le .pth
+        n_features: Nombre de features (1 pour MACD/RSI, 3 pour CCI)
+
+    Returns:
+        Modèle chargé en mode eval, ou None si le fichier n'existe pas
+    """
+    if not model_path.exists():
+        print(f"  ⚠ Model not found: {model_path}")
+        return None
+
+    try:
+        model = CNNLSTMMultiOutput(n_features=n_features, n_outputs=1)
+        model.load_state_dict(torch.load(model_path, map_location=DEVICE))
+        model.to(DEVICE)
+        model.eval()
+        print(f"  ✓ Model loaded: {model_path.name}")
+        return model
+    except Exception as e:
+        print(f"  ⚠ Error loading model {model_path}: {e}")
+        return None
+
+
+def extract_predictions(
+    model: CNNLSTMMultiOutput,
+    sequences: np.ndarray,
+    batch_size: int = 1024
+) -> np.ndarray:
+    """
+    Extrait les probabilités de direction d'un modèle primaire.
+
+    Args:
+        model: Modèle primaire (direction-only)
+        sequences: Séquences (n, seq_len, n_features)
+        batch_size: Taille des batches pour l'inférence
+
+    Returns:
+        Probabilités (n,) - probabilité de direction UP
+    """
+    model.eval()
+    n_samples = len(sequences)
+    predictions = np.zeros(n_samples, dtype=np.float32)
+
+    with torch.no_grad():
+        for i in range(0, n_samples, batch_size):
+            batch = sequences[i:i+batch_size]
+            X = torch.tensor(batch, dtype=torch.float32, device=DEVICE)
+            outputs = model(X)  # (batch, 1) - déjà après sigmoid
+            predictions[i:i+batch_size] = outputs[:, 0].cpu().numpy()
+
+    return predictions
 
 
 def backtest_single_asset(
@@ -383,12 +448,17 @@ def save_meta_dataset(
     meta_labels: np.ndarray,
     trades: List[dict],
     metadata: dict,
-    args: argparse.Namespace
+    args: argparse.Namespace,
+    predictions: Optional[dict] = None
 ):
     """
-    Sauvegarde nouveau dataset avec meta-labels.
+    Sauvegarde nouveau dataset avec meta-labels et optionnellement les prédictions.
 
     CRITIQUE: Préserve la structure originale + ajoute nouvelles données.
+
+    Args:
+        predictions: Dict optionnel avec prédictions des 3 modèles
+                     {'macd': np.array, 'rsi': np.array, 'cci': np.array}
     """
     print(f"Saving meta-dataset to: {output_path}")
 
@@ -410,19 +480,27 @@ def save_meta_dataset(
     }
 
     # Sauvegarder avec MÊME structure + nouvelles données
-    np.savez_compressed(
-        output_path,
+    save_dict = {
         # Données originales (préservées)
-        X=sequences,
-        Y=labels,
-        T=timestamps,
-        OHLCV=ohlcv,
+        'X': sequences,
+        'Y': labels,
+        'T': timestamps,
+        'OHLCV': ohlcv,
         # Nouvelles données
-        meta_labels=meta_labels,      # (n,) - 0, 1, ou -1
+        'meta_labels': meta_labels,      # (n,) - 0, 1, ou -1
         # Métadonnées
-        metadata=json.dumps(metadata_enriched),
-        trades=trades  # Liste de dict (sauvegardé comme objet)
-    )
+        'metadata': json.dumps(metadata_enriched),
+        'trades': trades  # Liste de dict (sauvegardé comme objet)
+    }
+
+    # Ajouter prédictions si fournies
+    if predictions is not None:
+        print("  Adding model predictions to dataset...")
+        for indicator, preds in predictions.items():
+            save_dict[f'predictions_{indicator}'] = preds
+            print(f"    {indicator}: {preds.shape}")
+
+    np.savez_compressed(output_path, **save_dict)
 
     print(f"  Dataset saved successfully")
     print(f"  File size: {output_path.stat().st_size / 1024 / 1024:.2f} MB")
@@ -444,6 +522,12 @@ def main():
                         help='Trading fees per trade (default: 0.001 = 0.1%)')
     parser.add_argument('--output-dir', type=str, default='data/prepared',
                         help='Output directory for meta-datasets')
+    parser.add_argument('--model-macd', type=str, default=None,
+                        help='Path to MACD model (optional, for predictions)')
+    parser.add_argument('--model-rsi', type=str, default=None,
+                        help='Path to RSI model (optional, for predictions)')
+    parser.add_argument('--model-cci', type=str, default=None,
+                        help='Path to CCI model (optional, for predictions)')
 
     args = parser.parse_args()
 
@@ -491,7 +575,58 @@ def main():
     )
     print()
 
-    # 6. Sauvegarder nouveau dataset
+    # 7. Générer prédictions des modèles primaires (optionnel)
+    predictions = None
+    if any([args.model_macd, args.model_rsi, args.model_cci]):
+        print("="*80)
+        print("GENERATING MODEL PREDICTIONS")
+        print("="*80)
+
+        predictions = {}
+
+        # Charger les 3 datasets direction-only pour les 3 indicateurs
+        datasets = {}
+        for ind in ['macd', 'rsi', 'cci']:
+            try:
+                ind_data = load_dataset(ind, args.filter, args.split)
+                datasets[ind] = ind_data['sequences']
+                print(f"  ✓ Loaded {ind} sequences: {datasets[ind].shape}")
+            except FileNotFoundError:
+                print(f"  ⚠ Dataset not found for {ind}, skipping...")
+                datasets[ind] = None
+
+        # Charger et utiliser MACD model
+        if args.model_macd and datasets['macd'] is not None:
+            print("\nMacd model:")
+            model = load_model(Path(args.model_macd), n_features=1)
+            if model is not None:
+                predictions['macd'] = extract_predictions(model, datasets['macd'])
+                print(f"  Predictions shape: {predictions['macd'].shape}")
+
+        # Charger et utiliser RSI model
+        if args.model_rsi and datasets['rsi'] is not None:
+            print("\nRSI model:")
+            model = load_model(Path(args.model_rsi), n_features=1)
+            if model is not None:
+                predictions['rsi'] = extract_predictions(model, datasets['rsi'])
+                print(f"  Predictions shape: {predictions['rsi'].shape}")
+
+        # Charger et utiliser CCI model
+        if args.model_cci and datasets['cci'] is not None:
+            print("\nCCI model:")
+            model = load_model(Path(args.model_cci), n_features=3)
+            if model is not None:
+                predictions['cci'] = extract_predictions(model, datasets['cci'])
+                print(f"  Predictions shape: {predictions['cci'].shape}")
+
+        if not predictions:
+            print("\n⚠ No predictions generated (no models loaded successfully)")
+            predictions = None
+        else:
+            print(f"\n✓ Generated predictions for {len(predictions)} models")
+        print()
+
+    # 8. Sauvegarder nouveau dataset
     output_path = Path(args.output_dir) / f'meta_labels_{args.indicator}_{args.filter}_{args.split}.npz'
     save_meta_dataset(
         output_path=output_path,
@@ -502,7 +637,8 @@ def main():
         meta_labels=timestep_meta_labels,
         trades=trades,
         metadata=metadata,
-        args=args
+        args=args,
+        predictions=predictions
     )
     print()
 
