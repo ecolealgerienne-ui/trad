@@ -311,14 +311,14 @@ def validate_meta_labels_consistency(meta_data: Dict) -> bool:
     for trade_idx, trade in enumerate(trades):
         entry_idx = trade['entry_idx']
         exit_idx = trade['exit_idx']
-        pnl = trade['pnl']
+        pnl_net = trade['pnl_after_fees']  # CRITIQUE: Utiliser PnL NET, pas brut!
         duration = trade['duration']
 
         # Déterminer le label attendu
         min_duration = meta_data['metadata']['meta_labeling']['min_duration']
         pnl_threshold = meta_data['metadata']['meta_labeling']['pnl_threshold']
 
-        if pnl > pnl_threshold and duration >= min_duration:
+        if pnl_net > pnl_threshold and duration >= min_duration:
             expected_label = 1
         else:
             expected_label = 0
