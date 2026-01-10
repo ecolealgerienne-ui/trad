@@ -610,11 +610,11 @@ def validate_statistics(meta_data: Dict) -> bool:
     # Comparer avec Phase 2.15 Oracle results (référence)
     print_info("\nComparaison avec Phase 2.15 Oracle (référence):")
 
-    # Phase 2.15: MACD Kalman Test Set
+    # Phase 2.15: MACD Kalman Test Set (NOUVELLE FORMULE t vs t-1)
     # - Trades: 68,924
-    # - PnL Brut: +9,669%
-    # - PnL Net: -4,116%
-    # - Win Rate: 33.4%
+    # - PnL Brut: +28,144%
+    # - PnL Net: +14,359%
+    # - Win Rate: 53.4%
     # - Avg Duration: 9.3p
 
     total_trades = len(trades)
@@ -635,10 +635,10 @@ def validate_statistics(meta_data: Dict) -> bool:
     win_rate_raw = 100 * winning_trades_raw / total_trades if total_trades > 0 else 0
 
     print_info(f"  Trades: {total_trades:,} (référence: 68,924)")
-    print_info(f"  PnL Brut: {pnl_gross:+.2f}% (référence: +9,669%)")
-    print_info(f"  PnL Net: {pnl_net:+.2f}% (référence: -4,116%)")
-    print_info(f"  Win Rate (Triple Barrier): {win_rate:.1f}% (référence: 33.4%)")
-    print_info(f"  Win Rate (raw PnL>0): {win_rate_raw:.1f}%")
+    print_info(f"  PnL Brut: {pnl_gross:+.2f}% (référence: +28,144%)")
+    print_info(f"  PnL Net: {pnl_net:+.2f}% (référence: +14,359%)")
+    print_info(f"  Win Rate (Triple Barrier): {win_rate:.1f}% (référence: 53.4%)")
+    print_info(f"  Win Rate (raw PnL NET>0): {win_rate_raw:.1f}%")
     print_info(f"  Avg Duration: {avg_duration:.1f}p (référence: 9.3p)")
 
     # Vérifier cohérence avec Phase 2.15
