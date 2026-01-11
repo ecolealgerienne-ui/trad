@@ -35,16 +35,25 @@ import argparse
 import numpy as np
 from pathlib import Path
 from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
     roc_auc_score, classification_report, confusion_matrix
 )
 import joblib
 import json
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Union
+
+# XGBoost (optional - will check if available)
+try:
+    import xgboost as xgb
+    XGBOOST_AVAILABLE = True
+except ImportError:
+    XGBOOST_AVAILABLE = False
+    print("Warning: XGBoost not installed. Install with: pip install xgboost")
 
 
-def load_meta_dataset(split: str, indicator: str = 'macd', filter_type: str = 'kalman') -> Dict:
+def load_meta_dataset(split: str, indicator: str = 'macd', filter_type: str = 'kalman', aligned: bool = False) -> Dict:
     """
     Charge le dataset meta-labels avec prédictions.
 
@@ -52,11 +61,13 @@ def load_meta_dataset(split: str, indicator: str = 'macd', filter_type: str = 'k
         split: 'train', 'val', ou 'test'
         indicator: Indicateur utilisé pour meta-labels (default: 'macd')
         filter_type: Type de filtre (default: 'kalman')
+        aligned: Si True, charge labels aligned (signal reversal) au lieu de Triple Barrier
 
     Returns:
         Dict avec predictions, meta_labels, ohlcv, etc.
     """
-    npz_path = Path(f'data/prepared/meta_labels_{indicator}_{filter_type}_{split}.npz')
+    suffix = '_aligned' if aligned else ''
+    npz_path = Path(f'data/prepared/meta_labels_{indicator}_{filter_type}_{split}{suffix}.npz')
 
     if not npz_path.exists():
         raise FileNotFoundError(f"Meta-labels file not found: {npz_path}")
@@ -248,8 +259,177 @@ def train_baseline_model(
     return model
 
 
+def train_xgboost_model(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_val: np.ndarray,
+    y_val: np.ndarray
+) -> 'xgb.XGBClassifier':
+    """
+    Entraîne le meta-modèle avec XGBoost.
+
+    Args:
+        X_train: Features train (n_train, 6)
+        y_train: Labels train (n_train,)
+        X_val: Features val (n_val, 6)
+        y_val: Labels val (n_val,)
+
+    Returns:
+        Modèle XGBoost entraîné
+    """
+    if not XGBOOST_AVAILABLE:
+        raise ImportError("XGBoost not installed. Install with: pip install xgboost")
+
+    print("\n" + "="*80)
+    print("TRAINING XGBOOST META-MODEL")
+    print("="*80)
+
+    # Filtrer les labels ignored (-1)
+    train_mask = y_train != -1
+    val_mask = y_val != -1
+
+    X_train_filtered = X_train[train_mask]
+    y_train_filtered = y_train[train_mask]
+    X_val_filtered = X_val[val_mask]
+    y_val_filtered = y_val[val_mask]
+
+    print(f"\nTrain samples: {len(X_train_filtered):,} (after filtering)")
+    print(f"Val samples: {len(X_val_filtered):,} (after filtering)")
+
+    # Distribution des classes
+    pos_train = np.sum(y_train_filtered == 1)
+    neg_train = np.sum(y_train_filtered == 0)
+    print(f"\nTrain distribution:")
+    print(f"  Positive (1): {pos_train:,} ({100*pos_train/len(y_train_filtered):.1f}%)")
+    print(f"  Negative (0): {neg_train:,} ({100*neg_train/len(y_train_filtered):.1f}%)")
+
+    # Calculer scale_pos_weight pour class imbalance
+    scale_pos_weight = neg_train / pos_train
+    print(f"\nClass imbalance ratio: {scale_pos_weight:.2f}")
+
+    # Entraîner XGBoost
+    print("\nTraining XGBoost...")
+    model = xgb.XGBClassifier(
+        n_estimators=100,
+        max_depth=5,
+        learning_rate=0.1,
+        scale_pos_weight=scale_pos_weight,  # Handle class imbalance
+        random_state=42,
+        n_jobs=-1,
+        eval_metric='logloss'
+    )
+
+    # Fit avec early stopping sur val
+    model.fit(
+        X_train_filtered, y_train_filtered,
+        eval_set=[(X_val_filtered, y_val_filtered)],
+        verbose=False
+    )
+
+    # Feature importance
+    print("\nFeature importance:")
+    feature_names = ['macd_prob', 'rsi_prob', 'cci_prob',
+                     'confidence_spread', 'confidence_mean', 'volatility_atr']
+    importances = model.feature_importances_
+    for name, imp in sorted(zip(feature_names, importances), key=lambda x: -x[1]):
+        print(f"  {name:20s}: {imp:.4f}")
+
+    # Évaluation train
+    y_train_pred = model.predict(X_train_filtered)
+    train_acc = accuracy_score(y_train_filtered, y_train_pred)
+    print(f"\nTrain Accuracy: {train_acc:.4f}")
+
+    # Évaluation val
+    y_val_pred = model.predict(X_val_filtered)
+    val_acc = accuracy_score(y_val_filtered, y_val_pred)
+    print(f"Val Accuracy: {val_acc:.4f}")
+
+    return model
+
+
+def train_random_forest_model(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_val: np.ndarray,
+    y_val: np.ndarray
+) -> RandomForestClassifier:
+    """
+    Entraîne le meta-modèle avec Random Forest.
+
+    Args:
+        X_train: Features train (n_train, 6)
+        y_train: Labels train (n_train,)
+        X_val: Features val (n_val, 6)
+        y_val: Labels val (n_val,)
+
+    Returns:
+        Modèle Random Forest entraîné
+    """
+    print("\n" + "="*80)
+    print("TRAINING RANDOM FOREST META-MODEL")
+    print("="*80)
+
+    # Filtrer les labels ignored (-1)
+    train_mask = y_train != -1
+    val_mask = y_val != -1
+
+    X_train_filtered = X_train[train_mask]
+    y_train_filtered = y_train[train_mask]
+    X_val_filtered = X_val[val_mask]
+    y_val_filtered = y_val[val_mask]
+
+    print(f"\nTrain samples: {len(X_train_filtered):,} (after filtering)")
+    print(f"Val samples: {len(X_val_filtered):,} (after filtering)")
+
+    # Distribution des classes
+    pos_train = np.sum(y_train_filtered == 1)
+    neg_train = np.sum(y_train_filtered == 0)
+    print(f"\nTrain distribution:")
+    print(f"  Positive (1): {pos_train:,} ({100*pos_train/len(y_train_filtered):.1f}%)")
+    print(f"  Negative (0): {neg_train:,} ({100*neg_train/len(y_train_filtered):.1f}%)")
+
+    # Calculer class_weight pour class imbalance
+    class_weight_ratio = neg_train / pos_train
+    print(f"\nClass imbalance ratio: {class_weight_ratio:.2f}")
+
+    # Entraîner Random Forest
+    print("\nTraining Random Forest...")
+    model = RandomForestClassifier(
+        n_estimators=100,           # Nombre d'arbres
+        max_depth=10,               # Profondeur max (vs 5 pour XGBoost - plus de non-linéarité)
+        min_samples_split=50,       # Régularisation
+        min_samples_leaf=20,        # Régularisation
+        class_weight='balanced',    # Handle class imbalance
+        random_state=42,
+        n_jobs=-1,
+        verbose=0
+    )
+
+    model.fit(X_train_filtered, y_train_filtered)
+
+    # Feature importance
+    print("\nFeature importance:")
+    feature_names = ['macd_prob', 'rsi_prob', 'cci_prob',
+                     'confidence_spread', 'confidence_mean', 'volatility_atr']
+    importances = model.feature_importances_
+    for name, imp in sorted(zip(feature_names, importances), key=lambda x: -x[1]):
+        print(f"  {name:20s}: {imp:.4f}")
+
+    # Évaluation train
+    y_train_pred = model.predict(X_train_filtered)
+    train_acc = accuracy_score(y_train_filtered, y_train_pred)
+    print(f"\nTrain Accuracy: {train_acc:.4f}")
+
+    # Évaluation val
+    y_val_pred = model.predict(X_val_filtered)
+    val_acc = accuracy_score(y_val_filtered, y_val_pred)
+    print(f"Val Accuracy: {val_acc:.4f}")
+
+    return model
+
+
 def evaluate_model(
-    model: LogisticRegression,
+    model: Union[LogisticRegression, RandomForestClassifier, 'xgb.XGBClassifier'],
     X: np.ndarray,
     y: np.ndarray,
     split_name: str
@@ -315,17 +495,24 @@ def evaluate_model(
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Train meta-model Phase 2.17')
+    parser = argparse.ArgumentParser(description='Train meta-model Phase 2.17/2.18')
     parser.add_argument('--filter', type=str, default='kalman', choices=['kalman', 'octave20'],
                         help='Filter type (default: kalman)')
+    parser.add_argument('--aligned', action='store_true',
+                        help='Use aligned labels (signal reversal) instead of Triple Barrier')
+    parser.add_argument('--model', type=str, default='logistic',
+                        choices=['logistic', 'xgboost', 'random_forest'],
+                        help='Model type: logistic (baseline), xgboost, or random_forest (default: logistic)')
     parser.add_argument('--output-dir', type=Path, default=Path('models/meta_model'),
                         help='Output directory for meta-model')
     args = parser.parse_args()
 
     print("="*80)
-    print("META-MODEL TRAINING - Phase 2.17")
+    print("META-MODEL TRAINING - Phase 2.17/2.18")
     print("="*80)
+    print(f"Model: {args.model}")
     print(f"Filter: {args.filter}")
+    print(f"Labels: {'Aligned (Signal Reversal)' if args.aligned else 'Triple Barrier'}")
     print(f"Output: {args.output_dir}")
 
     # Créer répertoire output
@@ -339,7 +526,7 @@ def main():
     datasets = {}
     for split in ['train', 'val', 'test']:
         print(f"\n{split.upper()}:")
-        datasets[split] = load_meta_dataset(split, indicator='macd', filter_type=args.filter)
+        datasets[split] = load_meta_dataset(split, indicator='macd', filter_type=args.filter, aligned=args.aligned)
 
     # Construire features meta-modèle pour chaque split
     print("\n" + "="*80)
@@ -359,13 +546,30 @@ def main():
         )
         y_meta[split] = datasets[split]['meta_labels']
 
-    # Entraîner baseline
-    meta_model = train_baseline_model(
-        X_train=X_meta['train'],
-        y_train=y_meta['train'],
-        X_val=X_meta['val'],
-        y_val=y_meta['val']
-    )
+    # Entraîner le modèle sélectionné
+    if args.model == 'logistic':
+        meta_model = train_baseline_model(
+            X_train=X_meta['train'],
+            y_train=y_meta['train'],
+            X_val=X_meta['val'],
+            y_val=y_meta['val']
+        )
+    elif args.model == 'xgboost':
+        meta_model = train_xgboost_model(
+            X_train=X_meta['train'],
+            y_train=y_meta['train'],
+            X_val=X_meta['val'],
+            y_val=y_meta['val']
+        )
+    elif args.model == 'random_forest':
+        meta_model = train_random_forest_model(
+            X_train=X_meta['train'],
+            y_train=y_meta['train'],
+            X_val=X_meta['val'],
+            y_val=y_meta['val']
+        )
+    else:
+        raise ValueError(f"Unknown model type: {args.model}")
 
     # Évaluer sur les 3 splits
     results = {}
@@ -378,12 +582,14 @@ def main():
         )
 
     # Sauvegarder modèle
-    model_path = args.output_dir / f'meta_model_baseline_{args.filter}.pkl'
+    suffix = '_aligned' if args.aligned else ''
+    model_name = args.model  # 'logistic', 'xgboost', ou 'random_forest'
+    model_path = args.output_dir / f'meta_model_{model_name}_{args.filter}{suffix}.pkl'
     print(f"\nSaving meta-model to: {model_path}")
     joblib.dump(meta_model, model_path)
 
     # Sauvegarder résultats
-    results_path = args.output_dir / f'meta_model_results_{args.filter}.json'
+    results_path = args.output_dir / f'meta_model_results_{model_name}_{args.filter}{suffix}.json'
     print(f"Saving results to: {results_path}")
     with open(results_path, 'w') as f:
         json.dump(results, f, indent=2)

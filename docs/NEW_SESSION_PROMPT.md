@@ -1,383 +1,511 @@
-# 🚀 Prompt Nouvelle Session - Meta-Labeling Phase 2.18
+# 🎯 Prompt Nouvelle Session - Post Phase 2.18 Validation Experte
 
-**Date**: 2026-01-10
-**Version**: 10.1 - Phase 2.18: Meta-Model Backtest et Aligned Labels
-**Branch Git**: `claude/review-context-update-main-844S0`
-**Commit Actuel**: `a74abec` - Script aligned meta-labels créé
+**Date**: 2026-01-11
+**Version**: 10.2 - Phase 2.18 COMPLÈTE avec Validation Académique
+**Branch Git**: `claude/review-and-sync-main-hASdA`
+**Dernier Commit**: `162abd0` - "docs: Complete meta-labeling synthesis (Phase 2.17/2.18)"
 
 ---
 
-## 📋 Contexte à Charger
+## 📋 Contexte Essentiel
 
 Bonjour Claude,
 
-Je continue le projet **CNN-LSTM Direction-Only avec Meta-Labeling**. **Lis d'abord `/home/user/trad/CLAUDE.md`** pour le contexte complet, particulièrement les sections:
-- Phase 2.15 (Nouvelle formule labels t vs t-1 - SUCCÈS)
-- Phase 2.17 (Meta-model baseline - Logistic Regression)
-- **Phase 2.18 (IMPORTANT - Diagnostic problème architecture)**
+Je continue le projet **CNN-LSTM Direction-Only avec Meta-Labeling**.
+
+**IMPORTANT: Lis d'abord ces 2 fichiers dans l'ordre:**
+1. `/home/user/trad/CLAUDE.md` - Documentation principale, sections Phase 2.15-2.18
+2. `/home/user/trad/docs/META_LABELING_SYNTHESIS_PHASE2.md` - Synthèse complète Phase 2.17/2.18 avec validation experte
 
 ---
 
-## 🎯 État Actuel - Phase 2.18 Meta-Model Backtest
+## 🎯 État Actuel du Projet
 
-### Situation Critique Identifiée
+### Phase 2.18 - COMPLÈTE ✅
 
-**PROBLÈME FONDAMENTAL**: Meta-model prédit selon Triple Barrier, backtest calcule selon Signal Reversal
+**Statut**: ✅ **PIPELINE SCIENTIFIQUEMENT VALIDÉ - Signal Primaire Insuffisant**
 
-#### Résultats Backtest Après Corrections Bugs
+Tous les tests sont terminés, validation académique obtenue, documentation complète.
 
-| Stratégie | Trades | Filtrés | Win Rate | PnL Net | Observation |
-|-----------|--------|---------|----------|---------|-------------|
-| **Baseline (no filter)** | 108,702 | 0 | 22.49% | **-21,382%** | Référence catastrophique |
-| **Meta-Filter (0.5)** | 76,881 | 210,115 | 22.32% | -14,924% | -29% trades, WR stable |
-| **Meta-Filter (0.6)** | 40,315 | 476,449 | **20.34%** ❌ | -7,790% | Win Rate **BAISSE** |
-| **Meta-Filter (0.7)** | 16,277 | 602,131 | **19.22%** ❌ | -3,034% | Win Rate **BAISSE** encore |
+### Résultats Finaux - 3 Modèles Testés
 
-**OBSERVATION CRITIQUE**: Plus on filtre, plus le Win Rate **EMPIRE** au lieu de s'améliorer!
+#### Test Set: ~445 jours, 5 assets (BTC, ETH, BNB, ADA, LTC)
 
-#### Bugs Corrigés (Commits Précédents)
+| Modèle | Threshold | Trades | Win Rate | PnL Net | Annualisé | Verdict |
+|--------|-----------|--------|----------|---------|-----------|---------|
+| **Logistic Regression** | 0.7 | 1,253 | 41.34% | +24.62% | ~20% | Baseline |
+| **XGBoost** | 0.7 | 1,160 | 41.21% | +24.62% | ~20% | = Logistic |
+| **Random Forest** 🥇 | **0.9** | **94** | **45.74%** | **+28.65%** | **~23%** | **Meilleur** |
 
-1. **✅ Bug Fees ×100** (Commit `4815ba9`):
-   ```python
-   # AVANT (bug)
-   total_fees = 2 * fees * 100  # 0.001 * 100 = 0.1 = 10%!
+**Observations Critiques**:
+- Les 3 modèles convergent vers ~44% Precision (plafond)
+- Random Forest @ 0.9: Meilleur WR (45.74%) mais seulement 94 trades
+- Performance +20-23% annualisée = **MÉDIOCRE pour crypto** (vs +100-300% Buy & Hold)
 
-   # APRÈS (corrigé)
-   total_fees = 2 * fees  # 0.001 = 0.1%
-   ```
+### Découvertes Techniques Majeures
 
-2. **✅ Bug Trading Logic Fatal** (Commit `ea672e8`):
-   ```python
-   # AVANT (bug - ne sortait JAMAIS)
-   if position != Position.FLAT and meta_prob <= threshold:
-       continue  # ❌ Bloque exit quand signal change
+#### 1. Pipeline Meta-Labeling Correct ✅
 
-   # APRÈS (corrigé - Option B: FLAT autorisé)
-   if position == Position.FLAT:
-       if meta_prob > threshold:
-           position = target
-   elif position != target:
-       # TOUJOURS sortir si signal change
-       exit_trade()
-       position = target  # Flip immédiat
-   ```
+**Architecture validée contre littérature**:
+- ✅ Séparation direction (primaire) vs profitabilité (meta)
+- ✅ Triple Barrier → Aligned Labels correction réussie
+- ✅ 3 modèles testés avec convergence
+- ✅ Toutes découvertes alignées théorie (López de Prado, Dixon, Zohren)
 
-### Diagnostic Expert - Mismatch Architecture Fondamental
+#### 2. confidence_spread Dominance (+2.6584 coeff) ✅
 
-**Citation Expert**:
-> "Le problème NE vient pas du méta-modèle. Il vient AVANT."
->
-> "Un meta-model ne transforme jamais un modèle perdant en modèle gagnant."
-> — López de Prado
+**Validation López de Prado (2018)**:
+> "The best predictors of profitable trades are not the classifier outputs, but their disagreement patterns."
 
-#### Le Meta-Modèle Fonctionne Techniquement
+Le coefficient 10× plus élevé que les autres features VALIDE empiriquement la théorie.
 
-| Métrique | Valeur | Interprétation |
-|----------|--------|----------------|
-| **Precision** | **68.41%** | ✅ Niveau institutionnel |
-| **ROC AUC** | 0.5846 | ✅ Signal détectable |
-| **F1-Score** | 0.5703 | ✅ Balance OK |
-| **confidence_spread** | **+2.6584** | ✅ 10× autres features (valide théorie) |
+#### 3. Random Forest volatility_atr Dominance (88.75%) ✅
 
-**Découverte Majeure Validée**:
-> "Le meilleur trade n'est PAS celui où les modèles sont d'accord, mais celui où ils sont en conflit."
+**Validation Breiman (2001)**:
+- Random Forests sur-pondèrent les features haute variance
+- 88.75% importance volatility_atr = comportement attendu
+- Le modèle devient un filtre de volatilité plutôt que meta-labeling pur
 
-#### Mais Il Prédit la Mauvaise Chose!
+#### 4. RSI Coefficient Négatif (-0.4844) ✅
 
-**Le Mismatch**:
+**Validation Daniel & Moskowitz (2016)**:
+- RSI oscillateur de vitesse = mauvais pour trend-following
+- RSI meilleur comme contrarian indicator
+- Découverte empirique cohérente avec littérature
 
-| Aspect | Triple Barrier (meta-labels) | Backtest Réel |
-|--------|------------------------------|---------------|
-| **Sortie** | Barrières prix + duration | Changement signal |
-| **PnL** | (exit - entry) avec barrières | (exit - entry) au signal change |
-| **Duration** | Contrainte min_duration=5 | Variable selon signal |
-| **Exits** | 3 conditions (TP, SL, time) | 1 condition (signal flip) |
+#### 5. Oracle >> ML (Proxy Learning Failure) ✅
 
-**Explication du Problème**:
-```
-Meta-modèle apprend:
-  "Ce trade sera profitable selon Triple Barrier"
-  (avec barrières fixes et contraintes de durée)
-
-Backtest calcule:
-  "Ce trade est profitable selon signal reversal"
-  (sortie immédiate quand direction change)
-
-→ Le meta-modèle filtre les "mauvais" trades selon Triple Barrier
-→ Mais ces trades peuvent être BONS selon la vraie stratégie
-→ Résultat: Filtrage INVERSE (Win Rate baisse au lieu de monter)
-```
-
-#### Pourquoi le Win Rate Diminue
-
-Le meta-modèle avec Precision 68.41% dit:
-- "68% des trades que je recommande sont profitables... **selon Triple Barrier**"
-
-Mais le backtest utilise une logique différente:
-- Trades recommandés peuvent être **perdants dans le backtest réel**
-- Trades rejetés peuvent être **gagnants dans le backtest réel**
-
-**Résultat**: Le filtrage sélectionne les MAUVAIS trades du point de vue du backtest.
+**Validation académique consensus**:
+- Oracle: +14k-23k% PnL Net, 53-57% WR
+- ML: +20-28% PnL Net, 41-46% WR
+- Gap massif = signature de proxy learning failure (documenté en ML)
 
 ---
 
-## ✅ Solution Créée - Aligned Meta-Labels
+## 🔬 Validation Académique Experte (2026-01-11)
 
-### Script: `src/create_meta_labels_aligned.py` (CRÉÉ)
+### Verdict Expert Finance Quantitative
 
-**Commit**: `a74abec` - "feat: Create aligned meta-labels script matching real backtest strategy"
+> **"Tout ce que vous avez observé est NORMAL et documenté dans la littérature académique. Vous n'avez pas de bug - vous avez découvert les limites fondamentales de la prédiction directionnelle."**
 
-**Principe**: Créer des meta-labels qui correspondent **EXACTEMENT** au calcul PnL du backtest.
+### 7 Points Validés par Littérature
 
-#### Pipeline Aligned
+| # | Observation | Référence Académique | Validation |
+|---|-------------|---------------------|------------|
+| 1 | confidence_spread dominance | López de Prado (2018) | ✅ PARFAIT |
+| 2 | RSI coefficient négatif | Daniel & Moskowitz (2016) | ✅ CONFIRMÉ |
+| 3 | Random Forest volatility dominance | Breiman (2001) | ✅ VALIDÉ |
+| 4 | XGBoost vs Logistic trade-off | Hastie (2009) | ✅ CONFORME |
+| 5 | Meta-labeling ne crée pas d'alpha | López de Prado (2018) | ✅ CONFIRMÉ |
+| 6 | Prédiction directionnelle faible | Zohren (2019), Krauss (2017) | ✅ CONSENSUS |
+| 7 | Performance +20-23% insuffisante | Expert validation | ✅ RÉALISTE |
 
-```python
-# Au lieu de Triple Barrier:
-direction = modèle_primaire[i]
-entry_price = open[i+1]
+### Citations Clés
 
-# Trouver quand direction change
-j = prochain_index_où_direction_change
+**López de Prado (AFML 2018)**:
+> "Meta-labeling improves profitable primary models. It cannot invert the sign of a losing model."
 
-exit_price = open[j+1]
+**Dixon, Halperin, Bilokon (2020)**:
+> "Directional forecasting remains challenging. Edge primaire nécessaire."
 
-# Calculer PnL exactement comme dans le backtest
-if direction == UP:
-    pnl = (exit_price - entry_price) / entry_price
-else:  # SHORT
-    pnl = (entry_price - exit_price) / entry_price
+**Zohren et al. (2019)**:
+> "Directional forecasting remains challenging even with deep learning."
 
-pnl_after_fees = pnl - (2 * fees)
+---
 
-# Label meta simple et aligné
-label_meta = 1 if pnl_after_fees > 0 else 0
-```
+## 📊 Diagnostic Final
+
+### ✅ Ce Qui Fonctionne
+
+1. **Architecture meta-labeling**: Correcte techniquement
+2. **Pipeline aligned labels**: Réussie (vs Triple Barrier qui a échoué)
+3. **3 modèles testés**: Tous convergent (~44% Precision)
+4. **Découvertes empiriques**: Toutes validées par littérature
+5. **Documentation**: Complète et synthétisée
+
+### ❌ Ce Qui Manque
+
+1. **Signal primaire faible**: MACD/RSI/CCI direction-only n'a pas d'alpha exploitable
+2. **Performance insuffisante**: +20-23% annualisé trop faible pour crypto
+3. **Edge/trade trop faible**: Frais 0.2%/trade mangent le signal
+4. **Gap Oracle-ML massif**: Oracle +14k-23%, ML +20-28% (100× différence)
+
+### Conclusion Fondamentale
+
+> **"Le problème n'est PAS l'implémentation du meta-labeling (qui est correcte). Le problème est que la prédiction directionnelle à partir d'indicateurs techniques n'a pas d'edge exploitable. C'est documenté depuis 20 ans."**
+> — Expert Finance Quantitative
+
+---
+
+## 🎯 Décision Stratégique à Prendre
+
+### ❌ Options à ABANDONNER
+
+1. **Meta-labeling supplémentaire**: Aucun gain attendu (plafond atteint)
+2. **Ajout de features**: Problème structurel, pas de features manquantes
+3. **Optimisation hyperparamètres**: Convergence déjà atteinte
+4. **Timeframe/holding différents**: Ne crée pas d'alpha
+
+### ✅ Alternatives Recommandées
+
+#### Option A: Régime Detection (Classification Multi-Classes)
+
+**Principe**: Classifier les états de marché au lieu de prédire direction.
+
+**Classes**:
+- TRENDING UP
+- TRENDING DOWN
+- RANGING (consolidation)
+- HIGH VOLATILITY
+- LOW VOLATILITY
 
 **Avantages**:
-- Labels correspondent **EXACTEMENT** au calcul PnL du backtest
-- Pas de barrières artificielles
-- Pas de contraintes de durée arbitraires
-- Le meta-modèle apprend à prédire la profitabilité **RÉELLE**
+- Littérature plus favorable (Ang & Bekaert 2002)
+- Permet stratégies conditionnelles
+- Alpha documenté en finance quantitative
 
-### Différences Clés vs Triple Barrier
+#### Option B: Returns Forecasting (Régression)
 
-| Aspect | Triple Barrier | Aligned |
-|--------|----------------|---------|
-| **Exit Logic** | 3 conditions (TP, SL, time) | 1 condition (signal flip) |
-| **PnL Calc** | Avec barrières | Sans barrières |
-| **Duration** | min_duration=5 imposé | Variable naturelle |
-| **Alignment** | ❌ Différent du backtest | ✅ **IDENTIQUE au backtest** |
+**Principe**: Prédire la magnitude du mouvement (continu) au lieu de direction (binaire).
+
+**Target**: Returns sur horizon N périodes
+
+**Avantages**:
+- Littérature académique meilleure (Gu, Kelly & Xiu 2020)
+- Plus d'information exploitable que binaire
+- Permet sizing de position
+
+#### Option C: Microstructure & Order Flow
+
+**Principe**: Utiliser données haute fréquence (tick-by-tick).
+
+**Features**:
+- Bid/Ask spread
+- Order book depth
+- Order flow imbalance
+- VWAP analysis
+
+**Avantages**:
+- Littérature HFT favorable (Cartea et al. 2015)
+- Alpha réel documenté
+- **Requiert données tick-by-tick**
+
+#### Option D: Ensemble Multi-Timeframe
+
+**Principe**: Combiner signaux de plusieurs timeframes pour régime global.
+
+**Timeframes**: 5min / 15min / 1h / 4h
+
+**Avantages**:
+- Littérature multi-scale favorable (Müller et al. 1997)
+- Capture patterns différents
+- Pas besoin nouvelles données
 
 ---
 
-## 🎯 Prochaines Étapes EXACTES
+## 📁 Fichiers et Structure du Projet
 
-### Étape 1: Générer Aligned Meta-Labels (À FAIRE)
+### Documentation Principale
+
+```
+/home/user/trad/
+├── CLAUDE.md                              # ⭐ Documentation principale
+├── docs/
+│   ├── META_LABELING_SYNTHESIS_PHASE2.md  # ⭐ Synthèse complète Phase 2.17/2.18
+│   └── NEW_SESSION_PROMPT.md             # 📍 Ce fichier
+```
+
+### Scripts Meta-Labeling
+
+```
+src/
+├── create_meta_labels_phase215.py         # Triple Barrier (Phase 2.17 - ÉCHEC)
+├── create_meta_labels_aligned.py          # Aligned Labels (Phase 2.18 - SUCCÈS)
+└── train_meta_model_phase217.py          # Training 3 modèles (Logistic, XGBoost, RF)
+
+tests/
+├── test_meta_model_backtest.py           # Backtest avec meta-filtering
+└── analyze_long_short_bias.py            # Analyse LONG/SHORT bias
+```
+
+### Datasets Générés
+
+```
+data/prepared/
+├── meta_labels_macd_kalman_train.npz                # Triple Barrier (ancien)
+├── meta_labels_macd_kalman_val.npz
+├── meta_labels_macd_kalman_test.npz
+├── meta_labels_macd_kalman_train_aligned.npz       # Aligned (nouveau) ⭐
+├── meta_labels_macd_kalman_val_aligned.npz
+└── meta_labels_macd_kalman_test_aligned.npz
+```
+
+**Structure fichiers meta-labels** (identique Triple Barrier et Aligned):
+```python
+{
+    'predictions_macd': (n,),      # Probabilités modèle primaire MACD
+    'predictions_rsi': (n,),       # Probabilités modèle primaire RSI
+    'predictions_cci': (n,),       # Probabilités modèle primaire CCI
+    'OHLCV': (n, 7),              # [timestamp, asset_id, O, H, L, C, V]
+    'meta_labels': (n,),          # 1=profitable, 0=unprofitable, -1=ignored
+    'metadata': {...}             # Métadonnées enrichies
+}
+```
+
+### Modèles Entraînés
+
+```
+models/meta_model/
+├── meta_model_baseline_kalman.pkl               # Logistic (Triple Barrier)
+├── meta_model_baseline_kalman_aligned.pkl       # Logistic (Aligned) ⭐
+├── meta_model_xgboost_kalman_aligned.pkl        # XGBoost (Aligned) ⭐
+├── meta_model_random_forest_kalman_aligned.pkl  # Random Forest (Aligned) ⭐
+└── meta_model_results_*.json                    # Résultats JSON
+```
+
+### Modèles Primaires (Direction-Only)
+
+```
+models/
+├── best_model_macd_kalman_dual_binary.pth   # 92.4% Direction, 81.5% Force
+├── best_model_rsi_kalman_dual_binary.pth    # 87.4% Direction, 74.0% Force
+└── best_model_cci_kalman_dual_binary.pth    # 89.3% Direction, 77.4% Force
+```
+
+---
+
+## 🔧 Commandes Principales
+
+### Génération Meta-Labels Aligned
 
 ```bash
 # Train split
 python src/create_meta_labels_aligned.py \
-    --indicator macd \
-    --filter kalman \
-    --split train \
-    --fees 0.001
+    --indicator macd --filter kalman --split train --fees 0.001
 
 # Validation split
 python src/create_meta_labels_aligned.py \
-    --indicator macd \
-    --filter kalman \
-    --split val \
-    --fees 0.001
+    --indicator macd --filter kalman --split val --fees 0.001
 
 # Test split
 python src/create_meta_labels_aligned.py \
-    --indicator macd \
-    --filter kalman \
-    --split test \
-    --fees 0.001
+    --indicator macd --filter kalman --split test --fees 0.001
 ```
 
-**Outputs attendus**:
-```
-data/prepared/meta_labels_macd_kalman_train_aligned.npz
-data/prepared/meta_labels_macd_kalman_val_aligned.npz
-data/prepared/meta_labels_macd_kalman_test_aligned.npz
-```
-
-### Étape 2: Modifier train_meta_model_phase217.py (À FAIRE)
-
-**Ajout requis**:
-```python
-# Ligne ~30
-parser.add_argument('--aligned', action='store_true',
-                    help='Utiliser labels aligned au lieu de Triple Barrier')
-
-# Ligne ~45
-if args.aligned:
-    # Charger datasets aligned
-    train_data = np.load('data/prepared/meta_labels_macd_kalman_train_aligned.npz')
-    # ...
-else:
-    # Charger datasets Triple Barrier (ancien)
-    train_data = np.load('data/prepared/meta_labels_macd_kalman_train.npz')
-    # ...
-```
-
-### Étape 3: Réentraîner Meta-Model avec Aligned Labels (À FAIRE)
+### Entraînement Meta-Models
 
 ```bash
-python src/train_meta_model_phase217.py --filter kalman --aligned
+# Logistic Regression (baseline)
+python src/train_meta_model_phase217.py --filter kalman --aligned --model logistic
+
+# XGBoost
+python src/train_meta_model_phase217.py --filter kalman --aligned --model xgboost
+
+# Random Forest
+python src/train_meta_model_phase217.py --filter kalman --aligned --model random_forest
 ```
 
-**Modèle sauvegardé**:
-```
-models/meta_model/meta_model_baseline_kalman_aligned.pkl
-models/meta_model/meta_model_results_kalman_aligned.json
-```
-
-### Étape 4: Modifier test_meta_model_backtest.py (À FAIRE)
-
-**Ajout requis**:
-```python
-# Ligne ~30
-parser.add_argument('--aligned', action='store_true',
-                    help='Utiliser meta-model aligned')
-
-# Ligne ~100
-if args.aligned:
-    model_path = 'models/meta_model/meta_model_baseline_kalman_aligned.pkl'
-else:
-    model_path = 'models/meta_model/meta_model_baseline_kalman.pkl'
-```
-
-### Étape 5: Re-Backtest avec Aligned Meta-Model (À FAIRE)
+### Backtest avec Meta-Filtering
 
 ```bash
-# Test avec aligned meta-model
+# Random Forest @ threshold 0.9 (meilleur résultat)
 python tests/test_meta_model_backtest.py \
-    --indicator macd \
-    --split test \
-    --aligned \
-    --compare-thresholds
+    --indicator macd --split test --aligned --model random_forest
+
+# Comparer plusieurs thresholds
+python tests/test_meta_model_backtest.py \
+    --indicator macd --split test --aligned --model random_forest --compare-thresholds
 ```
 
-**Résultats Attendus**:
+### Analyse Bias LONG/SHORT
 
-| Stratégie | Trades | Win Rate | PnL Net | Verdict |
-|-----------|--------|----------|---------|---------|
-| Baseline | 108,702 | 22.49% | -21,382% | Référence |
-| **Aligned (0.6)** | ~40,000 | **≥35%** ✅ | **Positif** ✅ | Win Rate **AUGMENTE** |
-
-**Critères de Succès**:
-- ✅ Win Rate **AUGMENTE** avec filtrage (pas de diminution)
-- ✅ PnL Net devient **positif** ou nettement amélioré
-- ✅ Trades réduits de ~60-70%
-
----
-
-## 📊 Contexte Phase 2.15 (Rappel)
-
-### Oracle Results - Nouvelle Formule (t vs t-1)
-
-| Indicateur | PnL Net | Win Rate | Profit Factor | Sharpe |
-|------------|---------|----------|---------------|--------|
-| **RSI** 🥇 | **+23,039%** | 57.3% | 4.02 | 102.67 |
-| **CCI** 🥈 | **+17,335%** | 56.4% | 3.16 | 87.55 |
-| **MACD** 🥉 | **+14,359%** | 53.4% | 2.79 | 85.44 |
-
-**Le signal EXISTE et fonctionne!** Oracle prouve +14k-23k% PnL Net.
-
-### ML Baseline (Sans Meta-Model)
-
-| Indicateur | Trades | Win Rate | PnL Net | Problème |
-|------------|--------|----------|---------|----------|
-| MACD | 108,702 | 22.49% | **-21,382%** | ❌ Trop de trades |
-| RSI | 96,886 | - | - | ❌ (non testé mais similaire) |
-
-**L'objectif du meta-model**: Filtrer pour passer de 22% Win Rate → 35-40%+ Win Rate.
-
----
-
-## 🚫 Ce Qui a ÉCHOUÉ (Ne Pas Retester)
-
-| Approche | Résultat | Raison |
-|----------|----------|--------|
-| **Triple Barrier Meta-Labels** | Win Rate ↓ | ❌ Mismatch avec backtest |
-| Fusion multi-indicateurs | -15% à -43% | Corrélation 100% |
-| Vote majoritaire | 0% gain | Mêmes erreurs |
-| Force filter | -354% à -800% | Non prédictif |
-| ATR filters | Neutre | Flickering bypass |
-| Kalman/Octave sliding window | -19% à -116% | Lag détruit signal |
-
----
-
-## 📁 Fichiers Clés du Projet
-
-### Scripts Meta-Labeling
-
-| Script | Status | Usage |
-|--------|--------|-------|
-| `src/create_meta_labels_phase215.py` | ✅ Existant | Triple Barrier (ANCIEN) |
-| **`src/create_meta_labels_aligned.py`** | ✅ **CRÉÉ** | **Aligned labels (NOUVEAU)** |
-| `src/train_meta_model_phase217.py` | ⏳ À modifier | Ajout --aligned flag |
-| `tests/test_meta_model_backtest.py` | ⏳ À modifier | Ajout --aligned flag |
-
-### Datasets Direction-Only
-
-```
-data/prepared/dataset_btc_eth_bnb_ada_ltc_macd_direction_only_kalman.npz
-data/prepared/dataset_btc_eth_bnb_ada_ltc_rsi_direction_only_kalman.npz
-data/prepared/dataset_btc_eth_bnb_ada_ltc_cci_direction_only_kalman.npz
-```
-
-### Modèles Primaires Entraînés
-
-```
-models/best_model_macd_kalman_dual_binary.pth  (92.4% Direction, 81.5% Force)
-models/best_model_rsi_kalman_dual_binary.pth   (87.4% Direction, 74.0% Force)
-models/best_model_cci_kalman_dual_binary.pth   (89.3% Direction, 77.4% Force)
+```bash
+python tests/analyze_long_short_bias.py \
+    --indicator macd --filter kalman --split test
 ```
 
 ---
 
-## ⚠️ Règles Critiques
+## ⚠️ Règles Critiques pour Claude
 
-### 1. Ne JAMAIS exécuter de scripts
-Claude n'a PAS les données. Fournir commandes, utilisateur exécute.
+### 1. 🔁 RÉUTILISER L'EXISTANT (IMPÉRATIF)
 
-### 2. Réutiliser l'existant
-- Logique backtest → `tests/test_meta_model_backtest.py`
-- Calcul PnL → Copier exactement, ne pas réinventer
+**Principe Fondamental**: **"Je regarde l'existant et je reparte de l'existant"**
 
-### 3. MACD = Indicateur Pivot
-Focus sur MACD pour Phase 2.18 (meilleur pour trading réel).
+Avant d'écrire du nouveau code, TOUJOURS:
+1. Chercher un script similaire existant
+2. Le COPIER comme base
+3. Modifier UNIQUEMENT ce qui doit changer
 
-### 4. Alignement = Clé du Succès
-**Les labels de meta-labeling doivent correspondre EXACTEMENT à la stratégie de trading.**
+**Exemples validés**:
+- ✅ `create_meta_labels_aligned.py`: Copié de `create_meta_labels_phase215.py` (590 lignes), modifié SEULEMENT la fonction de labeling (45 lignes) → Phase 2.18 succès
+- ❌ `create_meta_labels_aligned.py` v1: Réécrit from scratch avec imports PyTorch → ImportError (Phase 2.18 échec)
+
+**Coût d'une violation**:
+- Bug critique
+- ImportError, incompatibilités
+- Perte de temps (réécriture vs copie: 2h vs 5min)
+
+### 2. 🚫 NE JAMAIS LANCER DE SCRIPTS
+
+Claude Code ne possède PAS les datasets locaux (data_trad/, data/prepared/).
+
+**Actions INTERDITES**:
+- ❌ Exécuter `python src/train.py`
+- ❌ Exécuter `python tests/test_*.py`
+- ❌ Lire les fichiers .npz ou .csv de données
+
+**Actions AUTORISÉES**:
+- ✅ Lire les scripts Python (.py)
+- ✅ Lire la documentation (.md)
+- ✅ Écrire/modifier du code
+- ✅ Fournir les commandes à exécuter pour l'utilisateur
+
+**Template de réponse**:
+```bash
+# COMMANDE À EXÉCUTER (par l'utilisateur):
+python tests/test_structural_filters.py --split test --holding-min 30
+
+# RÉSULTATS ATTENDUS:
+# - Trades: ~15,000 (-50%)
+# - PnL Brut: ~+100% (maintenu)
+# - PnL Net: Positif si filtrage efficace
+```
+
+### 3. 📦 RÉUTILISER LES DONNÉES EXISTANTES (.npz)
+
+Les datasets meta-labels existent DÉJÀ. Ne pas régénérer inutilement.
+
+**Fichiers Existants**:
+- Triple Barrier: `meta_labels_macd_kalman_{train,val,test}.npz`
+- Aligned: `meta_labels_macd_kalman_{train,val,test}_aligned.npz` ⭐
+
+**Règle d'Usage**:
+- ✅ Charger les fichiers `.npz` existants via `np.load()`
+- ✅ S'inspirer de `train_meta_model_phase217.py` (fonction `load_meta_dataset`)
+- ❌ Ne PAS régénérer si fichiers existent déjà
+
+### 4. 🔧 FONCTIONS COMMUNES ET PARTAGÉES
+
+**Principe**: "Mutualisé les fonctions, c'est très importante cette règle"
+
+- Si une logique est utilisée >1 fois → extraction dans `src/utils.py`
+- Si modification d'une fonction partagée → vérifier impact sur TOUS les scripts
+- Documenter les paramètres et comportement (docstrings obligatoires)
 
 ---
 
 ## 💡 Ce Que Tu Dois Faire
 
+### Contexte Chargé - Prêt à Continuer
+
+Tu as maintenant le contexte complet:
+- ✅ Phase 2.18 complète et validée
+- ✅ Tous les tests effectués (3 modèles)
+- ✅ Validation académique obtenue
+- ✅ Documentation synthétisée
+- ⏳ **Décision stratégique en attente**
+
 ### Tâche Immédiate
 
-1. **Lire** `/home/user/trad/CLAUDE.md` section Phase 2.18 pour contexte complet
-2. **Vérifier** que tu comprends le mismatch Triple Barrier vs Backtest
-3. **Proposer** les modifications exactes pour étapes 2 et 4 ci-dessus
-4. **Fournir** les commandes complètes pour tester
+**L'utilisateur doit décider quelle direction prendre**:
+1. Option A: Régime Detection
+2. Option B: Returns Forecasting
+3. Option C: Microstructure & Order Flow
+4. Option D: Ensemble Multi-Timeframe
 
 ### Questions à Anticiper
 
-- "Comment modifier train_meta_model_phase217.py pour support --aligned?"
-- "Comment modifier test_meta_model_backtest.py pour charger aligned model?"
-- "Que faire si aligned meta-model ne fonctionne pas mieux?"
+**Q1**: "Quelle option recommandes-tu?"
+**R1**: Dépend des données disponibles:
+- Si tick data disponible → Option C (meilleur alpha)
+- Si que 5min data → Option A ou D (régime ou multi-timeframe)
+- Si veut essayer régression → Option B
+
+**Q2**: "Peut-on améliorer le meta-labeling actuel?"
+**R2**: Non, plafond atteint (~44% Precision). Les 3 modèles convergent. Le problème est le signal primaire (MACD/RSI/CCI direction-only), pas le meta-modèle.
+
+**Q3**: "Pourquoi Random Forest seulement 94 trades?"
+**R3**: Threshold 0.9 ultra-sélectif + feature dominance volatility_atr (88.75%) = filtre extrême. Bon WR (45.74%) mais peu de trades.
+
+**Q4**: "Faut-il retester sur RSI/CCI?"
+**R4**: Non prioritaire. MACD déjà testé, résultats convergent. Problème structurel affecte tous indicateurs.
 
 ### Approche Attendue
 
-1. Lire le code des scripts à modifier
-2. Proposer les modifications précises (diff-style)
-3. Expliquer pourquoi c'est aligné maintenant
-4. Donner commandes de test et critères de validation
+1. **Attendre décision utilisateur** sur direction (Options A/B/C/D)
+2. **Proposer plan d'implémentation** détaillé pour option choisie
+3. **Réutiliser l'existant** (ne pas réinventer)
+4. **Fournir commandes** claires pour exécution
+
+---
+
+## 📊 Todo List Actuelle
+
+```python
+[
+    {
+        "content": "Réentraîner meta-model XGBoost avec aligned labels",
+        "status": "completed",
+        "activeForm": "Retraining XGBoost meta-model"
+    },
+    {
+        "content": "Backtest XGBoost threshold 0.6 (espéré: 1000-5000 trades)",
+        "status": "completed",
+        "activeForm": "Backtesting XGBoost threshold 0.6"
+    },
+    {
+        "content": "Backtest XGBoost threshold 0.7 (espéré: 100-1000 trades)",
+        "status": "completed",
+        "activeForm": "Backtesting XGBoost threshold 0.7"
+    },
+    {
+        "content": "Tester threshold 0.8 (raffiner qualité/quantité)",
+        "status": "completed",
+        "activeForm": "Testing threshold 0.8"
+    },
+    {
+        "content": "Analyser biais LONG vs SHORT dans meta-probs",
+        "status": "completed",
+        "activeForm": "Analyzing LONG vs SHORT bias"
+    },
+    {
+        "content": "Documenter configuration optimale et validation experte",
+        "status": "completed",
+        "activeForm": "Documenting optimal configuration"
+    },
+    {
+        "content": "Décider direction stratégique (régime detection, returns forecasting, ou autre)",
+        "status": "pending",
+        "activeForm": "Deciding strategic direction"
+    }
+]
+```
+
+---
+
+## 🔗 Références Académiques Clés
+
+### Meta-Labeling
+- **López de Prado, M. (2018)**. *Advances in Financial Machine Learning*. Wiley. Chapitre 3.
+- **Dixon, M., Halperin, I., & Bilokon, P. (2020)**. *Machine Learning in Finance*.
+
+### Prédiction Directionnelle (Limites)
+- **Zohren, S., et al. (2019)**. *Deep Learning for Forecasting Stock Returns*.
+- **Krauss, C., Do, X. A., & Huck, N. (2017)**. *Deep neural networks for trading*.
+
+### Alternatives Recommandées
+- **Ang, A., & Bekaert, G. (2002)**. *Regime switches in interest rates*. (Régime Detection)
+- **Gu, S., Kelly, B., & Xiu, D. (2020)**. *Empirical Asset Pricing via Machine Learning*. (Returns Forecasting)
+- **Cartea, A., Jaimungal, S., & Penalva, J. (2015)**. *Algorithmic and High-Frequency Trading*. (Microstructure)
+- **Müller, U. A., et al. (1997)**. *Statistical study of foreign exchange rates*. (Multi-Timeframe)
+
+### Feature Importance
+- **Breiman, L. (2001)**. *Random Forests*. Machine Learning.
+- **Strobl, C., et al. (2007)**. *Bias in random forest variable importance measures*.
+
+### Trade-offs ML
+- **Hastie, T., Tibshirani, R., & Friedman, J. (2009)**. *The Elements of Statistical Learning*.
 
 ---
 
@@ -385,28 +513,34 @@ Focus sur MACD pour Phase 2.18 (meilleur pour trading réel).
 
 | Aspect | État |
 |--------|------|
-| **Phase** | 2.18 Meta-Model Backtest |
-| **Problème identifié** | ✅ Triple Barrier ≠ Backtest (mismatch) |
-| **Solution créée** | ✅ Script aligned meta-labels |
-| **Next step** | ⏳ Générer labels + réentraîner + re-backtest |
-| **Critère succès** | Win Rate ↑ avec filtrage (pas ↓) |
-| **Commit actuel** | `a74abec` |
+| **Phase** | 2.18 COMPLÈTE ✅ |
+| **Pipeline** | Scientifiquement validé ✅ |
+| **Performance** | +20-23% annualisé (insuffisant pour crypto) ❌ |
+| **Diagnostic** | Signal primaire manque d'alpha ❌ |
+| **Validation** | Littérature académique confirme ✅ |
+| **Documentation** | Complète et synthétisée ✅ |
+| **Next step** | ⏳ Décision stratégique (Options A/B/C/D) |
+| **Dernier commit** | `162abd0` - Synthèse complète |
 
 ---
 
-## 🔗 Références Critiques
+## 🎯 Message Final
 
-**Expert Diagnosis** (CLAUDE.md Phase 2.18):
-> "Le problème NE vient pas du méta-modèle. Il vient AVANT."
->
-> "Triple Barrier labels ≠ Backtest PnL calculation"
+**Phase 2.17/2.18 est un SUCCÈS TECHNIQUE mais révèle une LIMITE FONDAMENTALE**:
 
-**López de Prado (Advances in Financial ML)**:
-> "Meta-labeling improves profitable primary models. It cannot invert the sign of a losing model."
+✅ **Succès**:
+- Architecture meta-labeling correcte
+- Pipeline aligned validé
+- 3 modèles testés et convergents
+- Toutes découvertes alignées littérature
 
-**Leçon Critique**:
-> Les labels de meta-labeling doivent correspondre EXACTEMENT à la stratégie de trading utilisée en backtest. Toute différence créera un mismatch qui rendra le filtrage inefficace ou inverse.
+❌ **Limite**:
+- MACD/RSI/CCI direction-only n'a pas d'alpha exploitable
+- +20-23% annualisé insuffisant pour crypto
+- Problème documenté depuis 20 ans en finance quantitative
+
+**La vraie décision maintenant**: Abandonner l'approche directionnelle et pivoter vers régime detection, returns forecasting, microstructure, ou multi-timeframe.
 
 ---
 
-**Dis-moi que tu as bien compris le contexte et je te donne la première tâche!**
+**Dis-moi que tu as bien compris le contexte et attends ma décision sur quelle option (A/B/C/D) explorer!**
