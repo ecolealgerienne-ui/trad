@@ -156,7 +156,8 @@ def load_meta_labels_data(indicator: str, filter_type: str = 'kalman', split: st
 def load_meta_model(filter_type: str = 'kalman', aligned: bool = False, model_type: str = 'logistic') -> object:
     """Charge le meta-model entraîné."""
     suffix = '_aligned' if aligned else ''
-    model_name = 'baseline' if model_type == 'logistic' else model_type
+    # Note: train script sauve avec model_name = args.model directement
+    model_name = model_type  # 'logistic', 'xgboost', 'random_forest'
     path = Path(f'models/meta_model/meta_model_{model_name}_{filter_type}{suffix}.pkl')
 
     if not path.exists():
@@ -601,8 +602,9 @@ def main():
                         help='Split à tester (défaut: test)')
     parser.add_argument('--aligned', action='store_true',
                         help='Use aligned meta-model (signal reversal labels)')
-    parser.add_argument('--model', type=str, default='logistic', choices=['logistic', 'xgboost'],
-                        help='Model type: logistic (baseline) or xgboost (défaut: logistic)')
+    parser.add_argument('--model', type=str, default='logistic',
+                        choices=['logistic', 'xgboost', 'random_forest'],
+                        help='Model type: logistic (baseline), xgboost, or random_forest (défaut: logistic)')
     parser.add_argument('--threshold', type=float, default=None,
                         help='Seuil unique à tester (défaut: None)')
     parser.add_argument('--compare-thresholds', action='store_true',

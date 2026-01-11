@@ -35,6 +35,7 @@ import argparse
 import numpy as np
 from pathlib import Path
 from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
     roc_auc_score, classification_report, confusion_matrix
@@ -346,8 +347,89 @@ def train_xgboost_model(
     return model
 
 
+def train_random_forest_model(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_val: np.ndarray,
+    y_val: np.ndarray
+) -> RandomForestClassifier:
+    """
+    Entraîne le meta-modèle avec Random Forest.
+
+    Args:
+        X_train: Features train (n_train, 6)
+        y_train: Labels train (n_train,)
+        X_val: Features val (n_val, 6)
+        y_val: Labels val (n_val,)
+
+    Returns:
+        Modèle Random Forest entraîné
+    """
+    print("\n" + "="*80)
+    print("TRAINING RANDOM FOREST META-MODEL")
+    print("="*80)
+
+    # Filtrer les labels ignored (-1)
+    train_mask = y_train != -1
+    val_mask = y_val != -1
+
+    X_train_filtered = X_train[train_mask]
+    y_train_filtered = y_train[train_mask]
+    X_val_filtered = X_val[val_mask]
+    y_val_filtered = y_val[val_mask]
+
+    print(f"\nTrain samples: {len(X_train_filtered):,} (after filtering)")
+    print(f"Val samples: {len(X_val_filtered):,} (after filtering)")
+
+    # Distribution des classes
+    pos_train = np.sum(y_train_filtered == 1)
+    neg_train = np.sum(y_train_filtered == 0)
+    print(f"\nTrain distribution:")
+    print(f"  Positive (1): {pos_train:,} ({100*pos_train/len(y_train_filtered):.1f}%)")
+    print(f"  Negative (0): {neg_train:,} ({100*neg_train/len(y_train_filtered):.1f}%)")
+
+    # Calculer class_weight pour class imbalance
+    class_weight_ratio = neg_train / pos_train
+    print(f"\nClass imbalance ratio: {class_weight_ratio:.2f}")
+
+    # Entraîner Random Forest
+    print("\nTraining Random Forest...")
+    model = RandomForestClassifier(
+        n_estimators=100,           # Nombre d'arbres
+        max_depth=10,               # Profondeur max (vs 5 pour XGBoost - plus de non-linéarité)
+        min_samples_split=50,       # Régularisation
+        min_samples_leaf=20,        # Régularisation
+        class_weight='balanced',    # Handle class imbalance
+        random_state=42,
+        n_jobs=-1,
+        verbose=0
+    )
+
+    model.fit(X_train_filtered, y_train_filtered)
+
+    # Feature importance
+    print("\nFeature importance:")
+    feature_names = ['macd_prob', 'rsi_prob', 'cci_prob',
+                     'confidence_spread', 'confidence_mean', 'volatility_atr']
+    importances = model.feature_importances_
+    for name, imp in sorted(zip(feature_names, importances), key=lambda x: -x[1]):
+        print(f"  {name:20s}: {imp:.4f}")
+
+    # Évaluation train
+    y_train_pred = model.predict(X_train_filtered)
+    train_acc = accuracy_score(y_train_filtered, y_train_pred)
+    print(f"\nTrain Accuracy: {train_acc:.4f}")
+
+    # Évaluation val
+    y_val_pred = model.predict(X_val_filtered)
+    val_acc = accuracy_score(y_val_filtered, y_val_pred)
+    print(f"Val Accuracy: {val_acc:.4f}")
+
+    return model
+
+
 def evaluate_model(
-    model: Union[LogisticRegression, 'xgb.XGBClassifier'],
+    model: Union[LogisticRegression, RandomForestClassifier, 'xgb.XGBClassifier'],
     X: np.ndarray,
     y: np.ndarray,
     split_name: str
@@ -418,8 +500,9 @@ def main():
                         help='Filter type (default: kalman)')
     parser.add_argument('--aligned', action='store_true',
                         help='Use aligned labels (signal reversal) instead of Triple Barrier')
-    parser.add_argument('--model', type=str, default='logistic', choices=['logistic', 'xgboost'],
-                        help='Model type: logistic (baseline) or xgboost (default: logistic)')
+    parser.add_argument('--model', type=str, default='logistic',
+                        choices=['logistic', 'xgboost', 'random_forest'],
+                        help='Model type: logistic (baseline), xgboost, or random_forest (default: logistic)')
     parser.add_argument('--output-dir', type=Path, default=Path('models/meta_model'),
                         help='Output directory for meta-model')
     args = parser.parse_args()
@@ -478,6 +561,13 @@ def main():
             X_val=X_meta['val'],
             y_val=y_meta['val']
         )
+    elif args.model == 'random_forest':
+        meta_model = train_random_forest_model(
+            X_train=X_meta['train'],
+            y_train=y_meta['train'],
+            X_val=X_meta['val'],
+            y_val=y_meta['val']
+        )
     else:
         raise ValueError(f"Unknown model type: {args.model}")
 
@@ -493,7 +583,7 @@ def main():
 
     # Sauvegarder modèle
     suffix = '_aligned' if args.aligned else ''
-    model_name = 'logistic' if args.model == 'logistic' else 'xgboost'
+    model_name = args.model  # 'logistic', 'xgboost', ou 'random_forest'
     model_path = args.output_dir / f'meta_model_{model_name}_{args.filter}{suffix}.pkl'
     print(f"\nSaving meta-model to: {model_path}")
     joblib.dump(meta_model, model_path)
