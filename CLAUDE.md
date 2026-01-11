@@ -91,6 +91,54 @@ python tests/test_structural_filters.py --split test --holding-min 30
 4. Utilisateur partage les résultats
 5. Claude analyse et propose prochaine étape
 
+### 4. 📦 RÉUTILISER LES DONNÉES EXISTANTES (.npz)
+
+**Principe**: Les datasets meta-labels existent DÉJÀ sous forme `.npz`. Ne pas régénérer inutilement.
+
+**Fichiers Existants (Phase 2.17/2.18)**:
+```
+data/prepared/
+├── meta_labels_macd_kalman_train.npz           # Triple Barrier (Phase 2.17)
+├── meta_labels_macd_kalman_val.npz
+├── meta_labels_macd_kalman_test.npz
+├── meta_labels_macd_kalman_train_aligned.npz   # Aligned (Phase 2.18) ✨
+├── meta_labels_macd_kalman_val_aligned.npz
+└── meta_labels_macd_kalman_test_aligned.npz
+```
+
+**Structure Fichiers Meta-Labels** (identique Triple Barrier et Aligned):
+```python
+{
+    'predictions_macd': (n,),      # Probabilités modèle primaire MACD
+    'predictions_rsi': (n,),       # Probabilités modèle primaire RSI
+    'predictions_cci': (n,),       # Probabilités modèle primaire CCI
+    'OHLCV': (n, 7),              # [timestamp, asset_id, O, H, L, C, V]
+    'meta_labels': (n,),          # 1=profitable, 0=unprofitable, -1=ignored
+    'metadata': {...}             # Métadonnées enrichies
+}
+```
+
+**Différence Clé Triple Barrier vs Aligned**:
+| Aspect | Triple Barrier | Aligned |
+|--------|----------------|---------|
+| **Exit logic** | Barrières prix + duration | **Signal reversal** ✅ |
+| **min_duration** | 5 périodes imposé | Variable naturelle |
+| **Alignment** | ❌ Différent backtest | ✅ **IDENTIQUE backtest** |
+
+**Règle d'Usage**:
+- ✅ Charger les fichiers `.npz` existants via `np.load()` ou scripts existants
+- ✅ S'inspirer de `src/train_meta_model_phase217.py` (fonction `load_meta_dataset`)
+- ✅ S'inspirer de `tests/test_meta_model_backtest.py` (fonction `load_meta_labels_data`)
+- ❌ Ne PAS régénérer si fichiers existent déjà
+- ❌ Ne PAS exécuter les scripts de génération sans raison
+
+**Scripts de Référence** (pour structure loading):
+```python
+# Exemple: src/evaluate.py - fonction load_prepared_data()
+# Exemple: src/train_meta_model_phase217.py - fonction load_meta_dataset()
+# Copier la logique de chargement, ne pas réinventer
+```
+
 ---
 
 ## 🔄 Phase 2.15: CHANGEMENT FORMULE LABELS - Signal Immédiat (2026-01-10)
