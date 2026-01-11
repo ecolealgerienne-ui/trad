@@ -114,6 +114,11 @@ def load_predictions(indicator: str, filter_type: str, split: str) -> np.ndarray
         raise KeyError(f"Predictions not found. Key '{pred_key}' not in dataset.")
 
     predictions = data[pred_key]
+
+    # Direction-only: (n, 1) → extraire colonne
+    if predictions.ndim == 2 and predictions.shape[1] == 1:
+        predictions = predictions[:, 0]
+
     print(f"  Loaded {len(predictions)} predictions")
     print(f"  Distribution: UP={np.sum(predictions == 1)}, DOWN={np.sum(predictions == 0)}")
 
@@ -403,19 +408,21 @@ def save_meta_dataset(
 
     # Construire le dict de sauvegarde
     save_dict = {
-        # Données originales (préservées)
-        f'X_{split}': X,
-        f'Y_{split}': Y,
-        f'T_{split}': T,
-        f'OHLCV_{split}': OHLCV,
-
-        # Prédictions des 3 indicateurs (AVEC clés correctes)
+        # Prédictions des 3 indicateurs (clés SANS suffix)
         'predictions_macd': predictions_macd,
         'predictions_rsi': predictions_rsi,
         'predictions_cci': predictions_cci,
 
-        # NOUVEAU: meta-labels
-        f'meta_labels_{split}': meta_labels,
+        # Meta-labels (clé SANS suffix)
+        'meta_labels': meta_labels,
+
+        # OHLCV (clé SANS suffix pour train_meta_model)
+        'OHLCV': OHLCV,
+
+        # Données originales (AVEC suffix pour archive)
+        f'X_{split}': X,
+        f'Y_{split}': Y,
+        f'T_{split}': T,
 
         # Metadata enrichie
         'metadata': json.dumps({
