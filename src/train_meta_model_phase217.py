@@ -44,7 +44,7 @@ import json
 from typing import Tuple, Dict
 
 
-def load_meta_dataset(split: str, indicator: str = 'macd', filter_type: str = 'kalman') -> Dict:
+def load_meta_dataset(split: str, indicator: str = 'macd', filter_type: str = 'kalman', aligned: bool = False) -> Dict:
     """
     Charge le dataset meta-labels avec prédictions.
 
@@ -52,11 +52,13 @@ def load_meta_dataset(split: str, indicator: str = 'macd', filter_type: str = 'k
         split: 'train', 'val', ou 'test'
         indicator: Indicateur utilisé pour meta-labels (default: 'macd')
         filter_type: Type de filtre (default: 'kalman')
+        aligned: Si True, charge labels aligned (signal reversal) au lieu de Triple Barrier
 
     Returns:
         Dict avec predictions, meta_labels, ohlcv, etc.
     """
-    npz_path = Path(f'data/prepared/meta_labels_{indicator}_{filter_type}_{split}.npz')
+    suffix = '_aligned' if aligned else ''
+    npz_path = Path(f'data/prepared/meta_labels_{indicator}_{filter_type}_{split}{suffix}.npz')
 
     if not npz_path.exists():
         raise FileNotFoundError(f"Meta-labels file not found: {npz_path}")
@@ -315,9 +317,11 @@ def evaluate_model(
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Train meta-model Phase 2.17')
+    parser = argparse.ArgumentParser(description='Train meta-model Phase 2.17/2.18')
     parser.add_argument('--filter', type=str, default='kalman', choices=['kalman', 'octave20'],
                         help='Filter type (default: kalman)')
+    parser.add_argument('--aligned', action='store_true',
+                        help='Use aligned labels (signal reversal) instead of Triple Barrier')
     parser.add_argument('--output-dir', type=Path, default=Path('models/meta_model'),
                         help='Output directory for meta-model')
     args = parser.parse_args()
@@ -339,7 +343,7 @@ def main():
     datasets = {}
     for split in ['train', 'val', 'test']:
         print(f"\n{split.upper()}:")
-        datasets[split] = load_meta_dataset(split, indicator='macd', filter_type=args.filter)
+        datasets[split] = load_meta_dataset(split, indicator='macd', filter_type=args.filter, aligned=args.aligned)
 
     # Construire features meta-modèle pour chaque split
     print("\n" + "="*80)
@@ -378,12 +382,13 @@ def main():
         )
 
     # Sauvegarder modèle
-    model_path = args.output_dir / f'meta_model_baseline_{args.filter}.pkl'
+    suffix = '_aligned' if args.aligned else ''
+    model_path = args.output_dir / f'meta_model_baseline_{args.filter}{suffix}.pkl'
     print(f"\nSaving meta-model to: {model_path}")
     joblib.dump(meta_model, model_path)
 
     # Sauvegarder résultats
-    results_path = args.output_dir / f'meta_model_results_{args.filter}.json'
+    results_path = args.output_dir / f'meta_model_results_{args.filter}{suffix}.json'
     print(f"Saving results to: {results_path}")
     with open(results_path, 'w') as f:
         json.dump(results, f, indent=2)

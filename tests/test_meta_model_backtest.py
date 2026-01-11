@@ -93,7 +93,7 @@ class BacktestResult:
 # CHARGEMENT DONNÉES
 # =============================================================================
 
-def load_meta_labels_data(indicator: str, filter_type: str = 'kalman', split: str = 'test') -> Dict:
+def load_meta_labels_data(indicator: str, filter_type: str = 'kalman', split: str = 'test', aligned: bool = False) -> Dict:
     """
     Charge TOUTES les données depuis meta_labels_*.npz.
 
@@ -106,11 +106,13 @@ def load_meta_labels_data(indicator: str, filter_type: str = 'kalman', split: st
         indicator: 'macd', 'rsi', ou 'cci'
         filter_type: 'kalman' ou 'octave'
         split: 'train', 'val', ou 'test'
+        aligned: Si True, charge labels aligned (signal reversal)
 
     Returns:
         Dict avec predictions, OHLCV, meta_labels
     """
-    path = Path(f'data/prepared/meta_labels_{indicator}_{filter_type}_{split}.npz')
+    suffix = '_aligned' if aligned else ''
+    path = Path(f'data/prepared/meta_labels_{indicator}_{filter_type}_{split}{suffix}.npz')
 
     if not path.exists():
         raise FileNotFoundError(
@@ -151,15 +153,17 @@ def load_meta_labels_data(indicator: str, filter_type: str = 'kalman', split: st
     }
 
 
-def load_meta_model(filter_type: str = 'kalman') -> object:
+def load_meta_model(filter_type: str = 'kalman', aligned: bool = False) -> object:
     """Charge le meta-model entraîné."""
-    path = Path(f'models/meta_model/meta_model_baseline_{filter_type}.pkl')
+    suffix = '_aligned' if aligned else ''
+    path = Path(f'models/meta_model/meta_model_baseline_{filter_type}{suffix}.pkl')
 
     if not path.exists():
+        aligned_flag = ' --aligned' if aligned else ''
         raise FileNotFoundError(
             f"Meta-model introuvable: {path}\n\n"
             f"SOLUTION: Entraîner avec:\n"
-            f"  python src/train_meta_model_phase217.py --filter {filter_type}"
+            f"  python src/train_meta_model_phase217.py --filter {filter_type}{aligned_flag}"
         )
 
     logger.info(f"Chargement meta-model: {path}")
@@ -593,6 +597,8 @@ def main():
                         help='Type de filtre (défaut: kalman)')
     parser.add_argument('--split', type=str, default='test', choices=['train', 'val', 'test'],
                         help='Split à tester (défaut: test)')
+    parser.add_argument('--aligned', action='store_true',
+                        help='Use aligned meta-model (signal reversal labels)')
     parser.add_argument('--threshold', type=float, default=None,
                         help='Seuil unique à tester (défaut: None)')
     parser.add_argument('--compare-thresholds', action='store_true',
@@ -608,13 +614,14 @@ def main():
     print(f"Indicateur primaire: {args.indicator}")
     print(f"Filter: {args.filter}")
     print(f"Split: {args.split}")
+    print(f"Labels: {'aligned (signal reversal)' if args.aligned else 'Triple Barrier'}")
     print(f"Frais: {args.fees * 100:.2f}%")
 
     # Load data (TOUT depuis meta_labels_*.npz)
-    data = load_meta_labels_data(args.indicator, args.filter, args.split)
+    data = load_meta_labels_data(args.indicator, args.filter, args.split, aligned=args.aligned)
 
     # Load meta-model
-    meta_model = load_meta_model(args.filter)
+    meta_model = load_meta_model(args.filter, aligned=args.aligned)
 
     if args.compare_thresholds:
         # Compare multiple thresholds

@@ -15,18 +15,52 @@
 
 ### 1. 🔁 RÉUTILISER L'EXISTANT (Ne JAMAIS réinventer la roue)
 
-**Principe**: Avant d'écrire du nouveau code, TOUJOURS chercher si la logique existe déjà.
+**Principe Fondamental**: **"Je regarde l'existant et je reparte de l'existant"**
+
+Avant d'écrire du nouveau code, TOUJOURS:
+1. Chercher un script similaire existant
+2. Le COPIER comme base
+3. Modifier UNIQUEMENT ce qui doit changer
 
 **Exemples validés**:
 - ✅ Calcul PnL: Copié de `test_holding_strategy.py` → commit `8ec2610` (succès)
+- ✅ `create_meta_labels_aligned.py`: Copié de `create_meta_labels_phase215.py` (590 lignes), modifié SEULEMENT la fonction de labeling (45 lignes) → Phase 2.18 (succès)
 - ❌ Direction flip: Réécrit au lieu de copié → bug critique (commit `e51a691` fix)
+- ❌ `create_meta_labels_aligned.py` v1: Réécrit from scratch avec imports PyTorch → ImportError (Phase 2.18 échec)
+
+**Méthodologie Correcte** (Phase 2.18 - Exemple Concret):
+```bash
+# ❌ FAUX: Écrire from scratch
+# - Importer CNNLSTMModel (pas nécessaire)
+# - Réécrire load_model_and_predict() (78 lignes de code inutile)
+# - Risque: ImportError, bugs, incompatibilités
+
+# ✅ CORRECT: Copier l'existant
+1. Identifier: create_meta_labels_phase215.py (590 lignes, fonctionne)
+2. Copier: 100% du script
+3. Modifier: UNIQUEMENT create_meta_labels_aligned() (lignes 286-330)
+   - Retirer: duration >= min_duration
+   - Garder: pnl_after_fees > pnl_threshold
+4. Résultat: Script fonctionnel en 5 min, 0 bug
+```
 
 **Ordre de recherche**:
-1. Scripts existants dans `tests/` et `src/`
-2. Fonctions utilitaires communes
-3. Seulement si VRAIMENT nouveau → écrire
+1. Scripts existants dans `tests/` et `src/` avec fonctionnalité similaire
+2. Fonctions utilitaires communes (`src/utils.py`, etc.)
+3. Seulement si VRAIMENT nouveau → écrire from scratch
 
-**Coût d'une violation**: Bug critique, +25% trades, PnL détruit (validation empirique Phase 2.7)
+**Pattern de Code à Copier** (exemples récurrents):
+| Besoin | Script Source | Fonction Clé |
+|--------|---------------|--------------|
+| Charger .npz | `src/evaluate.py` | `load_prepared_data()` |
+| Charger meta-labels | `src/train_meta_model_phase217.py` | `load_meta_dataset()` |
+| Backtest strategy | `tests/test_holding_strategy.py` | Boucle principale |
+| Calculer PnL | `tests/test_holding_strategy.py` | Lignes 200-250 |
+
+**Coût d'une violation**:
+- Bug critique, +25% trades, PnL détruit (validation empirique Phase 2.7)
+- ImportError, incompatibilités (Phase 2.18 - create_meta_labels_aligned.py v1)
+- Perte de temps (réécriture vs copie: 2h vs 5min)
 
 ### 2. 🔧 FONCTIONS COMMUNES ET PARTAGÉES
 
