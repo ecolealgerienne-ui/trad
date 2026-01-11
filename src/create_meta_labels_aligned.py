@@ -375,7 +375,9 @@ def save_meta_dataset(
     Y: np.ndarray,
     T: np.ndarray,
     OHLCV: np.ndarray,
-    predictions: np.ndarray,
+    predictions_macd: np.ndarray,
+    predictions_rsi: np.ndarray,
+    predictions_cci: np.ndarray,
     meta_labels: np.ndarray,
     split: str,
     metadata: dict
@@ -389,7 +391,9 @@ def save_meta_dataset(
         Y: Labels
         T: Timestamps
         OHLCV: OHLCV data
-        predictions: Prédictions modèle primaire
+        predictions_macd: Prédictions MACD
+        predictions_rsi: Prédictions RSI
+        predictions_cci: Prédictions CCI
         meta_labels: Meta-labels
         split: Split name
         metadata: Metadata dict
@@ -405,8 +409,10 @@ def save_meta_dataset(
         f'T_{split}': T,
         f'OHLCV_{split}': OHLCV,
 
-        # Prédictions (préservées)
-        f'predictions_{split}': predictions,
+        # Prédictions des 3 indicateurs (AVEC clés correctes)
+        'predictions_macd': predictions_macd,
+        'predictions_rsi': predictions_rsi,
+        'predictions_cci': predictions_cci,
 
         # NOUVEAU: meta-labels
         f'meta_labels_{split}': meta_labels,
@@ -463,7 +469,13 @@ def main():
     # 1. Charger dataset
     data = load_dataset(args.indicator, args.filter, args.split)
 
-    # 2. Charger prédictions (depuis .npz, PAS de chargement modèle)
+    # 2. Charger prédictions DES 3 INDICATEURS (depuis .npz, PAS de chargement modèle)
+    print("\n=== Loading Predictions for All 3 Indicators ===")
+    predictions_macd = load_predictions('macd', args.filter, args.split)
+    predictions_rsi = load_predictions('rsi', args.filter, args.split)
+    predictions_cci = load_predictions('cci', args.filter, args.split)
+
+    # Utiliser l'indicateur spécifié pour le backtest
     predictions = load_predictions(args.indicator, args.filter, args.split)
 
     # 3. Simuler backtest Oracle (stratégie aligned)
@@ -483,7 +495,7 @@ def main():
     # 5. Mapper aux timesteps
     meta_labels = map_trade_labels_to_timesteps(trades, meta_labels_trades, n_samples)
 
-    # 6. Sauvegarder
+    # 6. Sauvegarder avec LES 3 PRÉDICTIONS
     output_path = Path(args.output_dir) / f'meta_labels_{args.indicator}_{args.filter}_{args.split}_aligned.npz'
     save_meta_dataset(
         output_path=output_path,
@@ -491,7 +503,9 @@ def main():
         Y=data['labels'],
         T=data['timestamps'],
         OHLCV=data['ohlcv'],
-        predictions=predictions,
+        predictions_macd=predictions_macd,
+        predictions_rsi=predictions_rsi,
+        predictions_cci=predictions_cci,
         meta_labels=meta_labels,
         split=args.split,
         metadata=data['metadata']
