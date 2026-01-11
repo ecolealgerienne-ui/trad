@@ -119,10 +119,15 @@ def load_predictions(indicator: str, filter_type: str, split: str) -> np.ndarray
     if predictions.ndim == 2 and predictions.shape[1] == 1:
         predictions = predictions[:, 0]
 
-    print(f"  Loaded {len(predictions)} predictions")
-    print(f"  Distribution: UP={np.sum(predictions == 1)}, DOWN={np.sum(predictions == 0)}")
+    # CRITIQUE: Les prédictions sont des PROBABILITÉS (0.0-1.0), pas binaires!
+    # Binariser avec seuil 0.5
+    predictions_binary = (predictions > 0.5).astype(int)
 
-    return predictions
+    print(f"  Loaded {len(predictions)} predictions")
+    print(f"  Probabilities range: [{predictions.min():.3f}, {predictions.max():.3f}]")
+    print(f"  Distribution (binary): UP={np.sum(predictions_binary == 1)}, DOWN={np.sum(predictions_binary == 0)}")
+
+    return predictions_binary
 
 
 def backtest_single_asset(
