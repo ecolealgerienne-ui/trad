@@ -41,7 +41,15 @@ from sklearn.metrics import (
 )
 import joblib
 import json
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Union
+
+# XGBoost (optional - will check if available)
+try:
+    import xgboost as xgb
+    XGBOOST_AVAILABLE = True
+except ImportError:
+    XGBOOST_AVAILABLE = False
+    print("Warning: XGBoost not installed. Install with: pip install xgboost")
 
 
 def load_meta_dataset(split: str, indicator: str = 'macd', filter_type: str = 'kalman', aligned: bool = False) -> Dict:
@@ -250,8 +258,96 @@ def train_baseline_model(
     return model
 
 
+def train_xgboost_model(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_val: np.ndarray,
+    y_val: np.ndarray
+) -> 'xgb.XGBClassifier':
+    """
+    Entraîne le meta-modèle avec XGBoost.
+
+    Args:
+        X_train: Features train (n_train, 6)
+        y_train: Labels train (n_train,)
+        X_val: Features val (n_val, 6)
+        y_val: Labels val (n_val,)
+
+    Returns:
+        Modèle XGBoost entraîné
+    """
+    if not XGBOOST_AVAILABLE:
+        raise ImportError("XGBoost not installed. Install with: pip install xgboost")
+
+    print("\n" + "="*80)
+    print("TRAINING XGBOOST META-MODEL")
+    print("="*80)
+
+    # Filtrer les labels ignored (-1)
+    train_mask = y_train != -1
+    val_mask = y_val != -1
+
+    X_train_filtered = X_train[train_mask]
+    y_train_filtered = y_train[train_mask]
+    X_val_filtered = X_val[val_mask]
+    y_val_filtered = y_val[val_mask]
+
+    print(f"\nTrain samples: {len(X_train_filtered):,} (after filtering)")
+    print(f"Val samples: {len(X_val_filtered):,} (after filtering)")
+
+    # Distribution des classes
+    pos_train = np.sum(y_train_filtered == 1)
+    neg_train = np.sum(y_train_filtered == 0)
+    print(f"\nTrain distribution:")
+    print(f"  Positive (1): {pos_train:,} ({100*pos_train/len(y_train_filtered):.1f}%)")
+    print(f"  Negative (0): {neg_train:,} ({100*neg_train/len(y_train_filtered):.1f}%)")
+
+    # Calculer scale_pos_weight pour class imbalance
+    scale_pos_weight = neg_train / pos_train
+    print(f"\nClass imbalance ratio: {scale_pos_weight:.2f}")
+
+    # Entraîner XGBoost
+    print("\nTraining XGBoost...")
+    model = xgb.XGBClassifier(
+        n_estimators=100,
+        max_depth=5,
+        learning_rate=0.1,
+        scale_pos_weight=scale_pos_weight,  # Handle class imbalance
+        random_state=42,
+        n_jobs=-1,
+        eval_metric='logloss'
+    )
+
+    # Fit avec early stopping sur val
+    model.fit(
+        X_train_filtered, y_train_filtered,
+        eval_set=[(X_val_filtered, y_val_filtered)],
+        verbose=False
+    )
+
+    # Feature importance
+    print("\nFeature importance:")
+    feature_names = ['macd_prob', 'rsi_prob', 'cci_prob',
+                     'confidence_spread', 'confidence_mean', 'volatility_atr']
+    importances = model.feature_importances_
+    for name, imp in sorted(zip(feature_names, importances), key=lambda x: -x[1]):
+        print(f"  {name:20s}: {imp:.4f}")
+
+    # Évaluation train
+    y_train_pred = model.predict(X_train_filtered)
+    train_acc = accuracy_score(y_train_filtered, y_train_pred)
+    print(f"\nTrain Accuracy: {train_acc:.4f}")
+
+    # Évaluation val
+    y_val_pred = model.predict(X_val_filtered)
+    val_acc = accuracy_score(y_val_filtered, y_val_pred)
+    print(f"Val Accuracy: {val_acc:.4f}")
+
+    return model
+
+
 def evaluate_model(
-    model: LogisticRegression,
+    model: Union[LogisticRegression, 'xgb.XGBClassifier'],
     X: np.ndarray,
     y: np.ndarray,
     split_name: str
@@ -322,14 +418,18 @@ def main():
                         help='Filter type (default: kalman)')
     parser.add_argument('--aligned', action='store_true',
                         help='Use aligned labels (signal reversal) instead of Triple Barrier')
+    parser.add_argument('--model', type=str, default='logistic', choices=['logistic', 'xgboost'],
+                        help='Model type: logistic (baseline) or xgboost (default: logistic)')
     parser.add_argument('--output-dir', type=Path, default=Path('models/meta_model'),
                         help='Output directory for meta-model')
     args = parser.parse_args()
 
     print("="*80)
-    print("META-MODEL TRAINING - Phase 2.17")
+    print("META-MODEL TRAINING - Phase 2.17/2.18")
     print("="*80)
+    print(f"Model: {args.model}")
     print(f"Filter: {args.filter}")
+    print(f"Labels: {'Aligned (Signal Reversal)' if args.aligned else 'Triple Barrier'}")
     print(f"Output: {args.output_dir}")
 
     # Créer répertoire output
@@ -363,13 +463,23 @@ def main():
         )
         y_meta[split] = datasets[split]['meta_labels']
 
-    # Entraîner baseline
-    meta_model = train_baseline_model(
-        X_train=X_meta['train'],
-        y_train=y_meta['train'],
-        X_val=X_meta['val'],
-        y_val=y_meta['val']
-    )
+    # Entraîner le modèle sélectionné
+    if args.model == 'logistic':
+        meta_model = train_baseline_model(
+            X_train=X_meta['train'],
+            y_train=y_meta['train'],
+            X_val=X_meta['val'],
+            y_val=y_meta['val']
+        )
+    elif args.model == 'xgboost':
+        meta_model = train_xgboost_model(
+            X_train=X_meta['train'],
+            y_train=y_meta['train'],
+            X_val=X_meta['val'],
+            y_val=y_meta['val']
+        )
+    else:
+        raise ValueError(f"Unknown model type: {args.model}")
 
     # Évaluer sur les 3 splits
     results = {}
@@ -383,12 +493,13 @@ def main():
 
     # Sauvegarder modèle
     suffix = '_aligned' if args.aligned else ''
-    model_path = args.output_dir / f'meta_model_baseline_{args.filter}{suffix}.pkl'
+    model_name = 'logistic' if args.model == 'logistic' else 'xgboost'
+    model_path = args.output_dir / f'meta_model_{model_name}_{args.filter}{suffix}.pkl'
     print(f"\nSaving meta-model to: {model_path}")
     joblib.dump(meta_model, model_path)
 
     # Sauvegarder résultats
-    results_path = args.output_dir / f'meta_model_results_{args.filter}{suffix}.json'
+    results_path = args.output_dir / f'meta_model_results_{model_name}_{args.filter}{suffix}.json'
     print(f"Saving results to: {results_path}")
     with open(results_path, 'w') as f:
         json.dump(results, f, indent=2)
