@@ -852,12 +852,14 @@ def main():
         # =====================================================================
         # EXTRACTION LABEL DEPUIS DATASET UNIVERSEL (si applicable)
         # =====================================================================
-        # Dataset universel (regime): Y shape (n, 8) avec toutes les directions
-        # Structure: [timestamp, asset_id, regime, ts, vc, macd_dir, rsi_dir, cci_dir]
+        # Dataset universel (regime): Y shape (n, ≥8) avec toutes les directions
+        # Structure de base: [timestamp, asset_id, regime, ts, vc, macd_dir, rsi_dir, cci_dir]
+        # Si enrichi: colonnes supplémentaires après index 7 (regime_pred, probs, etc.)
         logger.info(f"\n🔍 DEBUG - Y shape before extraction: train={Y_train.shape}, val={Y_val.shape}, test={Y_test.shape}")
         is_universal_dataset_extracted = False  # Flag pour éviter écrasement n_outputs_detected
 
-        if Y_train.shape[1] == 8:
+        # Accepter ≥8 colonnes (dataset original ou enrichi)
+        if Y_train.shape[1] >= 8:
             logger.info(f"\n📦 Dataset universel détecté (Y shape: {Y_train.shape})")
 
             # Mapping indicateur -> colonne Y
