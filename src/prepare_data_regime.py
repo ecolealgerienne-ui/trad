@@ -115,29 +115,105 @@ def get_safe_n_jobs(n_assets: int, ram_per_asset_gb: float = 4.0) -> int:
 # SPLIT TEMPOREL
 # =============================================================================
 
-def temporal_split(df: pd.DataFrame,
-                   train_ratio: float = 0.70,
-                   val_ratio: float = 0.15,
-                   test_ratio: float = 0.15) -> dict:
+def find_common_period(assets: list) -> tuple:
     """
-    Split temporel chronologique: Train → Val → Test.
+    Trouve la période temporelle commune à tous les assets.
 
     Args:
-        df: DataFrame avec index temporel
-        train_ratio: Ratio pour train (défaut: 70%)
-        val_ratio: Ratio pour val (défaut: 15%)
-        test_ratio: Ratio pour test (défaut: 15%)
+        assets: Liste des noms d'assets
+
+    Returns:
+        (min_timestamp, max_timestamp) en commun à tous
+    """
+    min_timestamps = []
+    max_timestamps = []
+
+    for asset_name in assets:
+        csv_path = AVAILABLE_ASSETS_5M.get(asset_name)
+        if csv_path is None:
+            continue
+
+        # Lecture rapide juste pour les timestamps
+        df = pd.read_csv(csv_path, usecols=['timestamp', 'time'], nrows=1)
+        ts_col = 'timestamp' if 'timestamp' in df.columns else 'time'
+
+        # Lire toutes les timestamps
+        df = pd.read_csv(csv_path, usecols=[ts_col])
+        df[ts_col] = pd.to_datetime(df[ts_col])
+
+        min_timestamps.append(df[ts_col].min())
+        max_timestamps.append(df[ts_col].max())
+
+    # Période commune = max des min, min des max
+    common_start = max(min_timestamps)
+    common_end = min(max_timestamps)
+
+    logger.info(f"  Période commune: {common_start} → {common_end}")
+    logger.info(f"    Durée: {(common_end - common_start).days / 365.25:.1f} ans")
+
+    return common_start, common_end
+
+
+def calculate_split_timestamps(common_start: pd.Timestamp,
+                                 common_end: pd.Timestamp,
+                                 train_ratio: float = 0.70,
+                                 val_ratio: float = 0.15,
+                                 test_ratio: float = 0.15) -> dict:
+    """
+    Calcule les timestamps de split sur la période commune.
+
+    Args:
+        common_start: Timestamp début période commune
+        common_end: Timestamp fin période commune
+        train_ratio: Ratio pour train
+        val_ratio: Ratio pour val
+        test_ratio: Ratio pour test
+
+    Returns:
+        dict avec 'train_end', 'val_end'
+    """
+    total_duration = common_end - common_start
+
+    train_duration = total_duration * train_ratio
+    val_duration = total_duration * val_ratio
+
+    train_end = common_start + train_duration
+    val_end = train_end + val_duration
+
+    logger.info(f"  Split timestamps:")
+    logger.info(f"    Train: {common_start} → {train_end}")
+    logger.info(f"    Val:   {train_end} → {val_end}")
+    logger.info(f"    Test:  {val_end} → {common_end}")
+
+    return {
+        'train_start': common_start,
+        'train_end': train_end,
+        'val_start': train_end,
+        'val_end': val_end,
+        'test_start': val_end,
+        'test_end': common_end
+    }
+
+
+def temporal_split_by_timestamps(df: pd.DataFrame,
+                                   split_timestamps: dict) -> dict:
+    """
+    Split temporel basé sur des timestamps absolus.
+
+    Args:
+        df: DataFrame avec DatetimeIndex
+        split_timestamps: Dict avec train_end, val_end
 
     Returns:
         dict avec clés 'train', 'val', 'test'
     """
-    n = len(df)
-    n_train = int(n * train_ratio)
-    n_val = int(n * val_ratio)
-
-    train_df = df.iloc[:n_train].copy()
-    val_df = df.iloc[n_train:n_train+n_val].copy()
-    test_df = df.iloc[n_train+n_val:].copy()
+    # Filtrer par timestamps
+    train_df = df[(df.index >= split_timestamps['train_start']) &
+                  (df.index < split_timestamps['train_end'])].copy()
+    val_df = df[(df.index >= split_timestamps['val_start']) &
+                (df.index < split_timestamps['val_end'])].copy()
+    test_df = df[(df.index >= split_timestamps['test_start']) &
+                 (df.index <= split_timestamps['test_end'])].copy()
 
     logger.info(f"  Split temporel: Train={len(train_df)}, Val={len(val_df)}, Test={len(test_df)}")
 
@@ -276,6 +352,7 @@ def create_sequences_for_regime(df: pd.DataFrame,
 # =============================================================================
 
 def process_single_asset(asset_name: str,
+                          split_timestamps: dict,
                           clip_value: float = None,
                           max_samples: int = None) -> dict:
     """
@@ -283,6 +360,7 @@ def process_single_asset(asset_name: str,
 
     Args:
         asset_name: Nom de l'asset ('BTC', 'ETH', etc.)
+        split_timestamps: Dict avec les timestamps de split (common_start, train_end, etc.)
         clip_value: Valeur de clipping des features (None = pas de clip)
         max_samples: Limite nombre de samples (None = tout)
 
@@ -325,6 +403,31 @@ def process_single_asset(asset_name: str,
     else:
         logger.warning("  Aucune colonne timestamp trouvée, utilisation index")
 
+    # ========================================================================
+    # FILTRAGE VOLUME=0 (FIX: 4977 violations Train)
+    # ========================================================================
+
+    original_len = len(df)
+    df = df[df['volume'] > 0].copy()
+    if len(df) < original_len:
+        filtered_count = original_len - len(df)
+        logger.info(f"  ✓ Filtré {filtered_count} lignes avec volume=0 ({filtered_count/original_len*100:.2f}%)")
+
+    # ========================================================================
+    # FILTRAGE À LA PÉRIODE COMMUNE (FIX: negative gaps)
+    # ========================================================================
+
+    if split_timestamps is not None:
+        common_start = split_timestamps['train_start']
+        common_end = split_timestamps['test_end']
+
+        original_len = len(df)
+        df = df[(df.index >= common_start) & (df.index <= common_end)].copy()
+
+        if len(df) < original_len:
+            filtered_count = original_len - len(df)
+            logger.info(f"  ✓ Filtré à période commune: {len(df)} lignes ({filtered_count} hors période)")
+
     # Trim edges (100 début + 100 fin)
     if len(df) > 2 * TRIM_EDGES:
         df = df.iloc[TRIM_EDGES:-TRIM_EDGES].copy()
@@ -361,11 +464,11 @@ def process_single_asset(asset_name: str,
     df = df.fillna(0)
 
     # ========================================================================
-    # ÉTAPE 3: SPLIT TEMPOREL (70/15/15)
+    # ÉTAPE 3: SPLIT TEMPOREL PAR TIMESTAMPS (70/15/15)
     # ========================================================================
 
-    logger.info(f"\n  Split temporel...")
-    splits = temporal_split(df, train_ratio=0.70, val_ratio=0.15, test_ratio=0.15)
+    logger.info(f"\n  Split temporel par timestamps...")
+    splits = temporal_split_by_timestamps(df, split_timestamps)
 
     # ========================================================================
     # ÉTAPE 4: CRÉER SÉQUENCES POUR CHAQUE SPLIT
@@ -449,6 +552,25 @@ def main():
     logger.info(f"Features: ~20 colonnes (trend, volatility, volume)")
 
     # ========================================================================
+    # CALCUL PÉRIODE COMMUNE ET SPLIT TIMESTAMPS (FIX: negative gaps)
+    # ========================================================================
+
+    logger.info(f"\n{'='*80}")
+    logger.info(f"CALCUL PÉRIODE COMMUNE")
+    logger.info('='*80)
+
+    common_start, common_end = find_common_period(args.assets)
+
+    logger.info(f"\n{'='*80}")
+    logger.info(f"CALCUL SPLIT TIMESTAMPS")
+    logger.info('='*80)
+
+    split_timestamps = calculate_split_timestamps(
+        common_start, common_end,
+        train_ratio=0.70, val_ratio=0.15, test_ratio=0.15
+    )
+
+    # ========================================================================
     # PARALLÉLISATION MULTI-CORE
     # ========================================================================
 
@@ -458,7 +580,7 @@ def main():
     # Traiter les assets en parallèle
     all_results = Parallel(n_jobs=n_jobs, verbose=10)(
         delayed(process_single_asset)(
-            asset_name, args.clip, args.max_samples
+            asset_name, split_timestamps, args.clip, args.max_samples
         ) for asset_name in args.assets
     )
 
