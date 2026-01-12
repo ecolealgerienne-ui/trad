@@ -895,17 +895,19 @@ def main():
 
                 if args.indicator == 'cci':
                     # CCI utilise Typical Price = (H+L+C)/3 → besoin h_ret, l_ret, c_ret
+                    # IMPORTANT: Exclure timestamp (0) et asset_id (1) - ne garder que les features pures!
                     logger.info(f"  🎯 Extraction h_ret, l_ret, c_ret (indices 2,3,4) pour CCI...")
-                    X_train = X_train[:, :, [0, 1, 2, 3, 4]]  # timestamp, asset_id, h_ret, l_ret, c_ret
-                    X_val = X_val[:, :, [0, 1, 2, 3, 4]]
-                    X_test = X_test[:, :, [0, 1, 2, 3, 4]]
+                    X_train = X_train[:, :, [2, 3, 4]]  # h_ret, l_ret, c_ret uniquement
+                    X_val = X_val[:, :, [2, 3, 4]]
+                    X_test = X_test[:, :, [2, 3, 4]]
                     features_name = "h_ret, l_ret, c_ret (3 features)"
                 else:
                     # MACD et RSI utilisent uniquement Close → c_ret
+                    # IMPORTANT: Exclure timestamp (0) et asset_id (1) - ne garder que c_ret!
                     logger.info(f"  🎯 Extraction c_ret (index 4) pour {args.indicator.upper()}...")
-                    X_train = X_train[:, :, [0, 1, 4]]  # timestamp, asset_id, c_ret
-                    X_val = X_val[:, :, [0, 1, 4]]
-                    X_test = X_test[:, :, [0, 1, 4]]
+                    X_train = X_train[:, :, 4:5]  # c_ret uniquement, garder shape 3D
+                    X_val = X_val[:, :, 4:5]
+                    X_test = X_test[:, :, 4:5]
                     features_name = "c_ret (1 feature)"
 
                 logger.info(f"     X shape après: train={X_train.shape}, val={X_val.shape}, test={X_test.shape}")
