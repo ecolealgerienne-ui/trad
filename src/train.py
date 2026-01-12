@@ -947,16 +947,18 @@ def main():
     logger.info(f"   Y_train.shape[1] (nb colonnes): {Y_train.shape[1]}")
 
     # Validation finale avant création modèle
-    if not is_universal_dataset_extracted and Y_train.shape[1] not in [2, 3]:
+    # Accepter: 1 (single-output filtré), 2 (dual-binary), 3 (universel extrait)
+    if not is_universal_dataset_extracted and Y_train.shape[1] not in [1, 2, 3]:
         logger.error(f"\n❌ ERREUR CRITIQUE: Y shape invalide!")
         logger.error(f"   Y_train.shape: {Y_train.shape}")
         logger.error(f"   Y_train.shape[1]: {Y_train.shape[1]} colonnes")
-        logger.error(f"   Attendu: 2 (dual-binary) ou 3 (universel extrait)")
+        logger.error(f"   Attendu: 1 (single-output), 2 (dual-binary) ou 3 (universel extrait)")
         logger.error(f"   is_universal_dataset_extracted: {is_universal_dataset_extracted}")
         logger.error(f"")
         logger.error(f"   Soit:")
-        logger.error(f"   1. Le dataset n'est PAS un dataset universel (regime) → shape[1] devrait être 2")
-        logger.error(f"   2. Le dataset EST universel (regime) → devrait avoir été extrait avec shape[1]=3")
+        logger.error(f"   1. Le dataset a été filtré single-output → shape[1]=1 ✅")
+        logger.error(f"   2. Le dataset est dual-binary → shape[1]=2 ✅")
+        logger.error(f"   3. Le dataset EST universel (regime) extrait → shape[1]=3 ✅")
         logger.error(f"")
         logger.error(f"   Vérifier que le fichier {args.data} est bien le dataset attendu")
         raise SystemExit(1)
