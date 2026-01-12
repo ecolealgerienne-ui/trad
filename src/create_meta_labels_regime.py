@@ -36,7 +36,10 @@ class Position(Enum):
 
 def load_regime_dataset(split: str) -> Dict:
     """
-    Charge le dataset régime enrichi.
+    Charge le dataset régime ENRICHI (avec toutes les prédictions).
+
+    ⚠️ ARCHITECTURE: Dataset unique avec Model A + MACD prédictions déjà intégrées.
+    Pas besoin de charger les modèles séparément.
 
     Args:
         split: 'train', 'val', ou 'test'
@@ -44,12 +47,16 @@ def load_regime_dataset(split: str) -> Dict:
     Returns:
         Dict avec X, Y (enrichi), OHLCV, metadata
     """
-    dataset_path = Path('data/prepared/dataset_btc_eth_bnb_ada_ltc_regime.npz')
+    # Charger dataset ENRICHI (pas le base)
+    dataset_path = Path('data/prepared/dataset_btc_eth_bnb_ada_ltc_regime_enriched.npz')
 
     if not dataset_path.exists():
-        raise FileNotFoundError(f"Dataset not found: {dataset_path}")
+        raise FileNotFoundError(
+            f"Dataset enrichi introuvable: {dataset_path}\n"
+            f"Exécutez d'abord: python src/enrich_dataset_complete.py --assets BTC ETH BNB ADA LTC"
+        )
 
-    print(f"Loading regime dataset: {dataset_path}")
+    print(f"📂 Chargement dataset enrichi: {dataset_path}")
     data = np.load(dataset_path, allow_pickle=True)
 
     # Clés selon le split
@@ -59,23 +66,36 @@ def load_regime_dataset(split: str) -> Dict:
 
     result = {
         'X': data[X_key],               # (n, 12, ~22)
-        'Y': data[Y_key],               # (n, 10) - enrichi avec prédictions
+        'Y': data[Y_key],               # (n, 12) - ENRICHI avec prédictions ✨
         'OHLCV': data[OHLCV_key],       # (n, 7)
-        'metadata': data['metadata'].item() if 'metadata' in data else {}
+        'metadata': data['metadata'].item() if isinstance(data['metadata'], np.ndarray) else data['metadata']
     }
 
     # Extraire les colonnes importantes de Y
+    # Structure Y enrichie:
+    #   [:, 0] = timestamp
+    #   [:, 1] = asset_id
+    #   [:, 2] = regime_label
+    #   [:, 3] = trend_strength
+    #   [:, 4] = volatility_cluster
+    #   [:, 5] = regime_pred (Model A)
+    #   [:, 6-9] = regime_probs (4 classes)
+    #   [:, 10] = macd_direction_pred ✨
+    #   [:, 11] = macd_direction_prob ✨
     result['timestamps'] = result['Y'][:, 0]
     result['asset_ids'] = result['Y'][:, 1].astype(int)
-    result['regime_labels'] = result['Y'][:, 2].astype(int)  # Ground truth
-    result['regime_preds'] = result['Y'][:, 5].astype(int)   # Model A predictions
-    result['regime_probs'] = result['Y'][:, 6:10]            # (n, 4) probabilities
+    result['regime_labels'] = result['Y'][:, 2].astype(int)      # Ground truth
+    result['regime_preds'] = result['Y'][:, 5].astype(int)       # Model A predictions
+    result['regime_probs'] = result['Y'][:, 6:10]                # (n, 4) probabilities
+    result['macd_preds'] = result['Y'][:, 10].astype(int)        # MACD direction (0=DOWN, 1=UP) ✨
+    result['macd_probs'] = result['Y'][:, 11]                    # MACD confidence ✨
 
     print(f"  Split: {split}")
     print(f"  Samples: {len(result['Y']):,}")
     print(f"  X shape: {result['X'].shape}")
-    print(f"  Y shape: {result['Y'].shape}")
+    print(f"  Y shape: {result['Y'].shape} (enrichi: Model A + MACD)")
     print(f"  OHLCV shape: {result['OHLCV'].shape}")
+    print(f"  MACD UP/DOWN: {np.bincount(result['macd_preds'], minlength=2)}")
 
     return result
 
