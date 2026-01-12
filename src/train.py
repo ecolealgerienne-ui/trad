@@ -599,7 +599,9 @@ def validate_args_vs_filename(args) -> None:
             raise SystemExit(1)
 
     # Vérifier l'indicateur (sauf 'all')
-    if args.indicator != 'all':
+    is_universal_dataset = 'regime' in filename  # Dataset universel avec tous les labels
+
+    if args.indicator != 'all' and not is_universal_dataset:
         indicator_name = args.indicator.lower()
         if indicator_name not in filename:
             logger.error(f"❌ Incohérence détectée!")
@@ -608,7 +610,10 @@ def validate_args_vs_filename(args) -> None:
             logger.error(f"   L'indicateur '{indicator_name}' n'est pas présent dans le nom du fichier")
             raise SystemExit(1)
 
-    logger.info(f"✅ Paramètres cohérents avec le fichier de données")
+    if is_universal_dataset:
+        logger.info(f"✅ Dataset universel détecté (regime) - contient tous les indicateurs")
+    else:
+        logger.info(f"✅ Paramètres cohérents avec le fichier de données")
 
 
 def main():
@@ -686,6 +691,36 @@ def main():
 
         metadata = prepared['metadata']
         log_dataset_metadata(metadata, logger)
+
+        # =====================================================================
+        # EXTRACTION LABEL DEPUIS DATASET UNIVERSEL (si applicable)
+        # =====================================================================
+        # Dataset universel (regime): Y shape (n, 8) avec toutes les directions
+        # Structure: [timestamp, asset_id, regime, ts, vc, macd_dir, rsi_dir, cci_dir]
+        if Y_train.shape[1] == 8:
+            logger.info(f"\n📦 Dataset universel détecté (Y shape: {Y_train.shape})")
+
+            # Mapping indicateur -> colonne Y
+            indicator_column_map = {
+                'macd': 5,  # Y[:, 5] = macd_direction
+                'rsi': 6,   # Y[:, 6] = rsi_direction
+                'cci': 7    # Y[:, 7] = cci_direction
+            }
+
+            if args.indicator in indicator_column_map:
+                col_idx = indicator_column_map[args.indicator]
+                logger.info(f"  Extraction label {args.indicator.upper()} (colonne {col_idx})")
+
+                # Extraire [timestamp, asset_id, label_indicateur]
+                Y_train = Y_train[:, [0, 1, col_idx]]
+                Y_val = Y_val[:, [0, 1, col_idx]]
+                Y_test = Y_test[:, [0, 1, col_idx]]
+
+                logger.info(f"  ✅ Y extrait: {Y_train.shape}")
+            else:
+                logger.error(f"❌ Indicateur '{args.indicator}' non supporté pour dataset universel")
+                logger.error(f"   Indicateurs disponibles: macd, rsi, cci")
+                raise SystemExit(1)
 
         # =====================================================================
         # FILTRAGE PAR ASSETS (optionnel)
