@@ -697,6 +697,8 @@ def main():
         # =====================================================================
         # Dataset universel (regime): Y shape (n, 8) avec toutes les directions
         # Structure: [timestamp, asset_id, regime, ts, vc, macd_dir, rsi_dir, cci_dir]
+        is_universal_dataset_extracted = False  # Flag pour éviter écrasement n_outputs_detected
+
         if Y_train.shape[1] == 8:
             logger.info(f"\n📦 Dataset universel détecté (Y shape: {Y_train.shape})")
 
@@ -723,6 +725,7 @@ def main():
                 # Les 2 premières sont timestamp et asset_id (metadata)
                 n_outputs_detected = 1  # Direction binaire (UP/DOWN)
                 indicator_for_metrics = args.indicator.upper()  # Pour auto-détection architecture
+                is_universal_dataset_extracted = True  # Flag pour éviter écrasement ligne 778
                 logger.info(f"  🎯 n_outputs mis à jour: {n_outputs_detected} (direction binaire)")
                 logger.info(f"  🎯 indicator_for_metrics: {indicator_for_metrics}")
             else:
@@ -775,7 +778,11 @@ def main():
     # =========================================================================
     # Détecter n_features et n_outputs depuis les données
     n_features_detected = X_train.shape[2]  # 1 pour RSI/MACD, 3 pour CCI
-    n_outputs_detected = Y_train.shape[1]   # 2 pour dual-binary (direction + force)
+
+    # Ne pas écraser n_outputs_detected s'il a déjà été défini lors de l'extraction du dataset universel
+    if not is_universal_dataset_extracted:
+        n_outputs_detected = Y_train.shape[1]   # 2 pour dual-binary (direction + force)
+    # Sinon, garder la valeur définie ligne 724 (n_outputs_detected = 1 pour direction binaire)
 
     # Détecter si dual-binary depuis metadata
     is_dual_binary = False
