@@ -93,14 +93,31 @@ def diagnose_dataset(npz_path: str):
 
     # Metadata
     if 'metadata' in data:
-        metadata = data['metadata'].item()
+        metadata_raw = data['metadata']
         print(f"\n📋 Metadata:")
-        if 'assets' in metadata:
-            print(f"  Assets: {metadata['assets']}")
-        if 'features' in metadata:
-            print(f"  Features: {metadata['features']}")
-        if 'labels' in metadata:
-            print(f"  Labels: {metadata['labels']}")
+        print(f"  Type: {type(metadata_raw)}")
+
+        # Essayer de charger selon le type
+        try:
+            if isinstance(metadata_raw, np.ndarray):
+                # Si c'est un array numpy avec item(), l'extraire
+                metadata = metadata_raw.item()
+            else:
+                metadata = metadata_raw
+
+            # Vérifier si c'est un dict
+            if isinstance(metadata, dict):
+                if 'assets' in metadata:
+                    print(f"  Assets: {metadata['assets']}")
+                if 'features' in metadata:
+                    print(f"  Features: {metadata['features']}")
+                if 'labels' in metadata:
+                    print(f"  Labels: {metadata['labels']}")
+            else:
+                print(f"  Metadata n'est pas un dict: {type(metadata)}")
+                print(f"  Contenu: {str(metadata)[:200]}...")
+        except Exception as e:
+            print(f"  ⚠️  Erreur lors du chargement metadata: {e}")
 
     print("\n" + "="*80)
     print("FIN DU DIAGNOSTIC")

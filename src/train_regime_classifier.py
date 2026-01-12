@@ -32,6 +32,83 @@ Référence:
     - Ang & Bekaert (2002) - Regime Switches
     - López de Prado (2018) - Feature Engineering
     - Documentation: docs/META_REGIME_TRADING_SPECS.md
+
+═══════════════════════════════════════════════════════════════════════════════
+DONNÉES D'ENTRAÎNEMENT - Structure détaillée
+═══════════════════════════════════════════════════════════════════════════════
+
+INPUT: X_train
+────────────────
+Shape: (n_train, 25, ~22)
+  - n_train: Nombre d'échantillons train
+  - 25: Longueur séquence (25 timesteps × 5min = 2h05 de contexte)
+  - ~22: Nombre de features (2 metadata + ~20 regime features)
+
+Colonnes X_train[:, :, i]:
+  Index 0-1: METADATA
+    [0] timestamp    - Unix timestamp (int64)
+    [1] asset_id     - ID asset 0-4 (BTC=0, ETH=1, BNB=2, ADA=3, LTC=4)
+
+  Index 2-8: TREND FEATURES (7)
+    [2]  ma20_slope          - Pente MA20 normalisée
+    [3]  ma50_slope          - Pente MA50 normalisée
+    [4]  regression_slope    - Pente régression linéaire
+    [5]  regression_r2       - R² régression (qualité tendance)
+    [6]  adx                 - Average Directional Index
+    [7]  macd_histogram_norm - Histogram MACD normalisé
+    [8]  hurst_exponent      - Exposant de Hurst (persistance tendance)
+
+  Index 9-17: VOLATILITY FEATURES (9)
+    [9]  atr_normalized         - ATR normalisé par prix
+    [10] bb_upper               - Bande de Bollinger supérieure
+    [11] bb_middle              - Bande de Bollinger moyenne (SMA20)
+    [12] bb_lower               - Bande de Bollinger inférieure
+    [13] bb_width               - Largeur bandes Bollinger
+    [14] percent_b              - Position prix dans bandes (0-1)
+    [15] realized_volatility    - Volatilité réalisée (std returns)
+    [16] volatility_compression - Ratio volatilité courte/longue
+    [17] range_atr_ratio        - Ratio (High-Low)/ATR
+
+  Index 18-21: VOLUME & MICROSTRUCTURE FEATURES (4)
+    [18] volume_ratio     - Volume / MA20 volume
+    [19] volume_spike     - Détection spike volume (bool)
+    [20] vwap_deviation   - Écart prix vs VWAP
+    [21] obv_derivative   - Dérivée On-Balance Volume
+
+Source: regime_features.py - calculate_all_regime_features()
+Référence complète: regime_features.py lignes 691-718
+
+TARGET: Y_train
+────────────────
+Shape: (n_train, 8)
+
+Colonnes Y_train[:, i]:
+  [0] timestamp       - Unix timestamp (int64)
+  [1] asset_id        - ID asset 0-4
+  [2] regime          - Régime 0-3 (TARGET PRINCIPAL)
+  [3] trend_strength  - Score tendance 0.0-1.0
+  [4] volatility      - Score volatilité 0.0-1.0
+  [5] macd_direction  - Direction MACD Kalman 0/1 (0=DOWN, 1=UP)
+  [6] rsi_direction   - Direction RSI Kalman 0/1
+  [7] cci_direction   - Direction CCI Kalman 0/1
+
+Note: Colonnes 5-7 sont ajoutées APRÈS par train_regime_classifier.py
+      (enrichissement in-place via np.column_stack)
+
+RÉGIMES (4 classes):
+  0: RANGE LOW VOL  - Consolidation calme (trend_strength < 0.5, volatility < 0.5)
+  1: RANGE HIGH VOL - Consolidation agitée (trend_strength < 0.5, volatility >= 0.5)
+  2: TREND LOW VOL  - Tendance stable (trend_strength >= 0.5, volatility < 0.5)
+  3: TREND HIGH VOL - Tendance explosive (trend_strength >= 0.5, volatility >= 0.5)
+
+UTILISATION PAR XGBOOST:
+  Ce script aggregate les 25 timesteps en 4 statistiques [mean, std, min, max]:
+  X_aggregated shape: (n_train, 4 × 20) = (n_train, 80) features
+  Target: regimes_train = Y_train[:, 2]
+
+Source dataset: data/prepared/dataset_btc_eth_bnb_ada_ltc_regime.npz
+Généré par: src/prepare_data_regime.py
+═══════════════════════════════════════════════════════════════════════════════
 """
 
 import argparse

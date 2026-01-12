@@ -630,11 +630,23 @@ def calculate_all_regime_features(df: pd.DataFrame) -> pd.DataFrame:
         df: DataFrame avec colonnes ['open', 'high', 'low', 'close', 'volume']
 
     Returns:
-        DataFrame avec ~50 features ajoutées
+        DataFrame avec ~23 features ajoutées
     """
     logger.info("Calcul de toutes les features de régime...")
 
     df = df.copy()
+
+    # ========== PURE SIGNAL FEATURES ==========
+    logger.info("Calcul des features pure signal (h_ret, l_ret, c_ret)...")
+    prev_close = df['close'].shift(1)
+    df['h_ret'] = (df['high'] - prev_close) / prev_close
+    df['l_ret'] = (df['low'] - prev_close) / prev_close
+    df['c_ret'] = (df['close'] - prev_close) / prev_close
+
+    # Clipper les outliers à ±10%
+    clip_value = 0.10
+    for col in ['h_ret', 'l_ret', 'c_ret']:
+        df[col] = df[col].clip(-clip_value, clip_value)
 
     # ========== TREND FEATURES ==========
     logger.info("Calcul des features de tendance...")
@@ -693,10 +705,13 @@ def get_regime_feature_names() -> list:
     Retourne la liste des noms de features de régime.
 
     Returns:
-        Liste des noms de colonnes features (~50)
+        Liste des noms de colonnes features (~23)
     """
     return [
-        # Trend features (6)
+        # Pure signal features (3) - ajouté pour combiner avec regime features
+        'h_ret', 'l_ret', 'c_ret',
+
+        # Trend features (7)
         'ma20_slope', 'ma50_slope',
         'regression_slope', 'regression_r2',
         'adx',
