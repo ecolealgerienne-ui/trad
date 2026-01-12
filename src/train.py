@@ -1102,9 +1102,25 @@ def main():
     # =========================================================================
     logger.info("\n2. Création des DataLoaders...")
 
+    # =========================================================================
+    # EXTRACTION LABEL UNIQUEMENT (si Y contient metadata)
+    # =========================================================================
+    # Après extraction dataset universel, Y shape (n, 3) = [timestamp, asset_id, label]
+    # Le modèle attend seulement le label (n, 1), pas les metadata
+    if is_universal_dataset_extracted and Y_train.shape[1] == 3:
+        logger.info(f"  🎯 Extraction colonne label (index 2) depuis Y shape {Y_train.shape}...")
+        Y_train_labels = Y_train[:, 2:3]  # Keep 2D shape (n, 1)
+        Y_val_labels = Y_val[:, 2:3]
+        Y_test_labels = Y_test[:, 2:3]
+        logger.info(f"  ✅ Y labels shape: train={Y_train_labels.shape}, val={Y_val_labels.shape}, test={Y_test_labels.shape}")
+    else:
+        Y_train_labels = Y_train
+        Y_val_labels = Y_val
+        Y_test_labels = Y_test
+
     # Passer les transitions si disponibles (Phase 2.11)
-    train_dataset = IndicatorDataset(X_train, Y_train, T_train)
-    val_dataset = IndicatorDataset(X_val, Y_val, T_val)
+    train_dataset = IndicatorDataset(X_train, Y_train_labels, T_train)
+    val_dataset = IndicatorDataset(X_val, Y_val_labels, T_val)
 
     train_loader = DataLoader(
         train_dataset,
