@@ -92,6 +92,140 @@ python src/prepare_data_regime.py --assets BTC ETH BNB ADA LTC
 
 **Source**: `regime_features.py` - fonction `get_regime_feature_names()`
 
+---
+
+## 🔬 ANALYSE DES FEATURES POUR CLASSIFICATION RÉGIME
+
+### Rappel: Les 4 régimes à prédire
+
+| Régime | Code | Caractéristiques |
+|--------|------|------------------|
+| RANGE LOW VOL | 0 | Pas de tendance + Volatilité faible |
+| RANGE HIGH VOL | 1 | Pas de tendance + Volatilité haute |
+| TREND LOW VOL | 2 | Tendance claire + Volatilité faible |
+| TREND HIGH VOL | 3 | Tendance claire + Volatilité haute |
+
+**Structure**: 2 dimensions = TREND vs RANGE × HIGH VOL vs LOW VOL
+
+### Features ESSENTIELLES vs REDONDANTES
+
+#### Pour distinguer TREND vs RANGE :
+
+| Feature | Index | Utilité | Essentiel ? |
+|---------|-------|---------|-------------|
+| `adx` | 9 | Mesure directe de la force de tendance | ✅ **OUI** |
+| `regression_slope` | 7 | Direction de tendance | ✅ **OUI** |
+| `regression_r2` | 8 | Qualité de la tendance (linéarité) | ✅ **OUI** |
+| `hurst_exponent` | 11 | Mean-reversion vs trending | ✅ **OUI** |
+| `ma20_slope` | 5 | Pente MA courte | ⚠️ Redondant avec regression |
+| `ma50_slope` | 6 | Pente MA longue | ⚠️ Redondant avec regression |
+| `macd_histogram_norm` | 10 | Momentum | ⚠️ Redondant |
+
+#### Pour distinguer HIGH VOL vs LOW VOL :
+
+| Feature | Index | Utilité | Essentiel ? |
+|---------|-------|---------|-------------|
+| `atr_normalized` | 12 | Mesure directe de volatilité | ✅ **OUI** |
+| `realized_volatility` | 18 | Volatilité historique | ✅ **OUI** |
+| `bb_width` | 16 | Largeur des bandes = volatilité | ⚠️ Redondant avec ATR |
+| `volatility_compression` | 19 | Ratio court/long terme | ⚠️ Utile mais secondaire |
+| `bb_upper/middle/lower` | 13-15 | Niveaux absolus | ❌ Peu utile pour régime |
+| `percent_b` | 17 | Position dans les bandes | ❌ Peu utile pour régime |
+| `range_atr_ratio` | 20 | Range vs ATR | ⚠️ Redondant |
+
+#### VOLUME & MICROSTRUCTURE (4 features) :
+
+| Feature | Index | Utilité pour régime | Essentiel ? |
+|---------|-------|---------------------|-------------|
+| `volume_ratio` | 21 | Volume relatif | ❌ Indirect |
+| `volume_spike` | 22 | Pics de volume | ❌ Indirect |
+| `vwap_deviation` | 23 | Écart au VWAP | ❌ Indirect |
+| `obv_derivative` | 24 | Flux de volume | ❌ Indirect |
+
+#### PURE SIGNAL (3 features) :
+
+| Feature | Index | Utilité pour régime | Essentiel ? |
+|---------|-------|---------------------|-------------|
+| `h_ret` | 2 | Rendement High | ❌ Pour direction, pas régime |
+| `l_ret` | 3 | Rendement Low | ❌ Pour direction, pas régime |
+| `c_ret` | 4 | Rendement Close | ❌ Pour direction, pas régime |
+
+### Conclusion: Features MINIMALES pour régime
+
+**Set minimal (~6 features) qui suffirait pour classifier les 4 régimes :**
+
+```python
+minimal_regime_features = [
+    'adx',                    # TREND vs RANGE (force)
+    'regression_r2',          # TREND vs RANGE (qualité)
+    'hurst_exponent',         # TREND vs RANGE (persistance)
+    'atr_normalized',         # HIGH vs LOW VOL
+    'realized_volatility',    # HIGH vs LOW VOL (confirmation)
+    'volatility_compression', # Transition volatilité
+]
+```
+
+**Les 20 features actuelles (hors Pure Signal) sont REDONDANTES** pour la classification de régime, mais :
+- ✅ Peuvent améliorer la robustesse (plusieurs perspectives)
+- ✅ XGBoost peut apprendre à ignorer les features inutiles (feature importance)
+- ⚠️ Risque de surapprentissage sur seulement 4 classes
+- ⚠️ Volume features peu utiles pour déterminer le régime
+
+### Usage par script
+
+| Script | Features utilisées | Notes |
+|--------|-------------------|-------|
+| `train_regime_classifier.py` | 20 features (TREND + VOL + VOLUME) | Agrégées en [mean, std, min, max] → 80 features XGBoost |
+| `train.py` (direction) | 23 features (inclut Pure Signal) | Séquences complètes pour CNN-LSTM |
+
+---
+
+## ⚠️ EXTRACTION DES FEATURES - Indices vs Noms
+
+### Comment `train_regime_classifier.py` extrait les features
+
+Le script utilise des **indices numériques** (pas des noms de colonnes) car les données sont en format NumPy :
+
+```python
+# Ligne 235 de train_regime_classifier.py
+features = X[:, :, 2:]  # Skip timestamp (index 0) et asset_id (index 1)
+
+# Ligne 174 - Extraction du régime
+regimes_train = Y_train[:, 2].astype(int)  # Colonne 2 = regime
+```
+
+### Garantie de cohérence
+
+**L'ordre des colonnes est garanti par la chaîne de fonctions :**
+
+1. `regime_features.py` → `get_regime_feature_names()` définit l'ordre (lignes 703-733)
+2. `prepare_data_regime.py` → utilise `get_regime_feature_names()` (ligne 606) pour construire X
+3. `train_regime_classifier.py` → extrait `X[:, :, 2:]` (cohérent avec l'ordre défini)
+
+**Code source de l'ordre des features** (`regime_features.py` lignes 703-733) :
+
+```python
+def get_regime_feature_names() -> list:
+    return [
+        # Pure signal features (3)
+        'h_ret', 'l_ret', 'c_ret',
+        # Trend features (7)
+        'ma20_slope', 'ma50_slope', 'regression_slope', 'regression_r2',
+        'adx', 'macd_histogram_norm', 'hurst_exponent',
+        # Volatility features (9)
+        'atr_normalized', 'bb_upper', 'bb_middle', 'bb_lower', 'bb_width', 'percent_b',
+        'realized_volatility', 'volatility_compression', 'range_atr_ratio',
+        # Volume & microstructure features (4)
+        'volume_ratio', 'volume_spike', 'vwap_deviation', 'obv_derivative'
+    ]
+```
+
+### Pourquoi pas de sélection par nom ?
+
+- **NumPy arrays** n'ont pas de noms de colonnes (contrairement à Pandas DataFrames)
+- La cohérence est maintenue par la **fonction unique** `get_regime_feature_names()`
+- Toute modification de l'ordre doit être faite dans cette fonction uniquement
+
 ### Labels Y (8 colonnes) - BASE DATASET
 
 | Index | Colonne | Type | Valeurs | Description |
