@@ -133,9 +133,17 @@ def find_common_period(assets: list) -> tuple:
         if csv_path is None:
             continue
 
-        # Lecture rapide juste pour les timestamps
-        df = pd.read_csv(csv_path, usecols=['timestamp', 'time'], nrows=1)
-        ts_col = 'timestamp' if 'timestamp' in df.columns else 'time'
+        # Lire première ligne pour détecter la colonne timestamp
+        df_sample = pd.read_csv(csv_path, nrows=1)
+
+        # Détecter quelle colonne timestamp est disponible
+        if 'timestamp' in df_sample.columns:
+            ts_col = 'timestamp'
+        elif 'time' in df_sample.columns:
+            ts_col = 'time'
+        else:
+            logger.warning(f"  {asset_name}: Aucune colonne timestamp trouvée, ignoré")
+            continue
 
         # Lire toutes les timestamps
         df = pd.read_csv(csv_path, usecols=[ts_col])
