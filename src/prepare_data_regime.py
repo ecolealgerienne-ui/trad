@@ -1,17 +1,16 @@
 """
 Script de préparation des données pour Meta-Regime Trading (5min).
 
-PRINCIPE CLÉ: Classification 4 régimes (TS × VC) + Features enrichies (~20)
+PRINCIPE CLÉ: Classification 3 régimes (TS × VC) + Features enrichies (~20)
 ===============================================================================
 
 ⚠️ NOUVELLE APPROCHE: Abandonner la prédiction directionnelle (MACD/RSI/CCI)
-→ Prédire le RÉGIME de marché (4 classes) pour améliorer Win Rate et PF
+→ Prédire le RÉGIME de marché (3 classes) pour améliorer Win Rate et PF
 
-Régimes:
-- 0: RANGE LOW VOL  (TS < 0.4, VC ≤ P70)
-- 1: RANGE HIGH VOL (TS < 0.4, VC > P70)
-- 2: TREND LOW VOL  (TS > 0.6, VC ≤ P70)
-- 3: TREND HIGH VOL (TS > 0.6, VC > P70)
+Régimes (3 classes - TREND LOW VOL n'existe pas en crypto):
+- 0: RANGE LOW VOL  (TS < 0.4, VC ≤ P40)
+- 1: RANGE HIGH VOL (TS < 0.4, VC > P40)
+- 2: TREND          (TS > 0.5, any volatility)
 
 Features (~20 colonnes):
   Trend: MA slopes, ADX, regression, Hurst, MACD histogram
@@ -20,7 +19,7 @@ Features (~20 colonnes):
 
 Labels (6 au total):
   Régime:
-    - regime: 0-3 (4 classes)
+    - regime: 0-2 (3 classes)
     - trend_strength: 0-1 (score TS)
     - volatility_cluster: 0-1 (score VC)
   Direction (Kalman-filtered, pour modèles MACD/RSI/CCI):
@@ -544,7 +543,7 @@ def process_single_asset(asset_name: str,
     # ÉTAPE 2: CALCULER LABELS DE RÉGIME (regime, ts_score, vc_score)
     # ========================================================================
 
-    logger.info(f"\n  Calcul labels de régime (4 classes)...")
+    logger.info(f"\n  Calcul labels de régime (3 classes)...")
     try:
         validate_regime_features(df)
         regime_labels, ts_score, vc_score = calculate_regime_labels(df)
@@ -674,7 +673,7 @@ def main():
     logger.info("="*80)
     logger.info(f"Assets: {args.assets}")
     logger.info(f"Sequence length: {SEQUENCE_LENGTH}")
-    logger.info(f"Régimes: 4 classes (TS × VC)")
+    logger.info(f"Régimes: 3 classes (TS × VC)")
     logger.info(f"Features: ~20 colonnes (trend, volatility, volume)")
 
     # ========================================================================
