@@ -563,8 +563,22 @@ def save_predictions_to_npz(
 
 # Mapping indicateur -> index (pour datasets multi-output)
 # Pour les single-output (close, macd40, etc.), l'index est None
+#
+# STRUCTURE DATASET UNIVERSEL (dataset_*_regime.npz):
+# Y = [timestamp, asset_id, regime, trend_strength, volatility_cluster,
+#      macd_direction, rsi_direction, cci_direction]
+# Index: 0        1         2       3               4
+#        5              6             7
+#
+# ⚠️ ATTENTION: Les anciens datasets 3-colonnes utilisaient:
+#    Y = [rsi_dir, cci_dir, macd_dir] → indices 0, 1, 2
+# ⚠️ Les nouveaux datasets universels 8+ colonnes utilisent:
+#    Y[:, 5] = macd_direction, Y[:, 6] = rsi_direction, Y[:, 7] = cci_direction
+#
 INDICATOR_INDEX = {
-    'rsi': 0, 'cci': 1, 'macd': 2,
+    'macd': 5,  # Y[:, 5] = macd_direction (binary: 0, 1)
+    'rsi': 6,   # Y[:, 6] = rsi_direction (binary: 0, 1)
+    'cci': 7,   # Y[:, 7] = cci_direction (binary: 0, 1)
     'close': None, 'macd40': None, 'macd26': None, 'macd13': None
 }
 INDICATOR_NAMES = {
