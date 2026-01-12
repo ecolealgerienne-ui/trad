@@ -8,14 +8,14 @@ Calcule 4 régimes de marché basés sur deux dimensions:
 
 **Trend Strength (TS)**: Force de la tendance (0-1)
   - Combinaison: MA slopes, ADX, regression R², Hurst exponent
-  - TS > 0.6 = TREND
+  - TS > 0.5 = TREND (seuil ajusté 2026-01-12, était 0.6)
   - TS < 0.4 = RANGE
-  - 0.4 ≤ TS ≤ 0.6 = Zone neutre (assigned to closest)
+  - 0.4 ≤ TS ≤ 0.5 = Zone neutre (assigned to closest)
 
 **Volatility Cluster (VC)**: Niveau de volatilité
   - Combinaison: ATR normalized, BB width, realized volatility
-  - VC > 70th percentile = HIGH VOL
-  - VC ≤ 70th percentile = LOW VOL
+  - VC > 80th percentile = HIGH VOL (seuil ajusté 2026-01-12, était 70)
+  - VC ≤ 80th percentile = LOW VOL
 
 **4 Régimes (TS × VC)**:
   0: RANGE LOW VOL  (Range + Low Vol)
@@ -75,9 +75,12 @@ VC_WEIGHTS = {
 }
 
 # Seuils de classification
-TS_TREND_THRESHOLD = 0.6    # TS > 0.6 = TREND
+# NOTE: Seuils ajustés le 2026-01-12 pour équilibrer les régimes
+# Avant: TS_TREND=0.6, VC_HIGH=70 → Régime 2 (TREND LOW VOL) = 0.1% seulement
+# Après: TS_TREND=0.5, VC_HIGH=80 → Distribution plus équilibrée attendue
+TS_TREND_THRESHOLD = 0.5    # TS > 0.5 = TREND (était 0.6)
 TS_RANGE_THRESHOLD = 0.4    # TS < 0.4 = RANGE
-VC_HIGH_PERCENTILE = 70     # VC > P70 = HIGH VOL
+VC_HIGH_PERCENTILE = 80     # VC > P80 = HIGH VOL (était 70)
 
 
 # =============================================================================
@@ -263,10 +266,10 @@ def classify_regime(ts_score: np.ndarray,
     Classifie chaque sample dans un des 4 régimes basé sur TS × VC.
 
     Régimes:
-    - 0: RANGE LOW VOL  (TS < 0.4, VC ≤ P70)
-    - 1: RANGE HIGH VOL (TS < 0.4, VC > P70)
-    - 2: TREND LOW VOL  (TS > 0.6, VC ≤ P70)
-    - 3: TREND HIGH VOL (TS > 0.6, VC > P70)
+    - 0: RANGE LOW VOL  (TS < 0.4, VC ≤ P80)
+    - 1: RANGE HIGH VOL (TS < 0.4, VC > P80)
+    - 2: TREND LOW VOL  (TS > 0.5, VC ≤ P80)
+    - 3: TREND HIGH VOL (TS > 0.5, VC > P80)
 
     Zone neutre (0.4 ≤ TS ≤ 0.6): Assigné au régime le plus proche.
 
