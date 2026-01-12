@@ -92,7 +92,69 @@ def apply_holding_minimum(trade_duration, holding_min):
 - Réduction bugs (1 seule source de vérité)
 - Maintenance simplifiée
 
-### 3. 🚫 NE JAMAIS LANCER DE SCRIPTS (Claude n'a pas les données)
+### 3. 📦 UN SEUL DATASET SOURCE (Architecture Critique)
+
+**Principe**: **"Toutes les informations dans le même dataset"**
+
+**Problème évité**:
+- ❌ Plusieurs datasets séparés avec tailles différentes (ex: 2,987,856 vs 2,988,779 samples)
+- ❌ Alignement complexe par timestamp/asset_id nécessaire
+- ❌ Risque de désynchronisation entre datasets
+- ❌ Bugs de shape mismatch (IndexError)
+
+**Solution validée**:
+```
+Dataset de base (prepare_data_*.py)
+  ↓
++ Prédictions Model A (enrichissement)
++ Prédictions MACD (enrichissement)
++ Prédictions autres modèles (enrichissement)
+  ↓
+= Dataset enrichi UNIQUE et COMPLET
+```
+
+**Structure Y enrichie recommandée**:
+```python
+Y[:, 0] = timestamp
+Y[:, 1] = asset_id
+Y[:, 2-4] = labels de base (regime, trend_strength, etc.)
+Y[:, 5] = model_a_pred ✨ (enrichi)
+Y[:, 6-9] = model_a_probs ✨ (enrichi)
+Y[:, 10] = macd_pred ✨ (enrichi)
+Y[:, 11] = macd_prob ✨ (enrichi)
+# ... autres prédictions selon besoins
+```
+
+**Script d'enrichissement**: `src/enrich_dataset_complete.py`
+
+**Workflow complet**:
+```bash
+# 1. Créer dataset de base
+python src/prepare_data_regime.py --assets BTC ETH BNB ADA LTC
+
+# 2. Entraîner modèles
+python src/train_regime_classifier.py  # Model A
+python src/train.py --data ...         # MACD, etc.
+
+# 3. Enrichir dataset avec TOUTES les prédictions (une seule fois)
+python src/enrich_dataset_complete.py --assets BTC ETH BNB ADA LTC
+
+# 4. Utiliser le dataset enrichi partout
+python src/create_meta_labels_regime.py  # Utilise dataset enrichi
+python src/backtest_regime.py            # Utilise dataset enrichi
+```
+
+**Bénéfices**:
+- ✅ Zéro désynchronisation (même source)
+- ✅ Pas d'alignement complexe nécessaire
+- ✅ Toutes prédictions disponibles partout
+- ✅ Architecture propre et maintenable
+
+**Règle à suivre**:
+> Si tu as besoin de prédictions d'un modèle, ne charge PAS le modèle dans chaque script.
+> À la place, enrichis le dataset une fois pour toutes.
+
+### 4. 🚫 NE JAMAIS LANCER DE SCRIPTS (Claude n'a pas les données)
 
 **Principe**: Claude Code ne possède PAS les datasets locaux (data_trad/, data/prepared/).
 
@@ -125,7 +187,7 @@ python tests/test_structural_filters.py --split test --holding-min 30
 4. Utilisateur partage les résultats
 5. Claude analyse et propose prochaine étape
 
-### 4. 📦 RÉUTILISER LES DONNÉES EXISTANTES (.npz)
+### 5. 📦 RÉUTILISER LES DONNÉES EXISTANTES (.npz)
 
 **Principe**: Les datasets meta-labels existent DÉJÀ sous forme `.npz`. Ne pas régénérer inutilement.
 

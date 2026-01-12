@@ -129,7 +129,8 @@ def train_epoch(
     loss_fn: nn.Module,
     optimizer: optim.Optimizer,
     device: str,
-    indicator_names: list = None
+    indicator_names: list = None,
+    grad_clip: float = None
 ) -> Dict[str, float]:
     """
     Entraîne le modèle sur une époque.
@@ -141,6 +142,7 @@ def train_epoch(
         optimizer: Optimizer
         device: Device
         indicator_names: Noms des outputs (ex: ['Direction', 'Force'] pour dual-binary)
+        grad_clip: Valeur max du gradient (None = pas de clipping)
 
     Returns:
         Dictionnaire avec loss et métriques
@@ -177,6 +179,11 @@ def train_epoch(
 
         # Backward
         loss.backward()
+
+        # 🛡️ Gradient clipping pour stabilité
+        if grad_clip is not None:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+
         optimizer.step()
 
         # Accumuler
@@ -257,6 +264,19 @@ def validate_epoch(
     # Métriques
     all_predictions = torch.cat(all_predictions, dim=0)
     all_targets = torch.cat(all_targets, dim=0)
+
+    # 🔍 DIAGNOSTIC: Afficher distribution des prédictions vs targets
+    with torch.no_grad():
+        pred_binary = (all_predictions > 0.5).float()
+        n_pred_0 = (pred_binary == 0).sum().item()
+        n_pred_1 = (pred_binary == 1).sum().item()
+        n_target_0 = (all_targets == 0).sum().item()
+        n_target_1 = (all_targets == 1).sum().item()
+        logger.info(f"  [DEBUG] Prédictions: 0={n_pred_0} ({n_pred_0/len(all_predictions)*100:.1f}%), "
+                   f"1={n_pred_1} ({n_pred_1/len(all_predictions)*100:.1f}%)")
+        logger.info(f"  [DEBUG] Targets:     0={n_target_0} ({n_target_0/len(all_targets)*100:.1f}%), "
+                   f"1={n_target_1} ({n_target_1/len(all_targets)*100:.1f}%)")
+
     metrics = compute_metrics(all_predictions, all_targets, indicator_names=indicator_names)
     metrics['loss'] = avg_loss
 
@@ -274,7 +294,8 @@ def train_model(
     patience: int = EARLY_STOPPING_PATIENCE,
     save_path: str = BEST_MODEL_PATH,
     model_config: Dict = None,
-    indicator_names: list = None
+    indicator_names: list = None,
+    grad_clip: float = None
 ) -> Dict:
     """
     Boucle d'entraînement complète avec early stopping.
@@ -291,6 +312,7 @@ def train_model(
         save_path: Chemin pour sauvegarder le meilleur modèle
         model_config: Configuration du modèle
         indicator_names: Noms des outputs (ex: ['Direction', 'Force'] pour dual-binary)
+        grad_clip: Gradient clipping max norm (None = désactivé)
 
     Returns:
         Historique de l'entraînement
@@ -317,7 +339,7 @@ def train_model(
         logger.info(f"\nÉpoque {epoch+1}/{num_epochs}")
 
         # Train
-        train_metrics = train_epoch(model, train_loader, loss_fn, optimizer, device, indicator_names)
+        train_metrics = train_epoch(model, train_loader, loss_fn, optimizer, device, indicator_names, grad_clip)
 
         # Validation
         val_metrics = validate_epoch(model, val_loader, loss_fn, device, indicator_names)
@@ -405,6 +427,8 @@ def parse_args():
                         help='Nombre maximum d\'époques')
     parser.add_argument('--patience', type=int, default=EARLY_STOPPING_PATIENCE,
                         help='Patience pour early stopping')
+    parser.add_argument('--grad-clip', type=float, default=1.0,
+                        help='Gradient clipping max norm (None = désactivé, 1.0 recommandé pour stabilité)')
 
     # Hyperparamètres du modèle
     parser.add_argument('--cnn-filters', type=int, default=64,
@@ -539,7 +563,8 @@ def save_predictions_to_npz(
 
     # Mettre à jour metadata
     if 'metadata' in existing_data:
-        metadata = json.loads(str(existing_data['metadata']))
+        # metadata est un numpy scalar dict, utiliser .item() pour extraire le dict Python
+        metadata = existing_data['metadata'].item()
     else:
         metadata = {}
 
@@ -563,8 +588,22 @@ def save_predictions_to_npz(
 
 # Mapping indicateur -> index (pour datasets multi-output)
 # Pour les single-output (close, macd40, etc.), l'index est None
+#
+# STRUCTURE DATASET UNIVERSEL (dataset_*_regime.npz):
+# Y = [timestamp, asset_id, regime, trend_strength, volatility_cluster,
+#      macd_direction, rsi_direction, cci_direction]
+# Index: 0        1         2       3               4
+#        5              6             7
+#
+# ⚠️ ATTENTION: Les anciens datasets 3-colonnes utilisaient:
+#    Y = [rsi_dir, cci_dir, macd_dir] → indices 0, 1, 2
+# ⚠️ Les nouveaux datasets universels 8+ colonnes utilisent:
+#    Y[:, 5] = macd_direction, Y[:, 6] = rsi_direction, Y[:, 7] = cci_direction
+#
 INDICATOR_INDEX = {
-    'rsi': 0, 'cci': 1, 'macd': 2,
+    'macd': 5,  # Y[:, 5] = macd_direction (binary: 0, 1)
+    'rsi': 6,   # Y[:, 6] = rsi_direction (binary: 0, 1)
+    'cci': 7,   # Y[:, 7] = cci_direction (binary: 0, 1)
     'close': None, 'macd40': None, 'macd26': None, 'macd13': None
 }
 INDICATOR_NAMES = {
@@ -599,7 +638,9 @@ def validate_args_vs_filename(args) -> None:
             raise SystemExit(1)
 
     # Vérifier l'indicateur (sauf 'all')
-    if args.indicator != 'all':
+    is_universal_dataset = 'regime' in filename  # Dataset universel avec tous les labels
+
+    if args.indicator != 'all' and not is_universal_dataset:
         indicator_name = args.indicator.lower()
         if indicator_name not in filename:
             logger.error(f"❌ Incohérence détectée!")
@@ -608,7 +649,10 @@ def validate_args_vs_filename(args) -> None:
             logger.error(f"   L'indicateur '{indicator_name}' n'est pas présent dans le nom du fichier")
             raise SystemExit(1)
 
-    logger.info(f"✅ Paramètres cohérents avec le fichier de données")
+    if is_universal_dataset:
+        logger.info(f"✅ Dataset universel détecté (regime) - contient tous les indicateurs")
+    else:
+        logger.info(f"✅ Paramètres cohérents avec le fichier de données")
 
 
 def main():
@@ -688,6 +732,60 @@ def main():
         log_dataset_metadata(metadata, logger)
 
         # =====================================================================
+        # EXTRACTION LABEL DEPUIS DATASET UNIVERSEL (si applicable)
+        # =====================================================================
+        # Dataset universel (regime): Y shape (n, 8) avec toutes les directions
+        # Structure: [timestamp, asset_id, regime, ts, vc, macd_dir, rsi_dir, cci_dir]
+        logger.info(f"\n🔍 DEBUG - Y shape before extraction: train={Y_train.shape}, val={Y_val.shape}, test={Y_test.shape}")
+        is_universal_dataset_extracted = False  # Flag pour éviter écrasement n_outputs_detected
+
+        if Y_train.shape[1] == 8:
+            logger.info(f"\n📦 Dataset universel détecté (Y shape: {Y_train.shape})")
+
+            # Mapping indicateur -> colonne Y
+            indicator_column_map = {
+                'macd': 5,  # Y[:, 5] = macd_direction
+                'rsi': 6,   # Y[:, 6] = rsi_direction
+                'cci': 7    # Y[:, 7] = cci_direction
+            }
+
+            if args.indicator in indicator_column_map:
+                col_idx = indicator_column_map[args.indicator]
+                logger.info(f"  Extraction label {args.indicator.upper()} (colonne {col_idx})")
+
+                # Extraire [timestamp, asset_id, label_indicateur]
+                Y_train = Y_train[:, [0, 1, col_idx]]
+                Y_val = Y_val[:, [0, 1, col_idx]]
+                Y_test = Y_test[:, [0, 1, col_idx]]
+
+                logger.info(f"  ✅ Y extrait: {Y_train.shape}")
+
+                # IMPORTANT: Recalculer n_outputs_detected après extraction
+                # Y shape (n, 3) mais seule la dernière colonne est le label
+                # Les 2 premières sont timestamp et asset_id (metadata)
+                n_outputs_detected = 1  # Direction binaire (UP/DOWN)
+                indicator_for_metrics = args.indicator.upper()  # Pour auto-détection architecture
+                is_universal_dataset_extracted = True  # Flag pour éviter écrasement ligne 778
+                logger.info(f"  🎯 n_outputs mis à jour: {n_outputs_detected} (direction binaire)")
+                logger.info(f"  🎯 indicator_for_metrics: {indicator_for_metrics}")
+
+                # Validation post-extraction
+                if Y_train.shape[1] != 3:
+                    logger.error(f"❌ ERREUR: Y shape après extraction devrait être (n, 3) mais est {Y_train.shape}")
+                    raise SystemExit(1)
+            else:
+                logger.error(f"❌ Indicateur '{args.indicator}' non supporté pour dataset universel")
+                logger.error(f"   Indicateurs disponibles: macd, rsi, cci")
+                raise SystemExit(1)
+        else:
+            # Dataset non-universel ou shape incorrect
+            logger.warning(f"⚠️ Y shape n'est pas 8 colonnes (shape={Y_train.shape[1]})")
+            logger.warning(f"   Ce n'est PAS un dataset universel (regime)")
+            logger.warning(f"   Pour entraîner sur directions depuis dataset universel:")
+            logger.warning(f"   1. Vérifier que le dataset a 8 colonnes: [timestamp, asset_id, regime, ts, vc, macd_dir, rsi_dir, cci_dir]")
+            logger.warning(f"   2. Utiliser --indicator macd|rsi|cci pour extraire la direction appropriée")
+
+        # =====================================================================
         # FILTRAGE PAR ASSETS (optionnel)
         # =====================================================================
         if args.assets:
@@ -732,7 +830,11 @@ def main():
     # =========================================================================
     # Détecter n_features et n_outputs depuis les données
     n_features_detected = X_train.shape[2]  # 1 pour RSI/MACD, 3 pour CCI
-    n_outputs_detected = Y_train.shape[1]   # 2 pour dual-binary (direction + force)
+
+    # Ne pas écraser n_outputs_detected s'il a déjà été défini lors de l'extraction du dataset universel
+    if not is_universal_dataset_extracted:
+        n_outputs_detected = Y_train.shape[1]   # 2 pour dual-binary (direction + force)
+    # Sinon, garder la valeur définie ligne 724 (n_outputs_detected = 1 pour direction binaire)
 
     # Détecter si dual-binary depuis metadata
     is_dual_binary = False
@@ -829,6 +931,11 @@ def main():
         Y_val = normalize_labels_for_single_output(Y_val, indicator_idx, indicator_name)
         Y_test = normalize_labels_for_single_output(Y_test, indicator_idx, indicator_name)
 
+        # CORRECTION CRITIQUE: Mettre à jour n_outputs_detected après filtrage
+        # Le filtrage a réduit Y de (n, 13) à (n, 1)
+        n_outputs_detected = Y_train.shape[1]  # Devrait être 1
+        logger.info(f"  ✅ n_outputs_detected mis à jour après filtrage single-output: {n_outputs_detected}")
+
     logger.info(f"\n📊 Datasets:")
     logger.info(f"  Train: X={X_train.shape}, Y={Y_train.shape}")
     logger.info(f"  Val:   X={X_val.shape}, Y={Y_val.shape}")
@@ -868,6 +975,32 @@ def main():
     # 3. CRÉER MODÈLE (Architecture Auto-Adaptative)
     # =========================================================================
     logger.info("\n3. Création du modèle...")
+
+    # DEBUG: Vérifier les valeurs avant création du modèle
+    logger.info(f"\n🔍 DEBUG - Valeurs avant création modèle:")
+    logger.info(f"   is_universal_dataset_extracted: {is_universal_dataset_extracted}")
+    logger.info(f"   n_outputs_detected: {n_outputs_detected}")
+    logger.info(f"   n_features_detected: {n_features_detected}")
+    logger.info(f"   indicator_for_metrics: {indicator_for_metrics}")
+    logger.info(f"   Y_train.shape: {Y_train.shape}")
+    logger.info(f"   Y_train.shape[1] (nb colonnes): {Y_train.shape[1]}")
+
+    # Validation finale avant création modèle
+    # Accepter: 1 (single-output filtré), 2 (dual-binary), 3 (universel extrait)
+    if not is_universal_dataset_extracted and Y_train.shape[1] not in [1, 2, 3]:
+        logger.error(f"\n❌ ERREUR CRITIQUE: Y shape invalide!")
+        logger.error(f"   Y_train.shape: {Y_train.shape}")
+        logger.error(f"   Y_train.shape[1]: {Y_train.shape[1]} colonnes")
+        logger.error(f"   Attendu: 1 (single-output), 2 (dual-binary) ou 3 (universel extrait)")
+        logger.error(f"   is_universal_dataset_extracted: {is_universal_dataset_extracted}")
+        logger.error(f"")
+        logger.error(f"   Soit:")
+        logger.error(f"   1. Le dataset a été filtré single-output → shape[1]=1 ✅")
+        logger.error(f"   2. Le dataset est dual-binary → shape[1]=2 ✅")
+        logger.error(f"   3. Le dataset EST universel (regime) extrait → shape[1]=3 ✅")
+        logger.error(f"")
+        logger.error(f"   Vérifier que le fichier {args.data} est bien le dataset attendu")
+        raise SystemExit(1)
 
     # Utiliser valeurs détectées au lieu de num_outputs manuel
     num_outputs_final = n_outputs_detected
@@ -1040,7 +1173,8 @@ def main():
         patience=args.patience,
         save_path=save_path,
         model_config=model_config,
-        indicator_names=indicator_names_for_metrics
+        indicator_names=indicator_names_for_metrics,
+        grad_clip=args.grad_clip
     )
 
     # =========================================================================
