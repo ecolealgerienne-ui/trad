@@ -32,31 +32,65 @@ python src/prepare_data_regime.py --assets BTC ETH BNB ADA LTC
 
 | Array | Shape | Description |
 |-------|-------|-------------|
-| `X_train` | (n_train, 25, ~22) | Séquences features train (25 timesteps × ~22 features) |
+| `X_train` | (n_train, 25, 25) | Séquences features train (25 timesteps × 25 canaux) |
 | `Y_train` | (n_train, 8) | Labels + metadata train |
 | `OHLCV_train` | (n_train, 7) | Prix OHLCV + metadata train |
-| `X_val` | (n_val, 25, ~22) | Séquences features val |
+| `X_val` | (n_val, 25, 25) | Séquences features val |
 | `Y_val` | (n_val, 8) | Labels + metadata val |
 | `OHLCV_val` | (n_val, 7) | Prix OHLCV + metadata val |
-| `X_test` | (n_test, 25, ~22) | Séquences features test |
+| `X_test` | (n_test, 25, 25) | Séquences features test |
 | `Y_test` | (n_test, 8) | Labels + metadata test |
 | `OHLCV_test` | (n_test, 7) | Prix OHLCV + metadata test |
 
-**Note**: X contient [timestamp, asset_id, ...features] donc shape (n, 25, 2 + n_features_regime).
+**Note**: X contient [timestamp, asset_id, ...features] donc shape (n, 25, 2 + 23 features = 25 canaux).
 
-### Features X (~22 canaux × 25 timesteps)
+### Features X (25 canaux × 25 timesteps)
 
-**Structure**: X[:, :, 0-1] = metadata, X[:, :, 2:] = features de régime
+**Structure**: X[:, :, 0-1] = metadata, X[:, :, 2:24] = features (23 total)
 
 | Index | Feature | Type | Description |
 |-------|---------|------|-------------|
-| 0 | `timestamp` | int64 | Unix timestamp (metadata) |
-| 1 | `asset_id` | int | ID asset 0-4 (metadata) |
-| **2-8** | **Trend features (7)** | float | MA slopes, regression, ADX, Hurst, MACD histogram |
-| **9-17** | **Volatility features (9)** | float | ATR, Bollinger Bands, realized vol, compression, range/ATR ratio |
-| **18-21** | **Volume & microstructure (4)** | float | Volume ratio/spike, VWAP deviation, OBV derivative |
+| **0** | `timestamp` | int64 | Unix timestamp (metadata) |
+| **1** | `asset_id` | int | ID asset 0-4 (metadata) |
+| | | | |
+| | **PURE SIGNAL (3)** | | **Rendements normalisés pour combiner avec régime** |
+| **2** | `h_ret` | float | (High - Close_prev) / Close_prev, clippé ±10% |
+| **3** | `l_ret` | float | (Low - Close_prev) / Close_prev, clippé ±10% |
+| **4** | `c_ret` | float | (Close - Close_prev) / Close_prev, clippé ±10% |
+| | | | |
+| | **TREND (7)** | | **Indicateurs de tendance** |
+| **5** | `ma20_slope` | float | Pente MA20 normalisée |
+| **6** | `ma50_slope` | float | Pente MA50 normalisée |
+| **7** | `regression_slope` | float | Pente régression linéaire (20 périodes) |
+| **8** | `regression_r2` | float | R² de la régression (0-1) |
+| **9** | `adx` | float | ADX normalisé (force de tendance) |
+| **10** | `macd_histogram_norm` | float | MACD histogram normalisé |
+| **11** | `hurst_exponent` | float | Exposant de Hurst (0-1, >0.5=trending) |
+| | | | |
+| | **VOLATILITY (9)** | | **Indicateurs de volatilité** |
+| **12** | `atr_normalized` | float | ATR / Close (volatilité relative) |
+| **13** | `bb_upper` | float | Bande Bollinger supérieure normalisée |
+| **14** | `bb_middle` | float | Bande Bollinger médiane normalisée |
+| **15** | `bb_lower` | float | Bande Bollinger inférieure normalisée |
+| **16** | `bb_width` | float | Largeur Bollinger Bands normalisée |
+| **17** | `percent_b` | float | Position du prix dans les Bollinger (0-1) |
+| **18** | `realized_volatility` | float | Volatilité réalisée (std returns) |
+| **19** | `volatility_compression` | float | Compression/expansion volatilité |
+| **20** | `range_atr_ratio` | float | Range / ATR (mesure de range) |
+| | | | |
+| | **VOLUME & MICROSTRUCTURE (4)** | | **Indicateurs de volume** |
+| **21** | `volume_ratio` | float | Volume / MA(Volume) |
+| **22** | `volume_spike` | float | Détection spike volume (Z-score) |
+| **23** | `vwap_deviation` | float | (Close - VWAP) / VWAP |
+| **24** | `obv_derivative` | float | Dérivée OBV normalisée |
 
-**Total features régime**: ~20 (7 trend + 9 vol + 4 volume) - Voir `regime_features.py`
+**Total**: 2 metadata + 23 features = **25 canaux**
+- Pure Signal: 3 (h_ret, l_ret, c_ret)
+- Trend: 7 (MA slopes, regression, ADX, Hurst, MACD histogram)
+- Volatility: 9 (ATR, Bollinger Bands, realized vol, compression, range/ATR)
+- Volume: 4 (ratio, spike, VWAP deviation, OBV derivative)
+
+**Source**: `regime_features.py` - fonction `get_regime_feature_names()`
 
 ### Labels Y (8 colonnes) - BASE DATASET
 
