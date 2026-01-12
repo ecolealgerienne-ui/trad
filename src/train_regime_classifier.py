@@ -60,16 +60,16 @@ def load_regime_dataset(npz_path: Path) -> Dict:
     Charge le dataset de régimes préparé.
 
     Structure attendue du NPZ:
-        - X: (n, 12, ~22) = [timestamp, asset_id, features...]
-        - Y: (n, 5) = [timestamp, asset_id, regime, ts_score, vc_score]
-        - OHLCV: (n, 7) = [timestamp, asset_id, O, H, L, C, V]
+        - X_train, Y_train, OHLCV_train
+        - X_val, Y_val, OHLCV_val
+        - X_test, Y_test, OHLCV_test
         - metadata: JSON avec infos
 
     Args:
         npz_path: Chemin vers le fichier .npz
 
     Returns:
-        Dict avec X, Y, OHLCV, metadata
+        Dict avec splits séparés et metadata
     """
     if not npz_path.exists():
         raise FileNotFoundError(f"Dataset not found: {npz_path}")
@@ -77,24 +77,38 @@ def load_regime_dataset(npz_path: Path) -> Dict:
     print(f"Loading dataset: {npz_path.name}")
     data = np.load(npz_path, allow_pickle=True)
 
-    # Extraire les données
-    X = data['X']  # (n, 12, ~22)
-    Y = data['Y']  # (n, 5)
-    OHLCV = data['OHLCV']  # (n, 7)
+    # Extraire les splits
+    X_train = data['X_train']
+    Y_train = data['Y_train']
+    OHLCV_train = data['OHLCV_train']
+
+    X_val = data['X_val']
+    Y_val = data['Y_val']
+    OHLCV_val = data['OHLCV_val']
+
+    X_test = data['X_test']
+    Y_test = data['Y_test']
+    OHLCV_test = data['OHLCV_test']
+
     metadata = json.loads(str(data['metadata'])) if 'metadata' in data else {}
 
     # Extraire les régimes (colonne 2 de Y)
-    regimes = Y[:, 2].astype(int)
+    regimes_train = Y_train[:, 2].astype(int)
+    regimes_val = Y_val[:, 2].astype(int)
+    regimes_test = Y_test[:, 2].astype(int)
 
-    print(f"  Total samples: {len(regimes):,}")
-    print(f"  Sequences shape: {X.shape}")
-    print(f"  Feature columns: {X.shape[2] - 2}")  # -2 pour timestamp, asset_id
+    print(f"\n  Split sizes:")
+    print(f"    Train: {len(regimes_train):,} samples")
+    print(f"    Val:   {len(regimes_val):,} samples")
+    print(f"    Test:  {len(regimes_test):,} samples")
+    print(f"  Sequences shape: {X_train.shape}")
+    print(f"  Feature columns: {X_train.shape[2] - 2}")  # -2 pour timestamp, asset_id
 
-    # Distribution des régimes
-    print(f"\n  Regime distribution:")
+    # Distribution des régimes (Train uniquement)
+    print(f"\n  Train regime distribution:")
     for regime_id in range(4):
-        count = np.sum(regimes == regime_id)
-        pct = 100 * count / len(regimes)
+        count = np.sum(regimes_train == regime_id)
+        pct = 100 * count / len(regimes_train)
         regime_names = {
             0: 'RANGE LOW VOL',
             1: 'RANGE HIGH VOL',
@@ -104,10 +118,18 @@ def load_regime_dataset(npz_path: Path) -> Dict:
         print(f"    Regime {regime_id} ({regime_names[regime_id]:15s}): {count:,} ({pct:.1f}%)")
 
     return {
-        'X': X,
-        'Y': Y,
-        'OHLCV': OHLCV,
-        'regimes': regimes,
+        'X_train': X_train,
+        'Y_train': Y_train,
+        'OHLCV_train': OHLCV_train,
+        'regimes_train': regimes_train,
+        'X_val': X_val,
+        'Y_val': Y_val,
+        'OHLCV_val': OHLCV_val,
+        'regimes_val': regimes_val,
+        'X_test': X_test,
+        'Y_test': Y_test,
+        'OHLCV_test': OHLCV_test,
+        'regimes_test': regimes_test,
         'metadata': metadata
     }
 
@@ -352,33 +374,17 @@ def main():
 
     full_data = load_regime_dataset(args.data)
 
-    # Extraire metadata pour identifier les splits
-    metadata = full_data['metadata']
-    split_indices = metadata.get('split_indices', {})
+    # Extraire les splits (déjà séparés dans le NPZ)
+    X_train_seq = full_data['X_train']
+    y_train = full_data['regimes_train']
 
-    if not split_indices:
-        raise ValueError("No split indices found in metadata. Run prepare_data_regime.py first.")
+    X_val_seq = full_data['X_val']
+    y_val = full_data['regimes_val']
 
-    # Extraire les splits
-    train_end = split_indices['train_end']
-    val_end = split_indices['val_end']
+    X_test_seq = full_data['X_test']
+    y_test = full_data['regimes_test']
 
-    X_full = full_data['X']
-    y_full = full_data['regimes']
-
-    X_train_seq = X_full[:train_end]
-    y_train = y_full[:train_end]
-
-    X_val_seq = X_full[train_end:val_end]
-    y_val = y_full[train_end:val_end]
-
-    X_test_seq = X_full[val_end:]
-    y_test = y_full[val_end:]
-
-    print(f"\nSplit sizes:")
-    print(f"  Train: {len(X_train_seq):,} samples")
-    print(f"  Val:   {len(X_val_seq):,} samples")
-    print(f"  Test:  {len(X_test_seq):,} samples")
+    # Les tailles ont déjà été affichées par load_regime_dataset()
 
     # Préparer features pour XGBoost (aggregate séquences)
     print("\n" + "="*80)
