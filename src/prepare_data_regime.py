@@ -566,12 +566,14 @@ def process_single_asset(asset_name: str,
     logger.info(f"\n  Calcul labels direction (MACD, RSI, CCI)...")
 
     # MACD
-    macd_vals = calculate_macd(
+    macd_dict = calculate_macd(
         df['close'],
-        fast=MACD_FAST,
-        slow=MACD_SLOW,
-        signal=MACD_SIGNAL
+        fast_period=MACD_FAST,
+        slow_period=MACD_SLOW,
+        signal_period=MACD_SIGNAL
     )
+    # calculate_macd retourne un dict avec 'macd', 'signal', 'histogram'
+    macd_vals = macd_dict['macd']
     df['macd_direction'] = calculate_direction_label(df, 'macd', macd_vals)
 
     # RSI
@@ -579,7 +581,7 @@ def process_single_asset(asset_name: str,
     df['rsi_direction'] = calculate_direction_label(df, 'rsi', rsi_vals)
 
     # CCI
-    cci_vals = calculate_cci(df, period=CCI_PERIOD)
+    cci_vals = calculate_cci(df['high'], df['low'], df['close'], period=CCI_PERIOD)
     df['cci_direction'] = calculate_direction_label(df, 'cci', cci_vals)
 
     logger.info(f"  ✓ Labels direction calculés (MACD, RSI, CCI)")
