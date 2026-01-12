@@ -531,11 +531,12 @@ def main():
     # Features
     feature_cols = get_regime_feature_names()
 
-    # Metadata
+    # Metadata (pattern copié de prepare_data_direction_only.py)
     metadata = {
         'created_at': datetime.now().isoformat(),
         'assets': args.assets,
         'n_assets': len(args.assets),
+        'asset_id_mapping': ASSET_ID_MAP,
         'sequence_length': SEQUENCE_LENGTH,
         'features': feature_cols,
         'n_features': len(feature_cols),
@@ -549,19 +550,31 @@ def main():
         },
         'clip_value': args.clip,
         'max_samples_per_asset': args.max_samples,
+        'split_indices': {
+            'train_end': len(X_train),
+            'val_end': len(X_train) + len(X_val)
+        },
         'splits': {
             'train': {'n_sequences': len(X_train), 'ratio': 0.70},
             'val': {'n_sequences': len(X_val), 'ratio': 0.15},
             'test': {'n_sequences': len(X_test), 'ratio': 0.15}
-        }
+        },
+        'structure': {
+            'X': f'(n, {SEQUENCE_LENGTH}, {len(feature_cols)}+2) - [timestamp, asset_id, features...] pour chaque timestep',
+            'Y': '(n, 5) - [timestamp, asset_id, regime, trend_strength, volatility_cluster]',
+            'OHLCV': '(n, 7) - [timestamp, asset_id, open, high, low, close, volume]'
+        },
+        'primary_key': '(timestamp, asset_id) - Commune à toutes les matrices',
+        'navigation': 'Même index i → même sample dans X, Y, OHLCV'
     }
 
-    # Sauvegarder .npz
+    # Sauvegarder .npz (pattern copié de prepare_data_direction_only.py)
     np.savez_compressed(
         output_path,
         X_train=X_train, Y_train=Y_train, OHLCV_train=OHLCV_train,
         X_val=X_val, Y_val=Y_val, OHLCV_val=OHLCV_val,
-        X_test=X_test, Y_test=Y_test, OHLCV_test=OHLCV_test
+        X_test=X_test, Y_test=Y_test, OHLCV_test=OHLCV_test,
+        metadata=json.dumps(metadata)
     )
 
     # Sauvegarder metadata JSON
