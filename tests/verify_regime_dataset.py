@@ -426,8 +426,11 @@ class RegimeDatasetValidator:
 
             if 'clip_value' in self.metadata:
                 clip = self.metadata['clip_value']
-                if feat_min < -clip or feat_max > clip:
-                    self._print_warning(f"Features hors clip_value ±{clip}")
+                if clip is not None:  # Vérifier que clipping a été appliqué
+                    if feat_min < -clip or feat_max > clip:
+                        self._print_warning(f"Features hors clip_value ±{clip}")
+                else:
+                    print(f"  ℹ️  Pas de clipping appliqué (clip_value=None)")
 
         return all_passed
 
