@@ -1076,7 +1076,8 @@ def main():
         logger.info(f"\n🎯 Mode MULTI-OUTPUT: RSI, CCI, MACD")
 
     # Filtrer les labels si mode single-output (ancien pipeline)
-    if single_indicator and not is_dual_binary:
+    # SKIP si déjà extrait depuis dataset universel (Y a déjà shape (n, 3) avec label en col 2)
+    if single_indicator and not is_dual_binary and not is_universal_dataset_extracted:
         # Ancien pipeline (3 outputs -> 1)
         Y_train = normalize_labels_for_single_output(Y_train, indicator_idx, indicator_name)
         Y_val = normalize_labels_for_single_output(Y_val, indicator_idx, indicator_name)
@@ -1086,6 +1087,10 @@ def main():
         # Le filtrage a réduit Y de (n, 13) à (n, 1)
         n_outputs_detected = Y_train.shape[1]  # Devrait être 1
         logger.info(f"  ✅ n_outputs_detected mis à jour après filtrage single-output: {n_outputs_detected}")
+    elif is_universal_dataset_extracted:
+        # Dataset universel déjà extrait - Y shape (n, 3) = [timestamp, asset_id, label]
+        # Le label est en colonne 2, n_outputs_detected déjà = 1
+        logger.info(f"  ✅ Dataset universel déjà extrait - skip normalize_labels_for_single_output")
 
     logger.info(f"\n📊 Datasets:")
     logger.info(f"  Train: X={X_train.shape}, Y={Y_train.shape}")
