@@ -697,6 +697,7 @@ def main():
         # =====================================================================
         # Dataset universel (regime): Y shape (n, 8) avec toutes les directions
         # Structure: [timestamp, asset_id, regime, ts, vc, macd_dir, rsi_dir, cci_dir]
+        logger.info(f"\n🔍 DEBUG - Y shape before extraction: train={Y_train.shape}, val={Y_val.shape}, test={Y_test.shape}")
         is_universal_dataset_extracted = False  # Flag pour éviter écrasement n_outputs_detected
 
         if Y_train.shape[1] == 8:
@@ -728,10 +729,22 @@ def main():
                 is_universal_dataset_extracted = True  # Flag pour éviter écrasement ligne 778
                 logger.info(f"  🎯 n_outputs mis à jour: {n_outputs_detected} (direction binaire)")
                 logger.info(f"  🎯 indicator_for_metrics: {indicator_for_metrics}")
+
+                # Validation post-extraction
+                if Y_train.shape[1] != 3:
+                    logger.error(f"❌ ERREUR: Y shape après extraction devrait être (n, 3) mais est {Y_train.shape}")
+                    raise SystemExit(1)
             else:
                 logger.error(f"❌ Indicateur '{args.indicator}' non supporté pour dataset universel")
                 logger.error(f"   Indicateurs disponibles: macd, rsi, cci")
                 raise SystemExit(1)
+        else:
+            # Dataset non-universel ou shape incorrect
+            logger.warning(f"⚠️ Y shape n'est pas 8 colonnes (shape={Y_train.shape[1]})")
+            logger.warning(f"   Ce n'est PAS un dataset universel (regime)")
+            logger.warning(f"   Pour entraîner sur directions depuis dataset universel:")
+            logger.warning(f"   1. Vérifier que le dataset a 8 colonnes: [timestamp, asset_id, regime, ts, vc, macd_dir, rsi_dir, cci_dir]")
+            logger.warning(f"   2. Utiliser --indicator macd|rsi|cci pour extraire la direction appropriée")
 
         # =====================================================================
         # FILTRAGE PAR ASSETS (optionnel)
@@ -918,6 +931,30 @@ def main():
     # 3. CRÉER MODÈLE (Architecture Auto-Adaptative)
     # =========================================================================
     logger.info("\n3. Création du modèle...")
+
+    # DEBUG: Vérifier les valeurs avant création du modèle
+    logger.info(f"\n🔍 DEBUG - Valeurs avant création modèle:")
+    logger.info(f"   is_universal_dataset_extracted: {is_universal_dataset_extracted}")
+    logger.info(f"   n_outputs_detected: {n_outputs_detected}")
+    logger.info(f"   n_features_detected: {n_features_detected}")
+    logger.info(f"   indicator_for_metrics: {indicator_for_metrics}")
+    logger.info(f"   Y_train.shape: {Y_train.shape}")
+    logger.info(f"   Y_train.shape[1] (nb colonnes): {Y_train.shape[1]}")
+
+    # Validation finale avant création modèle
+    if not is_universal_dataset_extracted and Y_train.shape[1] not in [2, 3]:
+        logger.error(f"\n❌ ERREUR CRITIQUE: Y shape invalide!")
+        logger.error(f"   Y_train.shape: {Y_train.shape}")
+        logger.error(f"   Y_train.shape[1]: {Y_train.shape[1]} colonnes")
+        logger.error(f"   Attendu: 2 (dual-binary) ou 3 (universel extrait)")
+        logger.error(f"   is_universal_dataset_extracted: {is_universal_dataset_extracted}")
+        logger.error(f"")
+        logger.error(f"   Soit:")
+        logger.error(f"   1. Le dataset n'est PAS un dataset universel (regime) → shape[1] devrait être 2")
+        logger.error(f"   2. Le dataset EST universel (regime) → devrait avoir été extrait avec shape[1]=3")
+        logger.error(f"")
+        logger.error(f"   Vérifier que le fichier {args.data} est bien le dataset attendu")
+        raise SystemExit(1)
 
     # Utiliser valeurs détectées au lieu de num_outputs manuel
     num_outputs_final = n_outputs_detected
