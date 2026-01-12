@@ -717,6 +717,14 @@ def main():
                 Y_test = Y_test[:, [0, 1, col_idx]]
 
                 logger.info(f"  ✅ Y extrait: {Y_train.shape}")
+
+                # IMPORTANT: Recalculer n_outputs_detected après extraction
+                # Y shape (n, 3) mais seule la dernière colonne est le label
+                # Les 2 premières sont timestamp et asset_id (metadata)
+                n_outputs_detected = 1  # Direction binaire (UP/DOWN)
+                indicator_for_metrics = args.indicator.upper()  # Pour auto-détection architecture
+                logger.info(f"  🎯 n_outputs mis à jour: {n_outputs_detected} (direction binaire)")
+                logger.info(f"  🎯 indicator_for_metrics: {indicator_for_metrics}")
             else:
                 logger.error(f"❌ Indicateur '{args.indicator}' non supporté pour dataset universel")
                 logger.error(f"   Indicateurs disponibles: macd, rsi, cci")
