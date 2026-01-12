@@ -892,6 +892,11 @@ def main():
         Y_val = normalize_labels_for_single_output(Y_val, indicator_idx, indicator_name)
         Y_test = normalize_labels_for_single_output(Y_test, indicator_idx, indicator_name)
 
+        # CORRECTION CRITIQUE: Mettre à jour n_outputs_detected après filtrage
+        # Le filtrage a réduit Y de (n, 13) à (n, 1)
+        n_outputs_detected = Y_train.shape[1]  # Devrait être 1
+        logger.info(f"  ✅ n_outputs_detected mis à jour après filtrage single-output: {n_outputs_detected}")
+
     logger.info(f"\n📊 Datasets:")
     logger.info(f"  Train: X={X_train.shape}, Y={Y_train.shape}")
     logger.info(f"  Val:   X={X_val.shape}, Y={Y_val.shape}")
