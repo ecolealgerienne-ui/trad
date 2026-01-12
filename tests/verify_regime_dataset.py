@@ -39,6 +39,9 @@ import sys
 # Ajouter src/ au path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
+# Import SEQUENCE_LENGTH from constants
+from constants import SEQUENCE_LENGTH
+
 # Asset ID mapping (copié de prepare_data_regime.py ligne 73-79)
 ASSET_ID_MAP = {
     'BTC': 0,
@@ -138,10 +141,10 @@ class RegimeDatasetValidator:
             self._print_check(f"{split_name} X rank=3", passed)
             all_passed &= passed
 
-            # Sequence length doit être 12
+            # Sequence length doit être SEQUENCE_LENGTH (défini dans constants.py)
             if len(X.shape) == 3:
-                passed = X.shape[1] == 12
-                self._print_check(f"{split_name} seq_length=12", passed,
+                passed = X.shape[1] == SEQUENCE_LENGTH
+                self._print_check(f"{split_name} seq_length={SEQUENCE_LENGTH}", passed,
                                 f"obtenu {X.shape[1]}")
                 all_passed &= passed
 
@@ -210,9 +213,10 @@ class RegimeDatasetValidator:
 
             print(f"\n📅 {split_name}:")
 
-            # Extraire timestamps (première colonne de chaque séquence)
-            # X: (n, 12, ~22) → timestamp à X[:, 0, 0]
-            ts_X = X[:, 0, 0]  # Premier timestep de chaque séquence
+            # Extraire timestamps
+            # X: (n, seq_len, ~22) → timestamp au DERNIER timestep X[:, -1, 0]
+            # Y et OHLCV correspondent au label/OHLC au même timestep final
+            ts_X = X[:, -1, 0]  # Dernier timestep de chaque séquence (t-0)
             ts_Y = Y[:, 0]
             ts_OHLCV = OHLCV[:, 0]
 
@@ -220,6 +224,15 @@ class RegimeDatasetValidator:
             passed = np.allclose(ts_X, ts_Y) and np.allclose(ts_Y, ts_OHLCV)
             self._print_check("Timestamps synchronisés (X=Y=OHLCV)", passed)
             all_passed &= passed
+
+            if not passed:
+                # Debug: afficher premier mismatch
+                mismatch_idx = np.where(~np.isclose(ts_X, ts_Y))[0]
+                if len(mismatch_idx) > 0:
+                    idx = mismatch_idx[0]
+                    print(f"  Premier mismatch X vs Y à index {idx}:")
+                    print(f"    X (dernier timestep): {ts_X[idx]}")
+                    print(f"    Y:  {ts_Y[idx]}")
 
             # Vérifier croissance par asset
             asset_ids = Y[:, 1].astype(int)
@@ -573,8 +586,8 @@ class RegimeDatasetValidator:
             print(f"\n🔑 {split_name}:")
 
             # Extraire primary keys
-            # X: premier timestep de chaque séquence
-            pk_X = X[:, 0, :2]  # (timestamp, asset_id)
+            # X: dernier timestep de chaque séquence (correspond au label)
+            pk_X = X[:, -1, :2]  # (timestamp, asset_id) au timestep final (t-0)
             pk_Y = Y[:, :2]
             pk_OHLCV = OHLCV[:, :2]
 
@@ -582,6 +595,15 @@ class RegimeDatasetValidator:
             passed = np.allclose(pk_X, pk_Y)
             self._print_check("Primary key X == Y", passed)
             all_passed &= passed
+
+            if not passed:
+                # Debug: afficher premier mismatch
+                mismatch_idx = np.where(~np.isclose(pk_X[:, 0], pk_Y[:, 0]))[0]
+                if len(mismatch_idx) > 0:
+                    idx = mismatch_idx[0]
+                    print(f"  Premier mismatch à index {idx}:")
+                    print(f"    X (dernier timestep): {pk_X[idx]}")
+                    print(f"    Y: {pk_Y[idx]}")
 
             # Vérifier Y == OHLCV
             passed = np.allclose(pk_Y, pk_OHLCV)
