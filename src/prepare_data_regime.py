@@ -18,10 +18,15 @@ Features (~20 colonnes):
   Volatility: ATR normalized, BB bands, realized vol, compression
   Volume/Micro: Volume ratio, spike, VWAP deviation, OBV derivative
 
-Labels:
-  - regime: 0-3 (4 classes)
-  - trend_strength: 0-1 (score TS)
-  - volatility_cluster: 0-1 (score VC)
+Labels (6 au total):
+  Régime:
+    - regime: 0-3 (4 classes)
+    - trend_strength: 0-1 (score TS)
+    - volatility_cluster: 0-1 (score VC)
+  Direction (Kalman-filtered, pour modèles MACD/RSI/CCI):
+    - macd_direction: 0/1 (DOWN/UP)
+    - rsi_direction: 0/1 (DOWN/UP)
+    - cci_direction: 0/1 (DOWN/UP)
 
 Pipeline:
 1. Charger données brutes (OHLCV 5min)
@@ -54,6 +59,7 @@ import gc
 from numpy.lib.stride_tricks import sliding_window_view
 from joblib import Parallel, delayed
 import psutil
+from pykalman import KalmanFilter
 
 logger = logging.getLogger(__name__)
 
@@ -63,11 +69,16 @@ from constants import (
     TRIM_EDGES,
     PREPARED_DATA_DIR,
     SEQUENCE_LENGTH,
+    RSI_PERIOD, CCI_PERIOD, MACD_FAST, MACD_SLOW, MACD_SIGNAL,
+    KALMAN_PROCESS_VAR, KALMAN_MEASURE_VAR,
 )
 
 # Import modules de régime
 from regime_features import calculate_all_regime_features, get_regime_feature_names
 from regime_labeler import calculate_regime_labels, validate_regime_features
+
+# Import indicateurs pour labels direction
+from indicators import calculate_rsi, calculate_cci, calculate_macd
 
 # Mapping Asset Name → Asset ID (pour encodage dans les matrices)
 ASSET_ID_MAP = {
@@ -77,6 +88,83 @@ ASSET_ID_MAP = {
     'ADA': 3,
     'LTC': 4
 }
+
+
+# =============================================================================
+# LABELS DIRECTION (MACD/RSI/CCI) - ARCHITECTURE UNIFIÉE
+# =============================================================================
+
+def kalman_filter_dual(data: np.ndarray,
+                       process_var: float = KALMAN_PROCESS_VAR,
+                       measure_var: float = KALMAN_MEASURE_VAR) -> np.ndarray:
+    """
+    Applique un filtre de Kalman CINÉMATIQUE (position + vélocité).
+
+    Copié depuis prepare_data_direction_only.py pour cohérence.
+
+    Returns:
+        np.ndarray de shape (n, 2) - [:, 0]=position, [:, 1]=velocity
+    """
+    valid_mask = ~np.isnan(data)
+    if valid_mask.sum() < 10:
+        result = np.full((len(data), 2), np.nan)
+        return result
+
+    transition_matrix = [[1, 1], [0, 1]]
+    observation_matrix = [[1, 0]]
+    initial_state_mean = [data[valid_mask][0], 0.0]
+    observation_covariance = measure_var
+    transition_covariance = np.eye(2) * process_var
+
+    kf = KalmanFilter(
+        transition_matrices=transition_matrix,
+        observation_matrices=observation_matrix,
+        initial_state_mean=initial_state_mean,
+        observation_covariance=observation_covariance,
+        transition_covariance=transition_covariance
+    )
+
+    means, _ = kf.smooth(data[valid_mask])
+
+    result = np.full((len(data), 2), np.nan)
+    result[valid_mask] = means
+
+    return result
+
+
+def calculate_direction_label(df: pd.DataFrame,
+                               indicator_name: str,
+                               indicator_values: np.ndarray) -> pd.Series:
+    """
+    Calcule le label direction pour un indicateur avec filtre Kalman.
+
+    Pipeline:
+      1. Indicateur brut → Kalman → position filtrée
+      2. Label direction = position[t] > position[t-1]
+
+    Args:
+        df: DataFrame (pour index temporel)
+        indicator_name: 'macd', 'rsi', ou 'cci'
+        indicator_values: Valeurs brutes de l'indicateur
+
+    Returns:
+        pd.Series de labels binaires (0=DOWN, 1=UP)
+    """
+    # Appliquer Kalman
+    filter_output = kalman_filter_dual(indicator_values)
+    position = filter_output[:, 0]
+
+    # Calculer label direction: filtered[t] > filtered[t-1]
+    pos_series = pd.Series(position, index=df.index)
+    pos_t0 = pos_series.shift(0)
+    pos_t1 = pos_series.shift(1)
+    direction_label = (pos_t0 > pos_t1).astype(int)
+
+    logger.info(f"      {indicator_name.upper()} direction: "
+                f"{direction_label.sum()}/{len(direction_label)} UP "
+                f"({direction_label.mean()*100:.1f}%)")
+
+    return direction_label
 
 
 # =============================================================================
@@ -258,11 +346,14 @@ def create_sequences_for_regime(df: pd.DataFrame,
 
     Returns:
         X: (n, seq_length, n_features+2)
-        Y: (n, 5)
+        Y: (n, 8)  # timestamp, asset_id, 3 régime, 3 direction
         OHLCV: (n, 7)
     """
-    # Colonnes label (3 pour régime: regime, ts_score, vc_score)
-    label_cols = ['regime', 'trend_strength', 'volatility_cluster']
+    # Colonnes label (6 au total: 3 régime + 3 direction)
+    label_cols = [
+        'regime', 'trend_strength', 'volatility_cluster',  # Labels régime
+        'macd_direction', 'rsi_direction', 'cci_direction'  # Labels direction
+    ]
 
     # Colonnes OHLCV brutes
     ohlcv_cols = ['open', 'high', 'low', 'close', 'volume']
@@ -277,7 +368,7 @@ def create_sequences_for_regime(df: pd.DataFrame,
 
     # Extraire arrays
     features = df_clean[feature_cols].values.astype(np.float32)  # (N, n_features)
-    labels = df_clean[label_cols].values.astype(np.float32)      # (N, 3)
+    labels = df_clean[label_cols].values.astype(np.float32)      # (N, 6)
     ohlcv = df_clean[ohlcv_cols].values.astype(np.float32)       # (N, 5)
 
     N, n_features = features.shape
@@ -308,7 +399,7 @@ def create_sequences_for_regime(df: pd.DataFrame,
     X_asset_ids = sliding_window_view(asset_ids, window_shape=seq_length).reshape(-1, seq_length)
 
     # Labels: Prendre le label à la FIN de chaque séquence
-    Y_labels = labels[seq_length-1:]  # (n_sequences, 3)
+    Y_labels = labels[seq_length-1:]  # (n_sequences, 6)
 
     # Timestamps pour Y: Derniers timestamps de chaque séquence
     Y_timestamps = timestamps[seq_length-1:]  # (n_sequences,)
@@ -331,12 +422,12 @@ def create_sequences_for_regime(df: pd.DataFrame,
         X_features                      # (n_seq, seq_len, n_features)
     ], axis=2)
 
-    # Combiner Y: [timestamp, asset_id, regime, ts_score, vc_score]
-    # Shape: (n_sequences, 5)
+    # Combiner Y: [timestamp, asset_id, regime, ts_score, vc_score, macd_dir, rsi_dir, cci_dir]
+    # Shape: (n_sequences, 8)
     Y = np.column_stack([
         Y_timestamps,  # (n_seq,)
         Y_asset_ids,   # (n_seq,)
-        Y_labels       # (n_seq, 3)
+        Y_labels       # (n_seq, 6)
     ])
 
     # Combiner OHLCV: [timestamp, asset_id, O, H, L, C, V]
@@ -349,7 +440,7 @@ def create_sequences_for_regime(df: pd.DataFrame,
 
     logger.info(f"     Séquences créées: {n_sequences}")
     logger.info(f"       X: {X.shape} (timestamp, asset_id, {n_features} features)")
-    logger.info(f"       Y: {Y.shape} (timestamp, asset_id, regime, ts, vc)")
+    logger.info(f"       Y: {Y.shape} (timestamp, asset_id, regime, ts, vc, macd_dir, rsi_dir, cci_dir)")
     logger.info(f"       OHLCV: {OHLCV.shape}")
 
     return X, Y, OHLCV
@@ -467,6 +558,31 @@ def process_single_asset(asset_name: str,
     except Exception as e:
         logger.error(f"  ✗ Erreur calcul labels: {e}")
         raise
+
+    # ========================================================================
+    # ÉTAPE 2.5: CALCULER LABELS DIRECTION (MACD, RSI, CCI)
+    # ========================================================================
+
+    logger.info(f"\n  Calcul labels direction (MACD, RSI, CCI)...")
+
+    # MACD
+    macd_vals = calculate_macd(
+        df['close'],
+        fast=MACD_FAST,
+        slow=MACD_SLOW,
+        signal=MACD_SIGNAL
+    )
+    df['macd_direction'] = calculate_direction_label(df, 'macd', macd_vals)
+
+    # RSI
+    rsi_vals = calculate_rsi(df['close'], period=RSI_PERIOD)
+    df['rsi_direction'] = calculate_direction_label(df, 'rsi', rsi_vals)
+
+    # CCI
+    cci_vals = calculate_cci(df, period=CCI_PERIOD)
+    df['cci_direction'] = calculate_direction_label(df, 'cci', cci_vals)
+
+    logger.info(f"  ✓ Labels direction calculés (MACD, RSI, CCI)")
 
     # Remplacer NaN par 0 après tout le calcul
     df = df.fillna(0)
@@ -670,13 +786,21 @@ def main():
         'sequence_length': SEQUENCE_LENGTH,
         'features': feature_cols,
         'n_features': len(feature_cols),
-        'labels': ['regime', 'trend_strength', 'volatility_cluster'],
-        'n_classes': 4,
+        'labels': [
+            'regime', 'trend_strength', 'volatility_cluster',  # Labels régime
+            'macd_direction', 'rsi_direction', 'cci_direction'  # Labels direction
+        ],
+        'n_classes': 4,  # Pour régime uniquement
         'regime_definition': {
             0: "RANGE LOW VOL (TS < 0.4, VC ≤ P70)",
             1: "RANGE HIGH VOL (TS < 0.4, VC > P70)",
             2: "TREND LOW VOL (TS > 0.6, VC ≤ P70)",
             3: "TREND HIGH VOL (TS > 0.6, VC > P70)"
+        },
+        'direction_definition': {
+            'macd_direction': 'Kalman-filtered MACD slope: 1=UP, 0=DOWN',
+            'rsi_direction': 'Kalman-filtered RSI slope: 1=UP, 0=DOWN',
+            'cci_direction': 'Kalman-filtered CCI slope: 1=UP, 0=DOWN'
         },
         'clip_value': args.clip,
         'max_samples_per_asset': args.max_samples,
@@ -691,7 +815,7 @@ def main():
         },
         'structure': {
             'X': f'(n, {SEQUENCE_LENGTH}, {len(feature_cols)}+2) - [timestamp, asset_id, features...] pour chaque timestep',
-            'Y': '(n, 5) - [timestamp, asset_id, regime, trend_strength, volatility_cluster]',
+            'Y': '(n, 8) - [timestamp, asset_id, regime, ts, vc, macd_dir, rsi_dir, cci_dir]',
             'OHLCV': '(n, 7) - [timestamp, asset_id, open, high, low, close, volume]'
         },
         'primary_key': '(timestamp, asset_id) - Commune à toutes les matrices',
