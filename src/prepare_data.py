@@ -285,11 +285,15 @@ def load_prepared_data(path: str = None) -> dict:
 
     # Parser les métadonnées (dans npz ou fichier JSON séparé)
     if 'metadata' in data.files:
-        # Extraire la string depuis le numpy array
-        metadata_str = data['metadata']
-        if isinstance(metadata_str, np.ndarray):
-            metadata_str = metadata_str.item()
-        metadata = json.loads(metadata_str)
+        # Extraire depuis le numpy array
+        metadata = data['metadata']
+        if isinstance(metadata, np.ndarray):
+            metadata = metadata.item()
+
+        # Parser JSON si c'est une string, sinon utiliser directement
+        if isinstance(metadata, (str, bytes)):
+            metadata = json.loads(metadata)
+        # Si c'est déjà un dict, on l'utilise tel quel
     else:
         # Fallback: chercher le fichier JSON à côté
         metadata_path = Path(str(path).replace('.npz', '_metadata.json'))
