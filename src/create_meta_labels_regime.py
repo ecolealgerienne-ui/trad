@@ -61,7 +61,7 @@ def load_regime_dataset(split: str) -> Dict:
         'X': data[X_key],               # (n, 12, ~22)
         'Y': data[Y_key],               # (n, 10) - enrichi avec prédictions
         'OHLCV': data[OHLCV_key],       # (n, 7)
-        'metadata': json.loads(data['metadata'].item()) if 'metadata' in data else {}
+        'metadata': data['metadata'].item() if 'metadata' in data else {}
     }
 
     # Extraire les colonnes importantes de Y
