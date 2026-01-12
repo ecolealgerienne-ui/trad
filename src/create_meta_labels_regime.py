@@ -80,16 +80,17 @@ def load_regime_dataset(split: str) -> Dict:
     return result
 
 
-def load_macd_predictions(split: str) -> Tuple[np.ndarray, np.ndarray]:
+def load_macd_predictions(split: str, regime_timestamps: np.ndarray, regime_asset_ids: np.ndarray) -> np.ndarray:
     """
-    Charge les prédictions MACD direction depuis meta_labels_aligned.
+    Charge les prédictions MACD direction et aligne avec le dataset régime.
 
     Args:
         split: 'train', 'val', ou 'test'
+        regime_timestamps: (n,) Timestamps du dataset régime
+        regime_asset_ids: (n,) Asset IDs du dataset régime
 
     Returns:
-        predictions: (n,) - prédictions MACD
-        probabilities: (n,) - probabilités MACD
+        predictions: (n,) - prédictions MACD alignées
     """
     # Essayer de charger depuis meta_labels_aligned
     meta_path = Path(f'data/prepared/meta_labels_macd_kalman_{split}_aligned.npz')
@@ -103,12 +104,40 @@ def load_macd_predictions(split: str) -> Tuple[np.ndarray, np.ndarray]:
     print(f"\nLoading MACD predictions: {meta_path}")
     data = np.load(meta_path, allow_pickle=True)
 
-    predictions = data['predictions_macd']  # (n,) - probabilités [0,1]
+    macd_predictions = data['predictions_macd']  # (n,) - probabilités [0,1]
+    macd_Y = data['Y']  # (n, 3) avec [timestamp, asset_id, direction]
+    macd_timestamps = macd_Y[:, 0]
+    macd_asset_ids = macd_Y[:, 1].astype(int)
 
-    print(f"  MACD predictions: {predictions.shape}")
-    print(f"  Mean prob: {predictions.mean():.4f}")
+    print(f"  MACD predictions: {macd_predictions.shape}")
+    print(f"  Regime dataset: {regime_timestamps.shape}")
 
-    return predictions, predictions  # Retourner 2x pour compatibilité
+    # Aligner par (timestamp, asset_id)
+    # Créer un dictionnaire (timestamp, asset_id) -> prediction
+    macd_dict = {}
+    for i in range(len(macd_timestamps)):
+        key = (int(macd_timestamps[i]), int(macd_asset_ids[i]))
+        macd_dict[key] = macd_predictions[i]
+
+    # Mapper sur le dataset régime
+    aligned_predictions = np.zeros(len(regime_timestamps), dtype=np.float32)
+    n_matched = 0
+    for i in range(len(regime_timestamps)):
+        key = (int(regime_timestamps[i]), int(regime_asset_ids[i]))
+        if key in macd_dict:
+            aligned_predictions[i] = macd_dict[key]
+            n_matched += 1
+        else:
+            # Si pas trouvé, utiliser 0.5 (neutre)
+            aligned_predictions[i] = 0.5
+
+    match_rate = 100 * n_matched / len(regime_timestamps)
+    print(f"  Matched: {n_matched}/{len(regime_timestamps)} ({match_rate:.1f}%)")
+
+    if match_rate < 95.0:
+        print(f"  WARNING: Low match rate ({match_rate:.1f}%) - some predictions will be neutral (0.5)")
+
+    return aligned_predictions
 
 
 def backtest_single_asset(
