@@ -756,8 +756,7 @@ def main():
             regime_name = {
                 0: "RANGE LOW VOL",
                 1: "RANGE HIGH VOL",
-                2: "TREND LOW VOL",
-                3: "TREND HIGH VOL"
+                2: "TREND"
             }.get(regime_id, f"UNKNOWN_{regime_id}")
             logger.info(f"       Régime {regime_id} ({regime_name}): {pct}%")
 
@@ -791,12 +790,11 @@ def main():
             'regime', 'trend_strength', 'volatility_cluster',  # Labels régime
             'macd_direction', 'rsi_direction', 'cci_direction'  # Labels direction
         ],
-        'n_classes': 4,  # Pour régime uniquement
+        'n_classes': 3,  # Pour régime uniquement
         'regime_definition': {
-            0: "RANGE LOW VOL (TS < 0.4, VC ≤ P70)",
-            1: "RANGE HIGH VOL (TS < 0.4, VC > P70)",
-            2: "TREND LOW VOL (TS > 0.6, VC ≤ P70)",
-            3: "TREND HIGH VOL (TS > 0.6, VC > P70)"
+            0: "RANGE LOW VOL (TS < 0.4, VC ≤ P40)",
+            1: "RANGE HIGH VOL (TS < 0.4, VC > P40)",
+            2: "TREND (TS > 0.5, any volatility)"
         },
         'direction_definition': {
             'macd_direction': 'Kalman-filtered MACD slope: 1=UP, 0=DOWN',
