@@ -735,7 +735,7 @@ def validate_args_vs_filename(args) -> None:
             raise SystemExit(1)
 
     # Vérifier l'indicateur (sauf 'all')
-    is_universal_dataset = 'regime' in filename  # Dataset universel avec tous les labels
+    is_universal_dataset = ('regime' in filename or 'universal' in filename)  # Dataset universel avec tous les labels
 
     if args.indicator != 'all' and not is_universal_dataset:
         indicator_name = args.indicator.lower()
@@ -747,7 +747,7 @@ def validate_args_vs_filename(args) -> None:
             raise SystemExit(1)
 
     if is_universal_dataset:
-        logger.info(f"✅ Dataset universel détecté (regime) - contient tous les indicateurs")
+        logger.info(f"✅ Dataset universel détecté (regime/universal) - contient tous les indicateurs")
     else:
         logger.info(f"✅ Paramètres cohérents avec le fichier de données")
 
