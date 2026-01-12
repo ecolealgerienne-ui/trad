@@ -257,6 +257,19 @@ def validate_epoch(
     # Métriques
     all_predictions = torch.cat(all_predictions, dim=0)
     all_targets = torch.cat(all_targets, dim=0)
+
+    # 🔍 DIAGNOSTIC: Afficher distribution des prédictions vs targets
+    with torch.no_grad():
+        pred_binary = (all_predictions > 0.5).float()
+        n_pred_0 = (pred_binary == 0).sum().item()
+        n_pred_1 = (pred_binary == 1).sum().item()
+        n_target_0 = (all_targets == 0).sum().item()
+        n_target_1 = (all_targets == 1).sum().item()
+        logger.info(f"  [DEBUG] Prédictions: 0={n_pred_0} ({n_pred_0/len(all_predictions)*100:.1f}%), "
+                   f"1={n_pred_1} ({n_pred_1/len(all_predictions)*100:.1f}%)")
+        logger.info(f"  [DEBUG] Targets:     0={n_target_0} ({n_target_0/len(all_targets)*100:.1f}%), "
+                   f"1={n_target_1} ({n_target_1/len(all_targets)*100:.1f}%)")
+
     metrics = compute_metrics(all_predictions, all_targets, indicator_names=indicator_names)
     metrics['loss'] = avg_loss
 
