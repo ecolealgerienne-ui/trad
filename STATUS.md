@@ -8,9 +8,10 @@
 ## 📊 PIPELINE DATASET - Vue d'ensemble
 
 ```
-[1] Base Dataset          [2] Model A Training      [3] Enrichment Stage 1       [4] Direction Training    [5] Enrichment Stage 2
-prepare_data_regime.py -> train.py (regime)    -> enrich_dataset_complete.py -> train.py (direction) -> enrich_dataset_complete.py
-     (8 colonnes Y)           Model A trained           (+5 colonnes, Y=13)          Direction models        (+6 colonnes, Y=19)
+[1] Base Dataset          [2] Train Model A + Enrichment      [3] Train Direction Models + Enrichment
+prepare_data_regime.py -> train_regime_classifier.py    -> train.py (macd/rsi/cci)
+     (8 colonnes Y)       Entraîne XGBoost + enrichit           Entraîne CNN-LSTM + enrichit
+                          (+5 colonnes → Y=13)                  (+6 colonnes → Y=19)
 ```
 
 ---
@@ -81,45 +82,36 @@ python src/prepare_data_regime.py --assets BTC ETH BNB ADA LTC
 
 ---
 
-## 🎯 ÉTAPE 2: Entraînement Model A (Régime Classifier)
+## 🎯 ÉTAPE 2: Entraînement Model A + Enrichissement
 
-**Script**: `src/train.py`
+**Script**: `src/train_regime_classifier.py`
 **Commande**:
 ```bash
-python src/train.py \
+python src/train_regime_classifier.py \
     --data data/prepared/dataset_btc_eth_bnb_ada_ltc_regime.npz \
-    --epochs 50 \
-    --grad-clip 1.0
+    --output-dir models
 ```
 
-**Modèle généré**: `models/best_model_regime.pth`
+**Modèle généré**: `models/regime_classifier_xgboost.pkl`
+
+**Dataset enrichi**: `data/prepared/dataset_btc_eth_bnb_ada_ltc_regime.npz` (REMPLACÉ IN-PLACE)
+
+**Backup créé**: `data/prepared/dataset_btc_eth_bnb_ada_ltc_regime_original.npz`
 
 **Status actuel**: ❌ **PAS ENTRAÎNÉ** (dataset base n'existe pas)
 
-**Objectif**: Prédire `Y[:, 2]` (regime 0-3) à partir de `X` (6 features × 25 timesteps)
+**Objectif**:
+1. Entraîner XGBoost multiclass pour prédire `Y[:, 2]` (regime 0-3)
+2. Enrichir automatiquement le dataset avec les prédictions
 
 **Architecture**:
-- Input: (batch, 25, 6)
-- CNN 1D: 64 filters
-- LSTM: 64 hidden × 2 layers
-- Output: (batch, 4) - probabilités 4 classes régime
-
----
-
-## 🔄 ÉTAPE 3: Enrichissement Stage 1 (Prédictions Model A)
-
-**Script**: `src/enrich_dataset_complete.py`
-**Commande**:
-```bash
-python src/enrich_dataset_complete.py \
-    --base-dataset data/prepared/dataset_btc_eth_bnb_ada_ltc_regime.npz \
-    --model-path models/best_model_regime.pth \
-    --output data/prepared/dataset_btc_eth_bnb_ada_ltc_regime_enriched_stage1.npz
-```
-
-**Status actuel**: ❌ **PAS EXÉCUTÉ**
+- Input: Features régime extraites de X (trend, vol, volume)
+- Modèle: XGBoost multiclass (200 arbres, depth=6)
+- Output: Classe prédite + 4 probabilités (une par régime)
 
 ### Modification Y: 8 colonnes → 13 colonnes (+5)
+
+**L'enrichissement est fait AUTOMATIQUEMENT par train_regime_classifier.py**
 
 **Colonnes ajoutées** (indices 8-12):
 
@@ -133,18 +125,20 @@ python src/enrich_dataset_complete.py \
 
 **Colonnes 0-7**: Inchangées (structure base)
 
+**Note importante**: Le fichier dataset est remplacé in-place, un backup est créé automatiquement.
+
 ---
 
-## 🎯 ÉTAPE 4: Entraînement Modèles Direction (MACD, RSI, CCI)
+## 🎯 ÉTAPE 3: Entraînement Modèles Direction + Enrichissement
 
 **Script**: `src/train.py` (3 exécutions séparées)
 
-### 4.1 - MACD Direction Model
+### 3.1 - MACD Direction Model
 
 **Commande**:
 ```bash
 python src/train.py \
-    --data data/prepared/dataset_btc_eth_bnb_ada_ltc_regime_enriched_stage1.npz \
+    --data data/prepared/dataset_btc_eth_bnb_ada_ltc_regime.npz \
     --indicator macd \
     --epochs 50 \
     --grad-clip 1.0 \
@@ -155,12 +149,22 @@ python src/train.py \
 
 **Target**: `Y[:, 5]` (macd_direction)
 
-### 4.2 - RSI Direction Model
+**Dataset enrichi**: `data/prepared/dataset_btc_eth_bnb_ada_ltc_regime.npz` (CLÉS NPZ ajoutées)
+
+**Clés ajoutées** : `Y_train_pred`, `Y_val_pred`, `Y_test_pred` (arrays séparés, shape (n, 1) pour MACD)
+
+**Objectif**:
+1. Entraîner CNN-LSTM pour prédire direction MACD (colonne 5)
+2. Enrichir automatiquement le dataset avec clé NPZ `Y_*_pred`
+
+**Note**: train.py ajoute des **clés NPZ séparées**, ne modifie PAS la structure de Y
+
+### 3.2 - RSI Direction Model
 
 **Commande**:
 ```bash
 python src/train.py \
-    --data data/prepared/dataset_btc_eth_bnb_ada_ltc_regime_enriched_stage1.npz \
+    --data data/prepared/dataset_btc_eth_bnb_ada_ltc_regime.npz \
     --indicator rsi \
     --epochs 50 \
     --grad-clip 1.0 \
@@ -171,12 +175,16 @@ python src/train.py \
 
 **Target**: `Y[:, 6]` (rsi_direction)
 
-### 4.3 - CCI Direction Model
+**Objectif**:
+1. Entraîner CNN-LSTM pour prédire direction RSI
+2. Enrichir automatiquement le dataset avec prédictions RSI
+
+### 3.3 - CCI Direction Model
 
 **Commande**:
 ```bash
 python src/train.py \
-    --data data/prepared/dataset_btc_eth_bnb_ada_ltc_regime_enriched_stage1.npz \
+    --data data/prepared/dataset_btc_eth_bnb_ada_ltc_regime.npz \
     --indicator cci \
     --epochs 50 \
     --grad-clip 1.0 \
@@ -187,65 +195,49 @@ python src/train.py \
 
 **Target**: `Y[:, 7]` (cci_direction)
 
-**Status actuel**: ❌ **PAS ENTRAÎNÉS**
+**Objectif**:
+1. Entraîner CNN-LSTM pour prédire direction CCI
+2. Enrichir automatiquement le dataset avec prédictions CCI
+
+**Status actuel**: ❌ **PAS ENTRAÎNÉS** (dataset base n'existe pas encore)
+
+**Note importante**: Chaque modèle de direction enrichit le dataset en ajoutant ses prédictions comme **clés NPZ séparées**, pas comme colonnes dans Y
 
 ---
 
-## 🔄 ÉTAPE 5: Enrichissement Stage 2 (Prédictions Direction)
-
-**Script**: `src/enrich_dataset_complete.py` (mode extended)
-**Commande**:
-```bash
-python src/enrich_dataset_complete.py \
-    --base-dataset data/prepared/dataset_btc_eth_bnb_ada_ltc_regime_enriched_stage1.npz \
-    --macd-model models/best_model_macd_direction.pth \
-    --rsi-model models/best_model_rsi_direction.pth \
-    --cci-model models/best_model_cci_direction.pth \
-    --output data/prepared/dataset_btc_eth_bnb_ada_ltc_regime_enriched_stage2.npz
-```
-
-**Status actuel**: ❌ **PAS EXÉCUTÉ**
-
-### Modification Y: 13 colonnes → 19 colonnes (+6)
-
-**Colonnes ajoutées** (indices 13-18):
-
-| Index | Colonne | Type | Valeurs | Description |
-|-------|---------|------|---------|-------------|
-| **13** | `macd_pred` | int | 0/1 | ✨ Prédiction MACD Model (0=DOWN, 1=UP) |
-| **14** | `macd_prob` | float | 0-1 | ✨ Probabilité MACD UP (confiance) |
-| **15** | `rsi_pred` | int | 0/1 | ✨ Prédiction RSI Model (0=DOWN, 1=UP) |
-| **16** | `rsi_prob` | float | 0-1 | ✨ Probabilité RSI UP (confiance) |
-| **17** | `cci_pred` | int | 0/1 | ✨ Prédiction CCI Model (0=DOWN, 1=UP) |
-| **18** | `cci_prob` | float | 0-1 | ✨ Probabilité CCI UP (confiance) |
-
-**Colonnes 0-12**: Inchangées (stage 1)
-
----
-
-## 📊 STRUCTURE FINALE Y - 19 COLONNES (Dataset Complet Enrichi)
+## 📊 STRUCTURE FINALE Y - 13 COLONNES (Après train_regime_classifier.py)
 
 | Index | Colonne | Source | Type | Description |
 |-------|---------|--------|------|-------------|
 | **0** | timestamp | Base | int64 | Unix timestamp |
 | **1** | asset_id | Base | int | ID asset (0-4) |
 | **2** | regime | Base | int | Ground truth régime (0-3) |
-| **3** | trend_strength | Base | float | Ground truth force tendance |
-| **4** | volatility_cluster | Base | float | Ground truth cluster volatilité |
+| **3** | trend_strength | Base | float | Score force tendance (0-1) |
+| **4** | volatility_cluster | Base | float | Score cluster volatilité (0-1) |
 | **5** | macd_direction | Base | int | Ground truth direction MACD |
 | **6** | rsi_direction | Base | int | Ground truth direction RSI |
 | **7** | cci_direction | Base | int | Ground truth direction CCI |
-| **8** | regime_pred | Stage 1 | int | ✨ Prédiction Model A (régime) |
-| **9** | regime_prob_0 | Stage 1 | float | ✨ Prob régime 0 |
-| **10** | regime_prob_1 | Stage 1 | float | ✨ Prob régime 1 |
-| **11** | regime_prob_2 | Stage 1 | float | ✨ Prob régime 2 |
-| **12** | regime_prob_3 | Stage 1 | float | ✨ Prob régime 3 |
-| **13** | macd_pred | Stage 2 | int | ✨ Prédiction MACD Model |
-| **14** | macd_prob | Stage 2 | float | ✨ Confiance MACD |
-| **15** | rsi_pred | Stage 2 | int | ✨ Prédiction RSI Model |
-| **16** | rsi_prob | Stage 2 | float | ✨ Confiance RSI |
-| **17** | cci_pred | Stage 2 | int | ✨ Prédiction CCI Model |
-| **18** | cci_prob | Stage 2 | float | ✨ Confiance CCI |
+| **8** | regime_pred | ÉTAPE 2 | int | ✨ Prédiction Model A (régime) |
+| **9** | regime_prob_0 | ÉTAPE 2 | float | ✨ Prob régime 0 |
+| **10** | regime_prob_1 | ÉTAPE 2 | float | ✨ Prob régime 1 |
+| **11** | regime_prob_2 | ÉTAPE 2 | float | ✨ Prob régime 2 |
+| **12** | regime_prob_3 | ÉTAPE 2 | float | ✨ Prob régime 3 |
+
+---
+
+## 📦 CLÉS NPZ SUPPLÉMENTAIRES (Prédictions Direction - ÉTAPE 3)
+
+**Après train.py (3 exécutions pour MACD, RSI, CCI)**, le fichier NPZ contient aussi :
+
+| Clé NPZ | Shape | Type | Description |
+|---------|-------|------|-------------|
+| `Y_train_pred` | (n_train, 1) | float | Probabilités prédites (0-1) sur train pour l'indicateur entraîné |
+| `Y_val_pred` | (n_val, 1) | float | Probabilités prédites (0-1) sur val pour l'indicateur entraîné |
+| `Y_test_pred` | (n_test, 1) | float | Probabilités prédites (0-1) sur test pour l'indicateur entraîné |
+
+**Note**: Ces clés sont **écrasées** à chaque exécution de train.py. Pour conserver les 3 prédictions (MACD, RSI, CCI), il faut soit :
+- Les sauvegarder séparément après chaque entraînement
+- Ou utiliser un script qui combine les 3 modèles
 
 ---
 
