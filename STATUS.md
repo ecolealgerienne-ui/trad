@@ -26,32 +26,37 @@ python src/prepare_data_regime.py --assets BTC ETH BNB ADA LTC
 
 **Fichier généré**: `data/prepared/dataset_btc_eth_bnb_ada_ltc_regime.npz`
 
-**Status actuel**: ❌ **PAS GÉNÉRÉ** (data/prepared/ est vide)
+**Status actuel**: ✅ **EXÉCUTÉ** (dataset base: 547M, backup: 461M)
 
 ### Structure NPZ (Base)
 
 | Array | Shape | Description |
 |-------|-------|-------------|
-| `X_train` | (n_train, 25, 6) | Séquences features train |
+| `X_train` | (n_train, 25, ~22) | Séquences features train (25 timesteps × ~22 features) |
 | `Y_train` | (n_train, 8) | Labels + metadata train |
 | `OHLCV_train` | (n_train, 7) | Prix OHLCV + metadata train |
-| `X_val` | (n_val, 25, 6) | Séquences features val |
+| `X_val` | (n_val, 25, ~22) | Séquences features val |
 | `Y_val` | (n_val, 8) | Labels + metadata val |
 | `OHLCV_val` | (n_val, 7) | Prix OHLCV + metadata val |
-| `X_test` | (n_test, 25, 6) | Séquences features test |
+| `X_test` | (n_test, 25, ~22) | Séquences features test |
 | `Y_test` | (n_test, 8) | Labels + metadata test |
 | `OHLCV_test` | (n_test, 7) | Prix OHLCV + metadata test |
 
-### Features X (6 canaux × 25 timesteps)
+**Note**: X contient [timestamp, asset_id, ...features] donc shape (n, 25, 2 + n_features_regime).
 
-| Index | Feature | Description |
-|-------|---------|-------------|
-| 0 | `c_ret` | Close return (rendement) |
-| 1 | `h_ret` | High return |
-| 2 | `l_ret` | Low return |
-| 3 | `volume_norm` | Volume normalisé |
-| 4 | `atr_norm` | ATR normalisé (volatilité) |
-| 5 | `rsi` | RSI(14) normalisé 0-1 |
+### Features X (~22 canaux × 25 timesteps)
+
+**Structure**: X[:, :, 0-1] = metadata, X[:, :, 2:] = features de régime
+
+| Index | Feature | Type | Description |
+|-------|---------|------|-------------|
+| 0 | `timestamp` | int64 | Unix timestamp (metadata) |
+| 1 | `asset_id` | int | ID asset 0-4 (metadata) |
+| **2-8** | **Trend features (7)** | float | MA slopes, regression, ADX, Hurst, MACD histogram |
+| **9-17** | **Volatility features (9)** | float | ATR, Bollinger Bands, realized vol, compression, range/ATR ratio |
+| **18-21** | **Volume & microstructure (4)** | float | Volume ratio/spike, VWAP deviation, OBV derivative |
+
+**Total features régime**: ~20 (7 trend + 9 vol + 4 volume) - Voir `regime_features.py`
 
 ### Labels Y (8 colonnes) - BASE DATASET
 
@@ -98,7 +103,7 @@ python src/train_regime_classifier.py \
 
 **Backup créé**: `data/prepared/dataset_btc_eth_bnb_ada_ltc_regime_original.npz`
 
-**Status actuel**: ❌ **PAS ENTRAÎNÉ** (dataset base n'existe pas)
+**Status actuel**: ✅ **EXÉCUTÉ** (dataset enrichi: 547M, backup: 461M)
 
 **Objectif**:
 1. Entraîner XGBoost multiclass pour prédire `Y[:, 2]` (regime 0-3)
