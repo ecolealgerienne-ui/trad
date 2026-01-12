@@ -129,7 +129,8 @@ def train_epoch(
     loss_fn: nn.Module,
     optimizer: optim.Optimizer,
     device: str,
-    indicator_names: list = None
+    indicator_names: list = None,
+    grad_clip: float = None
 ) -> Dict[str, float]:
     """
     Entraîne le modèle sur une époque.
@@ -141,6 +142,7 @@ def train_epoch(
         optimizer: Optimizer
         device: Device
         indicator_names: Noms des outputs (ex: ['Direction', 'Force'] pour dual-binary)
+        grad_clip: Valeur max du gradient (None = pas de clipping)
 
     Returns:
         Dictionnaire avec loss et métriques
@@ -177,6 +179,11 @@ def train_epoch(
 
         # Backward
         loss.backward()
+
+        # 🛡️ Gradient clipping pour stabilité
+        if grad_clip is not None:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+
         optimizer.step()
 
         # Accumuler
@@ -287,7 +294,8 @@ def train_model(
     patience: int = EARLY_STOPPING_PATIENCE,
     save_path: str = BEST_MODEL_PATH,
     model_config: Dict = None,
-    indicator_names: list = None
+    indicator_names: list = None,
+    grad_clip: float = None
 ) -> Dict:
     """
     Boucle d'entraînement complète avec early stopping.
@@ -304,6 +312,7 @@ def train_model(
         save_path: Chemin pour sauvegarder le meilleur modèle
         model_config: Configuration du modèle
         indicator_names: Noms des outputs (ex: ['Direction', 'Force'] pour dual-binary)
+        grad_clip: Gradient clipping max norm (None = désactivé)
 
     Returns:
         Historique de l'entraînement
@@ -330,7 +339,7 @@ def train_model(
         logger.info(f"\nÉpoque {epoch+1}/{num_epochs}")
 
         # Train
-        train_metrics = train_epoch(model, train_loader, loss_fn, optimizer, device, indicator_names)
+        train_metrics = train_epoch(model, train_loader, loss_fn, optimizer, device, indicator_names, grad_clip)
 
         # Validation
         val_metrics = validate_epoch(model, val_loader, loss_fn, device, indicator_names)
@@ -418,6 +427,8 @@ def parse_args():
                         help='Nombre maximum d\'époques')
     parser.add_argument('--patience', type=int, default=EARLY_STOPPING_PATIENCE,
                         help='Patience pour early stopping')
+    parser.add_argument('--grad-clip', type=float, default=1.0,
+                        help='Gradient clipping max norm (None = désactivé, 1.0 recommandé pour stabilité)')
 
     # Hyperparamètres du modèle
     parser.add_argument('--cnn-filters', type=int, default=64,
@@ -552,7 +563,8 @@ def save_predictions_to_npz(
 
     # Mettre à jour metadata
     if 'metadata' in existing_data:
-        metadata = json.loads(str(existing_data['metadata']))
+        # metadata est un numpy scalar dict, utiliser .item() pour extraire le dict Python
+        metadata = existing_data['metadata'].item()
     else:
         metadata = {}
 
@@ -1161,7 +1173,8 @@ def main():
         patience=args.patience,
         save_path=save_path,
         model_config=model_config,
-        indicator_names=indicator_names_for_metrics
+        indicator_names=indicator_names_for_metrics,
+        grad_clip=args.grad_clip
     )
 
     # =========================================================================
