@@ -417,6 +417,64 @@ def main():
             split_name=split_name
         )
 
+    # Générer prédictions et probabilités pour enrichir le dataset
+    print("\n" + "="*80)
+    print("ENRICHING DATASET WITH REGIME PREDICTIONS")
+    print("="*80)
+
+    # Prédictions (classe) et probabilités (4 colonnes pour 4 régimes)
+    regime_preds_train = regime_classifier.predict(X_train)
+    regime_probs_train = regime_classifier.predict_proba(X_train)
+
+    regime_preds_val = regime_classifier.predict(X_val)
+    regime_probs_val = regime_classifier.predict_proba(X_val)
+
+    regime_preds_test = regime_classifier.predict(X_test)
+    regime_probs_test = regime_classifier.predict_proba(X_test)
+
+    # Enrichir Y avec les prédictions
+    # Y original: (n, 5) - [timestamp, asset_id, regime_label, trend_label, volatility_label]
+    # Y enrichi: (n, 10) - [Y_original, regime_pred, prob_0, prob_1, prob_2, prob_3]
+    Y_train_enriched = np.column_stack([
+        full_data['Y_train'],
+        regime_preds_train.reshape(-1, 1),
+        regime_probs_train
+    ])
+
+    Y_val_enriched = np.column_stack([
+        full_data['Y_val'],
+        regime_preds_val.reshape(-1, 1),
+        regime_probs_val
+    ])
+
+    Y_test_enriched = np.column_stack([
+        full_data['Y_test'],
+        regime_preds_test.reshape(-1, 1),
+        regime_probs_test
+    ])
+
+    # Sauvegarder dataset enrichi
+    enriched_path = args.data.parent / f"{args.data.stem}_enriched.npz"
+    print(f"\nSaving enriched dataset to: {enriched_path}")
+    print(f"  Added columns: regime_pred, prob_R0, prob_R1, prob_R2, prob_R3")
+    print(f"  Y shape: {full_data['Y_train'].shape} → {Y_train_enriched.shape}")
+
+    np.savez_compressed(
+        enriched_path,
+        X_train=full_data['X_train'],
+        Y_train=Y_train_enriched,
+        OHLCV_train=full_data['OHLCV_train'],
+        X_val=full_data['X_val'],
+        Y_val=Y_val_enriched,
+        OHLCV_val=full_data['OHLCV_val'],
+        X_test=full_data['X_test'],
+        Y_test=Y_test_enriched,
+        OHLCV_test=full_data['OHLCV_test'],
+        metadata=full_data['metadata']
+    )
+
+    print(f"✅ Enriched dataset saved!")
+
     # Sauvegarder modèle
     model_path = args.output_dir / 'regime_classifier_xgboost.pkl'
     print(f"\nSaving regime classifier to: {model_path}")
