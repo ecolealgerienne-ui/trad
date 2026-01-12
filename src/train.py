@@ -7,6 +7,103 @@ Pipeline complet:
     3. Créer DataLoaders PyTorch
     4. Entraîner le modèle avec early stopping
     5. Sauvegarder le meilleur modèle
+
+═══════════════════════════════════════════════════════════════════════════════
+DONNÉES D'ENTRAÎNEMENT - Structure détaillée
+═══════════════════════════════════════════════════════════════════════════════
+
+INPUT: X_train
+────────────────
+Shape: (n_train, 25, ~22)
+  - n_train: Nombre d'échantillons train
+  - 25: Longueur séquence (25 timesteps × 5min = 2h05 de contexte)
+  - ~22: Nombre de features (2 metadata + ~20 regime features)
+
+Colonnes X_train[:, :, i]:
+  Index 0-1: METADATA
+    [0] timestamp    - Unix timestamp (int64)
+    [1] asset_id     - ID asset 0-4 (BTC=0, ETH=1, BNB=2, ADA=3, LTC=4)
+
+  Index 2-8: TREND FEATURES (7)
+    [2]  ma20_slope          - Pente MA20 normalisée
+    [3]  ma50_slope          - Pente MA50 normalisée
+    [4]  regression_slope    - Pente régression linéaire
+    [5]  regression_r2       - R² régression (qualité tendance)
+    [6]  adx                 - Average Directional Index
+    [7]  macd_histogram_norm - Histogram MACD normalisé
+    [8]  hurst_exponent      - Exposant de Hurst (persistance tendance)
+
+  Index 9-17: VOLATILITY FEATURES (9)
+    [9]  atr_normalized         - ATR normalisé par prix
+    [10] bb_upper               - Bande de Bollinger supérieure
+    [11] bb_middle              - Bande de Bollinger moyenne (SMA20)
+    [12] bb_lower               - Bande de Bollinger inférieure
+    [13] bb_width               - Largeur bandes Bollinger
+    [14] percent_b              - Position prix dans bandes (0-1)
+    [15] realized_volatility    - Volatilité réalisée (std returns)
+    [16] volatility_compression - Ratio volatilité courte/longue
+    [17] range_atr_ratio        - Ratio (High-Low)/ATR
+
+  Index 18-21: VOLUME & MICROSTRUCTURE FEATURES (4)
+    [18] volume_ratio     - Volume / MA20 volume
+    [19] volume_spike     - Détection spike volume (bool)
+    [20] vwap_deviation   - Écart prix vs VWAP
+    [21] obv_derivative   - Dérivée On-Balance Volume
+
+Source: regime_features.py - calculate_all_regime_features()
+Référence complète: regime_features.py lignes 691-718
+
+TARGET: Y_train
+────────────────
+Shape: (n_train, 13) - APRÈS enrichissement par train_regime_classifier.py
+
+Colonnes Y_train[:, i]:
+  [0]  timestamp         - Unix timestamp (int64)
+  [1]  asset_id          - ID asset 0-4
+  [2]  regime            - Régime 0-3 (4 classes)
+  [3]  trend_strength    - Score tendance 0.0-1.0
+  [4]  volatility        - Score volatilité 0.0-1.0
+  [5]  macd_direction    - Direction MACD Kalman 0/1 (0=DOWN, 1=UP) - TARGET
+  [6]  rsi_direction     - Direction RSI Kalman 0/1 (0=DOWN, 1=UP) - TARGET
+  [7]  cci_direction     - Direction CCI Kalman 0/1 (0=DOWN, 1=UP) - TARGET
+  [8]  regime_prob_0     - P(regime=0) XGBoost [0.0-1.0]
+  [9]  regime_prob_1     - P(regime=1) XGBoost [0.0-1.0]
+  [10] regime_prob_2     - P(regime=2) XGBoost [0.0-1.0]
+  [11] regime_prob_3     - P(regime=3) XGBoost [0.0-1.0]
+  [12] regime_pred       - Régime prédit (argmax probs) [0-3]
+
+Note: Colonnes 8-12 ajoutées par train_regime_classifier.py (enrichissement)
+
+EXTRACTION POUR TRAINING DIRECTION:
+  Si --indicator macd:
+    Y_train = Y_train[:, [0, 1, 5]]  # [timestamp, asset_id, macd_direction]
+    → Shape finale: (n_train, 3)
+    → Target: Y_train[:, 2] = macd_direction (binaire 0/1)
+
+  Si --indicator rsi:
+    Y_train = Y_train[:, [0, 1, 6]]  # [timestamp, asset_id, rsi_direction]
+    → Shape finale: (n_train, 3)
+    → Target: Y_train[:, 2] = rsi_direction (binaire 0/1)
+
+  Si --indicator cci:
+    Y_train = Y_train[:, [0, 1, 7]]  # [timestamp, asset_id, cci_direction]
+    → Shape finale: (n_train, 3)
+    → Target: Y_train[:, 2] = cci_direction (binaire 0/1)
+
+MODÈLE: CNN-LSTM Binary Classifier
+  Input:  X_train[:, :, 2:] (sans timestamp/asset_id) = (n, 25, 20) features
+  Output: P(direction=UP) pour l'indicateur choisi [0.0-1.0]
+
+PRÉDICTIONS SAUVEGARDÉES (après training):
+  Le script ajoute 3 nouvelles clés NPZ (n'enrichit PAS Y):
+    - Y_train_pred: (n_train,) - probabilités prédites train
+    - Y_val_pred:   (n_val,)   - probabilités prédites val
+    - Y_test_pred:  (n_test,)  - probabilités prédites test
+
+Source dataset: data/prepared/dataset_btc_eth_bnb_ada_ltc_regime.npz
+Généré par: src/prepare_data_regime.py
+Enrichi par: src/train_regime_classifier.py (colonnes 8-12)
+═══════════════════════════════════════════════════════════════════════════════
 """
 
 import numpy as np
