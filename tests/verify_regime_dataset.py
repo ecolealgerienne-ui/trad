@@ -39,7 +39,14 @@ import sys
 # Ajouter src/ au path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
-from constants import ASSET_ID_MAP
+# Asset ID mapping (copié de prepare_data_regime.py ligne 73-79)
+ASSET_ID_MAP = {
+    'BTC': 0,
+    'ETH': 1,
+    'BNB': 2,
+    'ADA': 3,
+    'LTC': 4
+}
 
 
 class RegimeDatasetValidator:
