@@ -43,6 +43,7 @@ from sklearn.metrics import (
 )
 import joblib
 import json
+import shutil
 from typing import Dict
 
 # XGBoost
@@ -453,14 +454,22 @@ def main():
         regime_probs_test
     ])
 
-    # Sauvegarder dataset enrichi
-    enriched_path = args.data.parent / f"{args.data.stem}_enriched.npz"
-    print(f"\nSaving enriched dataset to: {enriched_path}")
+    # Créer backup de l'original (seulement la première fois)
+    backup_path = args.data.parent / f"{args.data.stem}_original.npz"
+    if not backup_path.exists():
+        print(f"\n📦 Creating backup of original dataset...")
+        shutil.copy(args.data, backup_path)
+        print(f"  ✅ Backup saved: {backup_path.name}")
+    else:
+        print(f"\n📦 Backup already exists: {backup_path.name}")
+
+    # Remplacer le fichier original avec la version enrichie
+    print(f"\n💾 Enriching and saving dataset: {args.data.name}")
     print(f"  Added columns: regime_pred, prob_R0, prob_R1, prob_R2, prob_R3")
     print(f"  Y shape: {full_data['Y_train'].shape} → {Y_train_enriched.shape}")
 
     np.savez_compressed(
-        enriched_path,
+        args.data,  # Remplace l'original
         X_train=full_data['X_train'],
         Y_train=Y_train_enriched,
         OHLCV_train=full_data['OHLCV_train'],
@@ -473,7 +482,8 @@ def main():
         metadata=full_data['metadata']
     )
 
-    print(f"✅ Enriched dataset saved!")
+    print(f"✅ Dataset enriched and saved!")
+    print(f"  Original backup: {backup_path.name}")
 
     # Sauvegarder modèle
     model_path = args.output_dir / 'regime_classifier_xgboost.pkl'
