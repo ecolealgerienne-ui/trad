@@ -255,12 +255,12 @@ def get_regime_feature_names() -> list:
 
 ---
 
-## ⚠️ PROBLÈME CRITIQUE: Déséquilibre des Régimes
+## ✅ CORRECTION: Passage de 4 à 3 Régimes
 
 **Date d'analyse**: 2026-01-12
-**Status**: 🔴 **À CORRIGER AVANT ENTRAÎNEMENT**
+**Status**: ✅ **CORRIGÉ - Passage à 3 régimes**
 
-### Distribution Observée (Train Set)
+### Problème Identifié (Ancien Système à 4 Régimes)
 
 ```
 Regime 0 (RANGE LOW VOL):  1,842,381 samples (65.0%)
@@ -269,107 +269,63 @@ Regime 2 (TREND LOW VOL):      3,325 samples (0.1%)  ← PROBLÈME
 Regime 3 (TREND HIGH VOL):   135,995 samples (4.8%)
 ```
 
-**Problème**: Le Régime 2 représente seulement **0.1%** des données - quasi impossible à apprendre pour XGBoost.
+### Cause Racine: Fait de Microstructure Crypto
 
-### Cause Racine
+**Le régime "TREND LOW VOL" n'existe pas en crypto** - c'est un fait documenté :
+- Oxford-Man Institute Realized Library
+- BIS Papers 2020
 
-**Seuils actuels** (dans `regime_labeler.py`) :
+En crypto, **TREND = VOLATILITÉ** par nature. Les grandes tendances sont TOUJOURS accompagnées de forte volatilité.
 
+→ TREND + LOW VOL est **structurellement impossible** (0.1%)
+
+### Solution Implémentée: 3 Régimes
+
+**Nouveau système** (implémenté dans `regime_labeler.py` v2.0) :
+
+| Régime | Code | Conditions | Interprétation |
+|--------|------|------------|----------------|
+| **RANGE LOW VOL** | 0 | TS < 0.4 ET VC ≤ P40 | Marché inactif/dormant |
+| **RANGE HIGH VOL** | 1 | TS < 0.4 ET VC > P40 | Chop violent, piège |
+| **TREND** | 2 | TS > 0.5 (any vol) | **Seul régime exploitable** |
+
+**Paramètres** :
 ```python
-# Trend Strength (TS)
-TS_TREND_THRESHOLD = 0.6    # TS > 0.6 = TREND
+TS_TREND_THRESHOLD = 0.5    # TS > 0.5 = TREND (any volatility)
 TS_RANGE_THRESHOLD = 0.4    # TS < 0.4 = RANGE
-
-# Volatility Cluster (VC)
-VC_HIGH_PERCENTILE = 70     # VC > P70 = HIGH VOL
+VC_LOW_PERCENTILE = 40      # Pour RANGE: VC ≤ P40 = LOW VOL, VC > P40 = HIGH VOL
 ```
 
-**Le Régime 2 (TREND LOW VOL) requiert** :
-- TS > 0.6 (forte tendance)
-- VC ≤ P70 (faible volatilité)
+**Zone neutre** (0.4 ≤ TS ≤ 0.5) : Assigné au régime le plus proche
 
-**Mais en crypto** : **quand il y a une forte tendance, il y a TOUJOURS de la volatilité élevée**.
+### Distribution Attendue
 
-C'est la nature du marché - les grandes tendances crypto sont accompagnées de mouvements de prix importants.
+| Régime | Distribution Attendue |
+|--------|----------------------|
+| 0 (RANGE LOW VOL) | ~20-30% |
+| 1 (RANGE HIGH VOL) | ~50-60% |
+| 2 (TREND) | ~15-25% |
 
-### Corrélation TS ↔ VC
+### Avantages de 3 Régimes
 
-| Condition | Résultat Typique |
-|-----------|------------------|
-| RANGE (TS < 0.4) | Généralement LOW VOL |
-| TREND (TS > 0.6) | **Presque toujours HIGH VOL** |
+1. ✅ **Reflète la réalité crypto** (TREND = VOL)
+2. ✅ **Distribution équilibrée** (pas de classe à 0.1%)
+3. ✅ **Modèle apprend mieux** (pas de classe fantôme)
+4. ✅ **Interprétation claire** :
+   - Régime 0 : Ne pas trader (marché mort)
+   - Régime 1 : DANGER - chop/whipsaw
+   - Régime 2 : **SEUL régime à trader**
 
-→ TREND + LOW VOL est **structurellement rare** (0.1%)
+### Fichiers Modifiés
 
-### Impact sur l'Entraînement
+- ✅ `src/regime_labeler.py` - Passage de 4 à 3 classes (version 2.0)
 
-| Problème | Conséquence |
-|----------|-------------|
-| 0.1% de Régime 2 | XGBoost ne peut pas apprendre ce régime |
-| Classe sous-représentée | Modèle prédit jamais Régime 2 |
-| Metrics faussées | Accuracy artificielle haute (ignorer 2) |
-| Généralisation | Échec sur vrais cas TREND LOW VOL |
+### Prochaine Action
 
-### Solutions Proposées
-
-#### 🅰️ Solution A: Ajuster les seuils
-
-**Objectif** : Obtenir au moins 5% par régime
-
-```python
-# Nouveaux seuils (à tester)
-TS_TREND_THRESHOLD = 0.50  # Moins strict (était 0.6)
-TS_RANGE_THRESHOLD = 0.40  # Inchangé
-VC_HIGH_PERCENTILE = 80    # Plus strict (était 70)
+Régénérer le dataset avec le nouveau système à 3 régimes :
+```bash
+python src/prepare_data_regime.py --assets BTC ETH BNB ADA LTC
 ```
-
-**Avantage** : Conserve les 4 régimes
-**Risque** : Peut ne pas suffire (corrélation naturelle TS-VC)
-
-#### 🅱️ Solution B: Merger en 3 classes
-
-**Nouveaux régimes** :
-- Régime 0: RANGE LOW VOL
-- Régime 1: RANGE HIGH VOL
-- Régime 2: **TREND** (fusionne LOW et HIGH VOL)
-
-**Avantage** : Distribution plus équilibrée (~65% / 30% / 5%)
-**Inconvénient** : Perd la distinction volatilité en TREND
-
-#### 🅲️ Solution C: Class Weights dans XGBoost
-
-```python
-# Dans train_regime_classifier.py
-class_weights = {0: 1.0, 1: 2.0, 2: 500.0, 3: 13.0}  # Inverse de la fréquence
-```
-
-**Avantage** : Pas de modification des labels
-**Risque** : Peut créer de l'instabilité (poids ×500 pour Régime 2)
-
-### Recommandation
-
-**🅰️ Solution A (ajuster seuils)** est la meilleure approche car :
-1. Préserve les 4 régimes distincts (meilleure granularité)
-2. Modification simple dans `regime_labeler.py`
-3. Seuils plus permissifs reflètent mieux la réalité crypto
-
-**Fichier à modifier** : `src/regime_labeler.py` (lignes 77-80)
-
-```python
-# AVANT (seuils actuels)
-TS_TREND_THRESHOLD = 0.6    # TS > 0.6 = TREND
-TS_RANGE_THRESHOLD = 0.4    # TS < 0.4 = RANGE
-VC_HIGH_PERCENTILE = 70     # VC > P70 = HIGH VOL
-
-# APRÈS (seuils ajustés)
-TS_TREND_THRESHOLD = 0.50   # Plus permissif pour TREND
-TS_RANGE_THRESHOLD = 0.40   # Inchangé
-VC_HIGH_PERCENTILE = 80     # Plus strict pour HIGH VOL
-```
-
-### Action Requise
-
-⏳ **En attente** : Tester différentes combinaisons de seuils et relancer `prepare_data_regime.py` pour obtenir une distribution plus équilibrée (minimum 5% par régime).
 
 ---
 

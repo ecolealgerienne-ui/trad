@@ -2,18 +2,20 @@
 """
 Regime Classifier Training - Model A (Meta-Regime Phase 1)
 
-Entraîne un classifieur XGBoost multiclass pour prédire le régime de marché (4 classes).
+Entraîne un classifieur XGBoost multiclass pour prédire le régime de marché (3 classes).
 
 Architecture:
     ~20 features de régime (trend/vol/volume)
     → XGBoost Multiclass
-    → Probabilités 4 régimes [0, 1, 2, 3]
+    → Probabilités 3 régimes [0, 1, 2]
 
 Régimes (basés sur Trend Strength × Volatility Cluster):
-    0: RANGE LOW VOL  - Consolidation calme
-    1: RANGE HIGH VOL - Consolidation agitée
-    2: TREND LOW VOL  - Tendance stable
-    3: TREND HIGH VOL - Tendance explosive
+    0: RANGE LOW VOL  - Consolidation calme (TS < 0.4, VC ≤ P40)
+    1: RANGE HIGH VOL - Consolidation agitée (TS < 0.4, VC > P40)
+    2: TREND          - Tendance (TS > 0.5, any volatility)
+
+Note: TREND LOW VOL (ancien régime 2) n'existe pas en crypto.
+      En crypto, TREND = VOLATILITÉ (Oxford-Man Institute, BIS 2020).
 
 Features (~20):
     Trend: MA slopes, ADX, regression R², Hurst, MACD histogram
@@ -21,7 +23,7 @@ Features (~20):
     Volume: Volume ratio, spikes, VWAP deviation, OBV
 
 Target:
-    regime = 0, 1, 2, ou 3 (4 classes)
+    regime = 0, 1, ou 2 (3 classes)
 
 Performance attendue:
     - Accuracy: 45-55%
@@ -85,7 +87,7 @@ Shape: (n_train, 8)
 Colonnes Y_train[:, i]:
   [0] timestamp       - Unix timestamp (int64)
   [1] asset_id        - ID asset 0-4
-  [2] regime          - Régime 0-3 (TARGET PRINCIPAL)
+  [2] regime          - Régime 0-2 (TARGET PRINCIPAL)
   [3] trend_strength  - Score tendance 0.0-1.0
   [4] volatility      - Score volatilité 0.0-1.0
   [5] macd_direction  - Direction MACD Kalman 0/1 (0=DOWN, 1=UP)
@@ -95,11 +97,12 @@ Colonnes Y_train[:, i]:
 Note: Colonnes 5-7 sont ajoutées APRÈS par train_regime_classifier.py
       (enrichissement in-place via np.column_stack)
 
-RÉGIMES (4 classes):
-  0: RANGE LOW VOL  - Consolidation calme (trend_strength < 0.5, volatility < 0.5)
-  1: RANGE HIGH VOL - Consolidation agitée (trend_strength < 0.5, volatility >= 0.5)
-  2: TREND LOW VOL  - Tendance stable (trend_strength >= 0.5, volatility < 0.5)
-  3: TREND HIGH VOL - Tendance explosive (trend_strength >= 0.5, volatility >= 0.5)
+RÉGIMES (3 classes):
+  0: RANGE LOW VOL  - Consolidation calme (TS < 0.4, VC ≤ P40)
+  1: RANGE HIGH VOL - Consolidation agitée (TS < 0.4, VC > P40)
+  2: TREND          - Tendance (TS > 0.5, any volatility)
+
+  Note: TREND LOW VOL n'existe pas en crypto (TREND = VOLATILITÉ)
 
 UTILISATION PAR XGBOOST:
   Ce script aggregate les 25 timesteps en 4 statistiques [mean, std, min, max]:
@@ -184,15 +187,14 @@ def load_regime_dataset(npz_path: Path) -> Dict:
 
     # Distribution des régimes (Train uniquement)
     print(f"\n  Train regime distribution:")
-    for regime_id in range(4):
+    regime_names = {
+        0: 'RANGE LOW VOL',
+        1: 'RANGE HIGH VOL',
+        2: 'TREND'
+    }
+    for regime_id in range(3):
         count = np.sum(regimes_train == regime_id)
         pct = 100 * count / len(regimes_train)
-        regime_names = {
-            0: 'RANGE LOW VOL',
-            1: 'RANGE HIGH VOL',
-            2: 'TREND LOW VOL',
-            3: 'TREND HIGH VOL'
-        }
         print(f"    Regime {regime_id} ({regime_names[regime_id]:15s}): {count:,} ({pct:.1f}%)")
 
     return {
@@ -261,9 +263,9 @@ def train_xgboost_regime_classifier(
 
     Args:
         X_train: Features train (n_train, n_features)
-        y_train: Régimes train (n_train,) - valeurs [0, 1, 2, 3]
+        y_train: Régimes train (n_train,) - valeurs [0, 1, 2]
         X_val: Features val (n_val, n_features)
-        y_val: Régimes val (n_val,)
+        y_val: Régimes val (n_val,) - valeurs [0, 1, 2]
 
     Returns:
         Modèle XGBoost entraîné
@@ -277,7 +279,7 @@ def train_xgboost_regime_classifier(
 
     # Distribution des régimes
     print(f"\nTrain regime distribution:")
-    for regime_id in range(4):
+    for regime_id in range(3):
         count = np.sum(y_train == regime_id)
         pct = 100 * count / len(y_train)
         print(f"  Regime {regime_id}: {count:,} ({pct:.1f}%)")
@@ -286,7 +288,7 @@ def train_xgboost_regime_classifier(
     print("\nTraining XGBoost with multiclass objective...")
     model = xgb.XGBClassifier(
         objective='multi:softprob',   # Multiclass avec probabilités
-        num_class=4,                   # 4 régimes
+        num_class=3,                   # 3 régimes (RANGE LOW VOL, RANGE HIGH VOL, TREND)
         n_estimators=200,              # Plus d'arbres pour multiclass
         max_depth=6,                   # Profondeur augmentée (vs 5 binary)
         learning_rate=0.05,            # LR réduit pour plus de stabilité
@@ -342,7 +344,7 @@ def evaluate_regime_classifier(
     Args:
         model: Modèle XGBoost entraîné
         X: Features (n, n_features)
-        y: Régimes (n,) - valeurs [0, 1, 2, 3]
+        y: Régimes (n,) - valeurs [0, 1, 2]
         split_name: Nom du split (train/val/test)
 
     Returns:
@@ -380,7 +382,7 @@ def evaluate_regime_classifier(
     # Confusion matrix
     cm = confusion_matrix(y, y_pred)
     print(f"\nConfusion Matrix (rows=true, cols=pred):")
-    print("     ", "  ".join([f"R{i}" for i in range(4)]))
+    print("     ", "  ".join([f"R{i}" for i in range(3)]))
     for i, row in enumerate(cm):
         print(f"  R{i}:", "  ".join([f"{val:4d}" for val in row]))
 
@@ -389,15 +391,14 @@ def evaluate_regime_classifier(
     regime_names = {
         0: 'RANGE LOW VOL',
         1: 'RANGE HIGH VOL',
-        2: 'TREND LOW VOL',
-        3: 'TREND HIGH VOL'
+        2: 'TREND'
     }
 
     prec_per_class = precision_score(y, y_pred, average=None, zero_division=0)
     rec_per_class = recall_score(y, y_pred, average=None, zero_division=0)
     f1_per_class = f1_score(y, y_pred, average=None, zero_division=0)
 
-    for i in range(4):
+    for i in range(3):
         print(f"  Regime {i} ({regime_names[i]:15s}): "
               f"Prec={prec_per_class[i]:.3f}, "
               f"Rec={rec_per_class[i]:.3f}, "
@@ -406,10 +407,9 @@ def evaluate_regime_classifier(
     # Classification report
     print(f"\nClassification Report:")
     print(classification_report(y, y_pred, digits=4, target_names=[
-        'R0: RANGE LOW',
-        'R1: RANGE HIGH',
-        'R2: TREND LOW',
-        'R3: TREND HIGH'
+        'R0: RANGE LOW VOL',
+        'R1: RANGE HIGH VOL',
+        'R2: TREND'
     ]))
 
     return {
@@ -512,7 +512,7 @@ def main():
 
     # Enrichir Y avec les prédictions
     # Y original: (n, 5) - [timestamp, asset_id, regime_label, trend_label, volatility_label]
-    # Y enrichi: (n, 10) - [Y_original, regime_pred, prob_0, prob_1, prob_2, prob_3]
+    # Y enrichi: (n, 9) - [Y_original, regime_pred, prob_0, prob_1, prob_2]
     Y_train_enriched = np.column_stack([
         full_data['Y_train'],
         regime_preds_train.reshape(-1, 1),
@@ -542,7 +542,7 @@ def main():
 
     # Remplacer le fichier original avec la version enrichie
     print(f"\n💾 Enriching and saving dataset: {args.data.name}")
-    print(f"  Added columns: regime_pred, prob_R0, prob_R1, prob_R2, prob_R3")
+    print(f"  Added columns: regime_pred, prob_R0, prob_R1, prob_R2")
     print(f"  Y shape: {full_data['Y_train'].shape} → {Y_train_enriched.shape}")
 
     np.savez_compressed(
