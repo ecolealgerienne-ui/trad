@@ -34,7 +34,7 @@ def show_x_y_relationship(npz_path, idx=None):
 
     print(f"\n📌 Échantillon #{idx}")
     print(f"\n📊 OHLCV[{idx}] - RÉFÉRENCE PRIX:")
-    print(f"   timestamp:  {ohlcv_sample[0]:.0f} ({datetime.fromtimestamp(ohlcv_sample[0]).strftime('%Y-%m-%d %H:%M:%S')})")
+    print(f"   timestamp:  {ohlcv_sample[0]:.0f} ({datetime.fromtimestamp(int(ohlcv_sample[0])).strftime('%Y-%m-%d %H:%M:%S')})")
     print(f"   asset_id:   {int(ohlcv_sample[1])} (ADA)")
     print(f"   Open:       ${ohlcv_sample[2]:.6f}")
     print(f"   High:       ${ohlcv_sample[3]:.6f}")
@@ -51,7 +51,7 @@ def show_x_y_relationship(npz_path, idx=None):
     # Afficher quelques timesteps clés
     for t in [0, 12, 24]:
         ts = x_sample[t, 0]
-        dt = datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')
+        dt = datetime.fromtimestamp(int(ts)).strftime('%Y-%m-%d %H:%M:%S')
         print(f"\n   Timestep {t:2d} | {dt}")
         print(f"      timestamp:    {ts:.0f}")
         print(f"      asset_id:     {int(x_sample[t, 1])}")
@@ -74,7 +74,7 @@ def show_x_y_relationship(npz_path, idx=None):
     print(f"\n📋 Contenu Y:")
 
     timestamp_y = y_sample[0]
-    dt_y = datetime.fromtimestamp(timestamp_y).strftime('%Y-%m-%d %H:%M:%S')
+    dt_y = datetime.fromtimestamp(int(timestamp_y)).strftime('%Y-%m-%d %H:%M:%S')
 
     print(f"\n   [0] timestamp:       {timestamp_y:.0f} ({dt_y})")
     print(f"   [1] asset_id:        {int(y_sample[1])}")
