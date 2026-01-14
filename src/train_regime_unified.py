@@ -481,8 +481,8 @@ def train_cnn_lstm(dataset: Dict, args: argparse.Namespace) -> Dict:
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
 
     # Model
-    model = CNNLSTMRegimeClassifier(
-        input_size=3,
+    model = RegimeCNNLSTM(
+        num_features=3,
         num_classes=3,
         sequence_length=25
     ).to(device)
