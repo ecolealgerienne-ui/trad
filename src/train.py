@@ -795,8 +795,22 @@ def save_predictions_to_npz(
 
     # Mettre à jour metadata
     if 'metadata' in existing_data:
-        # metadata est un numpy scalar dict, utiliser .item() pour extraire le dict Python
-        metadata = existing_data['metadata'].item()
+        meta_raw = existing_data['metadata']
+        # Gérer les différents formats possibles
+        if isinstance(meta_raw, str):
+            # Si c'est déjà une string JSON
+            metadata = json.loads(meta_raw)
+        elif hasattr(meta_raw, 'item'):
+            # Si c'est un numpy scalar, extraire la valeur
+            meta_item = meta_raw.item()
+            if isinstance(meta_item, str):
+                metadata = json.loads(meta_item)
+            elif isinstance(meta_item, dict):
+                metadata = meta_item
+            else:
+                metadata = {}
+        else:
+            metadata = {}
     else:
         metadata = {}
 
