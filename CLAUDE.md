@@ -11,6 +11,36 @@
 
 ---
 
+## 🚨 ANTI-PATTERN CRITIQUE - NE JAMAIS CRÉER DE NOUVEAU FICHIER
+
+**ERREUR RÉPÉTÉE CONSTAMMENT**: Créer un nouveau script au lieu de modifier l'existant.
+
+**Exemple d'erreur (2026-01-14)**:
+- ❌ **MAUVAIS**: Créer `train_regime_unified.py` (837 lignes) pour ajouter XGBoost
+- ✅ **CORRECT**: Modifier `train_regime_classifier.py` existant (ajouter 200 lignes)
+
+**RÈGLE ABSOLUE**:
+```
+SI un script existe déjà et fait 80%+ de ce que tu veux:
+  ❌ NE JAMAIS créer un nouveau fichier
+  ✅ TOUJOURS modifier le fichier existant
+  ✅ Ajouter seulement ce qui manque (fonction, option CLI, etc.)
+```
+
+**Questions à se poser AVANT de créer un fichier**:
+1. ❓ Est-ce qu'un script similaire existe déjà?
+2. ❓ Puis-je ajouter une option `--model` ou `--mode` au lieu de créer un nouveau fichier?
+3. ❓ Est-ce que je suis en train de recopier du code existant?
+
+**Si OUI à l'une de ces questions → MODIFIER L'EXISTANT, ne PAS créer un nouveau fichier!**
+
+**Coût de cette erreur**:
+- Perte de temps (réécriture vs ajout: 2h vs 15min)
+- Réintroduction de bugs (imports, noms de classes)
+- Frustration utilisateur (violation répétée de la règle #1)
+
+---
+
 ## ⚠️ RÈGLES CRITIQUES POUR CLAUDE (À RESPECTER PENDANT TOUTE SESSION)
 
 ### 1. 🔁 RÉUTILISER L'EXISTANT (Ne JAMAIS réinventer la roue)
