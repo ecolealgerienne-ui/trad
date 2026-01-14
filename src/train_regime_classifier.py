@@ -5,22 +5,22 @@ Regime Classifier Training - Model A (Meta-Regime Phase 1)
 Entraîne un classifieur XGBoost multiclass pour prédire le régime de marché (3 classes).
 
 Architecture:
-    ~20 features de régime (trend/vol/volume)
+    3 raw returns features (c_ret, h_ret, l_ret)
+    → Agrégation temporelle [mean, std, min, max]
     → XGBoost Multiclass
     → Probabilités 3 régimes [0, 1, 2]
 
 Régimes (basés sur Trend Strength × Volatility Cluster):
-    0: RANGE LOW VOL  - Consolidation calme (TS < 0.4, VC ≤ P40)
-    1: RANGE HIGH VOL - Consolidation agitée (TS < 0.4, VC > P40)
-    2: TREND          - Tendance (TS > 0.5, any volatility)
+    0: RANGE_LOW_VOL  - Consolidation calme (TS < 0.45, vol ≤ P50)
+    1: RANGE_HIGH_VOL - Consolidation agitée (TS < 0.45, vol > P50)
+    2: TREND          - Tendance (TS ≥ 0.45)
 
-Note: TREND LOW VOL (ancien régime 2) n'existe pas en crypto.
-      En crypto, TREND = VOLATILITÉ (Oxford-Man Institute, BIS 2020).
+Note: En crypto, TREND = VOLATILITÉ (Oxford-Man Institute, BIS 2020).
 
-Features (~20):
-    Trend: MA slopes, ADX, regression R², Hurst, MACD histogram
-    Volatility: ATR, BB width, realized vol, compression
-    Volume: Volume ratio, spikes, VWAP deviation, OBV
+Features (3 raw returns):
+    [0] c_ret - Close return (close[t] - close[t-1]) / close[t-1]
+    [1] h_ret - High return (high[t] - close[t-1]) / close[t-1]
+    [2] l_ret - Low return (low[t] - close[t-1]) / close[t-1]
 
 Target:
     regime = 0, 1, ou 2 (3 classes)
@@ -41,73 +41,53 @@ DONNÉES D'ENTRAÎNEMENT - Structure détaillée
 
 INPUT: X_train
 ────────────────
-Shape: (n_train, 25, ~22)
+Shape: (n_train, 25, 5)
   - n_train: Nombre d'échantillons train
   - 25: Longueur séquence (25 timesteps × 5min = 2h05 de contexte)
-  - ~22: Nombre de features (2 metadata + ~20 regime features)
+  - 5: Nombre de colonnes (2 metadata + 3 raw returns)
 
 Colonnes X_train[:, :, i]:
   Index 0-1: METADATA
     [0] timestamp    - Unix timestamp (int64)
     [1] asset_id     - ID asset 0-4 (BTC=0, ETH=1, BNB=2, ADA=3, LTC=4)
 
-  Index 2-8: TREND FEATURES (7)
-    [2]  ma20_slope          - Pente MA20 normalisée
-    [3]  ma50_slope          - Pente MA50 normalisée
-    [4]  regression_slope    - Pente régression linéaire
-    [5]  regression_r2       - R² régression (qualité tendance)
-    [6]  adx                 - Average Directional Index
-    [7]  macd_histogram_norm - Histogram MACD normalisé
-    [8]  hurst_exponent      - Exposant de Hurst (persistance tendance)
+  Index 2-4: RAW RETURNS FEATURES (3)
+    [2] c_ret - Close return
+    [3] h_ret - High return
+    [4] l_ret - Low return
 
-  Index 9-17: VOLATILITY FEATURES (9)
-    [9]  atr_normalized         - ATR normalisé par prix
-    [10] bb_upper               - Bande de Bollinger supérieure
-    [11] bb_middle              - Bande de Bollinger moyenne (SMA20)
-    [12] bb_lower               - Bande de Bollinger inférieure
-    [13] bb_width               - Largeur bandes Bollinger
-    [14] percent_b              - Position prix dans bandes (0-1)
-    [15] realized_volatility    - Volatilité réalisée (std returns)
-    [16] volatility_compression - Ratio volatilité courte/longue
-    [17] range_atr_ratio        - Ratio (High-Low)/ATR
-
-  Index 18-21: VOLUME & MICROSTRUCTURE FEATURES (4)
-    [18] volume_ratio     - Volume / MA20 volume
-    [19] volume_spike     - Détection spike volume (bool)
-    [20] vwap_deviation   - Écart prix vs VWAP
-    [21] obv_derivative   - Dérivée On-Balance Volume
-
-Source: regime_features.py - calculate_all_regime_features()
-Référence complète: regime_features.py lignes 691-718
+Source: prepare_data_regime.py
 
 TARGET: Y_train
 ────────────────
-Shape: (n_train, 8)
+Shape: (n_train, 6)
 
 Colonnes Y_train[:, i]:
   [0] timestamp       - Unix timestamp (int64)
   [1] asset_id        - ID asset 0-4
   [2] regime          - Régime 0-2 (TARGET PRINCIPAL)
-  [3] trend_strength  - Score tendance 0.0-1.0
-  [4] volatility      - Score volatilité 0.0-1.0
-  [5] macd_direction  - Direction MACD Kalman 0/1 (0=DOWN, 1=UP)
-  [6] rsi_direction   - Direction RSI Kalman 0/1
-  [7] cci_direction   - Direction CCI Kalman 0/1
-
-Note: Colonnes 5-7 sont ajoutées APRÈS par train_regime_classifier.py
-      (enrichissement in-place via np.column_stack)
+  [3] macd_dir        - Direction MACD Kalman 0/1 (0=DOWN, 1=UP)
+  [4] rsi_dir         - Direction RSI Kalman 0/1
+  [5] cci_dir         - Direction CCI Kalman 0/1
 
 RÉGIMES (3 classes):
-  0: RANGE LOW VOL  - Consolidation calme (TS < 0.4, VC ≤ P40)
-  1: RANGE HIGH VOL - Consolidation agitée (TS < 0.4, VC > P40)
-  2: TREND          - Tendance (TS > 0.5, any volatility)
-
-  Note: TREND LOW VOL n'existe pas en crypto (TREND = VOLATILITÉ)
+  0: RANGE_LOW_VOL  - Consolidation calme (TS < 0.45, vol ≤ P50)
+  1: RANGE_HIGH_VOL - Consolidation agitée (TS < 0.45, vol > P50)
+  2: TREND          - Tendance (TS ≥ 0.45)
 
 UTILISATION PAR XGBOOST:
   Ce script aggregate les 25 timesteps en 4 statistiques [mean, std, min, max]:
-  X_aggregated shape: (n_train, 4 × 20) = (n_train, 80) features
+  X_aggregated shape: (n_train, 4 × 3) = (n_train, 12) features
   Target: regimes_train = Y_train[:, 2]
+
+ENRICHISSEMENT POST-TRAINING:
+  Après entraînement, Y est enrichi avec les prédictions du modèle:
+  Y enrichi shape: (n, 10) = Y original (6) + regime_pred (1) + probs (3)
+  Nouvelles colonnes:
+    [6] regime_pred - Prédiction du classifieur
+    [7] prob_R0     - Probabilité RANGE_LOW_VOL
+    [8] prob_R1     - Probabilité RANGE_HIGH_VOL
+    [9] prob_R2     - Probabilité TREND
 
 Source dataset: data/prepared/dataset_btc_eth_bnb_ada_ltc_regime.npz
 Généré par: src/prepare_data_regime.py
@@ -219,22 +199,22 @@ def prepare_features_for_xgboost(X: np.ndarray) -> np.ndarray:
     Prépare les features pour XGBoost depuis les séquences.
 
     XGBoost ne prend pas de séquences directement, donc on doit:
-    - Option A: Flatten (12 × features) → grand vecteur
-    - Option B: Aggregate (mean, std, min, max sur 12 steps)
+    - Option A: Flatten (25 × features) → grand vecteur
+    - Option B: Aggregate (mean, std, min, max sur 25 steps)
     - Option C: Keep last timestep only
 
     Pour ce baseline, on utilise Option B (aggregate stats).
 
     Args:
-        X: Séquences (n, 12, features+2) avec [timestamp, asset_id, features...]
+        X: Séquences (n, 25, 5) avec [timestamp, asset_id, c_ret, h_ret, l_ret]
 
     Returns:
-        Features aggregated (n, 4*n_features) = [mean, std, min, max] × features
+        Features aggregated (n, 4*3) = (n, 12) = [mean, std, min, max] × 3 raw returns
     """
     print("\nAggregating sequence features for XGBoost...")
 
     # Extraire les features (skip timestamp et asset_id)
-    features = X[:, :, 2:]  # (n, 12, n_features)
+    features = X[:, :, 2:]  # (n, 25, 3) = [c_ret, h_ret, l_ret]
 
     # Calculer stats sur la dimension temporelle (axis=1)
     feat_mean = np.mean(features, axis=1)  # (n, n_features)
@@ -358,7 +338,7 @@ def evaluate_regime_classifier(
 
     # Prédictions
     y_pred = model.predict(X)
-    y_pred_proba = model.predict_proba(X)  # (n, 4) probabilités
+    y_pred_proba = model.predict_proba(X)  # (n, 3) probabilités pour 3 régimes
 
     # Métriques
     acc = accuracy_score(y, y_pred)
@@ -500,7 +480,7 @@ def main():
     print("ENRICHING DATASET WITH REGIME PREDICTIONS")
     print("="*80)
 
-    # Prédictions (classe) et probabilités (4 colonnes pour 4 régimes)
+    # Prédictions (classe) et probabilités (3 colonnes pour 3 régimes)
     regime_preds_train = regime_classifier.predict(X_train)
     regime_probs_train = regime_classifier.predict_proba(X_train)
 
@@ -511,8 +491,8 @@ def main():
     regime_probs_test = regime_classifier.predict_proba(X_test)
 
     # Enrichir Y avec les prédictions
-    # Y original: (n, 5) - [timestamp, asset_id, regime_label, trend_label, volatility_label]
-    # Y enrichi: (n, 9) - [Y_original, regime_pred, prob_0, prob_1, prob_2]
+    # Y original: (n, 6) - [timestamp, asset_id, regime, macd_dir, rsi_dir, cci_dir]
+    # Y enrichi: (n, 10) - [Y_original (6), regime_pred (1), prob_R0, prob_R1, prob_R2 (3)]
     Y_train_enriched = np.column_stack([
         full_data['Y_train'],
         regime_preds_train.reshape(-1, 1),
