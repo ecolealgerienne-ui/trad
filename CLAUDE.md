@@ -7827,9 +7827,10 @@ Note: "accord" = agreement TOTAL ou PARTIEL avec confirmations
 ## 🎯 CLASSIFICATEUR DE RÉGIMES - Évolution et Migration (2026-01-14)
 
 **Date**: 2026-01-14
-**Statut**: ❌ **DATA LEAKAGE CONFIRMÉ - XGBoost INVALIDE, CNN-LSTM VALIDE**
+**Statut**: ✅ **MODÈLE FINAL ACCEPTÉ - CNN-LSTM 83.46%**
 **Objectif**: Classification multi-classes des régimes de marché pour filtrage conditionnel des trades
-**Résultat Valide**: CNN-LSTM avec raw returns = **86.33%** (seul modèle sans leakage)
+**Résultat Final**: CNN-LSTM avec raw returns = **83.46% test accuracy** (seul modèle sans data leakage)
+**Décision**: ✅ Modèle accepté SANS SMOTE (meilleur trade-off accuracy/TREND recall)
 
 ### Concept - Système Meta-Regime Trading
 
@@ -7892,40 +7893,131 @@ Per-class metrics:
 - ✅ ROC AUC quasi-parfait (97.78%)
 - ❌ **DATA LEAKAGE**: Les features utilisées sont les MÊMES que pour calculer les labels!
 
-#### CNN-LSTM avec Raw Returns (3 features)
+#### CNN-LSTM avec Raw Returns (3 features) - MODÈLE FINAL ACCEPTÉ ✅
 
 **Date**: 2026-01-14 (dataset régénéré après bug fix)
 **Features**: Raw returns uniquement (h_ret, l_ret, c_ret)
 **Architecture**: CNN 1D → LSTM → Dense avec CrossEntropyLoss
-
+**Commande d'entraînement**:
+```bash
+python src/train_regime_classifier.py \
+    --data data/prepared/dataset_btc_eth_bnb_ada_ltc_regime.npz \
+    --epochs 50 \
+    --batch-size 512 \
+    --model cnn-lstm
 ```
-EVALUATION - TEST SET (607,435 samples)
-├── Accuracy:         87.27%
-├── Precision (macro): 86.09%
-├── Recall (macro):    74.14%
-├── F1-Score (macro):  77.82%
-└── ROC AUC (OvR):     95.00%
+
+**RÉSULTATS FINAUX - TEST SET (607,435 samples)**
+```
+├── Accuracy:         83.46%
+├── Precision (macro): 83.22%
+├── Recall (macro):    74.26%
+├── F1-Score (macro):  76.45%
+└── ROC AUC (OvR):     95.37%
 
 Per-class metrics:
-├── Regime 0 (RANGE_LOW_VOL):  Prec=0.906, Rec=0.951, F1=0.928
-├── Regime 1 (RANGE_HIGH_VOL): Prec=0.816, Rec=0.834, F1=0.825
-└── Regime 2 (TREND):          Prec=0.861, Rec=0.440, F1=0.582
+├── Regime 0 (RANGE_LOW_VOL):  Prec=0.9495, Rec=0.8309, F1=0.8862
+├── Regime 1 (RANGE_HIGH_VOL): Prec=0.7028, Rec=0.9183, F1=0.7962
+└── Regime 2 (TREND):          Prec=0.8444, Rec=0.4787, F1=0.6111
+
+Confusion Matrix:
+      R0      R1    R2
+R0: 294276  59775   131
+R1:  13147 191071  3854
+R2:   2509  21042 21630
+
+Train/Val/Test Evolution:
+├── Train: Acc=86.85%, F1=81.03%
+├── Val:   Acc=86.70%, F1=79.24%
+└── Test:  Acc=83.46%, F1=76.45%
 ```
 
 **Observations CNN-LSTM**:
-- ✅ Pas d'overfitting: train 85.35%, val 89.30%, test 87.27% (val > test > train = excellent!)
+- ✅ Pas d'overfitting majeur: train 86.85%, val 86.70%, test 83.46% (gap train/test: -3.4%)
 - ✅ **AUCUN DATA LEAKAGE**: Utilise uniquement raw returns (pas dans formule labels)
-- ⚠️ TREND très difficile: **Recall 44%** (le modèle rate 56% des vraies tendances)
-- ❌ Performance inférieure à XGBoost (-4.2% accuracy) mais c'est le **SEUL résultat VALIDE**
+- ✅ **ROC AUC 95.37%**: Excellente capacité de discrimination
+- ⚠️ TREND difficile: **Recall 47.87%** (le modèle rate 52% des vraies tendances)
+- ⚠️ Principale confusion: TREND → RANGE_HIGH_VOL (21,042 samples)
+- ✅ **MODÈLE ACCEPTÉ**: Meilleur compromis sans data leakage
 
-### Comparaison des Approches (RÉSULTATS FINAUX)
+#### Test SMOTE Oversampling - REJETÉ ❌
 
-| Métrique | XGBoost + 20 Ind. | CNN-LSTM + Raw | **Delta** |
-|----------|-------------------|----------------|-----------|
-| **Test Accuracy** | ~~91.47%~~ | **87.27%** ✅ | -4.20% |
-| **F1 (macro)** | ~~85.90%~~ | **77.82%** ✅ | -8.08% |
-| **ROC AUC** | ~~97.78%~~ | **95.00%** ✅ | -2.78% |
-| **Validité** | ❌ **DATA LEAKAGE** | ✅ **VALIDE** | - |
+**Date**: 2026-01-14
+**Hypothèse**: SMOTE pourrait améliorer le recall TREND (47.87% → 60%+)
+**Configuration testée**: `--use-smote --smote-ratio 0.20`
+
+**Résultats SMOTE (Test Set)**:
+```
+Avec SMOTE (ratio 0.20):
+├── Accuracy:         76.83% (-6.63% vs baseline!)
+├── F1-Score (macro): 71.45%
+├── ROC AUC:          92.05%
+
+Per-class:
+├── RANGE_LOW_VOL: Recall=72.44% (-10.65%!) ❌
+├── RANGE_HIGH_VOL: Recall=88.46% (-2.24%)
+└── TREND:          Recall=50.94% (+3.07%) ✅ petit gain
+```
+
+**Comparaison Baseline vs SMOTE**:
+| Métrique | Sans SMOTE | Avec SMOTE | Delta | Verdict |
+|----------|------------|------------|-------|---------|
+| **Accuracy** | 83.46% | 76.83% | **-6.63%** ❌ | Inacceptable |
+| **TREND Recall** | 47.87% | 50.94% | **+3.07%** ✅ | Trop faible |
+| **RANGE_LOW Recall** | 83.09% | 72.44% | **-10.65%** ❌ | Dégradé |
+| **F1 macro** | 76.45% | 71.45% | **-5.00%** ❌ | Dégradé |
+
+**Décision**: ❌ **SMOTE REJETÉ**
+- Gain TREND trop faible (+3.07% recall)
+- Coût global trop élevé (-6.63% accuracy, -10.65% RANGE_LOW recall)
+- Trade-off inacceptable pour production
+
+---
+
+#### XGBoost Baseline Comparison - DATA LEAKAGE
+
+**Date**: 2026-01-14
+**Configuration**: 20 features agrégées (mean, std, min, max, last) = 100 features
+**Commande testée**:
+```bash
+python src/train_regime_classifier.py --model xgboost
+```
+
+**Résultats XGBoost (Test Set)**:
+```
+├── Accuracy:         82.56%
+├── Precision (macro): 77.74%
+├── Recall (macro):    72.87%
+├── F1-Score (macro):  74.43%
+└── ROC AUC (OvR):     93.52%
+```
+
+**Comparaison Finale XGBoost vs CNN-LSTM**:
+| Métrique | XGBoost | CNN-LSTM | Gagnant | Raison |
+|----------|---------|----------|---------|--------|
+| **Test Accuracy** | 82.56% | **83.46%** ✅ | **CNN-LSTM** | +0.90% |
+| **F1 (macro)** | 74.43% | **76.45%** ✅ | **CNN-LSTM** | +2.02% |
+| **ROC AUC** | 93.52% | **95.37%** ✅ | **CNN-LSTM** | +1.85% |
+| **Validité** | ⚠️ Risque leakage | ✅ **VALIDE** | **CNN-LSTM** | Raw returns uniquement |
+| **Temporal Patterns** | ❌ Non capturés | ✅ **Capturés** | **CNN-LSTM** | LSTM pour séquences |
+
+**Décision**: ✅ **CNN-LSTM CHOISI POUR PRODUCTION**
+- Meilleures métriques sur tous les critères
+- Capture les patterns temporels (séquences de 25 périodes)
+- Aucun risque de data leakage (raw returns uniquement)
+- Modèle sauvegardé: `models/regime/regime_cnn_lstm.pth`
+
+---
+
+### Comparaison des Approches (RÉSULTATS FINAUX - Mise à jour 2026-01-14)
+
+| Métrique | XGBoost (leakage) | XGBoost (valide) | CNN-LSTM + Raw | **Modèle Accepté** |
+|----------|-------------------|------------------|----------------|--------------------|
+| **Test Accuracy** | ~~91.47%~~ | 82.56% | **83.46%** ✅ | **CNN-LSTM** |
+| **F1 (macro)** | ~~85.90%~~ | 74.43% | **76.45%** ✅ | **CNN-LSTM** |
+| **ROC AUC** | ~~97.78%~~ | 93.52% | **95.37%** ✅ | **CNN-LSTM** |
+| **Validité** | ❌ **DATA LEAKAGE** | ⚠️ Risque | ✅ **VALIDE** | **CNN-LSTM** |
+| **SMOTE Testé** | - | - | ❌ Rejeté | Sans SMOTE |
 
 ### Performance par Classe
 
@@ -8064,36 +8156,78 @@ Output: Softmax → 3 probabilités
 
 ### Prochaines Étapes
 
-1. ✅ **Compléter évaluation CNN-LSTM** sur test set → **FAIT** (87.27%)
-2. ✅ **Comparer métriques per-class** → Dataset régénéré, résultats à jour
-3. ✅ **Décider**: → **UTILISER CNN-LSTM** (seul modèle valide, XGBoost a data leakage)
-4. ⏳ **Améliorer détection TREND** → Recall 44% insuffisant (voir section suivante)
+1. ✅ **Compléter évaluation CNN-LSTM** sur test set → **FAIT** (83.46% accuracy)
+2. ✅ **Tester SMOTE oversampling** → **FAIT ET REJETÉ** (trade-off inacceptable)
+3. ✅ **Comparer XGBoost vs CNN-LSTM** → **CNN-LSTM GAGNE** (83.46% vs 82.56%)
+4. ✅ **Décider modèle final** → **CNN-LSTM ACCEPTÉ POUR PRODUCTION**
+5. ✅ **Documentation mise à jour** → Résultats finaux documentés
+6. ⏳ **Intégration dans pipeline de trading** → Prochaine étape
+   - Utiliser probabilités régime pour filtrage conditionnel
+   - Stratégie adaptative selon régime détecté
+7. ⏳ **Monitoring production** → Suivre performance en temps réel
+   - Drift detection des distributions de régimes
+   - Re-entraînement périodique si nécessaire
 
-### Recommandations (MISE À JOUR POST-LEAKAGE - 2026-01-14)
+### Recommandations et Décision Finale (2026-01-14)
 
-**Décision finale**: ✅ **UTILISER CNN-LSTM** (seul modèle valide)
+**Décision finale**: ✅ **CNN-LSTM ACCEPTÉ POUR PRODUCTION** (83.46% test accuracy)
 
-| Critère | XGBoost | CNN-LSTM | Gagnant |
-|---------|---------|----------|---------|
-| Accuracy | ~~91.47%~~ | 87.27% | **CNN-LSTM** (valide) |
-| Validité | ❌ DATA LEAKAGE | ✅ VALIDE | **CNN-LSTM** |
-| Features | Leakage (20 ind.) | Raw returns (3) | **CNN-LSTM** |
+**Commande d'entraînement du modèle accepté**:
+```bash
+python src/train_regime_classifier.py \
+    --data data/prepared/dataset_btc_eth_bnb_ada_ltc_regime.npz \
+    --epochs 50 \
+    --batch-size 512 \
+    --model cnn-lstm
+```
 
-**Pourquoi XGBoost est INVALIDE:**
-- Les 20 features utilisées (adx, atr_normalized, bb_width, etc.) sont les **MÊMES** que celles utilisées pour calculer les labels
-- Le modèle apprend à reconstruire la formule du label → résultat artificiellement gonflé
-- 91.47% accuracy sur dataset corrigé = encore trop bon, encore du leakage
-- 98.95% accuracy (ancien run) = leakage extrême avec dataset non corrigé
+**Performance finale acceptée**:
+```
+Test Set (607,435 samples):
+├── Accuracy:         83.46%
+├── F1-Score (macro): 76.45%
+├── ROC AUC (OvR):    95.37%
 
-**Pourquoi CNN-LSTM est VALIDE:**
-- Utilise uniquement raw returns (h_ret, l_ret, c_ret)
-- Ces features ne sont PAS dans la formule de labeling
-- 87.27% = vraie capacité de prédiction
-- Seul modèle sans data leakage
+Per-class F1:
+├── RANGE_LOW_VOL:  88.62% (excellent)
+├── RANGE_HIGH_VOL: 79.62% (bon)
+└── TREND:          61.11% (acceptable)
 
-**Options abandonnées**:
-- XGBoost avec 20 features (91.47% sur dataset corrigé - DATA LEAKAGE confirmé)
-- XGBoost ancien (98.95% - DATA LEAKAGE extrême + dataset non corrigé)
+Modèle sauvegardé: models/regime/regime_cnn_lstm.pth
+```
+
+**Tableau de décision**:
+| Critère | XGBoost (leakage) | XGBoost (valide) | CNN-LSTM | **Choix Final** |
+|---------|-------------------|------------------|----------|-----------------|
+| Accuracy | ~~91.47%~~ | 82.56% | **83.46%** ✅ | **CNN-LSTM** |
+| Validité | ❌ DATA LEAKAGE | ⚠️ Risque | ✅ **VALIDE** | **CNN-LSTM** |
+| SMOTE | - | - | ❌ Rejeté | Sans SMOTE |
+| F1 macro | ~~85.90%~~ | 74.43% | **76.45%** ✅ | **CNN-LSTM** |
+
+**Pourquoi CNN-LSTM est le MEILLEUR choix:**
+- ✅ Utilise uniquement raw returns (h_ret, l_ret, c_ret) → **AUCUN DATA LEAKAGE**
+- ✅ Capture les patterns temporels via LSTM (séquences de 25 périodes)
+- ✅ Meilleure performance que XGBoost valide (+0.90% accuracy, +2.02% F1)
+- ✅ ROC AUC 95.37% = excellente capacité de discrimination
+- ✅ Pas d'overfitting significatif (gap train/test: -3.4%)
+
+**Pourquoi SMOTE a été REJETÉ:**
+- ❌ Gain TREND trop faible (+3.07% recall seulement)
+- ❌ Coût global trop élevé (-6.63% accuracy, -10.65% RANGE_LOW recall)
+- ❌ Trade-off inacceptable pour production
+
+**Pourquoi XGBoost (20 features) est INVALIDE:**
+- ❌ Les 20 features (adx, atr_normalized, bb_width, etc.) sont **identiques** à celles du labeling
+- ❌ Le modèle apprend à reconstruire la formule → 91.47% artificiel
+- ❌ 98.95% accuracy (ancien run) = leakage extrême avec dataset non corrigé
+
+**Limitation connue acceptée**:
+- ⚠️ TREND Recall 47.87%: Le modèle rate ~52% des vraies tendances
+- ⚠️ Principale confusion: TREND → RANGE_HIGH_VOL (21,042 samples)
+- ✅ **ACCEPTÉ**: Trade-off jugé acceptable car:
+  - TREND ne représente que 7.4% des données
+  - Precision TREND élevée (84.44%) = peu de faux positifs
+  - Alternative SMOTE dégrade trop l'accuracy globale
 
 ---
 
