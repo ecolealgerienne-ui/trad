@@ -7794,6 +7794,240 @@ Note: "accord" = agreement TOTAL ou PARTIEL avec confirmations
 
 ---
 
+## 🎯 CLASSIFICATEUR DE RÉGIMES - Évolution et Migration (2026-01-14)
+
+**Date**: 2026-01-14
+**Statut**: ⏳ **EN COURS - Migration XGBoost → CNN-LSTM**
+**Objectif**: Classification multi-classes des régimes de marché pour filtrage conditionnel des trades
+
+### Concept - Système Meta-Regime Trading
+
+**Architecture 3 étapes**:
+```
+Étape 1: CLASSIFICATION DU RÉGIME
+   - Input: Séquences OHLCV
+   - Output: Probabilités pour 3 classes de régime
+   - Modèle: CNN-LSTM (ou XGBoost baseline)
+
+Étape 2: SÉLECTION DES FEATURES SELON LE RÉGIME
+   - Chaque régime a ses features optimales
+   - Ex: TREND → indicateurs momentum
+   - Ex: RANGE → indicateurs oscillation
+
+Étape 3: STRATÉGIE CONDITIONNELLE
+   - TREND: Suivre la tendance (MACD dominant)
+   - RANGE_HIGH_VOL: Prudence, trades courts
+   - RANGE_LOW_VOL: Mean reversion
+```
+
+### Labels de Régime (3 classes)
+
+| Classe | ID | Description | Seuils |
+|--------|-----|-------------|--------|
+| **RANGE_LOW_VOL** | 0 | Range avec faible volatilité | TS < 0.45 ET Vol < P50 |
+| **RANGE_HIGH_VOL** | 1 | Range avec haute volatilité | TS < 0.45 ET Vol >= P50 |
+| **TREND** | 2 | Tendance claire (up ou down) | TS >= 0.45 |
+
+**Paramètres de labeling** (`regime_labeler.py`):
+- `TS_RANGE_THRESHOLD`: 0.45 (seuil Trend Strength pour TREND)
+- `VC_LOW_PERCENTILE`: 50 (percentile volatilité pour LOW/HIGH)
+- `ROLLING_WINDOW`: 20 (fenêtre pour calculs)
+
+### Historique des Résultats
+
+#### Baseline XGBoost avec Features Computées (~20 features)
+
+**Date**: Janvier 2026 (session précédente)
+**Features**: Features agrégées (mean, std, min, max des returns sur window)
+
+```
+EVALUATION - TEST SET (607,465 samples)
+├── Accuracy:         92.67%
+├── Precision (macro): 90.81%
+├── Recall (macro):    86.28%
+├── F1-Score (macro):  88.27%
+└── ROC AUC (OvR):     98.80%
+
+Per-class metrics:
+├── Regime 0 (RANGE_LOW_VOL):  Prec=0.956, Rec=0.935, F1=0.946
+├── Regime 1 (RANGE_HIGH_VOL): Prec=0.905, Rec=0.946, F1=0.925
+└── Regime 2 (TREND):          Prec=0.863, Rec=0.707, F1=0.777
+```
+
+**Observations XGBoost**:
+- ✅ Excellente performance globale (92.67%)
+- ✅ Très bon sur RANGE classes (F1 ~94%)
+- ⚠️ TREND plus difficile (F1 77.7%, Recall 70.7%)
+- ✅ ROC AUC quasi-parfait (98.8%)
+
+#### CNN-LSTM avec Raw Returns (3 features)
+
+**Date**: 2026-01-14 (session actuelle)
+**Features**: Raw returns uniquement (c_ret, h_ret, l_ret)
+**Architecture**: CNN 1D → LSTM → Dense avec CrossEntropyLoss
+
+```
+TRAINING RESULTS (Early stopping epoch 38)
+├── Train Accuracy: ~91.4%
+├── Val Accuracy:   ~90.0%
+├── Val Loss:       0.2169
+└── Evaluation: INCOMPLET (OOM corrigé)
+```
+
+**Observations CNN-LSTM**:
+- ✅ Entraînement stable (early stopping efficace)
+- ✅ Pas d'overfitting majeur (gap train/val ~1.4%)
+- ⚠️ Performance légèrement inférieure (~91% vs 92.67%)
+- ⚠️ Evaluation test incomplète (bug OOM corrigé)
+
+### Comparaison des Approches
+
+| Aspect | XGBoost + Features | CNN-LSTM + Raw |
+|--------|-------------------|----------------|
+| **Test Accuracy** | **92.67%** | ~91%* |
+| **Val Accuracy** | 93.42% | ~90% |
+| **Features** | ~20 (agrégées) | 3 (raw returns) |
+| **Interprétabilité** | ✅ Haute (feature importance) | ❌ Faible |
+| **Temps inference** | ✅ Rapide | ⚠️ Plus lent |
+| **Complexité** | ⚠️ Feature engineering | ✅ Automatique |
+
+*CNN-LSTM évaluation incomplète
+
+**Delta estimé**: XGBoost +1.5-2% grâce aux features computées
+
+### Bugs Corrigés (Session 2026-01-14)
+
+#### Bug 1: Metadata NPZ comme numpy array
+
+**Erreur**:
+```
+json.decoder.JSONDecodeError: Expecting property name enclosed in double quotes
+```
+
+**Cause**: `data['metadata']` retourne un numpy array, pas une string JSON
+
+**Fix** (`train_regime_classifier.py:301-322`):
+```python
+if 'metadata' in data:
+    meta_raw = data['metadata']
+    if hasattr(meta_raw, 'item'):
+        meta_item = meta_raw.item()
+        if isinstance(meta_item, dict):
+            metadata = meta_item  # Déjà un dict
+        elif isinstance(meta_item, str):
+            metadata = json.loads(meta_item)  # JSON string
+```
+
+**Commit**: `fix: Handle metadata stored as dict in numpy array`
+
+#### Bug 2: Paramètre verbose deprecated
+
+**Erreur**:
+```
+TypeError: ReduceLROnPlateau.__init__() got an unexpected keyword argument 'verbose'
+```
+
+**Cause**: `verbose` deprecated dans PyTorch récent
+
+**Fix**: Retirer `verbose=True` du scheduler
+
+**Commit**: `fix: Remove deprecated verbose param from ReduceLROnPlateau`
+
+#### Bug 3: CUDA Out of Memory
+
+**Erreur**:
+```
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 16.88 GiB
+```
+
+**Cause**: Evaluation chargeait tous les 2.8M samples sur GPU d'un coup
+
+**Fix** (`train_regime_classifier.py:604-627`):
+```python
+# Évaluation par batch
+batch_size = 4096
+for start_idx in range(0, n_samples, batch_size):
+    X_batch = torch.tensor(X[start_idx:end_idx], ...).to(device)
+    logits = model(X_batch)
+    # ... traitement
+    del X_batch, logits
+    torch.cuda.empty_cache()
+```
+
+**Commit**: `fix: Use batched evaluation to avoid CUDA OOM`
+
+### Architecture CNN-LSTM pour Régimes
+
+```python
+# Entrée
+Input: (batch, seq_len, 3)  # 3 features: c_ret, h_ret, l_ret
+
+# Architecture
+CNN 1D (64 filters, kernel=3)
+    ↓
+LayerNorm + ReLU + Dropout
+    ↓
+LSTM (hidden=64, layers=2, bidirectional)
+    ↓
+Dense (128) + ReLU + Dropout
+    ↓
+Output (3)  # 3 classes de régime
+
+# Loss & Activation
+Loss: CrossEntropyLoss (multiclass)
+Output: Softmax → 3 probabilités
+```
+
+### Fichiers du Système Regime
+
+| Fichier | Rôle |
+|---------|------|
+| `src/regime_labeler.py` | Création des labels (3 classes) |
+| `src/prepare_data_regime.py` | Préparation datasets NPZ |
+| `src/train_regime_classifier.py` | Entraînement CNN-LSTM |
+| `src/regime_model.py` | Architecture du modèle |
+| `data/prepared/regime_*.npz` | Datasets préparés |
+
+### Prochaines Étapes
+
+1. ⏳ **Compléter évaluation CNN-LSTM** sur test set
+2. ⏳ **Comparer métriques per-class** (surtout TREND)
+3. ⏳ **Décider**: garder CNN-LSTM ou revenir à XGBoost
+4. ⏳ **Intégrer dans pipeline Meta-Regime** si validé
+
+### Recommandations
+
+**Si priorité = Performance maximale**:
+→ Revenir à XGBoost avec features computées (92.67% prouvé)
+
+**Si priorité = Simplicité**:
+→ Garder CNN-LSTM avec raw returns (91%, pas de feature engineering)
+
+**Compromis possible**:
+→ CNN-LSTM avec features computées (potentiel 93%+, à tester)
+
+### Commandes
+
+```bash
+# Préparer le dataset regime
+python src/prepare_data_regime.py --assets BTC ETH BNB ADA LTC
+
+# Entraîner le classificateur CNN-LSTM
+python src/train_regime_classifier.py \
+    --data data/prepared/regime_train.npz \
+    --val-data data/prepared/regime_val.npz \
+    --epochs 50 \
+    --batch-size 512
+
+# Évaluer sur test set
+python src/train_regime_classifier.py \
+    --data data/prepared/regime_test.npz \
+    --model models/regime_classifier_best.pth \
+    --evaluate-only
+```
+
+---
+
 **Cree par**: Claude Code
-**Derniere MAJ**: 2026-01-04
-**Version**: 4.8 (+ CART Analysis + State Machine V2)
+**Derniere MAJ**: 2026-01-14
+**Version**: 5.0 (+ Regime Classifier Migration)
