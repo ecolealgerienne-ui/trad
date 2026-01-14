@@ -8029,25 +8029,44 @@ Output: Softmax → 3 probabilités
 ### Commandes
 
 ```bash
-# Préparer le dataset regime
+# 1. Préparer le dataset regime (23 features)
 python src/prepare_data_regime.py --assets BTC ETH BNB ADA LTC
 
-# Entraîner le classificateur CNN-LSTM
+# 2a. Entraîner le classificateur XGBoost (RECOMMANDÉ - 92.67% accuracy)
+python src/train_meta_model_regime.py \
+    --data data/prepared/dataset_btc_eth_bnb_ada_ltc_regime.npz \
+    --output-dir models/regime_xgboost
+
+# 2b. OU Entraîner le classificateur CNN-LSTM (86.33% accuracy - NON RECOMMANDÉ)
 python src/train_regime_classifier.py \
     --data data/prepared/regime_train.npz \
     --val-data data/prepared/regime_val.npz \
     --epochs 50 \
     --batch-size 512
-
-# Évaluer sur test set
-python src/train_regime_classifier.py \
-    --data data/prepared/regime_test.npz \
-    --model models/regime_classifier_best.pth \
-    --evaluate-only
 ```
+
+### Script XGBoost: `train_meta_model_regime.py`
+
+**Structure des colonnes X** (shape: n, 25, 25):
+- Colonnes 0-1: metadata (timestamp, asset_id) - ignorées
+- Colonnes 2-4: raw returns (h_ret, l_ret, c_ret) - **EXCLUES**
+- Colonnes 5-24: 20 indicateurs - **UTILISÉES**
+
+**20 Indicateurs utilisés:**
+```
+Trend (7):     ma20_slope, ma50_slope, regression_slope, regression_r2,
+               adx, macd_histogram_norm, hurst_exponent
+Volatility (9): atr_normalized, bb_upper, bb_middle, bb_lower, bb_width,
+               percent_b, realized_volatility, volatility_compression, range_atr_ratio
+Volume (4):    volume_ratio, volume_spike, vwap_deviation, obv_derivative
+```
+
+**Agrégation pour XGBoost:**
+- 5 méthodes: mean, std, min, max, last
+- 20 indicateurs × 5 agrégations = **100 features**
 
 ---
 
 **Cree par**: Claude Code
 **Derniere MAJ**: 2026-01-14
-**Version**: 5.0 (+ Regime Classifier Migration)
+**Version**: 5.1 (+ XGBoost Regime Classifier)
