@@ -298,7 +298,19 @@ def load_regime_dataset(npz_path: Path) -> Dict:
     Y_test = data['Y_test']
     OHLCV_test = data['OHLCV_test']
 
-    metadata = json.loads(str(data['metadata'])) if 'metadata' in data else {}
+    # Metadata peut être un numpy array contenant une string JSON
+    if 'metadata' in data:
+        try:
+            # Essayer .item() d'abord (numpy scalar)
+            metadata = json.loads(data['metadata'].item())
+        except (AttributeError, ValueError):
+            try:
+                # Fallback: str() direct
+                metadata = json.loads(str(data['metadata']))
+            except json.JSONDecodeError:
+                metadata = {}
+    else:
+        metadata = {}
 
     # Extraire les régimes (colonne 2 de Y)
     regimes_train = Y_train[:, 2].astype(int)
