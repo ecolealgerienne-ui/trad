@@ -12,46 +12,67 @@ Pipeline complet:
 DONNÉES D'ENTRAÎNEMENT - Structure détaillée
 ═══════════════════════════════════════════════════════════════════════════════
 
-INPUT: X_train
-────────────────
-Shape: (n_train, 25, ~22)
+INPUT: X_train (Dataset Régime)
+──────────────────────────────
+Shape originale: (n_train, 25, 25)
   - n_train: Nombre d'échantillons train
   - 25: Longueur séquence (25 timesteps × 5min = 2h05 de contexte)
-  - ~22: Nombre de features (2 metadata + ~20 regime features)
+  - 25: Nombre de features (2 metadata + 3 pure signal + 20 regime features)
 
 Colonnes X_train[:, :, i]:
   Index 0-1: METADATA
     [0] timestamp    - Unix timestamp (int64)
     [1] asset_id     - ID asset 0-4 (BTC=0, ETH=1, BNB=2, ADA=3, LTC=4)
 
-  Index 2-8: TREND FEATURES (7)
-    [2]  ma20_slope          - Pente MA20 normalisée
-    [3]  ma50_slope          - Pente MA50 normalisée
-    [4]  regression_slope    - Pente régression linéaire
-    [5]  regression_r2       - R² régression (qualité tendance)
-    [6]  adx                 - Average Directional Index
-    [7]  macd_histogram_norm - Histogram MACD normalisé
-    [8]  hurst_exponent      - Exposant de Hurst (persistance tendance)
+  Index 2-4: PURE SIGNAL FEATURES (3) - Pour modèle direction
+    [2]  h_ret - Rendement High (High - Close_prev) / Close_prev
+    [3]  l_ret - Rendement Low  (Low - Close_prev) / Close_prev
+    [4]  c_ret - Rendement Close (Close - Close_prev) / Close_prev ⭐ UTILISÉ
 
-  Index 9-17: VOLATILITY FEATURES (9)
-    [9]  atr_normalized         - ATR normalisé par prix
-    [10] bb_upper               - Bande de Bollinger supérieure
-    [11] bb_middle              - Bande de Bollinger moyenne (SMA20)
-    [12] bb_lower               - Bande de Bollinger inférieure
-    [13] bb_width               - Largeur bandes Bollinger
-    [14] percent_b              - Position prix dans bandes (0-1)
-    [15] realized_volatility    - Volatilité réalisée (std returns)
-    [16] volatility_compression - Ratio volatilité courte/longue
-    [17] range_atr_ratio        - Ratio (High-Low)/ATR
+  Index 5-11: TREND FEATURES (7) - Pour classification régime
+    [5]  ma20_slope          - Pente MA20 normalisée
+    [6]  ma50_slope          - Pente MA50 normalisée
+    [7]  regression_slope    - Pente régression linéaire
+    [8]  regression_r2       - R² régression (qualité tendance)
+    [9]  adx                 - Average Directional Index
+    [10] macd_histogram_norm - Histogram MACD normalisé
+    [11] hurst_exponent      - Exposant de Hurst (persistance tendance)
 
-  Index 18-21: VOLUME & MICROSTRUCTURE FEATURES (4)
-    [18] volume_ratio     - Volume / MA20 volume
-    [19] volume_spike     - Détection spike volume (bool)
-    [20] vwap_deviation   - Écart prix vs VWAP
-    [21] obv_derivative   - Dérivée On-Balance Volume
+  Index 12-20: VOLATILITY FEATURES (9)
+    [12] atr_normalized         - ATR normalisé par prix
+    [13] bb_upper               - Bande de Bollinger supérieure
+    [14] bb_middle              - Bande de Bollinger moyenne (SMA20)
+    [15] bb_lower               - Bande de Bollinger inférieure
+    [16] bb_width               - Largeur bandes Bollinger
+    [17] percent_b              - Position prix dans bandes (0-1)
+    [18] realized_volatility    - Volatilité réalisée (std returns)
+    [19] volatility_compression - Ratio volatilité courte/longue
+    [20] range_atr_ratio        - Ratio (High-Low)/ATR
+
+  Index 21-24: VOLUME & MICROSTRUCTURE FEATURES (4)
+    [21] volume_ratio     - Volume / MA20 volume
+    [22] volume_spike     - Détection spike volume (bool)
+    [23] vwap_deviation   - Écart prix vs VWAP
+    [24] obv_derivative   - Dérivée On-Balance Volume
+
+EXTRACTION POUR DIRECTION (--indicator macd/rsi/cci):
+─────────────────────────────────────────────────────
+Quand on entraîne pour direction depuis dataset régime:
+
+  MACD et RSI (Close-based):
+    → X_train[:, :, [0, 1, 4]] extrait [timestamp, asset_id, c_ret]
+    → Shape finale: (n_train, 25, 3)
+    → Modèle input: X[:, :, 2:] = c_ret uniquement (1 feature)
+
+  CCI (Typical Price-based = (H+L+C)/3):
+    → X_train[:, :, [0, 1, 2, 3, 4]] extrait [timestamp, asset_id, h_ret, l_ret, c_ret]
+    → Shape finale: (n_train, 25, 5)
+    → Modèle input: X[:, :, 2:] = h_ret, l_ret, c_ret (3 features)
+
+  → C'est l'architecture "Pure Signal" qui donne 92% accuracy
 
 Source: regime_features.py - calculate_all_regime_features()
-Référence complète: regime_features.py lignes 691-718
+Référence: regime_features.py::get_regime_feature_names()
 
 TARGET: Y_train
 ────────────────
@@ -831,12 +852,14 @@ def main():
         # =====================================================================
         # EXTRACTION LABEL DEPUIS DATASET UNIVERSEL (si applicable)
         # =====================================================================
-        # Dataset universel (regime): Y shape (n, 8) avec toutes les directions
-        # Structure: [timestamp, asset_id, regime, ts, vc, macd_dir, rsi_dir, cci_dir]
+        # Dataset universel (regime): Y shape (n, ≥8) avec toutes les directions
+        # Structure de base: [timestamp, asset_id, regime, ts, vc, macd_dir, rsi_dir, cci_dir]
+        # Si enrichi: colonnes supplémentaires après index 7 (regime_pred, probs, etc.)
         logger.info(f"\n🔍 DEBUG - Y shape before extraction: train={Y_train.shape}, val={Y_val.shape}, test={Y_test.shape}")
         is_universal_dataset_extracted = False  # Flag pour éviter écrasement n_outputs_detected
 
-        if Y_train.shape[1] == 8:
+        # Accepter ≥8 colonnes (dataset original ou enrichi)
+        if Y_train.shape[1] >= 8:
             logger.info(f"\n📦 Dataset universel détecté (Y shape: {Y_train.shape})")
 
             # Mapping indicateur -> colonne Y
@@ -856,6 +879,39 @@ def main():
                 Y_test = Y_test[:, [0, 1, col_idx]]
 
                 logger.info(f"  ✅ Y extrait: {Y_train.shape}")
+
+                # =====================================================================
+                # EXTRACTION Pure Signal Features pour modèle Direction
+                # =====================================================================
+                # Dataset régime X: (n, 25, 25) = [timestamp, asset_id, h_ret, l_ret, c_ret, ...]
+                # Indices: 0=timestamp, 1=asset_id, 2=h_ret, 3=l_ret, 4=c_ret
+                #
+                # Features par indicateur (Pure Signal):
+                #   - MACD → c_ret uniquement (1 feature)
+                #   - RSI  → c_ret uniquement (1 feature)
+                #   - CCI  → h_ret, l_ret, c_ret (3 features) car CCI = (TP - MA) / (0.015 * MD)
+                #            où TP = (High + Low + Close) / 3
+                logger.info(f"     X shape avant: train={X_train.shape}, val={X_val.shape}, test={X_test.shape}")
+
+                if args.indicator == 'cci':
+                    # CCI utilise Typical Price = (H+L+C)/3 → besoin h_ret, l_ret, c_ret
+                    # IMPORTANT: Exclure timestamp (0) et asset_id (1) - ne garder que les features pures!
+                    logger.info(f"  🎯 Extraction h_ret, l_ret, c_ret (indices 2,3,4) pour CCI...")
+                    X_train = X_train[:, :, [2, 3, 4]]  # h_ret, l_ret, c_ret uniquement
+                    X_val = X_val[:, :, [2, 3, 4]]
+                    X_test = X_test[:, :, [2, 3, 4]]
+                    features_name = "h_ret, l_ret, c_ret (3 features)"
+                else:
+                    # MACD et RSI utilisent uniquement Close → c_ret
+                    # IMPORTANT: Exclure timestamp (0) et asset_id (1) - ne garder que c_ret!
+                    logger.info(f"  🎯 Extraction c_ret (index 4) pour {args.indicator.upper()}...")
+                    X_train = X_train[:, :, 4:5]  # c_ret uniquement, garder shape 3D
+                    X_val = X_val[:, :, 4:5]
+                    X_test = X_test[:, :, 4:5]
+                    features_name = "c_ret (1 feature)"
+
+                logger.info(f"     X shape après: train={X_train.shape}, val={X_val.shape}, test={X_test.shape}")
+                logger.info(f"  ✅ Features extraites: {features_name}")
 
                 # IMPORTANT: Recalculer n_outputs_detected après extraction
                 # Y shape (n, 3) mais seule la dernière colonne est le label
@@ -1022,7 +1078,8 @@ def main():
         logger.info(f"\n🎯 Mode MULTI-OUTPUT: RSI, CCI, MACD")
 
     # Filtrer les labels si mode single-output (ancien pipeline)
-    if single_indicator and not is_dual_binary:
+    # SKIP si déjà extrait depuis dataset universel (Y a déjà shape (n, 3) avec label en col 2)
+    if single_indicator and not is_dual_binary and not is_universal_dataset_extracted:
         # Ancien pipeline (3 outputs -> 1)
         Y_train = normalize_labels_for_single_output(Y_train, indicator_idx, indicator_name)
         Y_val = normalize_labels_for_single_output(Y_val, indicator_idx, indicator_name)
@@ -1032,6 +1089,10 @@ def main():
         # Le filtrage a réduit Y de (n, 13) à (n, 1)
         n_outputs_detected = Y_train.shape[1]  # Devrait être 1
         logger.info(f"  ✅ n_outputs_detected mis à jour après filtrage single-output: {n_outputs_detected}")
+    elif is_universal_dataset_extracted:
+        # Dataset universel déjà extrait - Y shape (n, 3) = [timestamp, asset_id, label]
+        # Le label est en colonne 2, n_outputs_detected déjà = 1
+        logger.info(f"  ✅ Dataset universel déjà extrait - skip normalize_labels_for_single_output")
 
     logger.info(f"\n📊 Datasets:")
     logger.info(f"  Train: X={X_train.shape}, Y={Y_train.shape}")
@@ -1043,9 +1104,25 @@ def main():
     # =========================================================================
     logger.info("\n2. Création des DataLoaders...")
 
+    # =========================================================================
+    # EXTRACTION LABEL UNIQUEMENT (si Y contient metadata)
+    # =========================================================================
+    # Après extraction dataset universel, Y shape (n, 3) = [timestamp, asset_id, label]
+    # Le modèle attend seulement le label (n, 1), pas les metadata
+    if is_universal_dataset_extracted and Y_train.shape[1] == 3:
+        logger.info(f"  🎯 Extraction colonne label (index 2) depuis Y shape {Y_train.shape}...")
+        Y_train_labels = Y_train[:, 2:3]  # Keep 2D shape (n, 1)
+        Y_val_labels = Y_val[:, 2:3]
+        Y_test_labels = Y_test[:, 2:3]
+        logger.info(f"  ✅ Y labels shape: train={Y_train_labels.shape}, val={Y_val_labels.shape}, test={Y_test_labels.shape}")
+    else:
+        Y_train_labels = Y_train
+        Y_val_labels = Y_val
+        Y_test_labels = Y_test
+
     # Passer les transitions si disponibles (Phase 2.11)
-    train_dataset = IndicatorDataset(X_train, Y_train, T_train)
-    val_dataset = IndicatorDataset(X_val, Y_val, T_val)
+    train_dataset = IndicatorDataset(X_train, Y_train_labels, T_train)
+    val_dataset = IndicatorDataset(X_val, Y_val_labels, T_val)
 
     train_loader = DataLoader(
         train_dataset,

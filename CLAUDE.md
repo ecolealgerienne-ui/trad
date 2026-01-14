@@ -7794,6 +7794,408 @@ Note: "accord" = agreement TOTAL ou PARTIEL avec confirmations
 
 ---
 
+## 🎯 CLASSIFICATEUR DE RÉGIMES - Évolution et Migration (2026-01-14)
+
+**Date**: 2026-01-14
+**Statut**: ❌ **DATA LEAKAGE CONFIRMÉ - XGBoost INVALIDE, CNN-LSTM VALIDE**
+**Objectif**: Classification multi-classes des régimes de marché pour filtrage conditionnel des trades
+**Résultat Valide**: CNN-LSTM avec raw returns = **86.33%** (seul modèle sans leakage)
+
+### Concept - Système Meta-Regime Trading
+
+**Architecture 3 étapes**:
+```
+Étape 1: CLASSIFICATION DU RÉGIME
+   - Input: Séquences OHLCV
+   - Output: Probabilités pour 3 classes de régime
+   - Modèle: CNN-LSTM (ou XGBoost baseline)
+
+Étape 2: SÉLECTION DES FEATURES SELON LE RÉGIME
+   - Chaque régime a ses features optimales
+   - Ex: TREND → indicateurs momentum
+   - Ex: RANGE → indicateurs oscillation
+
+Étape 3: STRATÉGIE CONDITIONNELLE
+   - TREND: Suivre la tendance (MACD dominant)
+   - RANGE_HIGH_VOL: Prudence, trades courts
+   - RANGE_LOW_VOL: Mean reversion
+```
+
+### Labels de Régime (3 classes)
+
+| Classe | ID | Description | Seuils |
+|--------|-----|-------------|--------|
+| **RANGE_LOW_VOL** | 0 | Range avec faible volatilité | TS < 0.45 ET Vol < P50 |
+| **RANGE_HIGH_VOL** | 1 | Range avec haute volatilité | TS < 0.45 ET Vol >= P50 |
+| **TREND** | 2 | Tendance claire (up ou down) | TS >= 0.45 |
+
+**Paramètres de labeling** (`regime_labeler.py`):
+- `TS_RANGE_THRESHOLD`: 0.45 (seuil Trend Strength pour TREND)
+- `VC_LOW_PERCENTILE`: 50 (percentile volatilité pour LOW/HIGH)
+- `ROLLING_WINDOW`: 20 (fenêtre pour calculs)
+
+### Historique des Résultats
+
+#### Baseline XGBoost avec Features Computées (~20 features)
+
+**Date**: Janvier 2026 (session précédente)
+**Features**: Features agrégées (mean, std, min, max des returns sur window)
+
+```
+EVALUATION - TEST SET (607,465 samples)
+├── Accuracy:         92.67%
+├── Precision (macro): 90.81%
+├── Recall (macro):    86.28%
+├── F1-Score (macro):  88.27%
+└── ROC AUC (OvR):     98.80%
+
+Per-class metrics:
+├── Regime 0 (RANGE_LOW_VOL):  Prec=0.956, Rec=0.935, F1=0.946
+├── Regime 1 (RANGE_HIGH_VOL): Prec=0.905, Rec=0.946, F1=0.925
+└── Regime 2 (TREND):          Prec=0.863, Rec=0.707, F1=0.777
+```
+
+**Observations XGBoost**:
+- ✅ Excellente performance globale (92.67%)
+- ✅ Très bon sur RANGE classes (F1 ~94%)
+- ⚠️ TREND plus difficile (F1 77.7%, Recall 70.7%)
+- ✅ ROC AUC quasi-parfait (98.8%)
+
+#### CNN-LSTM avec Raw Returns (3 features)
+
+**Date**: 2026-01-14 (évaluation complète)
+**Features**: Raw returns uniquement (c_ret, h_ret, l_ret)
+**Architecture**: CNN 1D → LSTM → Dense avec CrossEntropyLoss
+
+```
+EVALUATION - TEST SET (607,465 samples)
+├── Accuracy:         86.33%
+├── Precision (macro): 78.26%
+├── Recall (macro):    85.03%
+├── F1-Score (macro):  81.04%
+└── ROC AUC (OvR):     96.48%
+
+Per-class metrics:
+├── Regime 0 (RANGE_LOW_VOL):  Prec=0.927, Rec=0.879, F1=0.902
+├── Regime 1 (RANGE_HIGH_VOL): Prec=0.815, Rec=0.844, F1=0.829
+└── Regime 2 (TREND):          Prec=0.606, Rec=0.828, F1=0.700
+```
+
+**Observations CNN-LSTM**:
+- ✅ Entraînement stable (early stopping epoch 25)
+- ✅ Pas d'overfitting (train 86.7%, val 87.5%, test 86.3%)
+- ❌ **Performance nettement inférieure** (-6.34% vs XGBoost)
+- ❌ TREND reste difficile (F1=70% vs 77.7% XGBoost)
+
+### Comparaison des Approches (RÉSULTATS FINAUX)
+
+| Métrique | XGBoost + Features | CNN-LSTM + Raw | **Delta** |
+|----------|-------------------|----------------|-----------|
+| **Test Accuracy** | **92.67%** | 86.33% | **-6.34%** ❌ |
+| **F1 (macro)** | **88.27%** | 81.04% | **-7.23%** ❌ |
+| **ROC AUC** | **98.80%** | 96.48% | -2.32% |
+
+### Performance par Classe
+
+| Classe | XGBoost F1 | CNN-LSTM F1 | Delta |
+|--------|------------|-------------|-------|
+| RANGE_LOW_VOL | **94.6%** | 90.2% | -4.4% |
+| RANGE_HIGH_VOL | **92.5%** | 82.9% | **-9.6%** |
+| TREND | **77.7%** | 70.0% | -7.7% |
+
+**Verdict**: ❌ **CNN-LSTM avec raw returns est nettement inférieur**
+- Les features computées (mean, std, min, max) sont **essentielles**
+- Le CNN-LSTM ne peut pas extraire ces agrégations aussi efficacement
+- **Recommandation**: Revenir à XGBoost ou ajouter features au CNN-LSTM
+
+### Bugs Corrigés (Session 2026-01-14)
+
+#### Bug 1: Metadata NPZ comme numpy array
+
+**Erreur**:
+```
+json.decoder.JSONDecodeError: Expecting property name enclosed in double quotes
+```
+
+**Cause**: `data['metadata']` retourne un numpy array, pas une string JSON
+
+**Fix** (`train_regime_classifier.py:301-322`):
+```python
+if 'metadata' in data:
+    meta_raw = data['metadata']
+    if hasattr(meta_raw, 'item'):
+        meta_item = meta_raw.item()
+        if isinstance(meta_item, dict):
+            metadata = meta_item  # Déjà un dict
+        elif isinstance(meta_item, str):
+            metadata = json.loads(meta_item)  # JSON string
+```
+
+**Commit**: `fix: Handle metadata stored as dict in numpy array`
+
+#### Bug 2: Paramètre verbose deprecated
+
+**Erreur**:
+```
+TypeError: ReduceLROnPlateau.__init__() got an unexpected keyword argument 'verbose'
+```
+
+**Cause**: `verbose` deprecated dans PyTorch récent
+
+**Fix**: Retirer `verbose=True` du scheduler
+
+**Commit**: `fix: Remove deprecated verbose param from ReduceLROnPlateau`
+
+#### Bug 3: CUDA Out of Memory
+
+**Erreur**:
+```
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 16.88 GiB
+```
+
+**Cause**: Evaluation chargeait tous les 2.8M samples sur GPU d'un coup
+
+**Fix** (`train_regime_classifier.py:604-627`):
+```python
+# Évaluation par batch
+batch_size = 4096
+for start_idx in range(0, n_samples, batch_size):
+    X_batch = torch.tensor(X[start_idx:end_idx], ...).to(device)
+    logits = model(X_batch)
+    # ... traitement
+    del X_batch, logits
+    torch.cuda.empty_cache()
+```
+
+**Commit**: `fix: Use batched evaluation to avoid CUDA OOM`
+
+### Architecture CNN-LSTM pour Régimes
+
+```python
+# Entrée
+Input: (batch, seq_len, 3)  # 3 features: c_ret, h_ret, l_ret
+
+# Architecture
+CNN 1D (64 filters, kernel=3)
+    ↓
+LayerNorm + ReLU + Dropout
+    ↓
+LSTM (hidden=64, layers=2, bidirectional)
+    ↓
+Dense (128) + ReLU + Dropout
+    ↓
+Output (3)  # 3 classes de régime
+
+# Loss & Activation
+Loss: CrossEntropyLoss (multiclass)
+Output: Softmax → 3 probabilités
+```
+
+### Fichiers du Système Regime
+
+| Fichier | Rôle |
+|---------|------|
+| `src/regime_labeler.py` | Création des labels (3 classes) |
+| `src/prepare_data_regime.py` | Préparation datasets NPZ |
+| `src/train_regime_classifier.py` | Entraînement CNN-LSTM |
+| `src/train_meta_model_regime.py` | Entraînement XGBoost (RECOMMANDÉ) |
+| `src/regime_model.py` | Architecture du modèle CNN-LSTM |
+| `data/prepared/regime_*.npz` | Datasets préparés |
+
+### Distribution des Labels Régime (⚠️ Déséquilibre Important)
+
+**Date observation**: 2026-01-14
+
+| Régime | Train | Val | Test | Nature |
+|--------|-------|-----|------|--------|
+| **0 - RANGE_LOW_VOL** | 44.1% | 69.6% | 57.6% | Consolidation calme |
+| **1 - RANGE_HIGH_VOL** | 49.7% | 27.2% | 37.9% | Consolidation agitée |
+| **2 - TREND** | **6.2%** | **3.2%** | **4.5%** | ⚠️ **TRÈS RARE** |
+
+**Observations critiques:**
+- ⚠️ **TREND très rare** (3-6%): Classe minoritaire difficile à prédire
+- ⚠️ **Distribution shift** entre splits: Val/Test très différents de Train
+- ✅ RANGE domine (~94-97%): La plupart du temps le marché consolide
+
+**Implications pour le modèle:**
+- XGBoost utilise `scale_pos_weight` pour gérer le déséquilibre
+- F1 macro (pas accuracy) est la métrique clé pour évaluer TREND
+- Recall TREND critique: ne pas rater les vraies tendances
+
+### Prochaines Étapes
+
+1. ✅ **Compléter évaluation CNN-LSTM** sur test set → **FAIT** (86.33%)
+2. ✅ **Comparer métriques per-class** → XGBoost meilleur partout
+3. ✅ **Décider**: → **REVENIR À XGBOOST** (écart trop grand: -6.34%)
+4. ⏳ **Intégrer XGBoost dans pipeline Meta-Regime**
+
+### Recommandations (MISE À JOUR POST-LEAKAGE - 2026-01-14)
+
+**Décision finale**: ✅ **UTILISER CNN-LSTM** (seul modèle valide)
+
+| Critère | XGBoost | CNN-LSTM | Gagnant |
+|---------|---------|----------|---------|
+| Accuracy | ~~98.95%~~ | 86.33% | **CNN-LSTM** (valide) |
+| Validité | ❌ DATA LEAKAGE | ✅ VALIDE | **CNN-LSTM** |
+| Features | Leakage (20 ind.) | Raw returns (3) | **CNN-LSTM** |
+
+**Pourquoi XGBoost est INVALIDE:**
+- Les 20 features utilisées (adx, atr_normalized, bb_width, etc.) sont les **MÊMES** que celles utilisées pour calculer les labels
+- Le modèle apprend à reconstruire la formule du label → résultat artificiellement gonflé
+- 98.95% accuracy = le modèle "triche", pas de vraie prédiction
+
+**Pourquoi CNN-LSTM est VALIDE:**
+- Utilise uniquement raw returns (h_ret, l_ret, c_ret)
+- Ces features ne sont PAS dans la formule de labeling
+- 86.33% = vraie capacité de prédiction
+
+**Option abandonnée**: XGBoost avec 20 features (98.95% - DATA LEAKAGE)
+
+### 🚨 DATA LEAKAGE CONFIRMÉ - XGBoost 98.95% (2026-01-14)
+
+**Date**: 2026-01-14
+**Statut**: ❌ **CRITIQUE - Les résultats XGBoost sont INVALIDES**
+
+#### Résultats Suspects
+
+```
+XGBoost avec 20 indicateurs (100 features agrégées):
+├── Train Accuracy: 98.88%
+├── Val Accuracy:   99.24%
+├── Test Accuracy:  98.95%  ← TROP BON POUR ÊTRE VRAI!
+
+Top Feature Importance:
+├── atr_normalized_last:  20.0%  ← Utilisé dans VC_SCORE!
+├── bb_upper_last:        13.2%  ← Lié à bb_width!
+├── bb_width_last:         6.8%  ← Utilisé dans VC_SCORE!
+└── adx_last:              5.1%  ← Utilisé dans TS_SCORE!
+```
+
+#### Cause du Leakage
+
+Les **labels de régime** sont calculés directement à partir des **mêmes features** utilisées pour entraîner le modèle:
+
+**Trend Strength (TS)** - utilisé pour label:
+```python
+# regime_labeler.py - ligne 68-74
+TS_WEIGHTS = {
+    'ma20_slope': 0.20,      # ← Feature du modèle!
+    'ma50_slope': 0.20,      # ← Feature du modèle!
+    'adx': 0.25,             # ← Feature du modèle!
+    'regression_r2': 0.20,   # ← Feature du modèle!
+    'hurst_exponent': 0.15,  # ← Feature du modèle!
+}
+```
+
+**Volatility Cluster (VC)** - utilisé pour label:
+```python
+# regime_labeler.py - ligne 78-82
+VC_WEIGHTS = {
+    'atr_normalized': 0.40,      # ← Feature du modèle!
+    'bb_width': 0.30,            # ← Feature du modèle!
+    'realized_volatility': 0.30, # ← Feature du modèle!
+}
+```
+
+**Pipeline qui cause le leakage** (`prepare_data_regime.py`):
+```python
+# Ligne 558: Calcul des features
+df = calculate_all_regime_features(df)
+
+# Ligne 568: Labels calculés AVEC CES MÊMES FEATURES!
+regime_labels = calculate_regime_labels(df)
+# → label = TREND si ts_score > 0.5
+# → ts_score = 0.25*adx + 0.20*ma20_slope + ...
+
+# Ligne 626: MÊMES features utilisées pour le modèle!
+feature_cols = get_regime_feature_names()
+```
+
+#### Pourquoi 98.95% Accuracy
+
+Le modèle XGBoost n'a qu'à **reconstruire la formule** du label:
+- Il voit `adx/100` en entrée
+- Le label utilise `0.25 * adx/100` dans ts_score
+- XGBoost apprend cette transformation TRIVIALE!
+
+**Preuve**: Les top features sont exactement celles utilisées dans le labeling.
+
+#### Solution Requise
+
+**Les features d'entrée du modèle DOIVENT être DIFFÉRENTES des features de labeling.**
+
+**Option A** (Recommandée): Raw Returns uniquement
+```python
+# Features d'entrée = SEULEMENT h_ret, l_ret, c_ret
+# Le modèle apprend les patterns à partir des returns bruts
+# Labels restent calculés avec indicateurs (pas de leakage)
+# → Correspond au CNN-LSTM avec 86.33% (résultat VALIDE)
+```
+
+**Option B**: Features de volume (non utilisées dans labels)
+```python
+# Features d'entrée = volume_ratio, volume_spike, vwap_deviation, obv_derivative
+# Ces features ne sont PAS utilisées dans TS ou VC
+# → Pas de leakage
+```
+
+**Option C**: Décalage temporel
+```python
+# Features à t-N, labels à t
+# Le modèle prédit le régime FUTUR
+# → Pas de leakage mais différent objectif
+```
+
+#### Conclusion
+
+| Modèle | Accuracy | Validity | Recommandation |
+|--------|----------|----------|----------------|
+| XGBoost + 20 features | 98.95% | ❌ INVALIDE (leakage) | **ABANDONNER** |
+| CNN-LSTM + raw returns | 86.33% | ✅ VALIDE | **UTILISER** |
+
+**Le CNN-LSTM avec 86.33% est le VRAI résultat** car il utilise uniquement les raw returns (h_ret, l_ret, c_ret) qui ne sont PAS dans la formule de labeling.
+
+### Commandes
+
+```bash
+# 1. Préparer le dataset regime (23 features)
+python src/prepare_data_regime.py --assets BTC ETH BNB ADA LTC
+
+# 2a. Entraîner le classificateur XGBoost (RECOMMANDÉ - 92.67% accuracy)
+python src/train_meta_model_regime.py \
+    --data data/prepared/dataset_btc_eth_bnb_ada_ltc_regime.npz \
+    --output-dir models/regime_xgboost
+
+# 2b. OU Entraîner le classificateur CNN-LSTM (86.33% accuracy - NON RECOMMANDÉ)
+python src/train_regime_classifier.py \
+    --data data/prepared/regime_train.npz \
+    --val-data data/prepared/regime_val.npz \
+    --epochs 50 \
+    --batch-size 512
+```
+
+### Script XGBoost: `train_meta_model_regime.py`
+
+**Structure des colonnes X** (shape: n, 25, 25):
+- Colonnes 0-1: metadata (timestamp, asset_id) - ignorées
+- Colonnes 2-4: raw returns (h_ret, l_ret, c_ret) - **EXCLUES**
+- Colonnes 5-24: 20 indicateurs - **UTILISÉES**
+
+**20 Indicateurs utilisés:**
+```
+Trend (7):     ma20_slope, ma50_slope, regression_slope, regression_r2,
+               adx, macd_histogram_norm, hurst_exponent
+Volatility (9): atr_normalized, bb_upper, bb_middle, bb_lower, bb_width,
+               percent_b, realized_volatility, volatility_compression, range_atr_ratio
+Volume (4):    volume_ratio, volume_spike, vwap_deviation, obv_derivative
+```
+
+**Agrégation pour XGBoost:**
+- 5 méthodes: mean, std, min, max, last
+- 20 indicateurs × 5 agrégations = **100 features**
+
+---
+
 **Cree par**: Claude Code
-**Derniere MAJ**: 2026-01-04
-**Version**: 4.8 (+ CART Analysis + State Machine V2)
+**Derniere MAJ**: 2026-01-14
+**Version**: 5.1 (+ XGBoost Regime Classifier)

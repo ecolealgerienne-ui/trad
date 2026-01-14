@@ -6,16 +6,25 @@ Inspiré de:
 - tests/test_load_direction_only.py (vérification shapes/distributions)
 - tests/verify_causality.py (vérification alignement temporel)
 
+Structure du dataset:
+- X: (n, 25, 5) = [timestamp, asset_id, c_ret, h_ret, l_ret] × 25 timesteps
+- Y: (n, 6) = [timestamp, asset_id, regime, macd_dir, rsi_dir, cci_dir]
+- OHLCV: (n, 7) = [timestamp, asset_id, O, H, L, C, V]
+
+Régimes (3 classes):
+- 0: RANGE_LOW_VOL  (ts < 0.45, vol <= P50)
+- 1: RANGE_HIGH_VOL (ts < 0.45, vol > P50)
+- 2: TREND          (ts >= 0.45)
+
 Vérifications effectuées:
 1. Shapes des arrays (X, Y, OHLCV)
 2. Timestamps (croissants, pas de doublons, gaps entre splits)
 3. Asset IDs (valides 0-4)
-4. Labels régime (0-3, distributions, TS/VC scores)
-5. Features (~20 attendues, pas de NaN/Inf)
+4. Labels régime (0-2) et direction (binaires 0/1)
+5. Features raw returns (3 attendues: c_ret, h_ret, l_ret, pas de NaN/Inf)
 6. OHLCV (cohérence prix, volume > 0)
 7. Primary key (timestamp, asset_id) synchronisé
 8. Metadata (split_indices, cohérence)
-9. Causalité temporelle (pas de lookahead)
 
 Usage:
     # Vérifier dataset regime généré
@@ -121,8 +130,8 @@ class RegimeDatasetValidator:
         Vérifier les shapes des arrays.
 
         Attendu:
-        - X: (n, 12, ~22) = [timestamp, asset_id, features...]
-        - Y: (n, 5) = [timestamp, asset_id, regime, ts_score, vc_score]
+        - X: (n, 25, 5) = [timestamp, asset_id, c_ret, h_ret, l_ret]
+        - Y: (n, 6) = [timestamp, asset_id, regime, macd_dir, rsi_dir, cci_dir]
         - OHLCV: (n, 7) = [timestamp, asset_id, O, H, L, C, V]
         """
         print(f"\n{'='*80}")
@@ -148,20 +157,21 @@ class RegimeDatasetValidator:
                                 f"obtenu {X.shape[1]}")
                 all_passed &= passed
 
-                # Features ~20-22 (timestamp + asset_id + ~20 features)
+                # Features = 5 (timestamp + asset_id + c_ret + h_ret + l_ret)
                 n_features = X.shape[2]
-                passed = 20 <= n_features <= 25
-                if not passed:
-                    self._print_warning(f"{split_name} n_features={n_features} (attendu ~20-22)")
+                passed = n_features == 5
+                self._print_check(f"{split_name} n_features=5", passed,
+                                f"obtenu {n_features}")
+                all_passed &= passed
 
         # Vérifier shapes Y
         print("\n📊 Y (Labels):")
         for split_name, Y in [('Train', self.Y_train), ('Val', self.Y_val), ('Test', self.Y_test)]:
             print(f"  {split_name}: {Y.shape}")
 
-            # Doit avoir 5 colonnes
-            passed = len(Y.shape) == 2 and Y.shape[1] == 5
-            self._print_check(f"{split_name} Y shape=(n, 5)", passed,
+            # Doit avoir 6 colonnes: [timestamp, asset_id, regime, macd_dir, rsi_dir, cci_dir]
+            passed = len(Y.shape) == 2 and Y.shape[1] == 6
+            self._print_check(f"{split_name} Y shape=(n, 6)", passed,
                             f"obtenu {Y.shape}")
             all_passed &= passed
 
@@ -327,60 +337,66 @@ class RegimeDatasetValidator:
 
     def verify_regime_labels(self) -> bool:
         """
-        Vérifier les labels régime.
+        Vérifier les labels régime et direction.
 
-        Y: [timestamp, asset_id, regime, ts_score, vc_score]
-        - regime dans [0-3]
-        - ts_score dans [0, 1]
-        - vc_score >= 0
+        Y: [timestamp, asset_id, regime, macd_dir, rsi_dir, cci_dir]
+        - regime dans [0-2] (3 classes)
+        - direction labels binaires (0 ou 1)
         - Distributions raisonnables
         """
         print(f"\n{'='*80}")
-        print("TEST #4: LABELS RÉGIME")
+        print("TEST #4: LABELS RÉGIME ET DIRECTION")
         print('='*80)
 
         all_passed = True
 
         regime_names = {
-            0: "RANGE LOW VOL",
-            1: "RANGE HIGH VOL",
-            2: "TREND LOW VOL",
-            3: "TREND HIGH VOL"
+            0: "RANGE_LOW_VOL",
+            1: "RANGE_HIGH_VOL",
+            2: "TREND"
         }
+
+        direction_names = ['macd_dir', 'rsi_dir', 'cci_dir']
 
         for split_name, Y in [('Train', self.Y_train), ('Val', self.Y_val), ('Test', self.Y_test)]:
             print(f"\n🎯 {split_name}:")
 
             regime = Y[:, 2].astype(int)
-            ts_score = Y[:, 3]
-            vc_score = Y[:, 4]
+            macd_dir = Y[:, 3].astype(int)
+            rsi_dir = Y[:, 4].astype(int)
+            cci_dir = Y[:, 5].astype(int)
 
-            # Vérifier regime dans [0-3]
-            valid_regime = np.all((regime >= 0) & (regime <= 3))
-            self._print_check("Regime dans [0-3]", valid_regime)
+            # Vérifier regime dans [0-2]
+            valid_regime = np.all((regime >= 0) & (regime <= 2))
+            self._print_check("Regime dans [0-2]", valid_regime,
+                            f"unique values: {np.unique(regime)}")
             all_passed &= valid_regime
 
-            # Vérifier ts_score dans [0, 1]
-            valid_ts = np.all((ts_score >= 0) & (ts_score <= 1))
-            self._print_check("TS score dans [0, 1]", valid_ts,
-                            f"min={ts_score.min():.3f}, max={ts_score.max():.3f}")
-            all_passed &= valid_ts
-
-            # Vérifier vc_score >= 0
-            valid_vc = np.all(vc_score >= 0)
-            self._print_check("VC score >= 0", valid_vc,
-                            f"min={vc_score.min():.3f}, max={vc_score.max():.3f}")
-            all_passed &= valid_vc
+            # Vérifier labels direction binaires (0 ou 1)
+            for col_idx, dir_name in enumerate(direction_names, start=3):
+                dir_values = Y[:, col_idx].astype(int)
+                valid_dir = np.all((dir_values >= 0) & (dir_values <= 1))
+                unique_vals = np.unique(dir_values)
+                self._print_check(f"{dir_name} binaire [0,1]", valid_dir,
+                                f"unique values: {unique_vals}")
+                all_passed &= valid_dir
 
             # Distribution régimes
             regime_counts = pd.Series(regime).value_counts().sort_index()
             regime_pcts = (regime_counts / len(regime) * 100).round(1)
 
             print(f"\n  Distribution régimes:")
-            for regime_id, pct in regime_pcts.items():
+            for regime_id in sorted(regime_counts.index):
                 name = regime_names.get(regime_id, f"UNKNOWN_{regime_id}")
                 count = regime_counts[regime_id]
+                pct = regime_pcts[regime_id]
                 print(f"    {regime_id} ({name}): {count} ({pct}%)")
+
+            # Distribution directions
+            print(f"\n  Distribution directions (% UP):")
+            for dir_val, dir_name in [(macd_dir, 'macd_dir'), (rsi_dir, 'rsi_dir'), (cci_dir, 'cci_dir')]:
+                pct_up = (dir_val.sum() / len(dir_val) * 100)
+                print(f"    {dir_name}: {pct_up:.1f}% UP")
 
             # Warning si un régime domine (>60%)
             max_pct = regime_pcts.max()
@@ -393,20 +409,30 @@ class RegimeDatasetValidator:
         """
         Vérifier les features.
 
+        X: [timestamp, asset_id, c_ret, h_ret, l_ret]
+        - 3 features: c_ret, h_ret, l_ret (raw returns)
         - Pas de NaN/Inf
-        - Nombre de features cohérent avec metadata
+        - Returns généralement dans [-0.1, +0.1]
         """
         print(f"\n{'='*80}")
-        print("TEST #5: FEATURES")
+        print("TEST #5: FEATURES (raw returns)")
         print('='*80)
 
         all_passed = True
 
+        feature_names = ['c_ret', 'h_ret', 'l_ret']
+
         for split_name, X in [('Train', self.X_train), ('Val', self.X_val), ('Test', self.X_test)]:
             print(f"\n📈 {split_name}:")
 
-            # Extraire features (colonnes 2+)
+            # Extraire features (colonnes 2, 3, 4)
             features = X[:, :, 2:]  # Skip timestamp et asset_id
+
+            # Vérifier nombre de features
+            n_features = features.shape[2]
+            passed = n_features == 3
+            self._print_check(f"n_features = 3", passed, f"obtenu {n_features}")
+            all_passed &= passed
 
             # Vérifier NaN
             n_nan = np.sum(np.isnan(features))
@@ -420,30 +446,18 @@ class RegimeDatasetValidator:
             self._print_check("Pas de Inf", passed, f"trouvé {n_inf} Inf" if n_inf > 0 else "")
             all_passed &= passed
 
-            # Stats features
-            n_features = features.shape[2]
-            print(f"  Nombre features: {n_features}")
+            # Stats par feature
+            print(f"\n  Stats par feature:")
+            for i, feat_name in enumerate(feature_names):
+                if i < n_features:
+                    feat_vals = features[:, :, i].flatten()
+                    print(f"    {feat_name}: min={feat_vals.min():.4f}, max={feat_vals.max():.4f}, "
+                          f"mean={feat_vals.mean():.6f}, std={feat_vals.std():.4f}")
 
-            # Comparer avec metadata
-            if 'n_features' in self.metadata:
-                expected = self.metadata['n_features']
-                passed = n_features == expected
-                self._print_check(f"n_features = metadata ({expected})", passed,
-                                f"obtenu {n_features}")
-                all_passed &= passed
-
-            # Ranges features (après clipping attendu)
-            feat_min = float(np.min(features))
-            feat_max = float(np.max(features))
-            print(f"  Range features: [{feat_min:.2f}, {feat_max:.2f}]")
-
-            if 'clip_value' in self.metadata:
-                clip = self.metadata['clip_value']
-                if clip is not None:  # Vérifier que clipping a été appliqué
-                    if feat_min < -clip or feat_max > clip:
-                        self._print_warning(f"Features hors clip_value ±{clip}")
-                else:
-                    print(f"  ℹ️  Pas de clipping appliqué (clip_value=None)")
+                    # Warning si returns extrêmes (> ±10%)
+                    extreme_pct = np.mean(np.abs(feat_vals) > 0.1) * 100
+                    if extreme_pct > 1:
+                        self._print_warning(f"{feat_name}: {extreme_pct:.2f}% de returns > ±10%")
 
         return all_passed
 

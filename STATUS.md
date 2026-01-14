@@ -32,31 +32,199 @@ python src/prepare_data_regime.py --assets BTC ETH BNB ADA LTC
 
 | Array | Shape | Description |
 |-------|-------|-------------|
-| `X_train` | (n_train, 25, ~22) | Séquences features train (25 timesteps × ~22 features) |
+| `X_train` | (n_train, 25, 25) | Séquences features train (25 timesteps × 25 canaux) |
 | `Y_train` | (n_train, 8) | Labels + metadata train |
 | `OHLCV_train` | (n_train, 7) | Prix OHLCV + metadata train |
-| `X_val` | (n_val, 25, ~22) | Séquences features val |
+| `X_val` | (n_val, 25, 25) | Séquences features val |
 | `Y_val` | (n_val, 8) | Labels + metadata val |
 | `OHLCV_val` | (n_val, 7) | Prix OHLCV + metadata val |
-| `X_test` | (n_test, 25, ~22) | Séquences features test |
+| `X_test` | (n_test, 25, 25) | Séquences features test |
 | `Y_test` | (n_test, 8) | Labels + metadata test |
 | `OHLCV_test` | (n_test, 7) | Prix OHLCV + metadata test |
 
-**Note**: X contient [timestamp, asset_id, ...features] donc shape (n, 25, 2 + n_features_regime).
+**Note**: X contient [timestamp, asset_id, ...features] donc shape (n, 25, 2 + 23 features = 25 canaux).
 
-### Features X (~22 canaux × 25 timesteps)
+### Features X (25 canaux × 25 timesteps)
 
-**Structure**: X[:, :, 0-1] = metadata, X[:, :, 2:] = features de régime
+**Structure**: X[:, :, 0-1] = metadata, X[:, :, 2:24] = features (23 total)
 
 | Index | Feature | Type | Description |
 |-------|---------|------|-------------|
-| 0 | `timestamp` | int64 | Unix timestamp (metadata) |
-| 1 | `asset_id` | int | ID asset 0-4 (metadata) |
-| **2-8** | **Trend features (7)** | float | MA slopes, regression, ADX, Hurst, MACD histogram |
-| **9-17** | **Volatility features (9)** | float | ATR, Bollinger Bands, realized vol, compression, range/ATR ratio |
-| **18-21** | **Volume & microstructure (4)** | float | Volume ratio/spike, VWAP deviation, OBV derivative |
+| **0** | `timestamp` | int64 | Unix timestamp (metadata) |
+| **1** | `asset_id` | int | ID asset 0-4 (metadata) |
+| | | | |
+| | **PURE SIGNAL (3)** | | **Rendements normalisés pour combiner avec régime** |
+| **2** | `h_ret` | float | (High - Close_prev) / Close_prev, clippé ±10% |
+| **3** | `l_ret` | float | (Low - Close_prev) / Close_prev, clippé ±10% |
+| **4** | `c_ret` | float | (Close - Close_prev) / Close_prev, clippé ±10% |
+| | | | |
+| | **TREND (7)** | | **Indicateurs de tendance** |
+| **5** | `ma20_slope` | float | Pente MA20 normalisée |
+| **6** | `ma50_slope` | float | Pente MA50 normalisée |
+| **7** | `regression_slope` | float | Pente régression linéaire (20 périodes) |
+| **8** | `regression_r2` | float | R² de la régression (0-1) |
+| **9** | `adx` | float | ADX normalisé (force de tendance) |
+| **10** | `macd_histogram_norm` | float | MACD histogram normalisé |
+| **11** | `hurst_exponent` | float | Exposant de Hurst (0-1, >0.5=trending) |
+| | | | |
+| | **VOLATILITY (9)** | | **Indicateurs de volatilité** |
+| **12** | `atr_normalized` | float | ATR / Close (volatilité relative) |
+| **13** | `bb_upper` | float | Bande Bollinger supérieure normalisée |
+| **14** | `bb_middle` | float | Bande Bollinger médiane normalisée |
+| **15** | `bb_lower` | float | Bande Bollinger inférieure normalisée |
+| **16** | `bb_width` | float | Largeur Bollinger Bands normalisée |
+| **17** | `percent_b` | float | Position du prix dans les Bollinger (0-1) |
+| **18** | `realized_volatility` | float | Volatilité réalisée (std returns) |
+| **19** | `volatility_compression` | float | Compression/expansion volatilité |
+| **20** | `range_atr_ratio` | float | Range / ATR (mesure de range) |
+| | | | |
+| | **VOLUME & MICROSTRUCTURE (4)** | | **Indicateurs de volume** |
+| **21** | `volume_ratio` | float | Volume / MA(Volume) |
+| **22** | `volume_spike` | float | Détection spike volume (Z-score) |
+| **23** | `vwap_deviation` | float | (Close - VWAP) / VWAP |
+| **24** | `obv_derivative` | float | Dérivée OBV normalisée |
 
-**Total features régime**: ~20 (7 trend + 9 vol + 4 volume) - Voir `regime_features.py`
+**Total**: 2 metadata + 23 features = **25 canaux**
+- Pure Signal: 3 (h_ret, l_ret, c_ret)
+- Trend: 7 (MA slopes, regression, ADX, Hurst, MACD histogram)
+- Volatility: 9 (ATR, Bollinger Bands, realized vol, compression, range/ATR)
+- Volume: 4 (ratio, spike, VWAP deviation, OBV derivative)
+
+**Source**: `regime_features.py` - fonction `get_regime_feature_names()`
+
+---
+
+## 🔬 ANALYSE DES FEATURES POUR CLASSIFICATION RÉGIME
+
+### Rappel: Les 4 régimes à prédire
+
+| Régime | Code | Caractéristiques |
+|--------|------|------------------|
+| RANGE LOW VOL | 0 | Pas de tendance + Volatilité faible |
+| RANGE HIGH VOL | 1 | Pas de tendance + Volatilité haute |
+| TREND LOW VOL | 2 | Tendance claire + Volatilité faible |
+| TREND HIGH VOL | 3 | Tendance claire + Volatilité haute |
+
+**Structure**: 2 dimensions = TREND vs RANGE × HIGH VOL vs LOW VOL
+
+### Features ESSENTIELLES vs REDONDANTES
+
+#### Pour distinguer TREND vs RANGE :
+
+| Feature | Index | Utilité | Essentiel ? |
+|---------|-------|---------|-------------|
+| `adx` | 9 | Mesure directe de la force de tendance | ✅ **OUI** |
+| `regression_slope` | 7 | Direction de tendance | ✅ **OUI** |
+| `regression_r2` | 8 | Qualité de la tendance (linéarité) | ✅ **OUI** |
+| `hurst_exponent` | 11 | Mean-reversion vs trending | ✅ **OUI** |
+| `ma20_slope` | 5 | Pente MA courte | ⚠️ Redondant avec regression |
+| `ma50_slope` | 6 | Pente MA longue | ⚠️ Redondant avec regression |
+| `macd_histogram_norm` | 10 | Momentum | ⚠️ Redondant |
+
+#### Pour distinguer HIGH VOL vs LOW VOL :
+
+| Feature | Index | Utilité | Essentiel ? |
+|---------|-------|---------|-------------|
+| `atr_normalized` | 12 | Mesure directe de volatilité | ✅ **OUI** |
+| `realized_volatility` | 18 | Volatilité historique | ✅ **OUI** |
+| `bb_width` | 16 | Largeur des bandes = volatilité | ⚠️ Redondant avec ATR |
+| `volatility_compression` | 19 | Ratio court/long terme | ⚠️ Utile mais secondaire |
+| `bb_upper/middle/lower` | 13-15 | Niveaux absolus | ❌ Peu utile pour régime |
+| `percent_b` | 17 | Position dans les bandes | ❌ Peu utile pour régime |
+| `range_atr_ratio` | 20 | Range vs ATR | ⚠️ Redondant |
+
+#### VOLUME & MICROSTRUCTURE (4 features) :
+
+| Feature | Index | Utilité pour régime | Essentiel ? |
+|---------|-------|---------------------|-------------|
+| `volume_ratio` | 21 | Volume relatif | ❌ Indirect |
+| `volume_spike` | 22 | Pics de volume | ❌ Indirect |
+| `vwap_deviation` | 23 | Écart au VWAP | ❌ Indirect |
+| `obv_derivative` | 24 | Flux de volume | ❌ Indirect |
+
+#### PURE SIGNAL (3 features) :
+
+| Feature | Index | Utilité pour régime | Essentiel ? |
+|---------|-------|---------------------|-------------|
+| `h_ret` | 2 | Rendement High | ❌ Pour direction, pas régime |
+| `l_ret` | 3 | Rendement Low | ❌ Pour direction, pas régime |
+| `c_ret` | 4 | Rendement Close | ❌ Pour direction, pas régime |
+
+### Conclusion: Features MINIMALES pour régime
+
+**Set minimal (~6 features) qui suffirait pour classifier les 4 régimes :**
+
+```python
+minimal_regime_features = [
+    'adx',                    # TREND vs RANGE (force)
+    'regression_r2',          # TREND vs RANGE (qualité)
+    'hurst_exponent',         # TREND vs RANGE (persistance)
+    'atr_normalized',         # HIGH vs LOW VOL
+    'realized_volatility',    # HIGH vs LOW VOL (confirmation)
+    'volatility_compression', # Transition volatilité
+]
+```
+
+**Les 20 features actuelles (hors Pure Signal) sont REDONDANTES** pour la classification de régime, mais :
+- ✅ Peuvent améliorer la robustesse (plusieurs perspectives)
+- ✅ XGBoost peut apprendre à ignorer les features inutiles (feature importance)
+- ⚠️ Risque de surapprentissage sur seulement 4 classes
+- ⚠️ Volume features peu utiles pour déterminer le régime
+
+### Usage par script
+
+| Script | Features utilisées | Notes |
+|--------|-------------------|-------|
+| `train_regime_classifier.py` | 20 features (TREND + VOL + VOLUME) | Agrégées en [mean, std, min, max] → 80 features XGBoost |
+| `train.py` (direction) | 23 features (inclut Pure Signal) | Séquences complètes pour CNN-LSTM |
+
+---
+
+## ⚠️ EXTRACTION DES FEATURES - Indices vs Noms
+
+### Comment `train_regime_classifier.py` extrait les features
+
+Le script utilise des **indices numériques** (pas des noms de colonnes) car les données sont en format NumPy :
+
+```python
+# Ligne 235 de train_regime_classifier.py
+features = X[:, :, 2:]  # Skip timestamp (index 0) et asset_id (index 1)
+
+# Ligne 174 - Extraction du régime
+regimes_train = Y_train[:, 2].astype(int)  # Colonne 2 = regime
+```
+
+### Garantie de cohérence
+
+**L'ordre des colonnes est garanti par la chaîne de fonctions :**
+
+1. `regime_features.py` → `get_regime_feature_names()` définit l'ordre (lignes 703-733)
+2. `prepare_data_regime.py` → utilise `get_regime_feature_names()` (ligne 606) pour construire X
+3. `train_regime_classifier.py` → extrait `X[:, :, 2:]` (cohérent avec l'ordre défini)
+
+**Code source de l'ordre des features** (`regime_features.py` lignes 703-733) :
+
+```python
+def get_regime_feature_names() -> list:
+    return [
+        # Pure signal features (3)
+        'h_ret', 'l_ret', 'c_ret',
+        # Trend features (7)
+        'ma20_slope', 'ma50_slope', 'regression_slope', 'regression_r2',
+        'adx', 'macd_histogram_norm', 'hurst_exponent',
+        # Volatility features (9)
+        'atr_normalized', 'bb_upper', 'bb_middle', 'bb_lower', 'bb_width', 'percent_b',
+        'realized_volatility', 'volatility_compression', 'range_atr_ratio',
+        # Volume & microstructure features (4)
+        'volume_ratio', 'volume_spike', 'vwap_deviation', 'obv_derivative'
+    ]
+```
+
+### Pourquoi pas de sélection par nom ?
+
+- **NumPy arrays** n'ont pas de noms de colonnes (contrairement à Pandas DataFrames)
+- La cohérence est maintenue par la **fonction unique** `get_regime_feature_names()`
+- Toute modification de l'ordre doit être faite dans cette fonction uniquement
 
 ### Labels Y (8 colonnes) - BASE DATASET
 
@@ -84,6 +252,80 @@ python src/prepare_data_regime.py --assets BTC ETH BNB ADA LTC
 | 4 | `low` | float | Prix bas |
 | 5 | `close` | float | Prix de clôture |
 | 6 | `volume` | float | Volume brut (non normalisé) |
+
+---
+
+## ✅ CORRECTION: Passage de 4 à 3 Régimes
+
+**Date d'analyse**: 2026-01-12
+**Status**: ✅ **CORRIGÉ - Passage à 3 régimes**
+
+### Problème Identifié (Ancien Système à 4 Régimes)
+
+```
+Regime 0 (RANGE LOW VOL):  1,842,381 samples (65.0%)
+Regime 1 (RANGE HIGH VOL):   850,983 samples (30.0%)
+Regime 2 (TREND LOW VOL):      3,325 samples (0.1%)  ← PROBLÈME
+Regime 3 (TREND HIGH VOL):   135,995 samples (4.8%)
+```
+
+### Cause Racine: Fait de Microstructure Crypto
+
+**Le régime "TREND LOW VOL" n'existe pas en crypto** - c'est un fait documenté :
+- Oxford-Man Institute Realized Library
+- BIS Papers 2020
+
+En crypto, **TREND = VOLATILITÉ** par nature. Les grandes tendances sont TOUJOURS accompagnées de forte volatilité.
+
+→ TREND + LOW VOL est **structurellement impossible** (0.1%)
+
+### Solution Implémentée: 3 Régimes
+
+**Nouveau système** (implémenté dans `regime_labeler.py` v2.0) :
+
+| Régime | Code | Conditions | Interprétation |
+|--------|------|------------|----------------|
+| **RANGE LOW VOL** | 0 | TS < 0.4 ET VC ≤ P40 | Marché inactif/dormant |
+| **RANGE HIGH VOL** | 1 | TS < 0.4 ET VC > P40 | Chop violent, piège |
+| **TREND** | 2 | TS > 0.5 (any vol) | **Seul régime exploitable** |
+
+**Paramètres** :
+```python
+TS_TREND_THRESHOLD = 0.5    # TS > 0.5 = TREND (any volatility)
+TS_RANGE_THRESHOLD = 0.4    # TS < 0.4 = RANGE
+VC_LOW_PERCENTILE = 40      # Pour RANGE: VC ≤ P40 = LOW VOL, VC > P40 = HIGH VOL
+```
+
+**Zone neutre** (0.4 ≤ TS ≤ 0.5) : Assigné au régime le plus proche
+
+### Distribution Attendue
+
+| Régime | Distribution Attendue |
+|--------|----------------------|
+| 0 (RANGE LOW VOL) | ~20-30% |
+| 1 (RANGE HIGH VOL) | ~50-60% |
+| 2 (TREND) | ~15-25% |
+
+### Avantages de 3 Régimes
+
+1. ✅ **Reflète la réalité crypto** (TREND = VOL)
+2. ✅ **Distribution équilibrée** (pas de classe à 0.1%)
+3. ✅ **Modèle apprend mieux** (pas de classe fantôme)
+4. ✅ **Interprétation claire** :
+   - Régime 0 : Ne pas trader (marché mort)
+   - Régime 1 : DANGER - chop/whipsaw
+   - Régime 2 : **SEUL régime à trader**
+
+### Fichiers Modifiés
+
+- ✅ `src/regime_labeler.py` - Passage de 4 à 3 classes (version 2.0)
+
+### Prochaine Action
+
+Régénérer le dataset avec le nouveau système à 3 régimes :
+```bash
+python src/prepare_data_regime.py --assets BTC ETH BNB ADA LTC
+```
 
 ---
 

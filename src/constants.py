@@ -17,6 +17,9 @@ CANDLES_PER_DAY = CANDLES_PER_HOUR * 24  # 288 bougies par jour
 # Dataset
 SEQUENCE_LENGTH = 25  # Nombre de timesteps pour l'input (t-25:t) - 2h de contexte
                       # Augmenté à 25 pour stabilité labels (~96% concordance vs 87% à 12)
+REGIME_LOOKAHEAD = 6  # Horizon de prédiction pour labels régime (N=6 = 30 min)
+                      # Label = régime FUTUR sur fenêtre [t+1, t+N]
+                      # Logique: Any TREND → TREND, sinon vote majoritaire
 TRIM_EDGES = 200  # Valeurs à enlever au début + fin (warm-up + artifacts)
                   # Augmenté à 200 pour dual-binary: MACD(~35) + Kalman(~50) + Z-Score(100) + shifts(3) = ~188
 

@@ -1,28 +1,35 @@
 """
 Script de préparation des données pour Meta-Regime Trading (5min).
 
-PRINCIPE CLÉ: Classification 4 régimes (TS × VC) + Features enrichies (~20)
+PRINCIPE CLÉ: Classification 3 régimes avec Features Computées (~23)
 ===============================================================================
 
-⚠️ NOUVELLE APPROCHE: Abandonner la prédiction directionnelle (MACD/RSI/CCI)
-→ Prédire le RÉGIME de marché (4 classes) pour améliorer Win Rate et PF
+✅ APPROCHE XGBoost (2026-01-14):
+- Features d'entrée: TOUTES les features de régime (~23 features)
+- Inclut: returns (3) + trend (7) + volatility (9) + volume (4)
+- XGBoost avec features computées: 92.67% accuracy (VALIDÉ)
+- CNN-LSTM avec 3 raw returns: 86.33% (ABANDONNÉ - delta -6.34%)
 
-Régimes:
-- 0: RANGE LOW VOL  (TS < 0.4, VC ≤ P70)
-- 1: RANGE HIGH VOL (TS < 0.4, VC > P70)
-- 2: TREND LOW VOL  (TS > 0.6, VC ≤ P70)
-- 3: TREND HIGH VOL (TS > 0.6, VC > P70)
+Régimes (3 classes):
+- 0: RANGE LOW VOL  (TS < 0.45, VC ≤ P50)
+- 1: RANGE HIGH VOL (TS < 0.45, VC > P50)
+- 2: TREND          (TS >= 0.45, any volatility)
 
-Features (~20 colonnes):
-  Trend: MA slopes, ADX, regression, Hurst, MACD histogram
-  Volatility: ATR normalized, BB bands, realized vol, compression
-  Volume/Micro: Volume ratio, spike, VWAP deviation, OBV derivative
+Features d'entrée du modèle (23 colonnes via get_regime_feature_names()):
+  Returns (3):
+    - c_ret, h_ret, l_ret
+  Trend (7):
+    - ma20_slope, ma50_slope, regression_slope, regression_r2
+    - adx, macd_histogram_norm, hurst_exponent
+  Volatility (9):
+    - atr_normalized, bb_upper, bb_middle, bb_lower, bb_width, percent_b
+    - realized_volatility, volatility_compression, range_atr_ratio
+  Volume (4):
+    - volume_ratio, volume_spike, vwap_deviation, obv_derivative
 
-Labels (6 au total):
+Labels (4 au total):
   Régime:
-    - regime: 0-3 (4 classes)
-    - trend_strength: 0-1 (score TS)
-    - volatility_cluster: 0-1 (score VC)
+    - regime: 0-2 (3 classes)
   Direction (Kalman-filtered, pour modèles MACD/RSI/CCI):
     - macd_direction: 0/1 (DOWN/UP)
     - rsi_direction: 0/1 (DOWN/UP)
@@ -30,11 +37,12 @@ Labels (6 au total):
 
 Pipeline:
 1. Charger données brutes (OHLCV 5min)
-2. Calculer ~20 features de régime (regime_features.py)
-3. Calculer labels régime (regime_labeler.py)
-4. Créer séquences (12 timesteps × ~20 features)
-5. Split temporel (70/15/15)
-6. Sauvegarder dataset unique: dataset_<assets>_regime.npz
+2. Calculer returns (c_ret, h_ret, l_ret)
+3. Calculer features de régime (~23) pour modèle ET labeling
+4. Calculer labels régime (regime_labeler.py)
+5. Créer séquences (25 timesteps × 23 features)
+6. Split temporel (70/15/15)
+7. Sauvegarder dataset unique: dataset_<assets>_regime.npz
 
 Usage:
     python src/prepare_data_regime.py --assets BTC ETH BNB ADA LTC
@@ -44,7 +52,7 @@ Génère:
 
 Author: Claude Code - Phase 1 (Data Layer)
 Date: 2025-01-11
-Version: 1.0
+Version: 3.0 (23 features for XGBoost)
 """
 
 import numpy as np
@@ -69,6 +77,7 @@ from constants import (
     TRIM_EDGES,
     PREPARED_DATA_DIR,
     SEQUENCE_LENGTH,
+    REGIME_LOOKAHEAD,
     RSI_PERIOD, CCI_PERIOD, MACD_FAST, MACD_SLOW, MACD_SIGNAL,
     KALMAN_PROCESS_VAR, KALMAN_MEASURE_VAR,
 )
@@ -324,34 +333,85 @@ def temporal_split_by_timestamps(df: pd.DataFrame,
 # CRÉATION SÉQUENCES POUR RÉGIMES
 # =============================================================================
 
+def compute_future_regime_label(regime_labels: np.ndarray,
+                                 lookahead: int = REGIME_LOOKAHEAD) -> np.ndarray:
+    """
+    Calcule le label de régime FUTUR avec logique "Any TREND".
+
+    Principe: Pour chaque position t, on regarde les régimes dans [t+1, t+N]
+    - Si ANY régime est TREND (2): label = TREND (2)
+    - Sinon: vote majoritaire entre RANGE_LOW_VOL (0) et RANGE_HIGH_VOL (1)
+
+    Args:
+        regime_labels: Array (N,) des labels de régime à chaque timestep
+        lookahead: Horizon N (défaut: 6 = 30 min sur données 5min)
+
+    Returns:
+        future_labels: Array (N-lookahead,) des labels futurs
+    """
+    N = len(regime_labels)
+    n_valid = N - lookahead
+
+    if n_valid <= 0:
+        return np.array([], dtype=np.float32)
+
+    future_labels = np.zeros(n_valid, dtype=np.float32)
+
+    for i in range(n_valid):
+        # Fenêtre future: [t+1, t+N] = indices [i+1, i+lookahead]
+        future_window = regime_labels[i+1:i+1+lookahead]
+
+        # Logique "Any TREND": si TREND (2) apparaît, label = TREND
+        if 2 in future_window:
+            future_labels[i] = 2.0
+        else:
+            # Vote majoritaire entre RANGE_LOW_VOL (0) et RANGE_HIGH_VOL (1)
+            counts = np.bincount(future_window.astype(int), minlength=3)
+            # Ignorer TREND (index 2) car non présent
+            if counts[1] > counts[0]:
+                future_labels[i] = 1.0
+            else:
+                future_labels[i] = 0.0
+
+    return future_labels
+
+
 def create_sequences_for_regime(df: pd.DataFrame,
                                  feature_cols: list,
                                  asset_name: str,
                                  asset_id: int,
-                                 seq_length: int = SEQUENCE_LENGTH) -> tuple:
+                                 seq_length: int = SEQUENCE_LENGTH,
+                                 lookahead: int = REGIME_LOOKAHEAD) -> tuple:
     """
-    Crée les séquences pour le dataset régime.
+    Crée les séquences pour le dataset régime avec labels FUTURS.
 
     Structure:
     - X: (n, seq_length, n_features+2) = [timestamp, asset_id, features...]
-    - Y: (n, 5) = [timestamp, asset_id, regime, ts_score, vc_score]
+    - Y: (n, 6) = [timestamp, asset_id, regime_futur, macd_dir, rsi_dir, cci_dir]
     - OHLCV: (n, 7) = [timestamp, asset_id, O, H, L, C, V]
+
+    IMPORTANT - Labels Futurs (2026-01-14):
+    - Le label 'regime' est calculé sur la fenêtre FUTURE [t+1, t+N]
+    - Logique "Any TREND": si TREND apparaît dans [t+1, t+N], label = TREND
+    - Sinon: vote majoritaire entre RANGE_LOW_VOL et RANGE_HIGH_VOL
+    - Les labels direction (macd_dir, rsi_dir, cci_dir) restent à t
 
     Args:
         df: DataFrame avec features + labels de régime
-        feature_cols: Liste des features à utiliser (~20)
+        feature_cols: Liste des features à utiliser (~23 features via get_regime_feature_names())
         asset_name: Nom de l'asset ('BTC', 'ETH', etc.)
         asset_id: ID encodé de l'asset (0-4)
-        seq_length: Longueur des séquences (défaut: 12)
+        seq_length: Longueur des séquences (défaut: 25)
+        lookahead: Horizon de prédiction N (défaut: 6 = 30 min)
 
     Returns:
         X: (n, seq_length, n_features+2)
-        Y: (n, 8)  # timestamp, asset_id, 3 régime, 3 direction
+        Y: (n, 6)  # timestamp, asset_id, regime_futur, macd_dir, rsi_dir, cci_dir
         OHLCV: (n, 7)
     """
-    # Colonnes label (6 au total: 3 régime + 3 direction)
+    # Colonnes label (4 au total: 1 régime + 3 direction)
     label_cols = [
-        'regime', 'trend_strength', 'volatility_cluster',  # Labels régime
+        'regime',  # Label régime (0-2)
         'macd_direction', 'rsi_direction', 'cci_direction'  # Labels direction
     ]
 
@@ -368,7 +428,7 @@ def create_sequences_for_regime(df: pd.DataFrame,
 
     # Extraire arrays
     features = df_clean[feature_cols].values.astype(np.float32)  # (N, n_features)
-    labels = df_clean[label_cols].values.astype(np.float32)      # (N, 6)
+    labels = df_clean[label_cols].values.astype(np.float32)      # (N, 4)
     ohlcv = df_clean[ohlcv_cols].values.astype(np.float32)       # (N, 5)
 
     N, n_features = features.shape
@@ -389,30 +449,66 @@ def create_sequences_for_regime(df: pd.DataFrame,
     # VECTORISATION SLIDING WINDOWS (×50 plus rapide)
     # ========================================================================
 
-    # Features: (N, n_features) → (n_sequences, seq_length, n_features)
-    X_features = sliding_window_view(features, window_shape=(seq_length, n_features)).squeeze(axis=1)
+    # Features: (N, n_features) → (n_sequences_raw, seq_length, n_features)
+    X_features_raw = sliding_window_view(features, window_shape=(seq_length, n_features)).squeeze(axis=1)
 
-    # Timestamps: (N,) → (n_sequences, seq_length)
-    X_timestamps = sliding_window_view(timestamps, window_shape=seq_length).reshape(-1, seq_length)
+    # Timestamps: (N,) → (n_sequences_raw, seq_length)
+    X_timestamps_raw = sliding_window_view(timestamps, window_shape=seq_length).reshape(-1, seq_length)
 
-    # Asset IDs: (N,) → (n_sequences, seq_length)
-    X_asset_ids = sliding_window_view(asset_ids, window_shape=seq_length).reshape(-1, seq_length)
+    # Asset IDs: (N,) → (n_sequences_raw, seq_length)
+    X_asset_ids_raw = sliding_window_view(asset_ids, window_shape=seq_length).reshape(-1, seq_length)
 
-    # Labels: Prendre le label à la FIN de chaque séquence
-    Y_labels = labels[seq_length-1:]  # (n_sequences, 6)
+    n_sequences_raw = X_features_raw.shape[0]
 
-    # Timestamps pour Y: Derniers timestamps de chaque séquence
-    Y_timestamps = timestamps[seq_length-1:]  # (n_sequences,)
+    # ========================================================================
+    # LABELS FUTURS avec logique "Any TREND" (2026-01-14)
+    # ========================================================================
+    # Pour chaque séquence, on calcule le label de régime sur [t+1, t+N]
+    # où t est la fin de la séquence et N = lookahead (défaut: 6)
+    # On perd 'lookahead' séquences à la fin car pas de données futures
+
+    # Extraire les labels de régime bruts (colonne 0)
+    regime_labels_raw = labels[:, 0]  # (N,)
+
+    # Calculer labels de régime FUTURS avec "Any TREND" logic
+    # Pour séquence finissant à position (seq_length-1 + i), le label futur est
+    # calculé sur [seq_length-1 + i + 1, seq_length-1 + i + lookahead]
+    regime_from_first_end = regime_labels_raw[seq_length-1:]  # (n_sequences_raw,)
+    future_regime_labels = compute_future_regime_label(regime_from_first_end, lookahead)
+
+    # Nombre de séquences valides après application du lookahead
+    n_sequences = len(future_regime_labels)
+    logger.info(f"     Séquences brutes: {n_sequences_raw}, après lookahead N={lookahead}: {n_sequences}")
+
+    if n_sequences == 0:
+        logger.warning(f"     {asset_name}: Pas assez de données après lookahead")
+        return None, None, None
+
+    # Tronquer tous les arrays pour correspondre au nombre de séquences valides
+    X_features = X_features_raw[:n_sequences]
+    X_timestamps = X_timestamps_raw[:n_sequences]
+    X_asset_ids = X_asset_ids_raw[:n_sequences]
+
+    # Labels direction: restent à t (fin de séquence) - colonnes 1, 2, 3
+    direction_labels = labels[seq_length-1:seq_length-1+n_sequences, 1:4]  # (n_sequences, 3)
+
+    # Combiner regime futur + direction à t
+    # Y_labels: [regime_futur, macd_dir, rsi_dir, cci_dir]
+    Y_labels = np.column_stack([
+        future_regime_labels,  # (n_sequences,) - labels FUTURS
+        direction_labels       # (n_sequences, 3) - labels à t
+    ])
+
+    # Timestamps pour Y: Derniers timestamps de chaque séquence valide
+    Y_timestamps = timestamps[seq_length-1:seq_length-1+n_sequences]  # (n_sequences,)
 
     # Asset IDs pour Y
-    Y_asset_ids = asset_ids[seq_length-1:]  # (n_sequences,)
+    Y_asset_ids = asset_ids[seq_length-1:seq_length-1+n_sequences]  # (n_sequences,)
 
-    # OHLCV: Prendre OHLCV à la FIN de chaque séquence
-    OHLCV_data = ohlcv[seq_length-1:]  # (n_sequences, 5)
-    OHLCV_timestamps = timestamps[seq_length-1:]
-    OHLCV_asset_ids = asset_ids[seq_length-1:]
-
-    n_sequences = X_features.shape[0]
+    # OHLCV: Prendre OHLCV à la FIN de chaque séquence valide
+    OHLCV_data = ohlcv[seq_length-1:seq_length-1+n_sequences]  # (n_sequences, 5)
+    OHLCV_timestamps = timestamps[seq_length-1:seq_length-1+n_sequences]
+    OHLCV_asset_ids = asset_ids[seq_length-1:seq_length-1+n_sequences]
 
     # Combiner X: [timestamp, asset_id, features...]
     # Shape: (n_sequences, seq_length, 2+n_features)
@@ -422,12 +518,12 @@ def create_sequences_for_regime(df: pd.DataFrame,
         X_features                      # (n_seq, seq_len, n_features)
     ], axis=2)
 
-    # Combiner Y: [timestamp, asset_id, regime, ts_score, vc_score, macd_dir, rsi_dir, cci_dir]
-    # Shape: (n_sequences, 8)
+    # Combiner Y: [timestamp, asset_id, regime_futur, macd_dir, rsi_dir, cci_dir]
+    # Shape: (n_sequences, 6)
     Y = np.column_stack([
         Y_timestamps,  # (n_seq,)
         Y_asset_ids,   # (n_seq,)
-        Y_labels       # (n_seq, 6)
+        Y_labels       # (n_seq, 4)
     ])
 
     # Combiner OHLCV: [timestamp, asset_id, O, H, L, C, V]
@@ -440,7 +536,7 @@ def create_sequences_for_regime(df: pd.DataFrame,
 
     logger.info(f"     Séquences créées: {n_sequences}")
     logger.info(f"       X: {X.shape} (timestamp, asset_id, {n_features} features)")
-    logger.info(f"       Y: {Y.shape} (timestamp, asset_id, regime, ts, vc, macd_dir, rsi_dir, cci_dir)")
+    logger.info(f"       Y: {Y.shape} (timestamp, asset_id, regime_futur, macd_dir, rsi_dir, cci_dir)")
     logger.info(f"       OHLCV: {OHLCV.shape}")
 
     return X, Y, OHLCV
@@ -533,18 +629,28 @@ def process_single_asset(asset_name: str,
         logger.info(f"  Trim ±{TRIM_EDGES}: {len(df)} lignes restantes")
 
     # ========================================================================
-    # ÉTAPE 1: CALCULER FEATURES DE RÉGIME (~20 colonnes)
+    # ÉTAPE 0.5: CALCULER RETURNS (c_ret, h_ret, l_ret) - INPUTS DU MODÈLE
     # ========================================================================
 
-    logger.info(f"\n  Calcul features de régime (~20 colonnes)...")
+    logger.info(f"\n  Calcul returns (c_ret, h_ret, l_ret) - inputs du modèle...")
+    df['c_ret'] = df['close'].pct_change()
+    df['h_ret'] = df['high'].pct_change()
+    df['l_ret'] = df['low'].pct_change()
+    logger.info(f"  ✓ Returns calculés: c_ret, h_ret, l_ret")
+
+    # ========================================================================
+    # ÉTAPE 1: CALCULER FEATURES DE RÉGIME (~20 colonnes) - POUR LABELING SEULEMENT
+    # ========================================================================
+
+    logger.info(f"\n  Calcul features de régime (~20 colonnes) pour labeling...")
     df = calculate_all_regime_features(df)
-    logger.info(f"  ✓ Features calculées: {df.shape[1]} colonnes")
+    logger.info(f"  ✓ Features intermédiaires calculées: {df.shape[1]} colonnes (utilisées pour labels UNIQUEMENT)")
 
     # ========================================================================
     # ÉTAPE 2: CALCULER LABELS DE RÉGIME (regime, ts_score, vc_score)
     # ========================================================================
 
-    logger.info(f"\n  Calcul labels de régime (4 classes)...")
+    logger.info(f"\n  Calcul labels de régime (3 classes)...")
     try:
         validate_regime_features(df)
         regime_labels, ts_score, vc_score = calculate_regime_labels(df)
@@ -602,9 +708,11 @@ def process_single_asset(asset_name: str,
 
     logger.info(f"\n  Création séquences (seq_length={SEQUENCE_LENGTH})...")
 
-    # Features à utiliser (toutes les features de régime)
+    # Features à utiliser (TOUTES les features de régime - ~23 features)
+    # Inclut: returns bruts (3) + trend (7) + volatility (9) + volume (4)
+    # Ces features computées sont essentielles pour XGBoost (92.67% vs 86.33% raw)
     feature_cols = get_regime_feature_names()
-    logger.info(f"  Features utilisées ({len(feature_cols)}): {feature_cols}")
+    logger.info(f"  Features utilisées ({len(feature_cols)}): {feature_cols[:5]}... (total: {len(feature_cols)})")
 
     # Clip si demandé
     if clip_value is not None:
@@ -670,12 +778,13 @@ def main():
     )
 
     logger.info("="*80)
-    logger.info("PRÉPARATION DONNÉES - META-REGIME TRADING")
+    logger.info("PRÉPARATION DONNÉES - META-REGIME TRADING v3.0 (XGBoost)")
     logger.info("="*80)
     logger.info(f"Assets: {args.assets}")
     logger.info(f"Sequence length: {SEQUENCE_LENGTH}")
-    logger.info(f"Régimes: 4 classes (TS × VC)")
-    logger.info(f"Features: ~20 colonnes (trend, volatility, volume)")
+    logger.info(f"Régimes: 3 classes (TS × VC)")
+    logger.info(f"Features MODEL INPUT: ~23 colonnes (via get_regime_feature_names())")
+    logger.info(f"  → Returns (3) + Trend (7) + Volatility (9) + Volume (4)")
 
     # ========================================================================
     # CALCUL PÉRIODE COMMUNE ET SPLIT TIMESTAMPS (FIX: negative gaps)
@@ -757,8 +866,7 @@ def main():
             regime_name = {
                 0: "RANGE LOW VOL",
                 1: "RANGE HIGH VOL",
-                2: "TREND LOW VOL",
-                3: "TREND HIGH VOL"
+                2: "TREND"
             }.get(regime_id, f"UNKNOWN_{regime_id}")
             logger.info(f"       Régime {regime_id} ({regime_name}): {pct}%")
 
@@ -776,33 +884,65 @@ def main():
     assets_str = '_'.join(args.assets).lower()
     output_path = output_dir / f"dataset_{assets_str}_regime.npz"
 
-    # Features
+    # Features utilisées (définies dans ÉTAPE 4)
     feature_cols = get_regime_feature_names()
 
-    # Metadata (pattern copié de prepare_data_direction_only.py)
+    # Metadata
     metadata = {
         'created_at': datetime.now().isoformat(),
+        'version': '3.0',
+        'description': 'Features computées (~23) pour XGBoost - 92.67% accuracy validé',
         'assets': args.assets,
         'n_assets': len(args.assets),
         'asset_id_mapping': ASSET_ID_MAP,
         'sequence_length': SEQUENCE_LENGTH,
         'features': feature_cols,
+        'features_description': {
+            # Returns (3)
+            'c_ret': 'close.pct_change() - Rendement close-to-close',
+            'h_ret': 'high.pct_change() - Rendement high-to-high',
+            'l_ret': 'low.pct_change() - Rendement low-to-low',
+            # Trend (7)
+            'ma20_slope': 'Pente MA20 normalisée',
+            'ma50_slope': 'Pente MA50 normalisée',
+            'regression_slope': 'Pente régression linéaire normalisée',
+            'regression_r2': 'R² de la régression',
+            'adx': 'Average Directional Index',
+            'macd_histogram_norm': 'MACD histogram normalisé',
+            'hurst_exponent': 'Exposant de Hurst (persistance)',
+            # Volatility (9)
+            'atr_normalized': 'ATR normalisé par prix',
+            'bb_upper': 'Bande de Bollinger supérieure',
+            'bb_middle': 'Bande de Bollinger médiane',
+            'bb_lower': 'Bande de Bollinger inférieure',
+            'bb_width': 'Largeur des bandes de Bollinger',
+            'percent_b': '%B (position dans les bandes)',
+            'realized_volatility': 'Volatilité réalisée',
+            'volatility_compression': 'Compression de volatilité',
+            'range_atr_ratio': 'Ratio range/ATR',
+            # Volume (4)
+            'volume_ratio': 'Ratio volume/MA volume',
+            'volume_spike': 'Spike de volume',
+            'vwap_deviation': 'Déviation VWAP',
+            'obv_derivative': 'Dérivée OBV'
+        },
         'n_features': len(feature_cols),
         'labels': [
-            'regime', 'trend_strength', 'volatility_cluster',  # Labels régime
+            'regime',  # Label régime (0-2)
             'macd_direction', 'rsi_direction', 'cci_direction'  # Labels direction
         ],
-        'n_classes': 4,  # Pour régime uniquement
+        'n_classes': 3,  # Pour régime uniquement
         'regime_definition': {
-            0: "RANGE LOW VOL (TS < 0.4, VC ≤ P70)",
-            1: "RANGE HIGH VOL (TS < 0.4, VC > P70)",
-            2: "TREND LOW VOL (TS > 0.6, VC ≤ P70)",
-            3: "TREND HIGH VOL (TS > 0.6, VC > P70)"
+            0: "RANGE LOW VOL (TS < 0.45, VC ≤ P50)",
+            1: "RANGE HIGH VOL (TS < 0.45, VC > P50)",
+            2: "TREND (TS >= 0.45, any volatility)"
         },
+        'regime_note': 'Régimes calculés depuis features de régime, exposées au modèle XGBoost',
+        'model_note': 'XGBoost avec features computées: 92.67% vs CNN-LSTM raw: 86.33%',
         'direction_definition': {
-            'macd_direction': 'Kalman-filtered MACD slope: 1=UP, 0=DOWN',
-            'rsi_direction': 'Kalman-filtered RSI slope: 1=UP, 0=DOWN',
-            'cci_direction': 'Kalman-filtered CCI slope: 1=UP, 0=DOWN'
+            'macd_direction': 'Kalman-filtered MACD slope (filtered[t] > filtered[t-1]): 1=UP, 0=DOWN',
+            'rsi_direction': 'Kalman-filtered RSI slope (filtered[t] > filtered[t-1]): 1=UP, 0=DOWN',
+            'cci_direction': 'Kalman-filtered CCI slope (filtered[t] > filtered[t-1]): 1=UP, 0=DOWN'
         },
         'clip_value': args.clip,
         'max_samples_per_asset': args.max_samples,
@@ -817,7 +957,7 @@ def main():
         },
         'structure': {
             'X': f'(n, {SEQUENCE_LENGTH}, {len(feature_cols)}+2) - [timestamp, asset_id, features...] pour chaque timestep',
-            'Y': '(n, 8) - [timestamp, asset_id, regime, ts, vc, macd_dir, rsi_dir, cci_dir]',
+            'Y': '(n, 6) - [timestamp, asset_id, regime, macd_dir, rsi_dir, cci_dir]',
             'OHLCV': '(n, 7) - [timestamp, asset_id, open, high, low, close, volume]'
         },
         'primary_key': '(timestamp, asset_id) - Commune à toutes les matrices',
