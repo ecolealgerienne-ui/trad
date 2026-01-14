@@ -333,18 +333,68 @@ def temporal_split_by_timestamps(df: pd.DataFrame,
 # CRÉATION SÉQUENCES POUR RÉGIMES
 # =============================================================================
 
+def compute_future_regime_label(regime_labels: np.ndarray,
+                                 lookahead: int = REGIME_LOOKAHEAD) -> np.ndarray:
+    """
+    Calcule le label de régime FUTUR avec logique "Any TREND".
+
+    Principe: Pour chaque position t, on regarde les régimes dans [t+1, t+N]
+    - Si ANY régime est TREND (2): label = TREND (2)
+    - Sinon: vote majoritaire entre RANGE_LOW_VOL (0) et RANGE_HIGH_VOL (1)
+
+    Args:
+        regime_labels: Array (N,) des labels de régime à chaque timestep
+        lookahead: Horizon N (défaut: 6 = 30 min sur données 5min)
+
+    Returns:
+        future_labels: Array (N-lookahead,) des labels futurs
+    """
+    N = len(regime_labels)
+    n_valid = N - lookahead
+
+    if n_valid <= 0:
+        return np.array([], dtype=np.float32)
+
+    future_labels = np.zeros(n_valid, dtype=np.float32)
+
+    for i in range(n_valid):
+        # Fenêtre future: [t+1, t+N] = indices [i+1, i+lookahead]
+        future_window = regime_labels[i+1:i+1+lookahead]
+
+        # Logique "Any TREND": si TREND (2) apparaît, label = TREND
+        if 2 in future_window:
+            future_labels[i] = 2.0
+        else:
+            # Vote majoritaire entre RANGE_LOW_VOL (0) et RANGE_HIGH_VOL (1)
+            counts = np.bincount(future_window.astype(int), minlength=3)
+            # Ignorer TREND (index 2) car non présent
+            if counts[1] > counts[0]:
+                future_labels[i] = 1.0
+            else:
+                future_labels[i] = 0.0
+
+    return future_labels
+
+
 def create_sequences_for_regime(df: pd.DataFrame,
                                  feature_cols: list,
                                  asset_name: str,
                                  asset_id: int,
-                                 seq_length: int = SEQUENCE_LENGTH) -> tuple:
+                                 seq_length: int = SEQUENCE_LENGTH,
+                                 lookahead: int = REGIME_LOOKAHEAD) -> tuple:
     """
-    Crée les séquences pour le dataset régime.
+    Crée les séquences pour le dataset régime avec labels FUTURS.
 
     Structure:
     - X: (n, seq_length, n_features+2) = [timestamp, asset_id, features...]
-    - Y: (n, 6) = [timestamp, asset_id, regime, macd_dir, rsi_dir, cci_dir]
+    - Y: (n, 6) = [timestamp, asset_id, regime_futur, macd_dir, rsi_dir, cci_dir]
     - OHLCV: (n, 7) = [timestamp, asset_id, O, H, L, C, V]
+
+    IMPORTANT - Labels Futurs (2026-01-14):
+    - Le label 'regime' est calculé sur la fenêtre FUTURE [t+1, t+N]
+    - Logique "Any TREND": si TREND apparaît dans [t+1, t+N], label = TREND
+    - Sinon: vote majoritaire entre RANGE_LOW_VOL et RANGE_HIGH_VOL
+    - Les labels direction (macd_dir, rsi_dir, cci_dir) restent à t
 
     Args:
         df: DataFrame avec features + labels de régime
@@ -352,10 +402,11 @@ def create_sequences_for_regime(df: pd.DataFrame,
         asset_name: Nom de l'asset ('BTC', 'ETH', etc.)
         asset_id: ID encodé de l'asset (0-4)
         seq_length: Longueur des séquences (défaut: 25)
+        lookahead: Horizon de prédiction N (défaut: 6 = 30 min)
 
     Returns:
         X: (n, seq_length, n_features+2)
-        Y: (n, 6)  # timestamp, asset_id, regime, macd_dir, rsi_dir, cci_dir
+        Y: (n, 6)  # timestamp, asset_id, regime_futur, macd_dir, rsi_dir, cci_dir
         OHLCV: (n, 7)
     """
     # Colonnes label (4 au total: 1 régime + 3 direction)
@@ -398,30 +449,66 @@ def create_sequences_for_regime(df: pd.DataFrame,
     # VECTORISATION SLIDING WINDOWS (×50 plus rapide)
     # ========================================================================
 
-    # Features: (N, n_features) → (n_sequences, seq_length, n_features)
-    X_features = sliding_window_view(features, window_shape=(seq_length, n_features)).squeeze(axis=1)
+    # Features: (N, n_features) → (n_sequences_raw, seq_length, n_features)
+    X_features_raw = sliding_window_view(features, window_shape=(seq_length, n_features)).squeeze(axis=1)
 
-    # Timestamps: (N,) → (n_sequences, seq_length)
-    X_timestamps = sliding_window_view(timestamps, window_shape=seq_length).reshape(-1, seq_length)
+    # Timestamps: (N,) → (n_sequences_raw, seq_length)
+    X_timestamps_raw = sliding_window_view(timestamps, window_shape=seq_length).reshape(-1, seq_length)
 
-    # Asset IDs: (N,) → (n_sequences, seq_length)
-    X_asset_ids = sliding_window_view(asset_ids, window_shape=seq_length).reshape(-1, seq_length)
+    # Asset IDs: (N,) → (n_sequences_raw, seq_length)
+    X_asset_ids_raw = sliding_window_view(asset_ids, window_shape=seq_length).reshape(-1, seq_length)
 
-    # Labels: Prendre le label à la FIN de chaque séquence
-    Y_labels = labels[seq_length-1:]  # (n_sequences, 6)
+    n_sequences_raw = X_features_raw.shape[0]
 
-    # Timestamps pour Y: Derniers timestamps de chaque séquence
-    Y_timestamps = timestamps[seq_length-1:]  # (n_sequences,)
+    # ========================================================================
+    # LABELS FUTURS avec logique "Any TREND" (2026-01-14)
+    # ========================================================================
+    # Pour chaque séquence, on calcule le label de régime sur [t+1, t+N]
+    # où t est la fin de la séquence et N = lookahead (défaut: 6)
+    # On perd 'lookahead' séquences à la fin car pas de données futures
+
+    # Extraire les labels de régime bruts (colonne 0)
+    regime_labels_raw = labels[:, 0]  # (N,)
+
+    # Calculer labels de régime FUTURS avec "Any TREND" logic
+    # Pour séquence finissant à position (seq_length-1 + i), le label futur est
+    # calculé sur [seq_length-1 + i + 1, seq_length-1 + i + lookahead]
+    regime_from_first_end = regime_labels_raw[seq_length-1:]  # (n_sequences_raw,)
+    future_regime_labels = compute_future_regime_label(regime_from_first_end, lookahead)
+
+    # Nombre de séquences valides après application du lookahead
+    n_sequences = len(future_regime_labels)
+    logger.info(f"     Séquences brutes: {n_sequences_raw}, après lookahead N={lookahead}: {n_sequences}")
+
+    if n_sequences == 0:
+        logger.warning(f"     {asset_name}: Pas assez de données après lookahead")
+        return None, None, None
+
+    # Tronquer tous les arrays pour correspondre au nombre de séquences valides
+    X_features = X_features_raw[:n_sequences]
+    X_timestamps = X_timestamps_raw[:n_sequences]
+    X_asset_ids = X_asset_ids_raw[:n_sequences]
+
+    # Labels direction: restent à t (fin de séquence) - colonnes 1, 2, 3
+    direction_labels = labels[seq_length-1:seq_length-1+n_sequences, 1:4]  # (n_sequences, 3)
+
+    # Combiner regime futur + direction à t
+    # Y_labels: [regime_futur, macd_dir, rsi_dir, cci_dir]
+    Y_labels = np.column_stack([
+        future_regime_labels,  # (n_sequences,) - labels FUTURS
+        direction_labels       # (n_sequences, 3) - labels à t
+    ])
+
+    # Timestamps pour Y: Derniers timestamps de chaque séquence valide
+    Y_timestamps = timestamps[seq_length-1:seq_length-1+n_sequences]  # (n_sequences,)
 
     # Asset IDs pour Y
-    Y_asset_ids = asset_ids[seq_length-1:]  # (n_sequences,)
+    Y_asset_ids = asset_ids[seq_length-1:seq_length-1+n_sequences]  # (n_sequences,)
 
-    # OHLCV: Prendre OHLCV à la FIN de chaque séquence
-    OHLCV_data = ohlcv[seq_length-1:]  # (n_sequences, 5)
-    OHLCV_timestamps = timestamps[seq_length-1:]
-    OHLCV_asset_ids = asset_ids[seq_length-1:]
-
-    n_sequences = X_features.shape[0]
+    # OHLCV: Prendre OHLCV à la FIN de chaque séquence valide
+    OHLCV_data = ohlcv[seq_length-1:seq_length-1+n_sequences]  # (n_sequences, 5)
+    OHLCV_timestamps = timestamps[seq_length-1:seq_length-1+n_sequences]
+    OHLCV_asset_ids = asset_ids[seq_length-1:seq_length-1+n_sequences]
 
     # Combiner X: [timestamp, asset_id, features...]
     # Shape: (n_sequences, seq_length, 2+n_features)
@@ -431,7 +518,7 @@ def create_sequences_for_regime(df: pd.DataFrame,
         X_features                      # (n_seq, seq_len, n_features)
     ], axis=2)
 
-    # Combiner Y: [timestamp, asset_id, regime, macd_dir, rsi_dir, cci_dir]
+    # Combiner Y: [timestamp, asset_id, regime_futur, macd_dir, rsi_dir, cci_dir]
     # Shape: (n_sequences, 6)
     Y = np.column_stack([
         Y_timestamps,  # (n_seq,)
@@ -449,7 +536,7 @@ def create_sequences_for_regime(df: pd.DataFrame,
 
     logger.info(f"     Séquences créées: {n_sequences}")
     logger.info(f"       X: {X.shape} (timestamp, asset_id, {n_features} features)")
-    logger.info(f"       Y: {Y.shape} (timestamp, asset_id, regime, macd_dir, rsi_dir, cci_dir)")
+    logger.info(f"       Y: {Y.shape} (timestamp, asset_id, regime_futur, macd_dir, rsi_dir, cci_dir)")
     logger.info(f"       OHLCV: {OHLCV.shape}")
 
     return X, Y, OHLCV
