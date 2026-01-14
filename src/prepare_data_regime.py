@@ -20,11 +20,9 @@ Features d'entrée du modèle (3 colonnes):
   - h_ret: high.pct_change() - Rendement high-to-high
   - l_ret: low.pct_change() - Rendement low-to-low
 
-Labels (6 au total):
+Labels (4 au total):
   Régime:
     - regime: 0-2 (3 classes)
-    - trend_strength: 0-1 (score TS)
-    - volatility_cluster: 0-1 (score VC)
   Direction (Kalman-filtered, pour modèles MACD/RSI/CCI):
     - macd_direction: 0/1 (DOWN/UP)
     - rsi_direction: 0/1 (DOWN/UP)
@@ -337,24 +335,24 @@ def create_sequences_for_regime(df: pd.DataFrame,
 
     Structure:
     - X: (n, seq_length, n_features+2) = [timestamp, asset_id, features...]
-    - Y: (n, 5) = [timestamp, asset_id, regime, ts_score, vc_score]
+    - Y: (n, 6) = [timestamp, asset_id, regime, macd_dir, rsi_dir, cci_dir]
     - OHLCV: (n, 7) = [timestamp, asset_id, O, H, L, C, V]
 
     Args:
         df: DataFrame avec features + labels de régime
-        feature_cols: Liste des features à utiliser (~20)
+        feature_cols: Liste des features à utiliser (3: c_ret, h_ret, l_ret)
         asset_name: Nom de l'asset ('BTC', 'ETH', etc.)
         asset_id: ID encodé de l'asset (0-4)
-        seq_length: Longueur des séquences (défaut: 12)
+        seq_length: Longueur des séquences (défaut: 25)
 
     Returns:
         X: (n, seq_length, n_features+2)
-        Y: (n, 8)  # timestamp, asset_id, 3 régime, 3 direction
+        Y: (n, 6)  # timestamp, asset_id, regime, macd_dir, rsi_dir, cci_dir
         OHLCV: (n, 7)
     """
-    # Colonnes label (6 au total: 3 régime + 3 direction)
+    # Colonnes label (4 au total: 1 régime + 3 direction)
     label_cols = [
-        'regime', 'trend_strength', 'volatility_cluster',  # Labels régime
+        'regime',  # Label régime (0-2)
         'macd_direction', 'rsi_direction', 'cci_direction'  # Labels direction
     ]
 
@@ -371,7 +369,7 @@ def create_sequences_for_regime(df: pd.DataFrame,
 
     # Extraire arrays
     features = df_clean[feature_cols].values.astype(np.float32)  # (N, n_features)
-    labels = df_clean[label_cols].values.astype(np.float32)      # (N, 6)
+    labels = df_clean[label_cols].values.astype(np.float32)      # (N, 4)
     ohlcv = df_clean[ohlcv_cols].values.astype(np.float32)       # (N, 5)
 
     N, n_features = features.shape
@@ -425,12 +423,12 @@ def create_sequences_for_regime(df: pd.DataFrame,
         X_features                      # (n_seq, seq_len, n_features)
     ], axis=2)
 
-    # Combiner Y: [timestamp, asset_id, regime, ts_score, vc_score, macd_dir, rsi_dir, cci_dir]
-    # Shape: (n_sequences, 8)
+    # Combiner Y: [timestamp, asset_id, regime, macd_dir, rsi_dir, cci_dir]
+    # Shape: (n_sequences, 6)
     Y = np.column_stack([
         Y_timestamps,  # (n_seq,)
         Y_asset_ids,   # (n_seq,)
-        Y_labels       # (n_seq, 6)
+        Y_labels       # (n_seq, 4)
     ])
 
     # Combiner OHLCV: [timestamp, asset_id, O, H, L, C, V]
@@ -443,7 +441,7 @@ def create_sequences_for_regime(df: pd.DataFrame,
 
     logger.info(f"     Séquences créées: {n_sequences}")
     logger.info(f"       X: {X.shape} (timestamp, asset_id, {n_features} features)")
-    logger.info(f"       Y: {Y.shape} (timestamp, asset_id, regime, ts, vc, macd_dir, rsi_dir, cci_dir)")
+    logger.info(f"       Y: {Y.shape} (timestamp, asset_id, regime, macd_dir, rsi_dir, cci_dir)")
     logger.info(f"       OHLCV: {OHLCV.shape}")
 
     return X, Y, OHLCV
@@ -811,7 +809,7 @@ def main():
         },
         'n_features': len(feature_cols),
         'labels': [
-            'regime', 'trend_strength', 'volatility_cluster',  # Labels régime
+            'regime',  # Label régime (0-2)
             'macd_direction', 'rsi_direction', 'cci_direction'  # Labels direction
         ],
         'n_classes': 3,  # Pour régime uniquement
@@ -839,7 +837,7 @@ def main():
         },
         'structure': {
             'X': f'(n, {SEQUENCE_LENGTH}, {len(feature_cols)}+2) - [timestamp, asset_id, c_ret, h_ret, l_ret] pour chaque timestep',
-            'Y': '(n, 8) - [timestamp, asset_id, regime, ts, vc, macd_dir, rsi_dir, cci_dir]',
+            'Y': '(n, 6) - [timestamp, asset_id, regime, macd_dir, rsi_dir, cci_dir]',
             'OHLCV': '(n, 7) - [timestamp, asset_id, open, high, low, close, volume]'
         },
         'primary_key': '(timestamp, asset_id) - Commune à toutes les matrices',
