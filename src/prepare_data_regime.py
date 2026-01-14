@@ -670,13 +670,12 @@ def create_sequences_for_regime(df: pd.DataFrame,
 
     Returns:
         X: (n, seq_length, n_features+2)
-        Y: (n, 8)  # timestamp, asset_id, regime_futur, ts, vc, macd_dir, rsi_dir, cci_dir
+        Y: (n, 6)  # timestamp, asset_id, regime_futur, macd_dir, rsi_dir, cci_dir
         OHLCV: (n, 7)
     """
-    # Colonnes label (6 au total: 1 régime + 2 scores + 3 direction)
+    # Colonnes label (4 au total: 1 régime + 3 direction)
     label_cols = [
         'regime',  # Label régime (0-2)
-        'trend_strength', 'volatility_cluster',  # Scores TS/VC (0-1)
         'macd_direction', 'rsi_direction', 'cci_direction'  # Labels direction
     ]
 
@@ -693,7 +692,7 @@ def create_sequences_for_regime(df: pd.DataFrame,
 
     # Extraire arrays
     features = df_clean[feature_cols].values.astype(np.float32)  # (N, n_features)
-    labels = df_clean[label_cols].values.astype(np.float32)      # (N, 6)
+    labels = df_clean[label_cols].values.astype(np.float32)      # (N, 4)
     ohlcv = df_clean[ohlcv_cols].values.astype(np.float32)       # (N, 5)
 
     N, n_features = features.shape
@@ -754,17 +753,14 @@ def create_sequences_for_regime(df: pd.DataFrame,
     X_timestamps = X_timestamps_raw[:n_sequences]
     X_asset_ids = X_asset_ids_raw[:n_sequences]
 
-    # Labels à t (fin de séquence):
-    # - ts_score, vc_score: colonnes 1, 2
-    # - direction: colonnes 3, 4, 5 (macd, rsi, cci)
-    ts_vc_labels = labels[seq_length-1:seq_length-1+n_sequences, 1:3]  # (n_sequences, 2)
-    direction_labels = labels[seq_length-1:seq_length-1+n_sequences, 3:6]  # (n_sequences, 3)
+    # Labels direction: restent à t (fin de séquence) - colonnes 1, 2, 3
+    direction_labels = labels[seq_length-1:seq_length-1+n_sequences, 1:4]  # (n_sequences, 3)
 
-    # Combiner: [regime_futur, ts, vc, macd_dir, rsi_dir, cci_dir] (6 colonnes)
+    # Combiner regime futur + direction à t
+    # Y_labels: [regime_futur, macd_dir, rsi_dir, cci_dir]
     Y_labels = np.column_stack([
-        future_regime_labels,  # (n_sequences,) - label FUTUR
-        ts_vc_labels,          # (n_sequences, 2) - scores à t
-        direction_labels       # (n_sequences, 3) - directions à t
+        future_regime_labels,  # (n_sequences,) - labels FUTURS
+        direction_labels       # (n_sequences, 3) - labels à t
     ])
 
     # Timestamps pour Y: Derniers timestamps de chaque séquence valide
@@ -786,12 +782,12 @@ def create_sequences_for_regime(df: pd.DataFrame,
         X_features                      # (n_seq, seq_len, n_features)
     ], axis=2)
 
-    # Combiner Y: [timestamp, asset_id, regime_futur, ts, vc, macd_dir, rsi_dir, cci_dir]
-    # Shape: (n_sequences, 8)
+    # Combiner Y: [timestamp, asset_id, regime_futur, macd_dir, rsi_dir, cci_dir]
+    # Shape: (n_sequences, 6)
     Y = np.column_stack([
         Y_timestamps,  # (n_seq,)
         Y_asset_ids,   # (n_seq,)
-        Y_labels       # (n_seq, 6) = [regime_futur, ts, vc, macd_dir, rsi_dir, cci_dir]
+        Y_labels       # (n_seq, 4)
     ])
 
     # Combiner OHLCV: [timestamp, asset_id, O, H, L, C, V]
@@ -804,7 +800,7 @@ def create_sequences_for_regime(df: pd.DataFrame,
 
     logger.info(f"     Séquences créées: {n_sequences}")
     logger.info(f"       X: {X.shape} (timestamp, asset_id, {n_features} features)")
-    logger.info(f"       Y: {Y.shape} (timestamp, asset_id, regime_futur, ts, vc, macd_dir, rsi_dir, cci_dir)")
+    logger.info(f"       Y: {Y.shape} (timestamp, asset_id, regime_futur, macd_dir, rsi_dir, cci_dir)")
     logger.info(f"       OHLCV: {OHLCV.shape}")
 
     return X, Y, OHLCV
