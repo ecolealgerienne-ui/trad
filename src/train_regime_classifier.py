@@ -601,13 +601,30 @@ def evaluate_regime_classifier(
 
     model.eval()
 
-    # Prédictions par batch pour mémoire
-    X_tensor = torch.tensor(X, dtype=torch.float32).to(device)
+    # Prédictions par batch pour éviter OOM
+    batch_size = 4096
+    n_samples = len(X)
+    all_preds = []
+    all_proba = []
 
     with torch.no_grad():
-        logits = model(X_tensor)
-        y_pred_proba = torch.softmax(logits, dim=1).cpu().numpy()
-        y_pred = torch.argmax(logits, dim=1).cpu().numpy()
+        for start_idx in range(0, n_samples, batch_size):
+            end_idx = min(start_idx + batch_size, n_samples)
+            X_batch = torch.tensor(X[start_idx:end_idx], dtype=torch.float32).to(device)
+
+            logits = model(X_batch)
+            proba = torch.softmax(logits, dim=1).cpu().numpy()
+            preds = torch.argmax(logits, dim=1).cpu().numpy()
+
+            all_proba.append(proba)
+            all_preds.append(preds)
+
+            # Libérer mémoire GPU
+            del X_batch, logits
+            torch.cuda.empty_cache()
+
+    y_pred_proba = np.concatenate(all_proba, axis=0)
+    y_pred = np.concatenate(all_preds, axis=0)
 
     # Métriques
     acc = accuracy_score(y, y_pred)
