@@ -473,7 +473,7 @@ def train_cnn_lstm_regime_classifier(
     criterion = nn.CrossEntropyLoss()  # Multiclass classification
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=5, verbose=True
+        optimizer, mode='min', factor=0.5, patience=5
     )
 
     # Tracking
