@@ -1,24 +1,31 @@
 """
 Script de préparation des données pour Meta-Regime Trading (5min).
 
-PRINCIPE CLÉ: Classification 3 régimes + Inputs bruts (c_ret, h_ret, l_ret)
+PRINCIPE CLÉ: Classification 3 régimes avec Features Computées (~23)
 ===============================================================================
 
-⚠️ APPROCHE SIMPLIFIÉE (2026-01-14):
-- Features d'entrée: UNIQUEMENT les returns bruts (c_ret, h_ret, l_ret)
-- Le CNN-LSTM apprend les patterns lui-même à partir des données brutes
-- Les régimes sont calculés à partir des features complexes (~20)
-  mais ces features ne sont PAS utilisées comme entrées du modèle
+✅ APPROCHE XGBoost (2026-01-14):
+- Features d'entrée: TOUTES les features de régime (~23 features)
+- Inclut: returns (3) + trend (7) + volatility (9) + volume (4)
+- XGBoost avec features computées: 92.67% accuracy (VALIDÉ)
+- CNN-LSTM avec 3 raw returns: 86.33% (ABANDONNÉ - delta -6.34%)
 
-Régimes (3 classes - calculés depuis features intermédiaires):
+Régimes (3 classes):
 - 0: RANGE LOW VOL  (TS < 0.45, VC ≤ P50)
 - 1: RANGE HIGH VOL (TS < 0.45, VC > P50)
-- 2: TREND          (TS > 0.5, any volatility)
+- 2: TREND          (TS >= 0.45, any volatility)
 
-Features d'entrée du modèle (3 colonnes):
-  - c_ret: close.pct_change() - Rendement close-to-close
-  - h_ret: high.pct_change() - Rendement high-to-high
-  - l_ret: low.pct_change() - Rendement low-to-low
+Features d'entrée du modèle (23 colonnes via get_regime_feature_names()):
+  Returns (3):
+    - c_ret, h_ret, l_ret
+  Trend (7):
+    - ma20_slope, ma50_slope, regression_slope, regression_r2
+    - adx, macd_histogram_norm, hurst_exponent
+  Volatility (9):
+    - atr_normalized, bb_upper, bb_middle, bb_lower, bb_width, percent_b
+    - realized_volatility, volatility_compression, range_atr_ratio
+  Volume (4):
+    - volume_ratio, volume_spike, vwap_deviation, obv_derivative
 
 Labels (4 au total):
   Régime:
@@ -31,9 +38,9 @@ Labels (4 au total):
 Pipeline:
 1. Charger données brutes (OHLCV 5min)
 2. Calculer returns (c_ret, h_ret, l_ret)
-3. Calculer features de régime (~20) pour labeling UNIQUEMENT
+3. Calculer features de régime (~23) pour modèle ET labeling
 4. Calculer labels régime (regime_labeler.py)
-5. Créer séquences (25 timesteps × 3 features: c_ret, h_ret, l_ret)
+5. Créer séquences (25 timesteps × 23 features)
 6. Split temporel (70/15/15)
 7. Sauvegarder dataset unique: dataset_<assets>_regime.npz
 
@@ -45,7 +52,7 @@ Génère:
 
 Author: Claude Code - Phase 1 (Data Layer)
 Date: 2025-01-11
-Version: 2.0 (c_ret, h_ret, l_ret inputs)
+Version: 3.0 (23 features for XGBoost)
 """
 
 import numpy as np
@@ -340,7 +347,7 @@ def create_sequences_for_regime(df: pd.DataFrame,
 
     Args:
         df: DataFrame avec features + labels de régime
-        feature_cols: Liste des features à utiliser (3: c_ret, h_ret, l_ret)
+        feature_cols: Liste des features à utiliser (~23 features via get_regime_feature_names())
         asset_name: Nom de l'asset ('BTC', 'ETH', etc.)
         asset_id: ID encodé de l'asset (0-4)
         seq_length: Longueur des séquences (défaut: 25)
@@ -613,11 +620,11 @@ def process_single_asset(asset_name: str,
 
     logger.info(f"\n  Création séquences (seq_length={SEQUENCE_LENGTH})...")
 
-    # Features à utiliser (UNIQUEMENT les returns bruts - 3 features)
-    # Les features de régime (~20) sont utilisées pour le labeling mais ne sont
-    # PAS passées au modèle - le CNN-LSTM apprend les patterns lui-même
-    feature_cols = ['c_ret', 'h_ret', 'l_ret']
-    logger.info(f"  Features utilisées ({len(feature_cols)}): {feature_cols}")
+    # Features à utiliser (TOUTES les features de régime - ~23 features)
+    # Inclut: returns bruts (3) + trend (7) + volatility (9) + volume (4)
+    # Ces features computées sont essentielles pour XGBoost (92.67% vs 86.33% raw)
+    feature_cols = get_regime_feature_names()
+    logger.info(f"  Features utilisées ({len(feature_cols)}): {feature_cols[:5]}... (total: {len(feature_cols)})")
 
     # Clip si demandé
     if clip_value is not None:
@@ -683,13 +690,13 @@ def main():
     )
 
     logger.info("="*80)
-    logger.info("PRÉPARATION DONNÉES - META-REGIME TRADING v2.0")
+    logger.info("PRÉPARATION DONNÉES - META-REGIME TRADING v3.0 (XGBoost)")
     logger.info("="*80)
     logger.info(f"Assets: {args.assets}")
     logger.info(f"Sequence length: {SEQUENCE_LENGTH}")
     logger.info(f"Régimes: 3 classes (TS × VC)")
-    logger.info(f"Features MODEL INPUT: 3 colonnes (c_ret, h_ret, l_ret)")
-    logger.info(f"Features LABELING: ~20 colonnes (utilisées pour calcul labels uniquement)")
+    logger.info(f"Features MODEL INPUT: ~23 colonnes (via get_regime_feature_names())")
+    logger.info(f"  → Returns (3) + Trend (7) + Volatility (9) + Volume (4)")
 
     # ========================================================================
     # CALCUL PÉRIODE COMMUNE ET SPLIT TIMESTAMPS (FIX: negative gaps)
@@ -789,23 +796,47 @@ def main():
     assets_str = '_'.join(args.assets).lower()
     output_path = output_dir / f"dataset_{assets_str}_regime.npz"
 
-    # Features (UNIQUEMENT les returns bruts)
-    feature_cols = ['c_ret', 'h_ret', 'l_ret']
+    # Features utilisées (définies dans ÉTAPE 4)
+    feature_cols = get_regime_feature_names()
 
-    # Metadata (pattern copié de prepare_data_direction_only.py)
+    # Metadata
     metadata = {
         'created_at': datetime.now().isoformat(),
-        'version': '2.0',
-        'description': 'Inputs bruts (c_ret, h_ret, l_ret) - CNN-LSTM apprend les patterns',
+        'version': '3.0',
+        'description': 'Features computées (~23) pour XGBoost - 92.67% accuracy validé',
         'assets': args.assets,
         'n_assets': len(args.assets),
         'asset_id_mapping': ASSET_ID_MAP,
         'sequence_length': SEQUENCE_LENGTH,
         'features': feature_cols,
         'features_description': {
+            # Returns (3)
             'c_ret': 'close.pct_change() - Rendement close-to-close',
             'h_ret': 'high.pct_change() - Rendement high-to-high',
-            'l_ret': 'low.pct_change() - Rendement low-to-low'
+            'l_ret': 'low.pct_change() - Rendement low-to-low',
+            # Trend (7)
+            'ma20_slope': 'Pente MA20 normalisée',
+            'ma50_slope': 'Pente MA50 normalisée',
+            'regression_slope': 'Pente régression linéaire normalisée',
+            'regression_r2': 'R² de la régression',
+            'adx': 'Average Directional Index',
+            'macd_histogram_norm': 'MACD histogram normalisé',
+            'hurst_exponent': 'Exposant de Hurst (persistance)',
+            # Volatility (9)
+            'atr_normalized': 'ATR normalisé par prix',
+            'bb_upper': 'Bande de Bollinger supérieure',
+            'bb_middle': 'Bande de Bollinger médiane',
+            'bb_lower': 'Bande de Bollinger inférieure',
+            'bb_width': 'Largeur des bandes de Bollinger',
+            'percent_b': '%B (position dans les bandes)',
+            'realized_volatility': 'Volatilité réalisée',
+            'volatility_compression': 'Compression de volatilité',
+            'range_atr_ratio': 'Ratio range/ATR',
+            # Volume (4)
+            'volume_ratio': 'Ratio volume/MA volume',
+            'volume_spike': 'Spike de volume',
+            'vwap_deviation': 'Déviation VWAP',
+            'obv_derivative': 'Dérivée OBV'
         },
         'n_features': len(feature_cols),
         'labels': [
@@ -816,9 +847,10 @@ def main():
         'regime_definition': {
             0: "RANGE LOW VOL (TS < 0.45, VC ≤ P50)",
             1: "RANGE HIGH VOL (TS < 0.45, VC > P50)",
-            2: "TREND (TS > 0.5, any volatility)"
+            2: "TREND (TS >= 0.45, any volatility)"
         },
-        'regime_note': 'Régimes calculés depuis features intermédiaires (~20), non exposées au modèle',
+        'regime_note': 'Régimes calculés depuis features de régime, exposées au modèle XGBoost',
+        'model_note': 'XGBoost avec features computées: 92.67% vs CNN-LSTM raw: 86.33%',
         'direction_definition': {
             'macd_direction': 'Kalman-filtered MACD slope (filtered[t] > filtered[t-1]): 1=UP, 0=DOWN',
             'rsi_direction': 'Kalman-filtered RSI slope (filtered[t] > filtered[t-1]): 1=UP, 0=DOWN',
@@ -836,7 +868,7 @@ def main():
             'test': {'n_sequences': len(X_test), 'ratio': 0.15}
         },
         'structure': {
-            'X': f'(n, {SEQUENCE_LENGTH}, {len(feature_cols)}+2) - [timestamp, asset_id, c_ret, h_ret, l_ret] pour chaque timestep',
+            'X': f'(n, {SEQUENCE_LENGTH}, {len(feature_cols)}+2) - [timestamp, asset_id, features...] pour chaque timestep',
             'Y': '(n, 6) - [timestamp, asset_id, regime, macd_dir, rsi_dir, cci_dir]',
             'OHLCV': '(n, 7) - [timestamp, asset_id, open, high, low, close, volume]'
         },
