@@ -7862,38 +7862,50 @@ Per-class metrics:
 
 #### CNN-LSTM avec Raw Returns (3 features)
 
-**Date**: 2026-01-14 (session actuelle)
+**Date**: 2026-01-14 (évaluation complète)
 **Features**: Raw returns uniquement (c_ret, h_ret, l_ret)
 **Architecture**: CNN 1D → LSTM → Dense avec CrossEntropyLoss
 
 ```
-TRAINING RESULTS (Early stopping epoch 38)
-├── Train Accuracy: ~91.4%
-├── Val Accuracy:   ~90.0%
-├── Val Loss:       0.2169
-└── Evaluation: INCOMPLET (OOM corrigé)
+EVALUATION - TEST SET (607,465 samples)
+├── Accuracy:         86.33%
+├── Precision (macro): 78.26%
+├── Recall (macro):    85.03%
+├── F1-Score (macro):  81.04%
+└── ROC AUC (OvR):     96.48%
+
+Per-class metrics:
+├── Regime 0 (RANGE_LOW_VOL):  Prec=0.927, Rec=0.879, F1=0.902
+├── Regime 1 (RANGE_HIGH_VOL): Prec=0.815, Rec=0.844, F1=0.829
+└── Regime 2 (TREND):          Prec=0.606, Rec=0.828, F1=0.700
 ```
 
 **Observations CNN-LSTM**:
-- ✅ Entraînement stable (early stopping efficace)
-- ✅ Pas d'overfitting majeur (gap train/val ~1.4%)
-- ⚠️ Performance légèrement inférieure (~91% vs 92.67%)
-- ⚠️ Evaluation test incomplète (bug OOM corrigé)
+- ✅ Entraînement stable (early stopping epoch 25)
+- ✅ Pas d'overfitting (train 86.7%, val 87.5%, test 86.3%)
+- ❌ **Performance nettement inférieure** (-6.34% vs XGBoost)
+- ❌ TREND reste difficile (F1=70% vs 77.7% XGBoost)
 
-### Comparaison des Approches
+### Comparaison des Approches (RÉSULTATS FINAUX)
 
-| Aspect | XGBoost + Features | CNN-LSTM + Raw |
-|--------|-------------------|----------------|
-| **Test Accuracy** | **92.67%** | ~91%* |
-| **Val Accuracy** | 93.42% | ~90% |
-| **Features** | ~20 (agrégées) | 3 (raw returns) |
-| **Interprétabilité** | ✅ Haute (feature importance) | ❌ Faible |
-| **Temps inference** | ✅ Rapide | ⚠️ Plus lent |
-| **Complexité** | ⚠️ Feature engineering | ✅ Automatique |
+| Métrique | XGBoost + Features | CNN-LSTM + Raw | **Delta** |
+|----------|-------------------|----------------|-----------|
+| **Test Accuracy** | **92.67%** | 86.33% | **-6.34%** ❌ |
+| **F1 (macro)** | **88.27%** | 81.04% | **-7.23%** ❌ |
+| **ROC AUC** | **98.80%** | 96.48% | -2.32% |
 
-*CNN-LSTM évaluation incomplète
+### Performance par Classe
 
-**Delta estimé**: XGBoost +1.5-2% grâce aux features computées
+| Classe | XGBoost F1 | CNN-LSTM F1 | Delta |
+|--------|------------|-------------|-------|
+| RANGE_LOW_VOL | **94.6%** | 90.2% | -4.4% |
+| RANGE_HIGH_VOL | **92.5%** | 82.9% | **-9.6%** |
+| TREND | **77.7%** | 70.0% | -7.7% |
+
+**Verdict**: ❌ **CNN-LSTM avec raw returns est nettement inférieur**
+- Les features computées (mean, std, min, max) sont **essentielles**
+- Le CNN-LSTM ne peut pas extraire ces agrégations aussi efficacement
+- **Recommandation**: Revenir à XGBoost ou ajouter features au CNN-LSTM
 
 ### Bugs Corrigés (Session 2026-01-14)
 
@@ -7990,21 +8002,29 @@ Output: Softmax → 3 probabilités
 
 ### Prochaines Étapes
 
-1. ⏳ **Compléter évaluation CNN-LSTM** sur test set
-2. ⏳ **Comparer métriques per-class** (surtout TREND)
-3. ⏳ **Décider**: garder CNN-LSTM ou revenir à XGBoost
-4. ⏳ **Intégrer dans pipeline Meta-Regime** si validé
+1. ✅ **Compléter évaluation CNN-LSTM** sur test set → **FAIT** (86.33%)
+2. ✅ **Comparer métriques per-class** → XGBoost meilleur partout
+3. ✅ **Décider**: → **REVENIR À XGBOOST** (écart trop grand: -6.34%)
+4. ⏳ **Intégrer XGBoost dans pipeline Meta-Regime**
 
-### Recommandations
+### Recommandations (MISE À JOUR POST-ÉVALUATION)
 
-**Si priorité = Performance maximale**:
-→ Revenir à XGBoost avec features computées (92.67% prouvé)
+**Décision finale**: ✅ **REVENIR À XGBOOST**
 
-**Si priorité = Simplicité**:
-→ Garder CNN-LSTM avec raw returns (91%, pas de feature engineering)
+| Critère | XGBoost | CNN-LSTM | Gagnant |
+|---------|---------|----------|---------|
+| Accuracy | 92.67% | 86.33% | **XGBoost** (+6.34%) |
+| F1 (macro) | 88.27% | 81.04% | **XGBoost** (+7.23%) |
+| TREND F1 | 77.7% | 70.0% | **XGBoost** (+7.7%) |
+| Interprétabilité | Haute | Faible | **XGBoost** |
+| Temps inference | Rapide | Lent | **XGBoost** |
 
-**Compromis possible**:
-→ CNN-LSTM avec features computées (potentiel 93%+, à tester)
+**Pourquoi XGBoost gagne:**
+- Les features computées (mean, std, min, max sur window) sont **essentielles**
+- Le CNN-LSTM avec raw returns ne peut pas reproduire ces agrégations
+- Écart de -6.34% est trop significatif pour justifier la simplicité
+
+**Option abandonnée**: CNN-LSTM avec raw returns (86.33% insuffisant)
 
 ### Commandes
 
