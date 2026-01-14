@@ -102,11 +102,17 @@ from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
     roc_auc_score, classification_report, confusion_matrix
 )
-from imblearn.over_sampling import SMOTE
 import json
 import shutil
 from typing import Dict, Tuple
 import logging
+
+# SMOTE (optional)
+try:
+    from imblearn.over_sampling import SMOTE
+    SMOTE_AVAILABLE = True
+except ImportError:
+    SMOTE_AVAILABLE = False
 
 # XGBoost
 try:
@@ -800,6 +806,11 @@ def train_xgboost(full_data: Dict, args) -> Dict:
 
     # SMOTE si demandé
     if args.use_smote:
+        if not SMOTE_AVAILABLE:
+            raise ImportError(
+                "SMOTE requested but imbalanced-learn not installed. "
+                "Install with: pip install imbalanced-learn"
+            )
         logger.info(f"\n🔄 SMOTE oversampling (target ratio={args.smote_ratio})...")
 
         # Calculer sampling_strategy
@@ -1016,6 +1027,11 @@ def main():
     # SMOTE OVERSAMPLING (if enabled)
     # ═══════════════════════════════════════════════════════════════════════════════
     if args.use_smote:
+        if not SMOTE_AVAILABLE:
+            raise ImportError(
+                "SMOTE requested but imbalanced-learn not installed. "
+                "Install with: pip install imbalanced-learn"
+            )
         print("\n" + "="*80)
         print("SMOTE OVERSAMPLING - Improving TREND detection")
         print("="*80)
