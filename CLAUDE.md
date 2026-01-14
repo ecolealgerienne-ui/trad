@@ -7997,8 +7997,29 @@ Output: Softmax → 3 probabilités
 | `src/regime_labeler.py` | Création des labels (3 classes) |
 | `src/prepare_data_regime.py` | Préparation datasets NPZ |
 | `src/train_regime_classifier.py` | Entraînement CNN-LSTM |
-| `src/regime_model.py` | Architecture du modèle |
+| `src/train_meta_model_regime.py` | Entraînement XGBoost (RECOMMANDÉ) |
+| `src/regime_model.py` | Architecture du modèle CNN-LSTM |
 | `data/prepared/regime_*.npz` | Datasets préparés |
+
+### Distribution des Labels Régime (⚠️ Déséquilibre Important)
+
+**Date observation**: 2026-01-14
+
+| Régime | Train | Val | Test | Nature |
+|--------|-------|-----|------|--------|
+| **0 - RANGE_LOW_VOL** | 44.1% | 69.6% | 57.6% | Consolidation calme |
+| **1 - RANGE_HIGH_VOL** | 49.7% | 27.2% | 37.9% | Consolidation agitée |
+| **2 - TREND** | **6.2%** | **3.2%** | **4.5%** | ⚠️ **TRÈS RARE** |
+
+**Observations critiques:**
+- ⚠️ **TREND très rare** (3-6%): Classe minoritaire difficile à prédire
+- ⚠️ **Distribution shift** entre splits: Val/Test très différents de Train
+- ✅ RANGE domine (~94-97%): La plupart du temps le marché consolide
+
+**Implications pour le modèle:**
+- XGBoost utilise `scale_pos_weight` pour gérer le déséquilibre
+- F1 macro (pas accuracy) est la métrique clé pour évaluer TREND
+- Recall TREND critique: ne pas rater les vraies tendances
 
 ### Prochaines Étapes
 
