@@ -39,17 +39,17 @@ python src/prepare_data_regime.py --assets BTC ETH BNB ADA LTC
 
 | Array | Shape | Description |
 |-------|-------|-------------|
-| `X_train` | **(2,832,684, 25, 25)** | Séquences features train (25 timesteps × 25 canaux) |
-| `Y_train` | **(2,832,684, 6)** | Labels + metadata train |
-| `OHLCV_train` | **(2,832,684, 7)** | Prix OHLCV + metadata train |
-| `X_val` | **(608,460, 25, 25)** | Séquences features val |
-| `Y_val` | **(608,460, 6)** | Labels + metadata val |
-| `OHLCV_val` | **(608,460, 7)** | Prix OHLCV + metadata val |
-| `X_test` | **(607,465, 25, 25)** | Séquences features test |
-| `Y_test` | **(607,465, 6)** | Labels + metadata test |
-| `OHLCV_test` | **(607,465, 7)** | Prix OHLCV + metadata test |
+| `X_train` | **(2,832,654, 25, 25)** | Séquences features train (25 timesteps × 25 canaux) |
+| `Y_train` | **(2,832,654, 6)** | Labels + metadata train |
+| `OHLCV_train` | **(2,832,654, 7)** | Prix OHLCV + metadata train |
+| `X_val` | **(608,430, 25, 25)** | Séquences features val |
+| `Y_val` | **(608,430, 6)** | Labels + metadata val |
+| `OHLCV_val` | **(608,430, 7)** | Prix OHLCV + metadata val |
+| `X_test` | **(607,435, 25, 25)** | Séquences features test |
+| `Y_test` | **(607,435, 6)** | Labels + metadata test |
+| `OHLCV_test` | **(607,435, 7)** | Prix OHLCV + metadata test |
 
-**Total samples**: 4,048,609 séquences (5 assets combinés)
+**Total samples**: 4,048,519 séquences (5 assets combinés)
 
 **Note**: X contient [timestamp, asset_id, ...features] donc shape (n, 25, 2 + 23 features = 25 canaux).
 
@@ -109,12 +109,12 @@ python src/prepare_data_regime.py --assets BTC ETH BNB ADA LTC
 
 | Régime | Code | Caractéristiques | Distribution |
 |--------|------|------------------|--------------|
-| RANGE_LOW_VOL | 0 | Pas de tendance + Volatilité faible | 44-70% |
-| RANGE_HIGH_VOL | 1 | Pas de tendance + Volatilité haute | 27-50% |
-| TREND | 2 | Tendance claire (UP ou DOWN) | **3-6%** ⚠️ |
+| RANGE_LOW_VOL | 0 | Pas de tendance + Volatilité faible | 45-70% |
+| RANGE_HIGH_VOL | 1 | Pas de tendance + Volatilité haute | 24-45% |
+| TREND | 2 | Tendance claire (UP ou DOWN) | **5-10%** ⚠️ |
 
 **Structure**: Pas de séparation HIGH/LOW VOL pour TREND
-- ✅ TREND = label unique (rare, 3-6%)
+- ✅ TREND = label unique (rare, 5-10%)
 - ✅ RANGE = séparé en LOW/HIGH VOL selon percentile 50 de volatilité
 - ⚠️ Déséquilibre de classes important (TREND très minoritaire)
 
@@ -336,15 +336,15 @@ VC_LOW_PERCENTILE = 40      # Pour RANGE: VC ≤ P40 = LOW VOL, VC > P40 = HIGH 
 
 | Régime | Train (2.8M) | Val (608K) | Test (607K) |
 |--------|--------------|------------|-------------|
-| **0 (RANGE LOW VOL)** | 44.1% | **69.6%** | 57.6% |
-| **1 (RANGE HIGH VOL)** | 49.7% | 27.2% | 37.9% |
-| **2 (TREND)** | **6.2%** | **3.2%** | **4.5%** |
+| **0 (RANGE LOW VOL)** | 44.9% | **70.3%** | 58.3% |
+| **1 (RANGE HIGH VOL)** | 45.1% | 24.3% | 34.3% |
+| **2 (TREND)** | **10.0%** | **5.4%** | **7.4%** |
 
 **Observations Critiques**:
-- ⚠️ **TREND très rare** (3-6%): Classe minoritaire difficile à prédire
+- ⚠️ **TREND très rare** (5-10%): Classe minoritaire difficile à prédire
 - ⚠️ **Distribution shift majeur**: Val très différent de Train/Test
-  - Val: 69.6% RANGE_LOW (vs 44.1% train)
-  - Val: 27.2% RANGE_HIGH (vs 49.7% train)
+  - Val: 70.3% RANGE_LOW (vs 44.9% train)
+  - Val: 24.3% RANGE_HIGH (vs 45.1% train)
 - ✅ RANGE domine (~94-97%): Marché passe la majorité du temps en consolidation
 
 ### Avantages de 3 Régimes
