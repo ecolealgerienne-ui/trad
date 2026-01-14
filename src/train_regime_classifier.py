@@ -789,9 +789,9 @@ def train_xgboost(full_data: Dict, args) -> Dict:
     X_val = aggregate_features(X_val_seq)
     X_test = aggregate_features(X_test_seq)
 
-    y_train = full_data['y_train']
-    y_val = full_data['y_val']
-    y_test = full_data['y_test']
+    y_train = full_data['regimes_train']
+    y_val = full_data['regimes_val']
+    y_test = full_data['regimes_test']
 
     logger.info(f"X_train aggregated: {X_train.shape} (15 features)")
     logger.info(f"X_val aggregated: {X_val.shape}")
