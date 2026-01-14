@@ -14,21 +14,21 @@ Références: Oxford-Man Institute Realized Library, BIS Papers 2020.
 **Trend Strength (TS)**: Force de la tendance (0-1)
   - Combinaison: MA slopes, ADX, regression R², Hurst exponent
   - TS > 0.5 = TREND
-  - TS < 0.4 = RANGE
-  - 0.4 ≤ TS ≤ 0.5 = Zone neutre (assigned to closest)
+  - TS < 0.45 = RANGE (seuil relevé pour plus de sécurité)
+  - 0.45 ≤ TS ≤ 0.5 = Zone neutre (assigned to closest)
 
 **Volatility Cluster (VC)**: Niveau de volatilité
   - Combinaison: ATR normalized, BB width, realized volatility
-  - VC > 40th percentile = HIGH VOL (pour RANGE seulement)
-  - VC ≤ 40th percentile = LOW VOL (pour RANGE seulement)
+  - VC > 50th percentile = HIGH VOL (pour RANGE seulement)
+  - VC ≤ 50th percentile = LOW VOL (pour RANGE seulement)
   - TREND: volatilité ignorée (toujours élevée par définition)
 
 **3 Régimes**:
-  0: RANGE LOW VOL  (TS < 0.4 ET VC ≤ P40) - Marché inactif/dormant
-  1: RANGE HIGH VOL (TS < 0.4 ET VC > P40) - Chop violent, piège
-  2: TREND          (TS > 0.5, any vol)    - Seul régime exploitable
+  0: RANGE LOW VOL  (TS < 0.45 ET VC ≤ P50) - Marché inactif/dormant - NO TRADE
+  1: RANGE HIGH VOL (TS < 0.45 ET VC > P50) - Chop violent, piège - PRUDENT
+  2: TREND          (TS > 0.5, any vol)     - Seul régime exploitable - RECOMMANDÉ
 
-Distribution attendue: Régime 0 (~20-30%), Régime 1 (~50-60%), Régime 2 (~15-25%)
+Distribution attendue: Régime 0 (~35-45%), Régime 1 (~35-45%), Régime 2 (~15-25%)
 
 Usage:
     from regime_labeler import calculate_regime_labels
@@ -85,9 +85,10 @@ VC_WEIGHTS = {
 # NOTE: Passage à 3 régimes le 2026-01-12 (suppression TREND LOW VOL)
 # TREND LOW VOL n'existe pas en crypto : trend = volatilité (fait documenté)
 # Le seuil VC est maintenant utilisé UNIQUEMENT pour discriminer RANGE LOW/HIGH VOL
+# UPDATE 2026-01-14: Seuils ajustés pour plus de sécurité (filtrage plus strict)
 TS_TREND_THRESHOLD = 0.5    # TS > 0.5 = TREND (any volatility)
-TS_RANGE_THRESHOLD = 0.4    # TS < 0.4 = RANGE
-VC_LOW_PERCENTILE = 40      # Pour RANGE: VC ≤ P40 = LOW VOL, VC > P40 = HIGH VOL
+TS_RANGE_THRESHOLD = 0.45   # TS < 0.45 = RANGE (augmenté de 0.4 pour plus de filtrage)
+VC_LOW_PERCENTILE = 50      # Pour RANGE: VC ≤ P50 = LOW VOL (augmenté de 40 pour plus de filtrage)
 
 
 # =============================================================================
@@ -276,18 +277,18 @@ def classify_regime(ts_score: np.ndarray,
     Le régime "TREND LOW VOL" n'existe pas statistiquement.
 
     Régimes:
-    - 0: RANGE LOW VOL  (TS < 0.4 ET VC ≤ P40) - Marché inactif
-    - 1: RANGE HIGH VOL (TS < 0.4 ET VC > P40) - Chop violent, piège
-    - 2: TREND          (TS > 0.5, any vol)    - Seul régime exploitable
+    - 0: RANGE LOW VOL  (TS < 0.45 ET VC ≤ P50) - Marché inactif - NO TRADE
+    - 1: RANGE HIGH VOL (TS < 0.45 ET VC > P50) - Chop violent, piège - PRUDENT
+    - 2: TREND          (TS > 0.5, any vol)     - Seul régime exploitable - RECOMMANDÉ
 
-    Zone neutre (0.4 ≤ TS ≤ 0.5): Assigné au régime le plus proche.
+    Zone neutre (0.45 ≤ TS ≤ 0.5): Assigné au régime le plus proche.
 
     Args:
         ts_score: Trend Strength scores (0-1)
         vc_score: Volatility Cluster scores (0-1)
         ts_trend_threshold: Seuil pour TREND (défaut: 0.5)
-        ts_range_threshold: Seuil pour RANGE (défaut: 0.4)
-        vc_low_percentile: Percentile pour LOW VOL dans RANGE (défaut: 40)
+        ts_range_threshold: Seuil pour RANGE (défaut: 0.45)
+        vc_low_percentile: Percentile pour LOW VOL dans RANGE (défaut: 50)
 
     Returns:
         Array (n,) avec labels 0-2
@@ -368,8 +369,8 @@ def calculate_regime_labels(df: pd.DataFrame,
         ts_weights: Poids pour TS (défaut: TS_WEIGHTS)
         vc_weights: Poids pour VC (défaut: VC_WEIGHTS)
         ts_trend_threshold: Seuil TS pour TREND (défaut: 0.5)
-        ts_range_threshold: Seuil TS pour RANGE (défaut: 0.4)
-        vc_low_percentile: Percentile pour LOW VOL dans RANGE (défaut: 40)
+        ts_range_threshold: Seuil TS pour RANGE (défaut: 0.45)
+        vc_low_percentile: Percentile pour LOW VOL dans RANGE (défaut: 50)
         normalize_method: 'minmax' ou 'percentile' (défaut: 'percentile')
 
     Returns:
