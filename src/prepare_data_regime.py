@@ -1,21 +1,24 @@
 """
 Script de préparation des données pour Meta-Regime Trading (5min).
 
-PRINCIPE CLÉ: Classification 3 régimes (TS × VC) + Features enrichies (~20)
+PRINCIPE CLÉ: Classification 3 régimes + Inputs bruts (c_ret, h_ret, l_ret)
 ===============================================================================
 
-⚠️ NOUVELLE APPROCHE: Abandonner la prédiction directionnelle (MACD/RSI/CCI)
-→ Prédire le RÉGIME de marché (3 classes) pour améliorer Win Rate et PF
+⚠️ APPROCHE SIMPLIFIÉE (2026-01-14):
+- Features d'entrée: UNIQUEMENT les returns bruts (c_ret, h_ret, l_ret)
+- Le CNN-LSTM apprend les patterns lui-même à partir des données brutes
+- Les régimes sont calculés à partir des features complexes (~20)
+  mais ces features ne sont PAS utilisées comme entrées du modèle
 
-Régimes (3 classes - TREND LOW VOL n'existe pas en crypto):
-- 0: RANGE LOW VOL  (TS < 0.4, VC ≤ P40)
-- 1: RANGE HIGH VOL (TS < 0.4, VC > P40)
+Régimes (3 classes - calculés depuis features intermédiaires):
+- 0: RANGE LOW VOL  (TS < 0.45, VC ≤ P50)
+- 1: RANGE HIGH VOL (TS < 0.45, VC > P50)
 - 2: TREND          (TS > 0.5, any volatility)
 
-Features (~20 colonnes):
-  Trend: MA slopes, ADX, regression, Hurst, MACD histogram
-  Volatility: ATR normalized, BB bands, realized vol, compression
-  Volume/Micro: Volume ratio, spike, VWAP deviation, OBV derivative
+Features d'entrée du modèle (3 colonnes):
+  - c_ret: close.pct_change() - Rendement close-to-close
+  - h_ret: high.pct_change() - Rendement high-to-high
+  - l_ret: low.pct_change() - Rendement low-to-low
 
 Labels (6 au total):
   Régime:
@@ -29,11 +32,12 @@ Labels (6 au total):
 
 Pipeline:
 1. Charger données brutes (OHLCV 5min)
-2. Calculer ~20 features de régime (regime_features.py)
-3. Calculer labels régime (regime_labeler.py)
-4. Créer séquences (12 timesteps × ~20 features)
-5. Split temporel (70/15/15)
-6. Sauvegarder dataset unique: dataset_<assets>_regime.npz
+2. Calculer returns (c_ret, h_ret, l_ret)
+3. Calculer features de régime (~20) pour labeling UNIQUEMENT
+4. Calculer labels régime (regime_labeler.py)
+5. Créer séquences (25 timesteps × 3 features: c_ret, h_ret, l_ret)
+6. Split temporel (70/15/15)
+7. Sauvegarder dataset unique: dataset_<assets>_regime.npz
 
 Usage:
     python src/prepare_data_regime.py --assets BTC ETH BNB ADA LTC
@@ -43,7 +47,7 @@ Génère:
 
 Author: Claude Code - Phase 1 (Data Layer)
 Date: 2025-01-11
-Version: 1.0
+Version: 2.0 (c_ret, h_ret, l_ret inputs)
 """
 
 import numpy as np
@@ -532,12 +536,22 @@ def process_single_asset(asset_name: str,
         logger.info(f"  Trim ±{TRIM_EDGES}: {len(df)} lignes restantes")
 
     # ========================================================================
-    # ÉTAPE 1: CALCULER FEATURES DE RÉGIME (~20 colonnes)
+    # ÉTAPE 0.5: CALCULER RETURNS (c_ret, h_ret, l_ret) - INPUTS DU MODÈLE
     # ========================================================================
 
-    logger.info(f"\n  Calcul features de régime (~20 colonnes)...")
+    logger.info(f"\n  Calcul returns (c_ret, h_ret, l_ret) - inputs du modèle...")
+    df['c_ret'] = df['close'].pct_change()
+    df['h_ret'] = df['high'].pct_change()
+    df['l_ret'] = df['low'].pct_change()
+    logger.info(f"  ✓ Returns calculés: c_ret, h_ret, l_ret")
+
+    # ========================================================================
+    # ÉTAPE 1: CALCULER FEATURES DE RÉGIME (~20 colonnes) - POUR LABELING SEULEMENT
+    # ========================================================================
+
+    logger.info(f"\n  Calcul features de régime (~20 colonnes) pour labeling...")
     df = calculate_all_regime_features(df)
-    logger.info(f"  ✓ Features calculées: {df.shape[1]} colonnes")
+    logger.info(f"  ✓ Features intermédiaires calculées: {df.shape[1]} colonnes (utilisées pour labels UNIQUEMENT)")
 
     # ========================================================================
     # ÉTAPE 2: CALCULER LABELS DE RÉGIME (regime, ts_score, vc_score)
@@ -601,8 +615,10 @@ def process_single_asset(asset_name: str,
 
     logger.info(f"\n  Création séquences (seq_length={SEQUENCE_LENGTH})...")
 
-    # Features à utiliser (toutes les features de régime)
-    feature_cols = get_regime_feature_names()
+    # Features à utiliser (UNIQUEMENT les returns bruts - 3 features)
+    # Les features de régime (~20) sont utilisées pour le labeling mais ne sont
+    # PAS passées au modèle - le CNN-LSTM apprend les patterns lui-même
+    feature_cols = ['c_ret', 'h_ret', 'l_ret']
     logger.info(f"  Features utilisées ({len(feature_cols)}): {feature_cols}")
 
     # Clip si demandé
@@ -669,12 +685,13 @@ def main():
     )
 
     logger.info("="*80)
-    logger.info("PRÉPARATION DONNÉES - META-REGIME TRADING")
+    logger.info("PRÉPARATION DONNÉES - META-REGIME TRADING v2.0")
     logger.info("="*80)
     logger.info(f"Assets: {args.assets}")
     logger.info(f"Sequence length: {SEQUENCE_LENGTH}")
     logger.info(f"Régimes: 3 classes (TS × VC)")
-    logger.info(f"Features: ~20 colonnes (trend, volatility, volume)")
+    logger.info(f"Features MODEL INPUT: 3 colonnes (c_ret, h_ret, l_ret)")
+    logger.info(f"Features LABELING: ~20 colonnes (utilisées pour calcul labels uniquement)")
 
     # ========================================================================
     # CALCUL PÉRIODE COMMUNE ET SPLIT TIMESTAMPS (FIX: negative gaps)
@@ -774,17 +791,24 @@ def main():
     assets_str = '_'.join(args.assets).lower()
     output_path = output_dir / f"dataset_{assets_str}_regime.npz"
 
-    # Features
-    feature_cols = get_regime_feature_names()
+    # Features (UNIQUEMENT les returns bruts)
+    feature_cols = ['c_ret', 'h_ret', 'l_ret']
 
     # Metadata (pattern copié de prepare_data_direction_only.py)
     metadata = {
         'created_at': datetime.now().isoformat(),
+        'version': '2.0',
+        'description': 'Inputs bruts (c_ret, h_ret, l_ret) - CNN-LSTM apprend les patterns',
         'assets': args.assets,
         'n_assets': len(args.assets),
         'asset_id_mapping': ASSET_ID_MAP,
         'sequence_length': SEQUENCE_LENGTH,
         'features': feature_cols,
+        'features_description': {
+            'c_ret': 'close.pct_change() - Rendement close-to-close',
+            'h_ret': 'high.pct_change() - Rendement high-to-high',
+            'l_ret': 'low.pct_change() - Rendement low-to-low'
+        },
         'n_features': len(feature_cols),
         'labels': [
             'regime', 'trend_strength', 'volatility_cluster',  # Labels régime
@@ -792,14 +816,15 @@ def main():
         ],
         'n_classes': 3,  # Pour régime uniquement
         'regime_definition': {
-            0: "RANGE LOW VOL (TS < 0.4, VC ≤ P40)",
-            1: "RANGE HIGH VOL (TS < 0.4, VC > P40)",
+            0: "RANGE LOW VOL (TS < 0.45, VC ≤ P50)",
+            1: "RANGE HIGH VOL (TS < 0.45, VC > P50)",
             2: "TREND (TS > 0.5, any volatility)"
         },
+        'regime_note': 'Régimes calculés depuis features intermédiaires (~20), non exposées au modèle',
         'direction_definition': {
-            'macd_direction': 'Kalman-filtered MACD slope: 1=UP, 0=DOWN',
-            'rsi_direction': 'Kalman-filtered RSI slope: 1=UP, 0=DOWN',
-            'cci_direction': 'Kalman-filtered CCI slope: 1=UP, 0=DOWN'
+            'macd_direction': 'Kalman-filtered MACD slope (filtered[t] > filtered[t-1]): 1=UP, 0=DOWN',
+            'rsi_direction': 'Kalman-filtered RSI slope (filtered[t] > filtered[t-1]): 1=UP, 0=DOWN',
+            'cci_direction': 'Kalman-filtered CCI slope (filtered[t] > filtered[t-1]): 1=UP, 0=DOWN'
         },
         'clip_value': args.clip,
         'max_samples_per_asset': args.max_samples,
@@ -813,7 +838,7 @@ def main():
             'test': {'n_sequences': len(X_test), 'ratio': 0.15}
         },
         'structure': {
-            'X': f'(n, {SEQUENCE_LENGTH}, {len(feature_cols)}+2) - [timestamp, asset_id, features...] pour chaque timestep',
+            'X': f'(n, {SEQUENCE_LENGTH}, {len(feature_cols)}+2) - [timestamp, asset_id, c_ret, h_ret, l_ret] pour chaque timestep',
             'Y': '(n, 8) - [timestamp, asset_id, regime, ts, vc, macd_dir, rsi_dir, cci_dir]',
             'OHLCV': '(n, 7) - [timestamp, asset_id, open, high, low, close, volume]'
         },
