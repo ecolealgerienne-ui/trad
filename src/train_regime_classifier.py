@@ -108,6 +108,13 @@ import shutil
 from typing import Dict, Tuple
 import logging
 
+# XGBoost
+try:
+    import xgboost as xgb
+    XGBOOST_AVAILABLE = True
+except ImportError:
+    XGBOOST_AVAILABLE = False
+
 # PyTorch
 import torch
 import torch.nn as nn
@@ -733,28 +740,215 @@ def generate_predictions(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# XGBOOST TRAINING
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def train_xgboost(full_data: Dict, args) -> Dict:
+    """
+    Entraîne un modèle XGBoost pour classification de régimes.
+
+    Args:
+        full_data: Dictionnaire avec X_train, X_val, X_test, y_train, y_val, y_test
+        args: Arguments CLI
+
+    Returns:
+        Dict avec modèle, métriques, etc.
+    """
+    if not XGBOOST_AVAILABLE:
+        raise ImportError("XGBoost n'est pas installé. Installez avec: pip install xgboost")
+
+    logger.info("\n" + "="*80)
+    logger.info("XGBOOST TRAINING")
+    logger.info("="*80)
+
+    # Extraire features (colonnes 2-4: raw returns uniquement)
+    X_train_seq = full_data['X_train'][:, :, 2:5]  # (n, 25, 3)
+    X_val_seq = full_data['X_val'][:, :, 2:5]
+    X_test_seq = full_data['X_test'][:, :, 2:5]
+
+    # Agréger features (mean, std, min, max, last)
+    def aggregate_features(X_seq):
+        """Agrège séquences (n,25,3) → (n,15) avec 5 stats × 3 features."""
+        n = X_seq.shape[0]
+        X_agg = np.zeros((n, 15))  # 3 features × 5 stats
+        for i in range(3):
+            X_agg[:, i*5 + 0] = np.mean(X_seq[:, :, i], axis=1)
+            X_agg[:, i*5 + 1] = np.std(X_seq[:, :, i], axis=1)
+            X_agg[:, i*5 + 2] = np.min(X_seq[:, :, i], axis=1)
+            X_agg[:, i*5 + 3] = np.max(X_seq[:, :, i], axis=1)
+            X_agg[:, i*5 + 4] = X_seq[:, -1, i]  # last
+        return X_agg
+
+    X_train = aggregate_features(X_train_seq)
+    X_val = aggregate_features(X_val_seq)
+    X_test = aggregate_features(X_test_seq)
+
+    y_train = full_data['y_train']
+    y_val = full_data['y_val']
+    y_test = full_data['y_test']
+
+    logger.info(f"X_train aggregated: {X_train.shape} (15 features)")
+    logger.info(f"X_val aggregated: {X_val.shape}")
+    logger.info(f"X_test aggregated: {X_test.shape}")
+
+    # Distribution labels
+    unique_train, counts_train = np.unique(y_train, return_counts=True)
+    logger.info("\n📊 Distribution train:")
+    for cls, count in zip(unique_train, counts_train):
+        pct = 100.0 * count / len(y_train)
+        logger.info(f"  Regime {cls}: {count:,} ({pct:.1f}%)")
+
+    # SMOTE si demandé
+    if args.use_smote:
+        logger.info(f"\n🔄 SMOTE oversampling (target ratio={args.smote_ratio})...")
+
+        # Calculer sampling_strategy
+        n_samples = len(y_train)
+        target_count_trend = int(n_samples * args.smote_ratio)
+
+        sampling_strategy = {2: target_count_trend}  # Classe TREND=2
+
+        smote = SMOTE(
+            sampling_strategy=sampling_strategy,
+            k_neighbors=args.smote_k_neighbors,
+            random_state=42
+        )
+
+        X_train, y_train = smote.fit_resample(X_train, y_train)
+
+        logger.info(f"✅ SMOTE done: {X_train.shape[0]:,} samples")
+        unique_train, counts_train = np.unique(y_train, return_counts=True)
+        logger.info("📊 Distribution après SMOTE:")
+        for cls, count in zip(unique_train, counts_train):
+            pct = 100.0 * count / len(y_train)
+            logger.info(f"  Regime {cls}: {count:,} ({pct:.1f}%)")
+
+    # Entraînement XGBoost
+    logger.info("\n🚀 Training XGBoost...")
+
+    # Calculer scale_pos_weight pour déséquilibre
+    unique, counts = np.unique(y_train, return_counts=True)
+    scale_pos_weight = counts[0] / counts[2] if len(counts) > 2 else 1.0
+
+    model = xgb.XGBClassifier(
+        n_estimators=getattr(args, 'n_estimators', 200),
+        max_depth=getattr(args, 'max_depth', 8),
+        learning_rate=getattr(args, 'learning_rate', 0.1),
+        objective='multi:softmax',
+        num_class=3,
+        scale_pos_weight=scale_pos_weight,
+        random_state=42,
+        n_jobs=-1
+    )
+
+    model.fit(
+        X_train, y_train,
+        eval_set=[(X_val, y_val)],
+        verbose=False
+    )
+
+    logger.info("✅ Training complete")
+
+    # Évaluation
+    logger.info("\n" + "="*80)
+    logger.info("EVALUATION")
+    logger.info("="*80)
+
+    # Prédictions
+    y_train_pred = model.predict(X_train)
+    y_val_pred = model.predict(X_val)
+    y_test_pred = model.predict(X_test)
+
+    y_train_proba = model.predict_proba(X_train)
+    y_val_proba = model.predict_proba(X_val)
+    y_test_proba = model.predict_proba(X_test)
+
+    # Métriques
+    results = {}
+
+    for split_name, y_true, y_pred, y_proba in [
+        ('train', y_train, y_train_pred, y_train_proba),
+        ('val', y_val, y_val_pred, y_val_proba),
+        ('test', y_test, y_test_pred, y_test_proba)
+    ]:
+        acc = accuracy_score(y_true, y_pred)
+        prec = precision_score(y_true, y_pred, average='macro', zero_division=0)
+        rec = recall_score(y_true, y_pred, average='macro', zero_division=0)
+        f1 = f1_score(y_true, y_pred, average='macro', zero_division=0)
+
+        try:
+            auc = roc_auc_score(y_true, y_proba, multi_class='ovr', average='macro')
+        except:
+            auc = 0.0
+
+        results[split_name] = {
+            'accuracy': float(acc),
+            'precision': float(prec),
+            'recall': float(rec),
+            'f1': float(f1),
+            'auc': float(auc)
+        }
+
+        logger.info(f"\n{split_name.upper()}: Acc={acc:.4f} | Prec={prec:.4f} | Rec={rec:.4f} | F1={f1:.4f} | AUC={auc:.4f}")
+
+    # Sauvegarder modèle
+    model_path = args.output_dir / 'regime_xgboost.json'
+    model.save_model(str(model_path))
+    logger.info(f"\n💾 Modèle sauvegardé: {model_path}")
+
+    # Sauvegarder métriques
+    results_path = args.output_dir / 'xgboost_results.json'
+    with open(results_path, 'w') as f:
+        json.dump(results, f, indent=2)
+    logger.info(f"💾 Résultats sauvegardés: {results_path}")
+
+    return {
+        'model': model,
+        'results': results,
+        'y_test_pred': y_test_pred,
+        'y_test_proba': y_test_proba
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def main():
-    parser = argparse.ArgumentParser(description='Train Regime Classifier (Model A - CNN-LSTM)')
+    parser = argparse.ArgumentParser(description='Train Regime Classifier - CNN-LSTM or XGBoost')
+
+    # Model selection
+    parser.add_argument('--model', type=str, default='cnn-lstm',
+                        choices=['cnn-lstm', 'xgboost'],
+                        help='Model type to train (default: cnn-lstm)')
+
     parser.add_argument('--data', type=Path, required=True,
                         help='Path to prepared regime dataset (.npz)')
     parser.add_argument('--output-dir', type=Path, default=Path('models/regime'),
                         help='Output directory for regime classifier')
+
+    # CNN-LSTM specific arguments
     parser.add_argument('--epochs', type=int, default=50,
-                        help='Max epochs (default: 50)')
+                        help='Max epochs for CNN-LSTM (default: 50)')
     parser.add_argument('--batch-size', type=int, default=256,
-                        help='Batch size (default: 256)')
+                        help='Batch size for CNN-LSTM (default: 256)')
     parser.add_argument('--lr', type=float, default=0.001,
-                        help='Learning rate (default: 0.001)')
+                        help='Learning rate for CNN-LSTM (default: 0.001)')
     parser.add_argument('--patience', type=int, default=10,
-                        help='Early stopping patience (default: 10)')
+                        help='Early stopping patience for CNN-LSTM (default: 10)')
     parser.add_argument('--device', type=str, default='auto',
                         choices=['auto', 'cuda', 'cpu'],
                         help='Device (default: auto)')
 
-    # SMOTE options (for TREND class oversampling)
+    # XGBoost specific arguments
+    parser.add_argument('--n-estimators', type=int, default=200,
+                        help='Number of trees for XGBoost (default: 200)')
+    parser.add_argument('--max-depth', type=int, default=8,
+                        help='Max tree depth for XGBoost (default: 8)')
+    parser.add_argument('--learning-rate', type=float, default=0.1,
+                        help='Learning rate for XGBoost (default: 0.1)')
+
+    # SMOTE options (for TREND class oversampling) - works for both models
     parser.add_argument('--use-smote', action='store_true',
                         help='Use SMOTE oversampling for minority classes')
     parser.add_argument('--smote-ratio', type=float, default=0.20,
@@ -765,8 +959,9 @@ def main():
     args = parser.parse_args()
 
     print("="*80)
-    print("REGIME CLASSIFIER TRAINING - Model A (CNN-LSTM Multiclass)")
+    print(f"REGIME CLASSIFIER TRAINING - {args.model.upper()}")
     print("="*80)
+    print(f"Model: {args.model}")
     print(f"Dataset: {args.data}")
     print(f"Output: {args.output_dir}")
 
@@ -786,6 +981,18 @@ def main():
     print("="*80)
 
     full_data = load_regime_dataset(args.data)
+
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # ROUTING: Train CNN-LSTM or XGBoost based on --model argument
+    # ═══════════════════════════════════════════════════════════════════════════════
+
+    if args.model == 'xgboost':
+        # XGBoost training path
+        train_xgboost(full_data, args)
+        return  # Exit after XGBoost training
+
+    # CNN-LSTM training path (default)
+    # Continue with existing CNN-LSTM logic below
 
     # Préparer features (extraire colonnes 2-4 = c_ret, h_ret, l_ret)
     print("\n" + "="*80)
