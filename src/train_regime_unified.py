@@ -63,9 +63,6 @@ try:
 except ImportError:
     SMOTE_AVAILABLE = False
 
-# Local
-from regime_model import CNNLSTMRegimeClassifier
-
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
@@ -93,6 +90,146 @@ REGIME_NAMES = {
     1: 'RANGE_HIGH_VOL',
     2: 'TREND'
 }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MODEL ARCHITECTURE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class RegimeCNNLSTM(nn.Module):
+    """
+    CNN-LSTM pour classification multiclass de régimes (3 classes).
+
+    Architecture:
+        Input: (batch, 25, 3) - 25 timesteps × 3 raw returns
+        → CNN 1D (extraction features temporelles)
+        → LayerNorm (stabilisation)
+        → LSTM (contexte séquentiel)
+        → Dense + Softmax
+        → Output: (batch, 3) - probabilités pour 3 régimes
+
+    Args:
+        sequence_length: Longueur des séquences (défaut: 25)
+        num_features: Nombre de features (défaut: 3 = c_ret, h_ret, l_ret)
+        num_classes: Nombre de classes (défaut: 3 régimes)
+        cnn_filters: Nombre de filtres CNN (défaut: 64)
+        cnn_kernel_size: Taille kernel CNN (défaut: 3)
+        lstm_hidden_size: Taille hidden LSTM (défaut: 64)
+        lstm_num_layers: Nombre de couches LSTM (défaut: 2)
+        lstm_dropout: Dropout LSTM (défaut: 0.2)
+        dense_hidden_size: Taille couche dense (défaut: 32)
+        dense_dropout: Dropout dense (défaut: 0.3)
+    """
+
+    def __init__(
+        self,
+        sequence_length: int = 25,
+        num_features: int = 3,
+        num_classes: int = 3,
+        cnn_filters: int = 64,
+        cnn_kernel_size: int = 3,
+        lstm_hidden_size: int = 64,
+        lstm_num_layers: int = 2,
+        lstm_dropout: float = 0.2,
+        dense_hidden_size: int = 32,
+        dense_dropout: float = 0.3
+    ):
+        super(RegimeCNNLSTM, self).__init__()
+
+        self.sequence_length = sequence_length
+        self.num_features = num_features
+        self.num_classes = num_classes
+
+        # CNN Layer
+        self.cnn = nn.Conv1d(
+            in_channels=num_features,
+            out_channels=cnn_filters,
+            kernel_size=cnn_kernel_size,
+            stride=1,
+            padding=cnn_kernel_size // 2  # Same padding
+        )
+        self.cnn_activation = nn.ReLU()
+        self.cnn_batchnorm = nn.BatchNorm1d(cnn_filters)
+
+        # Layer Normalization
+        self.layer_norm = nn.LayerNorm(cnn_filters)
+
+        # LSTM
+        self.lstm = nn.LSTM(
+            input_size=cnn_filters,
+            hidden_size=lstm_hidden_size,
+            num_layers=lstm_num_layers,
+            dropout=lstm_dropout if lstm_num_layers > 1 else 0,
+            batch_first=True,
+            bidirectional=False
+        )
+
+        # Dense layers
+        self.dense1 = nn.Linear(lstm_hidden_size, dense_hidden_size)
+        self.dense_activation = nn.ReLU()
+        self.dense_dropout = nn.Dropout(dense_dropout)
+
+        # Output layer (num_classes logits)
+        self.output = nn.Linear(dense_hidden_size, num_classes)
+
+        logger.info(f"✅ RegimeCNNLSTM créé:")
+        logger.info(f"  Input: ({sequence_length}, {num_features})")
+        logger.info(f"  CNN: {cnn_filters} filters, kernel={cnn_kernel_size}")
+        logger.info(f"  LSTM: {lstm_hidden_size} hidden × {lstm_num_layers} layers")
+        logger.info(f"  Dense: {dense_hidden_size}")
+        logger.info(f"  Output: {num_classes} classes (softmax)")
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass.
+
+        Args:
+            x: Input tensor (batch, sequence_length, num_features)
+
+        Returns:
+            Logits (batch, num_classes) - appliquer softmax pour probabilités
+        """
+        # Input: (batch, seq_len, features)
+
+        # CNN expects (batch, channels, length)
+        x = x.transpose(1, 2)  # (batch, features, seq_len)
+
+        # CNN
+        x = self.cnn(x)  # (batch, cnn_filters, seq_len)
+        x = self.cnn_activation(x)
+        x = self.cnn_batchnorm(x)
+
+        # Back to (batch, seq_len, cnn_filters)
+        x = x.transpose(1, 2)
+
+        # Layer Norm
+        x = self.layer_norm(x)
+
+        # LSTM
+        lstm_out, _ = self.lstm(x)  # (batch, seq_len, lstm_hidden)
+
+        # Take last timestep
+        x = lstm_out[:, -1, :]  # (batch, lstm_hidden)
+
+        # Dense
+        x = self.dense1(x)
+        x = self.dense_activation(x)
+        x = self.dense_dropout(x)
+
+        # Output logits
+        logits = self.output(x)  # (batch, num_classes)
+
+        return logits
+
+    def predict_proba(self, x: torch.Tensor) -> torch.Tensor:
+        """Retourne probabilités softmax."""
+        logits = self.forward(x)
+        return torch.softmax(logits, dim=1)
+
+    def predict(self, x: torch.Tensor) -> torch.Tensor:
+        """Retourne classes prédites."""
+        logits = self.forward(x)
+        return torch.argmax(logits, dim=1)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
