@@ -298,17 +298,26 @@ def load_regime_dataset(npz_path: Path) -> Dict:
     Y_test = data['Y_test']
     OHLCV_test = data['OHLCV_test']
 
-    # Metadata peut être un numpy array contenant une string JSON
+    # Metadata peut être stocké de différentes façons dans un npz
     if 'metadata' in data:
         try:
-            # Essayer .item() d'abord (numpy scalar)
-            metadata = json.loads(data['metadata'].item())
-        except (AttributeError, ValueError):
-            try:
-                # Fallback: str() direct
-                metadata = json.loads(str(data['metadata']))
-            except json.JSONDecodeError:
+            meta_raw = data['metadata']
+            # Cas 1: numpy array contenant un dict directement
+            if hasattr(meta_raw, 'item'):
+                meta_item = meta_raw.item()
+                if isinstance(meta_item, dict):
+                    metadata = meta_item
+                elif isinstance(meta_item, str):
+                    metadata = json.loads(meta_item)
+                else:
+                    metadata = {}
+            # Cas 2: string JSON directe
+            elif isinstance(meta_raw, str):
+                metadata = json.loads(meta_raw)
+            else:
                 metadata = {}
+        except (AttributeError, ValueError, json.JSONDecodeError, TypeError):
+            metadata = {}
     else:
         metadata = {}
 
