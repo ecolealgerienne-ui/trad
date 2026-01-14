@@ -7797,8 +7797,9 @@ Note: "accord" = agreement TOTAL ou PARTIEL avec confirmations
 ## 🎯 CLASSIFICATEUR DE RÉGIMES - Évolution et Migration (2026-01-14)
 
 **Date**: 2026-01-14
-**Statut**: ⏳ **EN COURS - Migration XGBoost → CNN-LSTM**
+**Statut**: ❌ **DATA LEAKAGE CONFIRMÉ - XGBoost INVALIDE, CNN-LSTM VALIDE**
 **Objectif**: Classification multi-classes des régimes de marché pour filtrage conditionnel des trades
+**Résultat Valide**: CNN-LSTM avec raw returns = **86.33%** (seul modèle sans leakage)
 
 ### Concept - Système Meta-Regime Trading
 
@@ -8028,24 +8029,131 @@ Output: Softmax → 3 probabilités
 3. ✅ **Décider**: → **REVENIR À XGBOOST** (écart trop grand: -6.34%)
 4. ⏳ **Intégrer XGBoost dans pipeline Meta-Regime**
 
-### Recommandations (MISE À JOUR POST-ÉVALUATION)
+### Recommandations (MISE À JOUR POST-LEAKAGE - 2026-01-14)
 
-**Décision finale**: ✅ **REVENIR À XGBOOST**
+**Décision finale**: ✅ **UTILISER CNN-LSTM** (seul modèle valide)
 
 | Critère | XGBoost | CNN-LSTM | Gagnant |
 |---------|---------|----------|---------|
-| Accuracy | 92.67% | 86.33% | **XGBoost** (+6.34%) |
-| F1 (macro) | 88.27% | 81.04% | **XGBoost** (+7.23%) |
-| TREND F1 | 77.7% | 70.0% | **XGBoost** (+7.7%) |
-| Interprétabilité | Haute | Faible | **XGBoost** |
-| Temps inference | Rapide | Lent | **XGBoost** |
+| Accuracy | ~~98.95%~~ | 86.33% | **CNN-LSTM** (valide) |
+| Validité | ❌ DATA LEAKAGE | ✅ VALIDE | **CNN-LSTM** |
+| Features | Leakage (20 ind.) | Raw returns (3) | **CNN-LSTM** |
 
-**Pourquoi XGBoost gagne:**
-- Les features computées (mean, std, min, max sur window) sont **essentielles**
-- Le CNN-LSTM avec raw returns ne peut pas reproduire ces agrégations
-- Écart de -6.34% est trop significatif pour justifier la simplicité
+**Pourquoi XGBoost est INVALIDE:**
+- Les 20 features utilisées (adx, atr_normalized, bb_width, etc.) sont les **MÊMES** que celles utilisées pour calculer les labels
+- Le modèle apprend à reconstruire la formule du label → résultat artificiellement gonflé
+- 98.95% accuracy = le modèle "triche", pas de vraie prédiction
 
-**Option abandonnée**: CNN-LSTM avec raw returns (86.33% insuffisant)
+**Pourquoi CNN-LSTM est VALIDE:**
+- Utilise uniquement raw returns (h_ret, l_ret, c_ret)
+- Ces features ne sont PAS dans la formule de labeling
+- 86.33% = vraie capacité de prédiction
+
+**Option abandonnée**: XGBoost avec 20 features (98.95% - DATA LEAKAGE)
+
+### 🚨 DATA LEAKAGE CONFIRMÉ - XGBoost 98.95% (2026-01-14)
+
+**Date**: 2026-01-14
+**Statut**: ❌ **CRITIQUE - Les résultats XGBoost sont INVALIDES**
+
+#### Résultats Suspects
+
+```
+XGBoost avec 20 indicateurs (100 features agrégées):
+├── Train Accuracy: 98.88%
+├── Val Accuracy:   99.24%
+├── Test Accuracy:  98.95%  ← TROP BON POUR ÊTRE VRAI!
+
+Top Feature Importance:
+├── atr_normalized_last:  20.0%  ← Utilisé dans VC_SCORE!
+├── bb_upper_last:        13.2%  ← Lié à bb_width!
+├── bb_width_last:         6.8%  ← Utilisé dans VC_SCORE!
+└── adx_last:              5.1%  ← Utilisé dans TS_SCORE!
+```
+
+#### Cause du Leakage
+
+Les **labels de régime** sont calculés directement à partir des **mêmes features** utilisées pour entraîner le modèle:
+
+**Trend Strength (TS)** - utilisé pour label:
+```python
+# regime_labeler.py - ligne 68-74
+TS_WEIGHTS = {
+    'ma20_slope': 0.20,      # ← Feature du modèle!
+    'ma50_slope': 0.20,      # ← Feature du modèle!
+    'adx': 0.25,             # ← Feature du modèle!
+    'regression_r2': 0.20,   # ← Feature du modèle!
+    'hurst_exponent': 0.15,  # ← Feature du modèle!
+}
+```
+
+**Volatility Cluster (VC)** - utilisé pour label:
+```python
+# regime_labeler.py - ligne 78-82
+VC_WEIGHTS = {
+    'atr_normalized': 0.40,      # ← Feature du modèle!
+    'bb_width': 0.30,            # ← Feature du modèle!
+    'realized_volatility': 0.30, # ← Feature du modèle!
+}
+```
+
+**Pipeline qui cause le leakage** (`prepare_data_regime.py`):
+```python
+# Ligne 558: Calcul des features
+df = calculate_all_regime_features(df)
+
+# Ligne 568: Labels calculés AVEC CES MÊMES FEATURES!
+regime_labels = calculate_regime_labels(df)
+# → label = TREND si ts_score > 0.5
+# → ts_score = 0.25*adx + 0.20*ma20_slope + ...
+
+# Ligne 626: MÊMES features utilisées pour le modèle!
+feature_cols = get_regime_feature_names()
+```
+
+#### Pourquoi 98.95% Accuracy
+
+Le modèle XGBoost n'a qu'à **reconstruire la formule** du label:
+- Il voit `adx/100` en entrée
+- Le label utilise `0.25 * adx/100` dans ts_score
+- XGBoost apprend cette transformation TRIVIALE!
+
+**Preuve**: Les top features sont exactement celles utilisées dans le labeling.
+
+#### Solution Requise
+
+**Les features d'entrée du modèle DOIVENT être DIFFÉRENTES des features de labeling.**
+
+**Option A** (Recommandée): Raw Returns uniquement
+```python
+# Features d'entrée = SEULEMENT h_ret, l_ret, c_ret
+# Le modèle apprend les patterns à partir des returns bruts
+# Labels restent calculés avec indicateurs (pas de leakage)
+# → Correspond au CNN-LSTM avec 86.33% (résultat VALIDE)
+```
+
+**Option B**: Features de volume (non utilisées dans labels)
+```python
+# Features d'entrée = volume_ratio, volume_spike, vwap_deviation, obv_derivative
+# Ces features ne sont PAS utilisées dans TS ou VC
+# → Pas de leakage
+```
+
+**Option C**: Décalage temporel
+```python
+# Features à t-N, labels à t
+# Le modèle prédit le régime FUTUR
+# → Pas de leakage mais différent objectif
+```
+
+#### Conclusion
+
+| Modèle | Accuracy | Validity | Recommandation |
+|--------|----------|----------|----------------|
+| XGBoost + 20 features | 98.95% | ❌ INVALIDE (leakage) | **ABANDONNER** |
+| CNN-LSTM + raw returns | 86.33% | ✅ VALIDE | **UTILISER** |
+
+**Le CNN-LSTM avec 86.33% est le VRAI résultat** car il utilise uniquement les raw returns (h_ret, l_ret, c_ret) qui ne sont PAS dans la formule de labeling.
 
 ### Commandes
 
