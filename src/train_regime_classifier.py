@@ -102,6 +102,7 @@ from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
     roc_auc_score, classification_report, confusion_matrix
 )
+from imblearn.over_sampling import SMOTE
 import json
 import shutil
 from typing import Dict, Tuple
@@ -752,6 +753,15 @@ def main():
     parser.add_argument('--device', type=str, default='auto',
                         choices=['auto', 'cuda', 'cpu'],
                         help='Device (default: auto)')
+
+    # SMOTE options (for TREND class oversampling)
+    parser.add_argument('--use-smote', action='store_true',
+                        help='Use SMOTE oversampling for minority classes')
+    parser.add_argument('--smote-ratio', type=float, default=0.20,
+                        help='Target ratio for TREND class after SMOTE (default: 0.20 = 20%% of dataset)')
+    parser.add_argument('--smote-k-neighbors', type=int, default=5,
+                        help='Number of nearest neighbors for SMOTE (default: 5)')
+
     args = parser.parse_args()
 
     print("="*80)
@@ -794,6 +804,82 @@ def main():
     print(f"  X_train: {X_train.shape} (n, seq_len, features)")
     print(f"  X_val:   {X_val.shape}")
     print(f"  X_test:  {X_test.shape}")
+
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # SMOTE OVERSAMPLING (if enabled)
+    # ═══════════════════════════════════════════════════════════════════════════════
+    if args.use_smote:
+        print("\n" + "="*80)
+        print("SMOTE OVERSAMPLING - Improving TREND detection")
+        print("="*80)
+
+        # Print original class distribution
+        unique, counts = np.unique(y_train, return_counts=True)
+        counts_orig = counts.copy()  # Store for later comparison
+        total = len(y_train)
+        print(f"\n📊 BEFORE SMOTE - Class distribution (Train):")
+        for cls, count in zip(unique, counts):
+            regime_name = ['RANGE_LOW_VOL', 'RANGE_HIGH_VOL', 'TREND'][cls]
+            print(f"  Regime {cls} ({regime_name:15s}): {count:8,} ({count/total*100:5.2f}%)")
+
+        # Calculate target samples for TREND (regime 2)
+        n_train = len(y_train)
+        target_trend_samples = int(args.smote_ratio * n_train)
+
+        print(f"\n🎯 Target configuration:")
+        print(f"  TREND target ratio: {args.smote_ratio:.1%}")
+        print(f"  TREND target samples: {target_trend_samples:,}")
+        print(f"  k_neighbors: {args.smote_k_neighbors}")
+
+        # Save original shape
+        original_shape = X_train.shape  # (n, seq_len, features)
+        seq_len, n_features = original_shape[1], original_shape[2]
+
+        # Flatten sequences for SMOTE (SMOTE requires 2D input)
+        print(f"\n🔄 Reshaping for SMOTE...")
+        X_train_flat = X_train.reshape(len(X_train), -1)  # (n, seq_len * features)
+        print(f"  Flattened shape: {X_train_flat.shape}")
+
+        # Apply SMOTE to oversample TREND (regime 2) only
+        sampling_strategy = {2: target_trend_samples}  # Only oversample TREND
+
+        try:
+            print(f"\n⏳ Applying SMOTE (this may take a few minutes)...")
+            smote = SMOTE(
+                sampling_strategy=sampling_strategy,
+                k_neighbors=args.smote_k_neighbors,
+                random_state=42,
+                n_jobs=-1  # Use all CPU cores
+            )
+            X_train_resampled, y_train_resampled = smote.fit_resample(X_train_flat, y_train)
+
+            # Reshape back to sequence format
+            X_train = X_train_resampled.reshape(-1, seq_len, n_features)
+            y_train = y_train_resampled
+
+            print(f"  ✅ SMOTE completed successfully!")
+
+            # Print new class distribution
+            unique, counts = np.unique(y_train, return_counts=True)
+            total = len(y_train)
+            print(f"\n📊 AFTER SMOTE - Class distribution (Train):")
+            for cls, count in zip(unique, counts):
+                regime_name = ['RANGE_LOW_VOL', 'RANGE_HIGH_VOL', 'TREND'][cls]
+                gain = f"(+{count - counts_orig[cls]:,})" if cls == 2 else ""
+                print(f"  Regime {cls} ({regime_name:15s}): {count:8,} ({count/total*100:5.2f}%) {gain}")
+
+            print(f"\n📈 SMOTE impact:")
+            print(f"  Original samples: {original_shape[0]:,}")
+            print(f"  Resampled samples: {len(y_train):,}")
+            print(f"  Synthetic samples added: {len(y_train) - original_shape[0]:,}")
+            print(f"  Final X_train shape: {X_train.shape}")
+
+        except Exception as e:
+            print(f"\n❌ ERROR during SMOTE: {e}")
+            print(f"  Continuing with original (non-resampled) data...")
+
+    else:
+        print(f"\n⏩ SMOTE disabled (use --use-smote to enable)")
 
     # Créer DataLoaders
     train_loader, val_loader = create_dataloaders(
