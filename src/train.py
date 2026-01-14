@@ -401,6 +401,118 @@ def validate_epoch(
     return metrics
 
 
+def evaluate_all_splits(
+    model: nn.Module,
+    X_train: np.ndarray,
+    Y_train_labels: np.ndarray,
+    X_val: np.ndarray,
+    Y_val_labels: np.ndarray,
+    X_test: np.ndarray,
+    Y_test_labels: np.ndarray,
+    device: str,
+    batch_size: int = 512,
+    indicator_names: list = None
+) -> Dict[str, Dict[str, float]]:
+    """
+    Évalue le modèle sur les trois splits (train/val/test).
+
+    Args:
+        model: Modèle entraîné
+        X_train/X_val/X_test: Features des trois splits
+        Y_train_labels/Y_val_labels/Y_test_labels: Labels des trois splits
+        device: Device PyTorch
+        batch_size: Taille des batchs pour l'évaluation
+        indicator_names: Noms des indicateurs
+
+    Returns:
+        Dictionnaire avec métriques pour chaque split:
+        {
+            'train': {'accuracy': ..., 'precision': ..., 'recall': ..., 'f1': ..., 'roc_auc': ...},
+            'val': {...},
+            'test': {...}
+        }
+    """
+    from sklearn.metrics import roc_auc_score
+
+    model.eval()
+    eval_results = {}
+
+    splits = {
+        'train': (X_train, Y_train_labels),
+        'val': (X_val, Y_val_labels),
+        'test': (X_test, Y_test_labels)
+    }
+
+    for split_name, (X, Y_labels) in splits.items():
+        # Créer dataset et loader
+        dataset = IndicatorDataset(
+            torch.tensor(X, dtype=torch.float32),
+            torch.tensor(Y_labels, dtype=torch.float32)
+        )
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+
+        # Collecter prédictions et targets
+        all_predictions = []
+        all_targets = []
+
+        with torch.no_grad():
+            for batch in loader:
+                if len(batch) == 3:
+                    X_batch, Y_batch, _ = batch
+                else:
+                    X_batch, Y_batch = batch
+
+                X_batch = X_batch.to(device)
+                Y_batch = Y_batch.to(device)
+
+                outputs = model(X_batch)
+
+                all_predictions.append(outputs.cpu())
+                all_targets.append(Y_batch.cpu())
+
+        # Concaténer
+        all_predictions = torch.cat(all_predictions, dim=0)
+        all_targets = torch.cat(all_targets, dim=0)
+
+        # Calculer métriques avec compute_metrics
+        metrics = compute_metrics(all_predictions, all_targets, indicator_names=indicator_names)
+
+        # Calculer ROC AUC
+        try:
+            # Pour binary classification (1 output)
+            if all_predictions.shape[1] == 1:
+                roc_auc = roc_auc_score(
+                    all_targets.numpy(),
+                    all_predictions.numpy()
+                )
+            # Pour multi-output (moyenne)
+            else:
+                roc_aucs = []
+                for i in range(all_predictions.shape[1]):
+                    try:
+                        auc = roc_auc_score(
+                            all_targets[:, i].numpy(),
+                            all_predictions[:, i].numpy()
+                        )
+                        roc_aucs.append(auc)
+                    except:
+                        pass
+                roc_auc = np.mean(roc_aucs) if roc_aucs else None
+        except:
+            roc_auc = None
+
+        # Stocker résultats
+        eval_results[split_name] = {
+            'accuracy': metrics['avg_accuracy'],
+            'precision': metrics['avg_precision'],
+            'recall': metrics['avg_recall'],
+            'f1': metrics['avg_f1'],
+            'roc_auc': roc_auc
+        }
+
+    return eval_results
+
+
 def train_model(
     train_loader: DataLoader,
     val_loader: DataLoader,
@@ -652,7 +764,8 @@ def save_predictions_to_npz(
     X_val: np.ndarray,
     X_test: np.ndarray,
     device: str,
-    model_path: str
+    model_path: str,
+    eval_metrics: Dict = None
 ):
     """
     Génère les prédictions et met à jour le fichier .npz avec Y_train_pred, Y_val_pred, Y_test_pred.
@@ -663,6 +776,7 @@ def save_predictions_to_npz(
         X_train, X_val, X_test: Features
         device: Device
         model_path: Chemin du modèle sauvegardé (pour metadata)
+        eval_metrics: Dictionnaire avec métriques d'évaluation pour train/val/test (optionnel)
     """
     logger.info("\n📊 Génération des prédictions...")
 
@@ -692,6 +806,15 @@ def save_predictions_to_npz(
     metadata['predictions_val_mean'] = float(Y_val_pred.mean())
     metadata['predictions_test_mean'] = float(Y_test_pred.mean())
 
+    # Ajouter les métriques d'évaluation si disponibles
+    if eval_metrics is not None:
+        for split in ['train', 'val', 'test']:
+            if split in eval_metrics:
+                metrics = eval_metrics[split]
+                for metric_name, metric_value in metrics.items():
+                    if metric_value is not None:
+                        metadata[f'eval_{split}_{metric_name}'] = float(metric_value)
+
     # Ajouter les prédictions
     existing_data['Y_train_pred'] = Y_train_pred
     existing_data['Y_val_pred'] = Y_val_pred
@@ -702,6 +825,8 @@ def save_predictions_to_npz(
     np.savez_compressed(npz_path, **existing_data)
     logger.info(f"  ✅ Prédictions sauvegardées dans {npz_path}")
     logger.info(f"     Nouvelles clés: Y_train_pred, Y_val_pred, Y_test_pred")
+    if eval_metrics is not None:
+        logger.info(f"     Métriques d'évaluation ajoutées aux metadata (eval_<split>_<metric>)")
 
 
 # Mapping indicateur -> index (pour datasets multi-output)
@@ -1365,17 +1490,45 @@ def main():
     logger.info(f"  Historique sauvegardé: {history_path}")
 
     # =========================================================================
-    # 6. GÉNÉRER ET SAUVEGARDER LES PRÉDICTIONS
+    # 6. ÉVALUATION COMPLÈTE ET GÉNÉRATION DES PRÉDICTIONS
     # =========================================================================
     if args.data:
-        logger.info("\n6. Génération des prédictions...")
+        logger.info("\n6. Évaluation complète et génération des prédictions...")
 
         # Charger le meilleur modèle
         checkpoint = torch.load(save_path, map_location=device)
         model.load_state_dict(checkpoint['model_state_dict'])
         logger.info(f"  Meilleur modèle chargé: {save_path}")
 
-        # Sauvegarder les prédictions dans le .npz
+        # Évaluer sur les trois splits
+        logger.info("\n  📊 Évaluation sur train/val/test...")
+        eval_metrics = evaluate_all_splits(
+            model=model,
+            X_train=X_train,
+            Y_train_labels=Y_train_labels,
+            X_val=X_val,
+            Y_val_labels=Y_val_labels,
+            X_test=X_test,
+            Y_test_labels=Y_test_labels,
+            device=device,
+            batch_size=args.batch_size,
+            indicator_names=indicator_names_for_metrics
+        )
+
+        # Afficher les résultats
+        logger.info("\n  ✅ RÉSULTATS ÉVALUATION FINALE:")
+        logger.info("  " + "="*70)
+        for split in ['train', 'val', 'test']:
+            metrics = eval_metrics[split]
+            logger.info(f"\n  {split.upper()} SET:")
+            logger.info(f"    Accuracy:  {metrics['accuracy']:.4f}")
+            logger.info(f"    Precision: {metrics['precision']:.4f}")
+            logger.info(f"    Recall:    {metrics['recall']:.4f}")
+            logger.info(f"    F1-Score:  {metrics['f1']:.4f}")
+            if 'roc_auc' in metrics and metrics['roc_auc'] is not None:
+                logger.info(f"    ROC AUC:   {metrics['roc_auc']:.4f}")
+
+        # Sauvegarder les prédictions ET les métriques dans le .npz
         save_predictions_to_npz(
             npz_path=args.data,
             model=model,
@@ -1383,7 +1536,8 @@ def main():
             X_val=X_val,
             X_test=X_test,
             device=device,
-            model_path=save_path
+            model_path=save_path,
+            eval_metrics=eval_metrics
         )
 
     # =========================================================================
