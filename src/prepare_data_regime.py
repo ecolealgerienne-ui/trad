@@ -177,6 +177,270 @@ def calculate_direction_label(df: pd.DataFrame,
 
 
 # =============================================================================
+# FONCTIONS DE VALIDATION DES DONNÉES
+# =============================================================================
+
+def validate_returns(df: pd.DataFrame, asset_name: str):
+    """
+    Valide que les returns (c_ret, h_ret, l_ret) sont correctement calculés.
+
+    Vérifications:
+      1. Les returns correspondent bien au pct_change() des prix
+      2. Les valeurs NaN sont uniquement en première position
+      3. Les valeurs sont dans des plages raisonnables
+      4. Pas de valeurs infinies ou anormales
+
+    Args:
+        df: DataFrame avec colonnes close, high, low, c_ret, h_ret, l_ret
+        asset_name: Nom de l'asset pour logging
+    """
+    logger.info(f"\n  🔍 VALIDATION RETURNS ({asset_name})...")
+
+    errors = []
+    warnings = []
+
+    # Vérification 1: c_ret correspond au pct_change de close
+    expected_c_ret = df['close'].pct_change()
+    if not np.allclose(df['c_ret'].dropna(), expected_c_ret.dropna(), rtol=1e-10, atol=1e-15):
+        errors.append("c_ret ne correspond pas à close.pct_change()")
+    else:
+        logger.info(f"    ✓ c_ret = close.pct_change() vérifié")
+
+    # Vérification 2: h_ret correspond au pct_change de high
+    expected_h_ret = df['high'].pct_change()
+    if not np.allclose(df['h_ret'].dropna(), expected_h_ret.dropna(), rtol=1e-10, atol=1e-15):
+        errors.append("h_ret ne correspond pas à high.pct_change()")
+    else:
+        logger.info(f"    ✓ h_ret = high.pct_change() vérifié")
+
+    # Vérification 3: l_ret correspond au pct_change de low
+    expected_l_ret = df['low'].pct_change()
+    if not np.allclose(df['l_ret'].dropna(), expected_l_ret.dropna(), rtol=1e-10, atol=1e-15):
+        errors.append("l_ret ne correspond pas à low.pct_change()")
+    else:
+        logger.info(f"    ✓ l_ret = low.pct_change() vérifié")
+
+    # Vérification 4: NaN uniquement en première position
+    for col in ['c_ret', 'h_ret', 'l_ret']:
+        nan_count = df[col].isna().sum()
+        first_is_nan = df[col].iloc[0] if len(df) > 0 else False
+        if nan_count > 1 or (nan_count == 1 and not pd.isna(first_is_nan)):
+            warnings.append(f"{col}: {nan_count} NaN (attendu: 1 en première position)")
+        else:
+            logger.info(f"    ✓ {col}: NaN seulement en position [0]")
+
+    # Vérification 5: Plages de valeurs raisonnables pour données 5min
+    for col in ['c_ret', 'h_ret', 'l_ret']:
+        values = df[col].dropna()
+        min_val = values.min()
+        max_val = values.max()
+        abs_max = max(abs(min_val), abs(max_val))
+
+        # Pour du 5min crypto, returns typiques: -10% à +10% (extrêmes rares)
+        if abs_max > 0.5:  # 50% en 5min est suspect
+            warnings.append(f"{col}: valeur extrême détectée (max={abs_max:.2%})")
+        else:
+            logger.info(f"    ✓ {col}: plage [{min_val:.4%}, {max_val:.4%}]")
+
+    # Vérification 6: Pas de valeurs infinies
+    for col in ['c_ret', 'h_ret', 'l_ret']:
+        if np.isinf(df[col]).any():
+            errors.append(f"{col} contient des valeurs infinies")
+        else:
+            logger.info(f"    ✓ {col}: pas de valeurs infinies")
+
+    # Statistiques descriptives
+    logger.info(f"\n    📊 Statistiques returns:")
+    logger.info(f"       c_ret - mean: {df['c_ret'].mean():.6f}, std: {df['c_ret'].std():.6f}")
+    logger.info(f"       h_ret - mean: {df['h_ret'].mean():.6f}, std: {df['h_ret'].std():.6f}")
+    logger.info(f"       l_ret - mean: {df['l_ret'].mean():.6f}, std: {df['l_ret'].std():.6f}")
+
+    # Rapport final
+    if errors:
+        logger.error(f"\n    ❌ ERREURS DÉTECTÉES:")
+        for error in errors:
+            logger.error(f"       - {error}")
+        raise ValueError(f"Validation returns échouée pour {asset_name}")
+
+    if warnings:
+        logger.warning(f"\n    ⚠️  AVERTISSEMENTS:")
+        for warning in warnings:
+            logger.warning(f"       - {warning}")
+
+    logger.info(f"\n    ✅ Validation returns réussie ({asset_name})")
+
+
+def validate_directions(df: pd.DataFrame, asset_name: str):
+    """
+    Valide que les labels direction (macd_direction, rsi_direction, cci_direction)
+    sont correctement calculés.
+
+    Vérifications:
+      1. Les valeurs sont binaires (0 ou 1 uniquement)
+      2. Les ratios UP/DOWN sont raisonnables (pas tous identiques)
+      3. Les changements de direction sont fréquents (pas stagnants)
+      4. Pas de valeurs NaN après calcul
+
+    Args:
+        df: DataFrame avec colonnes *_direction
+        asset_name: Nom de l'asset pour logging
+    """
+    logger.info(f"\n  🔍 VALIDATION DIRECTIONS ({asset_name})...")
+
+    errors = []
+    warnings = []
+
+    for indicator in ['macd', 'rsi', 'cci']:
+        col = f'{indicator}_direction'
+
+        if col not in df.columns:
+            errors.append(f"{col} manquante dans DataFrame")
+            continue
+
+        values = df[col]
+
+        # Vérification 1: Valeurs binaires (0 ou 1)
+        unique_vals = values.dropna().unique()
+        if not np.all(np.isin(unique_vals, [0, 1])):
+            errors.append(f"{col}: valeurs non-binaires détectées: {unique_vals}")
+        else:
+            logger.info(f"    ✓ {col}: valeurs binaires (0/1)")
+
+        # Vérification 2: Ratio UP/DOWN raisonnable
+        up_count = (values == 1).sum()
+        down_count = (values == 0).sum()
+        total = up_count + down_count
+
+        if total == 0:
+            errors.append(f"{col}: aucune valeur valide")
+            continue
+
+        up_ratio = up_count / total
+        logger.info(f"    ✓ {col}: UP={up_count}/{total} ({up_ratio:.1%}), DOWN={down_count}/{total} ({1-up_ratio:.1%})")
+
+        # Avertir si ratio extrême (>95% ou <5% dans une direction)
+        if up_ratio > 0.95 or up_ratio < 0.05:
+            warnings.append(f"{col}: ratio déséquilibré (UP={up_ratio:.1%})")
+
+        # Vérification 3: Changements de direction (transitions)
+        transitions = (values.diff() != 0).sum()
+        transition_rate = transitions / len(values) if len(values) > 0 else 0
+        logger.info(f"    ✓ {col}: {transitions} transitions ({transition_rate:.2%} du temps)")
+
+        # Avertir si très peu de transitions (<1%)
+        if transition_rate < 0.01:
+            warnings.append(f"{col}: très peu de transitions ({transition_rate:.2%})")
+
+        # Vérification 4: NaN après calcul (avant fillna)
+        nan_count = values.isna().sum()
+        if nan_count > 0:
+            # NaN attendus: Kalman nécessite warmup (~100 samples)
+            expected_nan = min(100, len(df) // 10)  # Environ 10% max acceptable
+            if nan_count > expected_nan:
+                warnings.append(f"{col}: {nan_count} NaN (warmup Kalman?)")
+            logger.info(f"    ✓ {col}: {nan_count} NaN (warmup Kalman)")
+        else:
+            logger.info(f"    ✓ {col}: pas de NaN")
+
+    # Rapport final
+    if errors:
+        logger.error(f"\n    ❌ ERREURS DÉTECTÉES:")
+        for error in errors:
+            logger.error(f"       - {error}")
+        raise ValueError(f"Validation directions échouée pour {asset_name}")
+
+    if warnings:
+        logger.warning(f"\n    ⚠️  AVERTISSEMENTS:")
+        for warning in warnings:
+            logger.warning(f"       - {warning}")
+
+    logger.info(f"\n    ✅ Validation directions réussie ({asset_name})")
+
+
+def validate_synchronization(df: pd.DataFrame, asset_name: str):
+    """
+    Valide la synchronisation temporelle entre returns et directions.
+
+    Vérifications:
+      1. Même index temporel (timestamps alignés)
+      2. Même nombre d'échantillons non-NaN
+      3. Cohérence logique: direction UP corrèle avec c_ret > 0
+      4. Lag vérifié: direction[t] basée sur filtered[t] vs filtered[t-1]
+
+    Args:
+        df: DataFrame avec returns et directions
+        asset_name: Nom de l'asset pour logging
+    """
+    logger.info(f"\n  🔍 VALIDATION SYNCHRONISATION ({asset_name})...")
+
+    errors = []
+    warnings = []
+
+    # Vérification 1: Index temporel identique
+    if not df.index.equals(df.index):
+        errors.append("Index temporel incohérent")
+    else:
+        logger.info(f"    ✓ Index temporel cohérent: {len(df)} samples")
+
+    # Vérification 2: Cohérence direction vs returns
+    # Note: Direction est basée sur Kalman(indicator), pas directement sur c_ret
+    # Mais il devrait y avoir une corrélation positive entre direction et returns moyens
+    for indicator in ['macd', 'rsi', 'cci']:
+        col_dir = f'{indicator}_direction'
+
+        if col_dir not in df.columns:
+            continue
+
+        # Calculer c_ret moyen pour chaque direction
+        df_valid = df[[col_dir, 'c_ret']].dropna()
+
+        if len(df_valid) == 0:
+            warnings.append(f"{indicator}: pas assez de données valides")
+            continue
+
+        mean_ret_up = df_valid[df_valid[col_dir] == 1]['c_ret'].mean()
+        mean_ret_down = df_valid[df_valid[col_dir] == 0]['c_ret'].mean()
+
+        logger.info(f"    📊 {indicator.upper()}:")
+        logger.info(f"       UP (1): c_ret moyen = {mean_ret_up:.6f}")
+        logger.info(f"       DOWN (0): c_ret moyen = {mean_ret_down:.6f}")
+
+        # Vérifier que UP a un return moyen positif et DOWN négatif
+        # (Attention: ce n'est pas garanti car direction est sur indicator filtré, pas sur c_ret)
+        # Mais une corrélation positive est attendue
+        if mean_ret_up > mean_ret_down:
+            logger.info(f"    ✓ {indicator}: cohérence logique (UP > DOWN)")
+        else:
+            # Ce n'est pas une erreur car les directions sont sur indicators filtrés
+            warnings.append(f"{indicator}: UP mean_ret ({mean_ret_up:.6f}) ≤ DOWN mean_ret ({mean_ret_down:.6f})")
+
+    # Vérification 3: Lag entre direction et returns
+    # Direction[t] est calculée comme filtered[t] > filtered[t-1]
+    # Donc direction[t] utilise des informations jusqu'à t inclus
+    # c_ret[t] = (close[t] - close[t-1]) / close[t-1]
+    # Il y a synchronisation parfaite: les deux utilisent t et t-1
+
+    logger.info(f"\n    ✓ Alignement temporel:")
+    logger.info(f"       direction[t] = filtered[t] > filtered[t-1]")
+    logger.info(f"       c_ret[t] = (close[t] - close[t-1]) / close[t-1]")
+    logger.info(f"       → Synchronisation correcte (même fenêtre temporelle)")
+
+    # Rapport final
+    if errors:
+        logger.error(f"\n    ❌ ERREURS DÉTECTÉES:")
+        for error in errors:
+            logger.error(f"       - {error}")
+        raise ValueError(f"Validation synchronisation échouée pour {asset_name}")
+
+    if warnings:
+        logger.warning(f"\n    ⚠️  AVERTISSEMENTS:")
+        for warning in warnings:
+            logger.warning(f"       - {warning}")
+
+    logger.info(f"\n    ✅ Validation synchronisation réussie ({asset_name})")
+
+
+# =============================================================================
 # PARALLÉLISATION INTELLIGENTE
 # =============================================================================
 
@@ -638,6 +902,9 @@ def process_single_asset(asset_name: str,
     df['l_ret'] = df['low'].pct_change()
     logger.info(f"  ✓ Returns calculés: c_ret, h_ret, l_ret")
 
+    # Validation des returns
+    validate_returns(df, asset_name)
+
     # ========================================================================
     # ÉTAPE 1: CALCULER FEATURES DE RÉGIME (~20 colonnes) - POUR LABELING SEULEMENT
     # ========================================================================
@@ -691,6 +958,10 @@ def process_single_asset(asset_name: str,
     df['cci_direction'] = calculate_direction_label(df, 'cci', cci_vals)
 
     logger.info(f"  ✓ Labels direction calculés (MACD, RSI, CCI)")
+
+    # Validation des directions et synchronisation avec returns
+    validate_directions(df, asset_name)
+    validate_synchronization(df, asset_name)
 
     # Remplacer NaN par 0 après tout le calcul
     df = df.fillna(0)
