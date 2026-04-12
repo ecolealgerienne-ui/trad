@@ -11,7 +11,7 @@ Strict schema enforcement with:
 from enum import Enum
 from typing import List, Optional
 
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -194,18 +194,15 @@ class Meta(BaseModel):
 
 
 class GemmaOutput(BaseModel):
-    global_: GlobalSection  # "global" is a Python keyword-ish, use alias
-    assets: List[AssetDecision]
-    meta: Meta
+    model_config = ConfigDict(populate_by_name=True)
 
-    class Config:
-        populate_by_name = True
+    global_: GlobalSection = Field(alias="global")
+    assets: List[AssetDecision] = Field(min_length=5, max_length=5)
+    meta: Meta
 
     @classmethod
     def parse_raw_response(cls, data: dict) -> "GemmaOutput":
-        """Parse a raw dict, handling the 'global' key rename."""
-        if "global" in data and "global_" not in data:
-            data["global_"] = data.pop("global")
+        """Parse a raw dict from LLM. Accepts both 'global' and 'global_' keys."""
         return cls.model_validate(data)
 
     @model_validator(mode="after")
