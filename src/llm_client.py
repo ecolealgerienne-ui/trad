@@ -201,6 +201,50 @@ def _strip_code_fences(text: str) -> str:
     return text
 
 
+def _extract_first_json_object(text: str) -> str:
+    """Extract the first complete top-level JSON object from text.
+
+    Handles cases where Gemma appends comments or extra text after the JSON.
+    Uses brace counting to find the matching closing brace.
+    """
+    start = text.find("{")
+    if start == -1:
+        return text
+
+    depth = 0
+    in_string = False
+    escape = False
+
+    for i in range(start, len(text)):
+        c = text[i]
+
+        if escape:
+            escape = False
+            continue
+
+        if c == "\\":
+            if in_string:
+                escape = True
+            continue
+
+        if c == '"' and not escape:
+            in_string = not in_string
+            continue
+
+        if in_string:
+            continue
+
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+
+    # No complete object found, return as-is for downstream error
+    return text
+
+
 def _validate_response(raw_text: str):
     """Parse JSON and validate against GemmaOutput schema.
 
@@ -209,9 +253,12 @@ def _validate_response(raw_text: str):
     if not raw_text or not raw_text.strip():
         return None, ["Empty response from LLM"]
 
+    # Extract first JSON object (ignore trailing text)
+    cleaned = _extract_first_json_object(raw_text.strip())
+
     # Step 1: JSON parse
     try:
-        data = json.loads(raw_text)
+        data = json.loads(cleaned)
     except json.JSONDecodeError as e:
         return None, [f"JSON parse error: {e}"]
 
