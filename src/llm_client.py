@@ -1,0 +1,183 @@
+"""
+Ollama wrapper for Gemma 4 26B.
+
+- Calls POST http://localhost:11434/api/chat with format:"json" + think:false
+- Validates response via pydantic GemmaOutput
+- Retry once on validation failure with error feedback
+- Returns dict with parsed output + debug metadata (latency, raw responses, errors)
+"""
+
+import json
+import logging
+import time
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+import requests
+from pydantic import ValidationError
+
+from src.schemas import GemmaOutput
+
+logger = logging.getLogger(__name__)
+
+OLLAMA_BASE_URL = "http://localhost:11434"
+PROMPTS_DIR = Path(__file__).parent / "prompts"
+
+
+class LLMValidationError(Exception):
+    """Raised when Gemma output fails validation after retry."""
+
+    def __init__(self, message: str, raw_first: str, raw_retry: Optional[str], errors: list):
+        super().__init__(message)
+        self.raw_first = raw_first
+        self.raw_retry = raw_retry
+        self.errors = errors
+
+
+def load_system_prompt(filename: str = "gemma_system_v1.txt") -> str:
+    """Read the system prompt from disk."""
+    path = PROMPTS_DIR / filename
+    if not path.exists():
+        raise FileNotFoundError(f"System prompt not found: {path}")
+    return path.read_text(encoding="utf-8")
+
+
+def ping_ollama(base_url: str = OLLAMA_BASE_URL, timeout: float = 5.0) -> bool:
+    """Check if Ollama is reachable. Returns True if OK."""
+    try:
+        resp = requests.get(f"{base_url}/api/tags", timeout=timeout)
+        return resp.status_code == 200
+    except requests.ConnectionError:
+        return False
+
+
+def call_gemma(
+    system_prompt: str,
+    user_payload: dict,
+    temperature: float = 0.2,
+    model: str = "gemma4:26b",
+    base_url: str = OLLAMA_BASE_URL,
+    timeout: float = 300.0,
+) -> Dict[str, Any]:
+    """Call Gemma via Ollama and return validated output + metadata.
+
+    Returns dict with keys:
+        - parsed: dict (the validated GemmaOutput as dict), or None if failed
+        - raw_response_first_attempt: str (always present)
+        - raw_response_retry: str or None
+        - validation_errors: list of str (empty if OK)
+        - latency_sec: float (total, including retry)
+        - retried: bool
+        - success: bool
+    """
+    user_content = json.dumps(user_payload, default=str)
+
+    result = {
+        "parsed": None,
+        "raw_response_first_attempt": None,
+        "raw_response_retry": None,
+        "validation_errors": [],
+        "latency_sec": 0.0,
+        "retried": False,
+        "success": False,
+    }
+
+    t_start = time.perf_counter()
+
+    # --- First attempt ---
+    raw_text = _call_ollama(system_prompt, user_content, temperature, model, base_url, timeout)
+    result["raw_response_first_attempt"] = raw_text
+
+    parsed, errors = _validate_response(raw_text)
+
+    if parsed is not None:
+        result["parsed"] = parsed
+        result["success"] = True
+        result["latency_sec"] = round(time.perf_counter() - t_start, 2)
+        return result
+
+    # --- Retry with error feedback ---
+    result["retried"] = True
+    result["validation_errors"] = errors
+    logger.warning("First attempt failed validation: %s — retrying", errors)
+
+    error_msg = "; ".join(errors)
+    retry_user = (
+        f"Your previous output violated the schema: {error_msg}. "
+        f"Output again, strict JSON only."
+    )
+
+    raw_retry = _call_ollama(system_prompt, retry_user, temperature, model, base_url, timeout)
+    result["raw_response_retry"] = raw_retry
+
+    parsed_retry, errors_retry = _validate_response(raw_retry)
+
+    if parsed_retry is not None:
+        result["parsed"] = parsed_retry
+        result["success"] = True
+        result["validation_errors"] = []  # Cleared on success
+        result["latency_sec"] = round(time.perf_counter() - t_start, 2)
+        return result
+
+    # --- Both attempts failed ---
+    all_errors = errors + errors_retry
+    result["validation_errors"] = all_errors
+    result["latency_sec"] = round(time.perf_counter() - t_start, 2)
+    logger.error("Both attempts failed validation: %s", all_errors)
+
+    return result
+
+
+def _call_ollama(
+    system_prompt: str,
+    user_content: str,
+    temperature: float,
+    model: str,
+    base_url: str,
+    timeout: float,
+) -> str:
+    """Raw HTTP call to Ollama chat endpoint. Returns response text."""
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ],
+        "stream": False,
+        "think": False,
+        "options": {"temperature": temperature},
+        "format": "json",
+    }
+
+    resp = requests.post(
+        f"{base_url}/api/chat",
+        json=payload,
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+
+    data = resp.json()
+    return data.get("message", {}).get("content", "")
+
+
+def _validate_response(raw_text: str):
+    """Parse JSON and validate against GemmaOutput schema.
+
+    Returns (parsed_dict, []) on success, or (None, [error_strings]) on failure.
+    """
+    # Step 1: JSON parse
+    try:
+        data = json.loads(raw_text)
+    except json.JSONDecodeError as e:
+        return None, [f"JSON parse error: {e}"]
+
+    # Step 2: Pydantic validation
+    try:
+        output = GemmaOutput.parse_raw_response(data)
+        return output.model_dump(by_alias=True), []
+    except ValidationError as e:
+        error_msgs = []
+        for err in e.errors():
+            loc = ".".join(str(x) for x in err["loc"])
+            error_msgs.append(f"{loc}: {err['msg']}")
+        return None, error_msgs
