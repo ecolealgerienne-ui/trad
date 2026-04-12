@@ -209,7 +209,7 @@ def call_gemma(
     temperature: float = 0.2,
     model: str = DEFAULT_MODEL,
     base_url: str = OLLAMA_BASE_URL,
-    timeout: float = 300.0,
+    timeout: float = 600.0,
     _override_user_content: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Call LLM via Ollama and return validated output + metadata.
