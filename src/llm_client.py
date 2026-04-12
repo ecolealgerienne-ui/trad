@@ -71,7 +71,30 @@ def call_gemma(
         - retried: bool
         - success: bool
     """
-    user_content = json.dumps(user_payload, default=str)
+    # Prefix user message with compact schema reminder — Gemma prioritizes
+    # the last thing it sees over a long system prompt
+    user_content = (
+        'Analyze this market data and respond with EXACTLY this JSON structure:\n'
+        '{"global": {"btc_regime": "trending_up|trending_down|range|chaotic", '
+        '"market_mode": "risk_on|risk_off|rotation|neutral", '
+        '"market_coherence": "aligned|diverging|rotating", '
+        '"sector_flow": "btc_led|alt_led|mixed|defensive", '
+        '"relative_strength_ranking": ["ASSET_X","ASSET_X","ASSET_X","ASSET_X","ASSET_X"], '
+        '"risk_adjustment": "normal|defensive|aggressive", '
+        '"max_concurrent_positions": 1-5, '
+        '"rationale": "one sentence"}, '
+        '"assets": [{"symbol": "ASSET_A", "regime": "...", "setup": "breakout|pullback|mean_reversion|none", '
+        '"action": "buy|close|hold|skip", "conviction": 0-10, "relative_strength_rank": 1-5, '
+        '"entry_zone": {"min": N, "max": N}|null, "atr_stop_multiplier": N|null, '
+        '"atr_tp_multiplier": N|null, "expected_horizon_hours": 1-8|null, '
+        '"holistic_justification": "...", "rationale": "..."}, ... for all 5 assets], '
+        '"meta": {"analysis_confidence": 0-10}}\n'
+        'Rules: if action="buy" then entry_zone/multipliers/horizon are REQUIRED. '
+        'If action="skip"|"hold"|"close" then those fields MUST be null. '
+        'All 5 assets must appear in order A,B,C,D,E.\n\n'
+        'DATA:\n'
+        + json.dumps(user_payload, default=str)
+    )
 
     result = {
         "parsed": None,
