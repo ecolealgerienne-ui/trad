@@ -256,9 +256,14 @@ def _call_ollama(
         "format": "json",
     }
 
-    # Debug: log the payload structure (truncated) before sending
-    debug_payload = json.dumps(payload, indent=2, default=str)
-    logger.info("PAYLOAD DEBUG:\n%s", debug_payload[:2000])
+    # Debug: log payload structure + message sizes
+    msg_sizes = [(m["role"], len(m["content"])) for m in payload["messages"]]
+    logger.info(
+        "PAYLOAD: model=%s think=%s format=%s stream=%s temp=%s | messages: %s | total_chars=%d",
+        payload.get("model"), payload.get("think"), payload.get("format"),
+        payload.get("stream"), payload.get("options", {}).get("temperature"),
+        msg_sizes, sum(s for _, s in msg_sizes)
+    )
 
     resp = requests.post(
         f"{base_url}/api/chat",
