@@ -238,22 +238,30 @@ def call_gemma(
         result["latency_sec"] = round(time.perf_counter() - t_start, 2)
         return result
 
-    # --- Retry with error feedback + original data ---
+    # --- Retry with conversational history (system → user → failed assistant → correction) ---
     result["retried"] = True
     result["validation_errors"] = errors
     logger.warning("First attempt failed validation: %s — retrying", errors)
 
     error_list = "\n".join(f"- {err}" for err in errors[:10])
-    retry_user = (
+    retry_correction = (
         f"Your previous JSON response was missing required fields:\n"
         f"{error_list}\n\n"
         f"Regenerate the complete JSON with ALL required fields. "
         f"Keep the same analysis, just include the missing fields. "
-        f"Strict schema only.\n\n"
-        f"{user_content}"
+        f"Strict schema only."
     )
+    logger.info("RETRY USER MESSAGE:\n%s", retry_correction[:500])
 
-    raw_retry = _call_ollama(system_prompt, retry_user, temperature, model, base_url, timeout)
+    # Send full conversation: Gemma sees its own failed response + what to fix
+    retry_messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_content},
+        {"role": "assistant", "content": raw_text},
+        {"role": "user", "content": retry_correction},
+    ]
+
+    raw_retry = _call_ollama_messages(retry_messages, temperature, model, base_url, timeout)
     result["raw_response_retry"] = raw_retry
 
     parsed_retry, errors_retry = _validate_response(raw_retry)
@@ -287,13 +295,25 @@ def _call_ollama(
     base_url: str,
     timeout: float,
 ) -> str:
-    """Raw HTTP call to Ollama chat endpoint."""
+    """Simple 2-message call (system + user)."""
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_content},
+    ]
+    return _call_ollama_messages(messages, temperature, model, base_url, timeout)
+
+
+def _call_ollama_messages(
+    messages: list,
+    temperature: float,
+    model: str,
+    base_url: str,
+    timeout: float,
+) -> str:
+    """Raw HTTP call to Ollama chat endpoint with arbitrary message list."""
     payload = {
         "model": model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content},
-        ],
+        "messages": messages,
         "stream": False,
         "think": False,
         "format": "json",
@@ -301,7 +321,7 @@ def _call_ollama(
     }
 
     # Debug: log payload structure
-    msg_sizes = [(m["role"], len(m["content"])) for m in payload["messages"]]
+    msg_sizes = [(m["role"], len(m["content"])) for m in messages]
     logger.info(
         "PAYLOAD: model=%s think=%s format=%s temp=%s | messages: %s | total=%d chars",
         model, payload["think"], payload["format"],
@@ -361,47 +381,8 @@ def _clean_response(text: str) -> str:
     return text
 
 
-def _patch_missing_fields(data: dict) -> dict:
-    """Infer missing fields from context before pydantic validation.
-
-    Not arbitrary defaults — each inference is logically derived:
-    - max_concurrent_positions: count of buy actions in the response
-    - rationale: copy from holistic_justification if present
-    - analysis_confidence: mean of asset convictions
-    """
-    g = data.get("global", {})
-
-    # max_concurrent_positions: count buys, min 1
-    if "max_concurrent_positions" not in g:
-        assets = data.get("assets", [])
-        n_buys = sum(1 for a in assets if a.get("action") == "buy")
-        g["max_concurrent_positions"] = max(n_buys, 1)
-        logger.debug("Patched global.max_concurrent_positions=%d", g["max_concurrent_positions"])
-
-    # Asset rationale: copy from holistic_justification
-    for i, asset in enumerate(data.get("assets", [])):
-        if "rationale" not in asset and "holistic_justification" in asset:
-            asset["rationale"] = asset["holistic_justification"]
-            logger.debug("Patched assets[%d].rationale from holistic_justification", i)
-        elif "rationale" not in asset:
-            asset["rationale"] = f"No explicit rationale for {asset.get('symbol', '?')}"
-            logger.debug("Patched assets[%d].rationale with fallback", i)
-
-    # meta.analysis_confidence: mean of convictions
-    meta = data.get("meta", {})
-    if not isinstance(meta, dict):
-        data["meta"] = {}
-        meta = data["meta"]
-    if "analysis_confidence" not in meta:
-        convictions = [a.get("conviction", 5) for a in data.get("assets", []) if isinstance(a.get("conviction"), (int, float))]
-        meta["analysis_confidence"] = round(sum(convictions) / len(convictions)) if convictions else 5
-        logger.debug("Patched meta.analysis_confidence=%d", meta["analysis_confidence"])
-
-    return data
-
-
 def _validate_response(raw_text: str):
-    """Parse JSON, patch missing fields, validate against GemmaOutput schema."""
+    """Parse JSON and validate against GemmaOutput schema. No patching."""
     if not raw_text or not raw_text.strip():
         return None, ["Empty response from LLM"]
 
@@ -409,9 +390,6 @@ def _validate_response(raw_text: str):
         data = json.loads(raw_text)
     except json.JSONDecodeError as e:
         return None, [f"JSON parse error: {e}"]
-
-    # Patch commonly omitted fields before strict validation
-    data = _patch_missing_fields(data)
 
     try:
         output = GemmaOutput.parse_raw_response(data)
