@@ -732,7 +732,7 @@ def compute_features(
 if __name__ == "__main__":
     import sys
 
-    data_dir = sys.argv[1] if len(sys.argv) > 1 else "data_trad"
+    data_dir = sys.argv[1] if len(sys.argv) > 1 else "src/data_trad"
 
     print(f"Loading data from {data_dir}/ ...")
     data = load_all_data(data_dir)
