@@ -243,13 +243,13 @@ def call_gemma(
     result["validation_errors"] = errors
     logger.warning("First attempt failed validation: %s — retrying", errors)
 
-    error_msg = "; ".join(errors[:5])
+    error_list = "\n".join(f"- {err}" for err in errors[:10])
     retry_user = (
-        f"SCHEMA ERROR: {error_msg}. "
-        f"Output the JSON with exactly these top keys: global, assets, meta. "
-        f"5 assets in order A,B,C,D,E. Each with: symbol, regime, setup, action, "
-        f"conviction, relative_strength_rank, entry_zone, atr_stop_multiplier, "
-        f"atr_tp_multiplier, expected_horizon_hours, holistic_justification, rationale.\n\n"
+        f"Your previous JSON response was missing required fields:\n"
+        f"{error_list}\n\n"
+        f"Regenerate the complete JSON with ALL required fields. "
+        f"Keep the same analysis, just include the missing fields. "
+        f"Strict schema only.\n\n"
         f"{user_content}"
     )
 

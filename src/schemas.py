@@ -90,7 +90,7 @@ class GlobalSection(BaseModel):
     sector_flow: SectorFlow
     relative_strength_ranking: List[str]
     risk_adjustment: RiskAdjustment
-    max_concurrent_positions: int = 3  # Default if Gemma omits
+    max_concurrent_positions: int
     rationale: str
 
     @field_validator("relative_strength_ranking")
@@ -122,7 +122,7 @@ class AssetDecision(BaseModel):
     atr_tp_multiplier: Optional[float] = None
     expected_horizon_hours: Optional[int] = None
     holistic_justification: str
-    rationale: str = "No rationale provided"  # Default if Gemma omits
+    rationale: str
 
     @field_validator("conviction")
     @classmethod
@@ -178,7 +178,7 @@ class AssetDecision(BaseModel):
 
 
 class Meta(BaseModel):
-    analysis_confidence: int = 5  # Default if Gemma omits
+    analysis_confidence: int
 
     @field_validator("analysis_confidence")
     @classmethod
