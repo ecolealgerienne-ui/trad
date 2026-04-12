@@ -94,6 +94,8 @@ class Trade:
     exit_reason: str
     duration_minutes: int
 
+MAX_POSITION_PCT = 0.20  # 20% of capital per position max
+
 
 # ---------------------------------------------------------------------------
 # Position sizing
@@ -102,27 +104,39 @@ class Trade:
 def calculate_position_size(
     capital: float, risk_pct: float, entry_price: float,
     stop_price: float, fee_rate: float, cash: float,
+    funnel: Optional[dict] = None,
 ) -> Optional[Tuple[float, float, float]]:
-    """Size based on risk: qty = (capital * risk_pct) / stop_distance.
-    Returns (qty, size_usd, entry_fee_usd) or None.
+    """Size based on risk with cap at MAX_POSITION_PCT of capital.
+
+    1. qty = (capital * risk_pct) / stop_distance  (risk-based)
+    2. Cap size_usd at capital * MAX_POSITION_PCT   (exposure limit)
+    3. Check cash available
+
+    Returns (qty, size_usd, entry_fee_usd) or None if can't afford.
     """
     stop_distance = entry_price - stop_price
     if stop_distance <= 0:
         return None
 
+    # Risk-based sizing
     risk_amount = capital * risk_pct
     qty = risk_amount / stop_distance
     size_usd = qty * entry_price
+
+    # Cap at max position size
+    max_size_usd = capital * MAX_POSITION_PCT
+    if size_usd > max_size_usd:
+        qty = max_size_usd / entry_price
+        size_usd = max_size_usd
+        if funnel is not None:
+            funnel["positions_capped_at_max"] = funnel.get("positions_capped_at_max", 0) + 1
+
     entry_fee = size_usd * fee_rate
 
-    # Fit in cash
-    if size_usd + entry_fee > cash:
-        max_size = cash / (1 + fee_rate)
-        qty = max_size / entry_price
-        size_usd = qty * entry_price
-        entry_fee = size_usd * fee_rate
-        if size_usd < 1.0:
-            return None
+    # Check cash
+    required = size_usd * (1 + fee_rate)
+    if required > cash:
+        return None
 
     return qty, size_usd, entry_fee
 
@@ -239,7 +253,7 @@ def process_entries(
             funnel["filtered_invalid_stop"] += 1
             continue
 
-        result = calculate_position_size(capital, risk_pct, entry_price, stop_price, fee_rate, cash)
+        result = calculate_position_size(capital, risk_pct, entry_price, stop_price, fee_rate, cash, funnel)
         if result is None:
             funnel["filtered_insufficient_cash"] += 1
             continue
