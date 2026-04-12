@@ -808,7 +808,7 @@ def main():
     parser.add_argument("--fee-rate", type=float, default=0.001)
     parser.add_argument("--risk-pct", type=float, default=0.02)
     parser.add_argument("--model", default="qwen2.5:14b")
-    parser.add_argument("--prompt", default="gemma_system_v4.txt")
+    parser.add_argument("--prompt", default="gemma_system_v5.txt")
     parser.add_argument("--output-dir", default="results")
     args = parser.parse_args()
 
