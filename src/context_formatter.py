@@ -201,13 +201,17 @@ def format_user_message(
                 if cb_parts:
                     lines.append(f"  current_bar_{tf_key}: {' '.join(cb_parts)}")
 
-        # Series 20 points
+        # Series last 5 (compact)
         series = a.get("series_20", {})
         if series:
-            lines.append("  series_20:")
-            for s_key, s_vals in series.items():
-                if s_vals:
-                    formatted = [f"{v:.4f}" if v is not None else "?" for v in s_vals]
-                    lines.append(f"    {s_key}: [{', '.join(formatted)}]")
+            price_s = series.get("price", [])
+            rsi_s = series.get("rsi_15m", [])
+            vol_s = series.get("vol_rel_15m", [])
+            if price_s:
+                lines.append(f"  price last 5: {', '.join(f'{v:.0f}' if v else '?' for v in price_s)}")
+            if rsi_s:
+                lines.append(f"  rsi_15m last 5: {', '.join(f'{v:.0f}' if v else '?' for v in rsi_s)}")
+            if vol_s:
+                lines.append(f"  vol_rel last 5: {', '.join(f'{v:.1f}' if v else '?' for v in vol_s)}")
 
     return "\n".join(lines)
