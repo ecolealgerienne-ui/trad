@@ -820,7 +820,7 @@ def main():
     parser.add_argument("--end", help="End date YYYY-MM-DD")
     parser.add_argument("--capital", type=float, default=10000.0)
     parser.add_argument("--fee-rate", type=float, default=0.001)
-    parser.add_argument("--risk-pct", type=float, default=0.02)
+    parser.add_argument("--risk-pct", type=float, default=0.20)
     parser.add_argument("--model", default="qwen2.5:14b")
     parser.add_argument("--prompt", default="gemma_system_v5.txt")
     parser.add_argument("--output-dir", default="results")
