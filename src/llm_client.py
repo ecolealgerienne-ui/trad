@@ -154,6 +154,72 @@ def call_gemma(
     return result
 
 
+_OLLAMA_JSON_SCHEMA = {
+    "type": "object",
+    "required": ["global", "assets", "meta"],
+    "properties": {
+        "global": {
+            "type": "object",
+            "required": [
+                "btc_regime", "market_mode", "market_coherence", "sector_flow",
+                "relative_strength_ranking", "risk_adjustment",
+                "max_concurrent_positions", "rationale"
+            ],
+            "properties": {
+                "btc_regime": {"type": "string", "enum": ["trending_up", "trending_down", "range", "chaotic"]},
+                "market_mode": {"type": "string", "enum": ["risk_on", "risk_off", "rotation", "neutral"]},
+                "market_coherence": {"type": "string", "enum": ["aligned", "diverging", "rotating"]},
+                "sector_flow": {"type": "string", "enum": ["btc_led", "alt_led", "mixed", "defensive"]},
+                "relative_strength_ranking": {"type": "array", "items": {"type": "string"}, "minItems": 5, "maxItems": 5},
+                "risk_adjustment": {"type": "string", "enum": ["normal", "defensive", "aggressive"]},
+                "max_concurrent_positions": {"type": "integer"},
+                "rationale": {"type": "string"},
+            },
+        },
+        "assets": {
+            "type": "array",
+            "minItems": 5,
+            "maxItems": 5,
+            "items": {
+                "type": "object",
+                "required": [
+                    "symbol", "regime", "setup", "action", "conviction",
+                    "relative_strength_rank", "entry_zone", "atr_stop_multiplier",
+                    "atr_tp_multiplier", "expected_horizon_hours",
+                    "holistic_justification", "rationale"
+                ],
+                "properties": {
+                    "symbol": {"type": "string"},
+                    "regime": {"type": "string", "enum": ["trending_up", "trending_down", "range", "chaotic"]},
+                    "setup": {"type": "string", "enum": ["breakout", "pullback", "mean_reversion", "none"]},
+                    "action": {"type": "string", "enum": ["buy", "close", "hold", "skip"]},
+                    "conviction": {"type": "integer"},
+                    "relative_strength_rank": {"type": "integer"},
+                    "entry_zone": {
+                        "oneOf": [
+                            {"type": "null"},
+                            {"type": "object", "properties": {"min": {"type": "number"}, "max": {"type": "number"}}, "required": ["min", "max"]},
+                        ]
+                    },
+                    "atr_stop_multiplier": {"oneOf": [{"type": "null"}, {"type": "number"}]},
+                    "atr_tp_multiplier": {"oneOf": [{"type": "null"}, {"type": "number"}]},
+                    "expected_horizon_hours": {"oneOf": [{"type": "null"}, {"type": "integer"}]},
+                    "holistic_justification": {"type": "string"},
+                    "rationale": {"type": "string"},
+                },
+            },
+        },
+        "meta": {
+            "type": "object",
+            "required": ["analysis_confidence"],
+            "properties": {
+                "analysis_confidence": {"type": "integer"},
+            },
+        },
+    },
+}
+
+
 def _call_ollama(
     system_prompt: str,
     user_content: str,
@@ -162,7 +228,11 @@ def _call_ollama(
     base_url: str,
     timeout: float,
 ) -> str:
-    """Raw HTTP call to Ollama chat endpoint. Returns response text."""
+    """Raw HTTP call to Ollama chat endpoint. Returns response text.
+
+    Uses structured output (JSON Schema in format param) to force Gemma
+    to respect our exact schema at the token generation level.
+    """
     payload = {
         "model": model,
         "messages": [
@@ -172,7 +242,7 @@ def _call_ollama(
         "stream": False,
         "think": False,
         "options": {"temperature": temperature},
-        "format": "json",
+        "format": _OLLAMA_JSON_SCHEMA,
     }
 
     resp = requests.post(
