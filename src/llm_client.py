@@ -23,7 +23,7 @@ from typing import Any, Dict, Optional
 import requests
 from pydantic import ValidationError
 
-from src.schemas import GemmaOutput
+from src.schemas import QwenOutput
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,7 @@ class LLMValidationError(Exception):
         self.errors = errors
 
 
-def load_system_prompt(filename: str = "gemma_system_v4.txt") -> str:
+def load_system_prompt(filename: str = "gemma_system_v5.txt") -> str:
     """Read the system prompt from disk."""
     path = PROMPTS_DIR / filename
     if not path.exists():
@@ -388,7 +388,7 @@ def _clean_response(text: str) -> str:
 
 
 def _validate_response(raw_text: str):
-    """Parse JSON and validate against GemmaOutput schema. No patching."""
+    """Parse JSON and validate against QwenOutput schema. No patching."""
     if not raw_text or not raw_text.strip():
         return None, ["Empty response from LLM"]
 
@@ -398,7 +398,7 @@ def _validate_response(raw_text: str):
         return None, [f"JSON parse error: {e}"]
 
     try:
-        output = GemmaOutput.parse_raw_response(data)
+        output = QwenOutput.parse_raw_response(data)
         return output.model_dump(by_alias=True), []
     except ValidationError as e:
         error_msgs = []

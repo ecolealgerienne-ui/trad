@@ -227,8 +227,8 @@ def process_entries(
             funnel["filtered_no_atr"] += 1
             continue
 
-        stop_mult = a.get("atr_stop_multiplier")
-        tp_mult = a.get("atr_tp_multiplier")
+        stop_mult = a.get("stop_mult")
+        tp_mult = a.get("tp_mult")
         if stop_mult is None or tp_mult is None:
             funnel["filtered_no_multipliers"] += 1
             continue
