@@ -220,6 +220,31 @@ _OLLAMA_JSON_SCHEMA = {
 }
 
 
+# Minimal few-shot example to teach the output format via conversation history.
+# This is the most reliable way to force schema compliance with local LLMs.
+_FEW_SHOT_USER = "Analyze this market snapshot and respond with the required JSON."
+_FEW_SHOT_ASSISTANT = json.dumps({
+    "global": {
+        "btc_regime": "range",
+        "market_mode": "neutral",
+        "market_coherence": "diverging",
+        "sector_flow": "mixed",
+        "relative_strength_ranking": ["ASSET_B", "ASSET_A", "ASSET_C", "ASSET_D", "ASSET_E"],
+        "risk_adjustment": "normal",
+        "max_concurrent_positions": 3,
+        "rationale": "BTC ranging, alts diverging with B leading on momentum."
+    },
+    "assets": [
+        {"symbol": "ASSET_A", "regime": "range", "setup": "none", "action": "skip", "conviction": 4, "relative_strength_rank": 2, "entry_zone": None, "atr_stop_multiplier": None, "atr_tp_multiplier": None, "expected_horizon_hours": None, "holistic_justification": "Neutral regime, B is stronger.", "rationale": "No clean setup on 15m."},
+        {"symbol": "ASSET_B", "regime": "trending_up", "setup": "pullback", "action": "buy", "conviction": 7, "relative_strength_rank": 1, "entry_zone": {"min": 3500, "max": 3520}, "atr_stop_multiplier": 1.5, "atr_tp_multiplier": 3.0, "expected_horizon_hours": 4, "holistic_justification": "Strongest asset, BTC stable enough for alt entry.", "rationale": "Pullback to EMA20 with RSI 48, volume cooling."},
+        {"symbol": "ASSET_C", "regime": "range", "setup": "none", "action": "skip", "conviction": 2, "relative_strength_rank": 3, "entry_zone": None, "atr_stop_multiplier": None, "atr_tp_multiplier": None, "expected_horizon_hours": None, "holistic_justification": "Mid-pack, no edge.", "rationale": "ADX 16, sideways."},
+        {"symbol": "ASSET_D", "regime": "trending_down", "setup": "none", "action": "skip", "conviction": 1, "relative_strength_rank": 4, "entry_zone": None, "atr_stop_multiplier": None, "atr_tp_multiplier": None, "expected_horizon_hours": None, "holistic_justification": "Laggard, R2 blocks.", "rationale": "Below EMA50 1h."},
+        {"symbol": "ASSET_E", "regime": "trending_down", "setup": "none", "action": "skip", "conviction": 0, "relative_strength_rank": 5, "entry_zone": None, "atr_stop_multiplier": None, "atr_tp_multiplier": None, "expected_horizon_hours": None, "holistic_justification": "Weakest, avoid.", "rationale": "Downtrend on all TFs."},
+    ],
+    "meta": {"analysis_confidence": 6}
+})
+
+
 def _call_ollama(
     system_prompt: str,
     user_content: str,
@@ -230,13 +255,17 @@ def _call_ollama(
 ) -> str:
     """Raw HTTP call to Ollama chat endpoint. Returns response text.
 
-    Uses structured output (JSON Schema in format param) to force Gemma
-    to respect our exact schema at the token generation level.
+    Uses few-shot conversation history + JSON Schema format constraint
+    to force Gemma to produce the exact schema we need.
     """
     payload = {
         "model": model,
         "messages": [
             {"role": "system", "content": system_prompt},
+            # Few-shot: teach the format by example
+            {"role": "user", "content": _FEW_SHOT_USER},
+            {"role": "assistant", "content": _FEW_SHOT_ASSISTANT},
+            # Actual request
             {"role": "user", "content": user_content},
         ],
         "stream": False,
