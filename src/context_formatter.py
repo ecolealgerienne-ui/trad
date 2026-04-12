@@ -48,6 +48,16 @@ def format_user_message(
     t = g.get("time", {})
     lines.append(f"Time to close: {t.get('minutes_to_close')} min")
 
+    # --- CROSS-ASSET OVERVIEW ---
+    lines.append("")
+    lines.append("# CROSS-ASSET OVERVIEW")
+    for a in features.get("assets", []):
+        asset_id = a.get("id", a.get("_symbol", "?"))
+        c1h = a.get("chg_1h_pct")
+        c24h = a.get("chg_24h_pct")
+        c7d = a.get("chg_7d_pct")
+        lines.append(f"{asset_id}: 1h={c1h}% 24h={c24h}% 7d={c7d}%")
+
     # --- PORTFOLIO ---
     lines.append("")
     lines.append("# PORTFOLIO")

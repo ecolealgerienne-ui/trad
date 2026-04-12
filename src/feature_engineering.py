@@ -697,6 +697,9 @@ def compute_features(
         asset_dict = {
             "_symbol": symbol,
             "price": current_price,
+            "chg_1h_pct": _price_change(df_15m, as_of, 1),
+            "chg_24h_pct": _price_change(df_15m, as_of, 24),
+            "chg_7d_pct": _price_change(df_15m, as_of, 168),
             "session": compute_session_context(df_15m, as_of),
             "trend": {
                 "ema20_15m": {
