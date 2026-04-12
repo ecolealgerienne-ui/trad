@@ -42,7 +42,7 @@ class LLMValidationError(Exception):
         self.errors = errors
 
 
-def load_system_prompt(filename: str = "gemma_system_v1.txt") -> str:
+def load_system_prompt(filename: str = "gemma_system_v4.txt") -> str:
     """Read the system prompt from disk."""
     path = PROMPTS_DIR / filename
     if not path.exists():
@@ -210,10 +210,15 @@ def call_gemma(
     model: str = DEFAULT_MODEL,
     base_url: str = OLLAMA_BASE_URL,
     timeout: float = 300.0,
+    _override_user_content: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Call Gemma via Ollama and return validated output + metadata."""
-    # Convert features to text — Gemma needs text input, not JSON
-    user_content = features_to_text(user_payload)
+    """Call LLM via Ollama and return validated output + metadata.
+
+    If _override_user_content is provided, use it directly instead of
+    converting user_payload via features_to_text. Used by backtest_engine
+    to send context-enriched messages from context_formatter.
+    """
+    user_content = _override_user_content if _override_user_content else features_to_text(user_payload)
 
     result = {
         "parsed": None,

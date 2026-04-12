@@ -560,6 +560,23 @@ def anonymize_and_format(
 # ---------------------------------------------------------------------------
 
 
+def get_series(df_closed: pd.DataFrame, column: str, n: int = 20) -> List[Optional[float]]:
+    """Extract last N values of a column from filtered closed candles.
+
+    Returns list of floats (newest last). None for NaN values.
+    """
+    if column not in df_closed.columns or df_closed.empty:
+        return []
+    series = df_closed[column].tail(n)
+    result = []
+    for v in series:
+        if pd.isna(v):
+            result.append(None)
+        else:
+            result.append(round(float(v), 6))
+    return result
+
+
 def _price_change(
     df_closed: pd.DataFrame, as_of: pd.Timestamp, hours: float
 ) -> Optional[float]:
@@ -624,7 +641,10 @@ def compute_features(
         "btc": {
             "price": btc_price,
             "chg_1h_pct": _price_change(df_btc_15m, as_of, 1),
+            "chg_4h_pct": _price_change(df_btc_15m, as_of, 4),
+            "chg_12h_pct": _price_change(df_btc_15m, as_of, 12),
             "chg_24h_pct": _price_change(df_btc_15m, as_of, 24),
+            "chg_7d_pct": _price_change(df_btc_15m, as_of, 168),
         },
         "btc_dominance": btc_dom,
         "time": {"minutes_to_close": minutes_to_close},
@@ -716,6 +736,12 @@ def compute_features(
             "current_bar": {
                 "tf_1h": cb_1h_feat,
                 "tf_4h": cb_4h_feat,
+            },
+            "series_20": {
+                "price": get_series(df_15m, "close", 20),
+                "rsi_15m": get_series(df_15m, "rsi14", 20),
+                "vol_rel_15m": get_series(df_15m, "vol_rel", 20),
+                "ema20_dist_15m": get_series(df_15m, "ema20_dist_pct", 20),
             },
         }
         assets.append(asset_dict)
