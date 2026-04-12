@@ -1,11 +1,15 @@
 """
 Ollama wrapper for Gemma 4 26B.
 
-Strategy for schema compliance:
-1. Short system prompt (rules only, no verbose explanations)
-2. JSON Schema in Ollama `format` param (structural constraint at token level)
-3. Few-shot example in conversation history (format by mimicry)
-4. Compact user message (data only, no schema repetition)
+Key finding: Gemma respects the output schema when features are sent as
+NATURAL TEXT, not as raw JSON. JSON input "contaminates" the model and it
+invents its own JSON structure. Text input keeps it focused on the schema.
+
+Strategy:
+1. Short system prompt (~850 chars) with schema example
+2. Features converted to natural text before sending
+3. format:"json" forces valid JSON output
+4. think:false disables internal reasoning blocks
 5. Retry with error feedback + original data if validation fails
 """
 
@@ -55,101 +59,142 @@ def ping_ollama(base_url: str = OLLAMA_BASE_URL, timeout: float = 5.0) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# JSON Schema for Ollama structured output
+# Features to natural text (CRITICAL — Gemma needs text input, not JSON)
 # ---------------------------------------------------------------------------
 
-_OLLAMA_JSON_SCHEMA = {
-    "type": "object",
-    "required": ["global", "assets", "meta"],
-    "properties": {
-        "global": {
-            "type": "object",
-            "required": [
-                "btc_regime", "market_mode", "market_coherence", "sector_flow",
-                "relative_strength_ranking", "risk_adjustment",
-                "max_concurrent_positions", "rationale"
-            ],
-            "properties": {
-                "btc_regime": {"type": "string", "enum": ["trending_up", "trending_down", "range", "chaotic"]},
-                "market_mode": {"type": "string", "enum": ["risk_on", "risk_off", "rotation", "neutral"]},
-                "market_coherence": {"type": "string", "enum": ["aligned", "diverging", "rotating"]},
-                "sector_flow": {"type": "string", "enum": ["btc_led", "alt_led", "mixed", "defensive"]},
-                "relative_strength_ranking": {"type": "array", "items": {"type": "string"}, "minItems": 5, "maxItems": 5},
-                "risk_adjustment": {"type": "string", "enum": ["normal", "defensive", "aggressive"]},
-                "max_concurrent_positions": {"type": "integer"},
-                "rationale": {"type": "string"},
-            },
-        },
-        "assets": {
-            "type": "array",
-            "minItems": 5,
-            "maxItems": 5,
-            "items": {
-                "type": "object",
-                "required": [
-                    "symbol", "regime", "setup", "action", "conviction",
-                    "relative_strength_rank", "entry_zone", "atr_stop_multiplier",
-                    "atr_tp_multiplier", "expected_horizon_hours",
-                    "holistic_justification", "rationale"
-                ],
-                "properties": {
-                    "symbol": {"type": "string"},
-                    "regime": {"type": "string", "enum": ["trending_up", "trending_down", "range", "chaotic"]},
-                    "setup": {"type": "string", "enum": ["breakout", "pullback", "mean_reversion", "none"]},
-                    "action": {"type": "string", "enum": ["buy", "close", "hold", "skip"]},
-                    "conviction": {"type": "integer"},
-                    "relative_strength_rank": {"type": "integer"},
-                    "entry_zone": {
-                        "oneOf": [
-                            {"type": "null"},
-                            {"type": "object", "properties": {"min": {"type": "number"}, "max": {"type": "number"}}, "required": ["min", "max"]},
-                        ]
-                    },
-                    "atr_stop_multiplier": {"oneOf": [{"type": "null"}, {"type": "number"}]},
-                    "atr_tp_multiplier": {"oneOf": [{"type": "null"}, {"type": "number"}]},
-                    "expected_horizon_hours": {"oneOf": [{"type": "null"}, {"type": "integer"}]},
-                    "holistic_justification": {"type": "string"},
-                    "rationale": {"type": "string"},
-                },
-            },
-        },
-        "meta": {
-            "type": "object",
-            "required": ["analysis_confidence"],
-            "properties": {
-                "analysis_confidence": {"type": "integer"},
-            },
-        },
-    },
-}
 
+def features_to_text(features: dict) -> str:
+    """Convert anonymized features dict to structured text for Gemma.
 
-# ---------------------------------------------------------------------------
-# Few-shot example (conversation history teaches format by mimicry)
-# ---------------------------------------------------------------------------
+    Gemma produces correct schema output ONLY when input is text.
+    JSON input contaminates the model and it invents its own structure.
+    """
+    lines = []
 
-_FEW_SHOT_USER = '{"cycle_index":100,"timeframe_reference":"15m","global":{"btc":{"price":68000,"chg_1h_pct":0.3,"chg_24h_pct":1.2},"btc_dominance":{"value":55},"time":{"minutes_to_close":300},"portfolio":{"open_positions":0,"total_exposure_pct":0}},"assets":[{"id":"ASSET_A","price":68000,"session":{"chg_pct":0.5},"trend":{"ema20_15m":{"slope_pct":0.02,"dist_pct":0.1}},"regime":{"adx_1h":22},"momentum":{"rsi_15m":55,"rsi_1h":52},"volatility":{"atr_15m_pct":0.2,"atr_ratio_vs_avg50":1.1,"bb_position_15m":0.6},"volume":{"vol_rel_15m":1.0},"correlation":{"corr_btc_24h":null}},{"id":"ASSET_B","price":3500,"session":{"chg_pct":0.8},"trend":{"ema20_15m":{"slope_pct":0.05,"dist_pct":-0.2}},"regime":{"adx_1h":28},"momentum":{"rsi_15m":48,"rsi_1h":55},"volatility":{"atr_15m_pct":0.3,"atr_ratio_vs_avg50":1.2,"bb_position_15m":0.4},"volume":{"vol_rel_15m":0.9},"correlation":{"corr_btc_24h":0.7}},{"id":"ASSET_C","price":150,"session":{"chg_pct":-0.3},"trend":{"ema20_15m":{"slope_pct":-0.01,"dist_pct":-0.5}},"regime":{"adx_1h":18},"momentum":{"rsi_15m":42,"rsi_1h":45},"volatility":{"atr_15m_pct":0.4,"atr_ratio_vs_avg50":0.9,"bb_position_15m":0.3},"volume":{"vol_rel_15m":0.7},"correlation":{"corr_btc_24h":0.65}},{"id":"ASSET_D","price":0.6,"session":{"chg_pct":-0.8},"trend":{"ema20_15m":{"slope_pct":-0.03,"dist_pct":-1.0}},"regime":{"adx_1h":15},"momentum":{"rsi_15m":35,"rsi_1h":38},"volatility":{"atr_15m_pct":0.2,"atr_ratio_vs_avg50":0.8,"bb_position_15m":0.15},"volume":{"vol_rel_15m":0.5},"correlation":{"corr_btc_24h":0.72}},{"id":"ASSET_E","price":600,"session":{"chg_pct":-1.2},"trend":{"ema20_15m":{"slope_pct":-0.04,"dist_pct":-1.5}},"regime":{"adx_1h":30},"momentum":{"rsi_15m":30,"rsi_1h":32},"volatility":{"atr_15m_pct":0.3,"atr_ratio_vs_avg50":1.4,"bb_position_15m":0.05},"volume":{"vol_rel_15m":1.8},"correlation":{"corr_btc_24h":0.8}}]}'
+    # Cycle
+    ci = features.get("cycle_index", "?")
+    lines.append(f"CYCLE {ci}")
 
-_FEW_SHOT_ASSISTANT = json.dumps({
-    "global": {
-        "btc_regime": "range",
-        "market_mode": "neutral",
-        "market_coherence": "diverging",
-        "sector_flow": "mixed",
-        "relative_strength_ranking": ["ASSET_B", "ASSET_A", "ASSET_C", "ASSET_D", "ASSET_E"],
-        "risk_adjustment": "normal",
-        "max_concurrent_positions": 3,
-        "rationale": "BTC ranging, B shows strongest momentum with pullback to EMA20."
-    },
-    "assets": [
-        {"symbol": "ASSET_A", "regime": "range", "setup": "none", "action": "skip", "conviction": 4, "relative_strength_rank": 2, "entry_zone": None, "atr_stop_multiplier": None, "atr_tp_multiplier": None, "expected_horizon_hours": None, "holistic_justification": "B offers stronger setup at rank 1.", "rationale": "Sideways, no trigger."},
-        {"symbol": "ASSET_B", "regime": "trending_up", "setup": "pullback", "action": "buy", "conviction": 7, "relative_strength_rank": 1, "entry_zone": {"min": 3490, "max": 3510}, "atr_stop_multiplier": 1.5, "atr_tp_multiplier": 3.0, "expected_horizon_hours": 4, "holistic_justification": "Strongest asset, BTC stable enough.", "rationale": "Pullback to EMA20 with RSI 48, volume cooling."},
-        {"symbol": "ASSET_C", "regime": "range", "setup": "none", "action": "skip", "conviction": 2, "relative_strength_rank": 3, "entry_zone": None, "atr_stop_multiplier": None, "atr_tp_multiplier": None, "expected_horizon_hours": None, "holistic_justification": "Mid-pack, no edge vs B.", "rationale": "ADX 18, sideways."},
-        {"symbol": "ASSET_D", "regime": "range", "setup": "none", "action": "skip", "conviction": 1, "relative_strength_rank": 4, "entry_zone": None, "atr_stop_multiplier": None, "atr_tp_multiplier": None, "expected_horizon_hours": None, "holistic_justification": "Rank 4, R2 blocks buy.", "rationale": "Weak momentum."},
-        {"symbol": "ASSET_E", "regime": "trending_down", "setup": "none", "action": "skip", "conviction": 0, "relative_strength_rank": 5, "entry_zone": None, "atr_stop_multiplier": None, "atr_tp_multiplier": None, "expected_horizon_hours": None, "holistic_justification": "Weakest, high vol selloff.", "rationale": "Below all EMAs, ATR expanding."},
-    ],
-    "meta": {"analysis_confidence": 6}
-})
+    # Global context
+    g = features.get("global", {})
+    btc = g.get("btc", {})
+    dom = g.get("btc_dominance", {})
+    t = g.get("time", {})
+    pf = g.get("portfolio", {})
+
+    lines.append("GLOBAL:")
+    lines.append(f"  BTC: chg_1h={btc.get('chg_1h_pct')}%, chg_24h={btc.get('chg_24h_pct')}%")
+    if isinstance(dom, dict) and dom.get("value") is not None:
+        lines.append(f"  Dominance: {dom['value']}% (chg_24h={dom.get('chg_24h_pct', 0)}%)")
+    lines.append(f"  Time to close: {t.get('minutes_to_close')} min")
+    lines.append(f"  Portfolio: {pf.get('open_positions', 0)} positions, {pf.get('total_exposure_pct', 0)}% exposure")
+
+    # Per-asset
+    for a in features.get("assets", []):
+        asset_id = a.get("id", a.get("_symbol", "?"))
+        lines.append("")
+        lines.append(f"{asset_id}:")
+        lines.append(f"  price={a.get('price')}")
+
+        # Session
+        s = a.get("session", {})
+        s_parts = []
+        if s.get("chg_pct") is not None:
+            s_parts.append(f"chg={s['chg_pct']}%")
+        if s.get("range_position") is not None:
+            s_parts.append(f"range_pos={s['range_position']}")
+        if s_parts:
+            lines.append(f"  session: {', '.join(s_parts)}")
+
+        # Trend
+        tr = a.get("trend", {})
+        t_parts = []
+        for ema_key, ema_data in tr.items():
+            if isinstance(ema_data, dict) and ema_data.get("slope_pct") is not None:
+                t_parts.append(
+                    f"{ema_key} slope={ema_data['slope_pct']}% dist={ema_data.get('dist_pct', '?')}%"
+                )
+        if t_parts:
+            lines.append(f"  trend: {', '.join(t_parts)}")
+
+        # Regime
+        r = a.get("regime", {})
+        if r.get("adx_1h") is not None:
+            lines.append(f"  regime: adx_1h={r['adx_1h']}")
+
+        # Momentum
+        m = a.get("momentum", {})
+        m_parts = []
+        if m.get("rsi_15m") is not None:
+            m_parts.append(f"rsi_15m={m['rsi_15m']}")
+        if m.get("rsi_1h") is not None:
+            m_parts.append(f"rsi_1h={m['rsi_1h']}")
+        if m_parts:
+            lines.append(f"  momentum: {', '.join(m_parts)}")
+
+        # Volatility
+        v = a.get("volatility", {})
+        v_parts = []
+        if v.get("atr_15m_pct") is not None:
+            v_parts.append(f"atr_pct={v['atr_15m_pct']}%")
+        if v.get("atr_ratio_vs_avg50") is not None:
+            v_parts.append(f"atr_ratio={v['atr_ratio_vs_avg50']}")
+        if v.get("bb_position_15m") is not None:
+            v_parts.append(f"bb_pos={v['bb_position_15m']}")
+        if v_parts:
+            lines.append(f"  volatility: {', '.join(v_parts)}")
+
+        # Volume
+        vol = a.get("volume", {})
+        vol_parts = []
+        if vol.get("vol_rel_15m") is not None:
+            vol_parts.append(f"vol_rel_15m={vol['vol_rel_15m']}")
+        if vol.get("vol_rel_1h") is not None:
+            vol_parts.append(f"vol_rel_1h={vol['vol_rel_1h']}")
+        if vol.get("vwap_dist_pct") is not None:
+            vol_parts.append(f"vwap_dist={vol['vwap_dist_pct']}%")
+        if vol_parts:
+            lines.append(f"  volume: {', '.join(vol_parts)}")
+
+        # Structure
+        st = a.get("structure", {})
+        sup = st.get("support", {})
+        res = st.get("resistance", {})
+        st_parts = []
+        if sup.get("price") is not None:
+            st_parts.append(f"support={sup['price']} ({sup.get('dist_pct','')}% {sup.get('type','')})")
+        if res.get("price") is not None:
+            st_parts.append(f"resistance={res['price']} ({res.get('dist_pct','')}% {res.get('type','')})")
+        if st_parts:
+            lines.append(f"  structure: {' / '.join(st_parts)}")
+
+        # Correlation
+        c = a.get("correlation", {})
+        if c.get("corr_btc_24h") is not None:
+            lines.append(f"  correlation: corr_btc_24h={c['corr_btc_24h']}")
+
+        # Sentiment
+        se = a.get("sentiment", {})
+        if se.get("funding_rate_perp_8h") is not None:
+            lines.append(f"  sentiment: funding={se['funding_rate_perp_8h']}")
+
+        # Current bars
+        cb = a.get("current_bar", {})
+        for tf_key, cb_data in cb.items():
+            if cb_data is not None and isinstance(cb_data, dict):
+                cb_parts = []
+                if cb_data.get("progress_pct") is not None:
+                    cb_parts.append(f"progress={cb_data['progress_pct']}%")
+                if cb_data.get("move_pct") is not None:
+                    cb_parts.append(f"move={cb_data['move_pct']}%")
+                if cb_data.get("range_vs_atr") is not None:
+                    cb_parts.append(f"range_vs_atr={cb_data['range_vs_atr']}")
+                if cb_data.get("vol_vs_expected") is not None:
+                    cb_parts.append(f"vol_vs_exp={cb_data['vol_vs_expected']}")
+                if cb_parts:
+                    lines.append(f"  current_bar_{tf_key}: {' '.join(cb_parts)}")
+
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -166,7 +211,8 @@ def call_gemma(
     timeout: float = 300.0,
 ) -> Dict[str, Any]:
     """Call Gemma via Ollama and return validated output + metadata."""
-    user_content = json.dumps(user_payload, default=str)
+    # Convert features to text — Gemma needs text input, not JSON
+    user_content = features_to_text(user_payload)
 
     result = {
         "parsed": None,
@@ -197,12 +243,12 @@ def call_gemma(
     result["validation_errors"] = errors
     logger.warning("First attempt failed validation: %s — retrying", errors)
 
-    error_msg = "; ".join(errors[:5])  # Limit error length
+    error_msg = "; ".join(errors[:5])
     retry_user = (
         f"SCHEMA ERROR: {error_msg}. "
-        f"Output the JSON with keys: global, assets (5 items), meta. "
-        f"Each asset needs: symbol, regime, setup, action, conviction, "
-        f"relative_strength_rank, entry_zone, atr_stop_multiplier, "
+        f"Output the JSON with exactly these top keys: global, assets, meta. "
+        f"5 assets in order A,B,C,D,E. Each with: symbol, regime, setup, action, "
+        f"conviction, relative_strength_rank, entry_zone, atr_stop_multiplier, "
         f"atr_tp_multiplier, expected_horizon_hours, holistic_justification, rationale.\n\n"
         f"{user_content}"
     )
@@ -246,23 +292,20 @@ def _call_ollama(
         "model": model,
         "messages": [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": _FEW_SHOT_USER},
-            {"role": "assistant", "content": _FEW_SHOT_ASSISTANT},
             {"role": "user", "content": user_content},
         ],
         "stream": False,
         "think": False,
-        "options": {"temperature": temperature},
         "format": "json",
+        "options": {"temperature": temperature},
     }
 
-    # Debug: log payload structure + message sizes
+    # Debug: log payload structure
     msg_sizes = [(m["role"], len(m["content"])) for m in payload["messages"]]
     logger.info(
-        "PAYLOAD: model=%s think=%s format=%s stream=%s temp=%s | messages: %s | total_chars=%d",
-        payload.get("model"), payload.get("think"), payload.get("format"),
-        payload.get("stream"), payload.get("options", {}).get("temperature"),
-        msg_sizes, sum(s for _, s in msg_sizes)
+        "PAYLOAD: model=%s think=%s format=%s temp=%s | messages: %s | total=%d chars",
+        model, payload["think"], payload["format"],
+        temperature, msg_sizes, sum(s for _, s in msg_sizes)
     )
 
     resp = requests.post(
@@ -286,7 +329,7 @@ def _clean_response(text: str) -> str:
     if match:
         text = match.group(1).strip()
 
-    # Extract first complete JSON object (ignore trailing text)
+    # Extract first complete JSON object
     start = text.find("{")
     if start == -1:
         return text
