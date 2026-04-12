@@ -201,14 +201,13 @@ def format_user_message(
                 if cb_parts:
                     lines.append(f"  current_bar_{tf_key}: {' '.join(cb_parts)}")
 
-        # Series 20 points
+        # Series 10 points (compact: 2 decimal places)
         series = a.get("series_20", {})
         if series:
-            lines.append("  series_20pts:")
+            lines.append("  series:")
             for s_key, s_vals in series.items():
                 if s_vals:
-                    # Compact: 4 decimal places, comma separated
-                    formatted = [f"{v:.4f}" if v is not None else "null" for v in s_vals]
-                    lines.append(f"    {s_key}: [{', '.join(formatted)}]")
+                    formatted = [f"{v:.2f}" if v is not None else "?" for v in s_vals]
+                    lines.append(f"    {s_key}: {','.join(formatted)}")
 
     return "\n".join(lines)
