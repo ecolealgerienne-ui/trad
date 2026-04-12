@@ -361,8 +361,47 @@ def _clean_response(text: str) -> str:
     return text
 
 
+def _patch_missing_fields(data: dict) -> dict:
+    """Infer missing fields from context before pydantic validation.
+
+    Not arbitrary defaults — each inference is logically derived:
+    - max_concurrent_positions: count of buy actions in the response
+    - rationale: copy from holistic_justification if present
+    - analysis_confidence: mean of asset convictions
+    """
+    g = data.get("global", {})
+
+    # max_concurrent_positions: count buys, min 1
+    if "max_concurrent_positions" not in g:
+        assets = data.get("assets", [])
+        n_buys = sum(1 for a in assets if a.get("action") == "buy")
+        g["max_concurrent_positions"] = max(n_buys, 1)
+        logger.debug("Patched global.max_concurrent_positions=%d", g["max_concurrent_positions"])
+
+    # Asset rationale: copy from holistic_justification
+    for i, asset in enumerate(data.get("assets", [])):
+        if "rationale" not in asset and "holistic_justification" in asset:
+            asset["rationale"] = asset["holistic_justification"]
+            logger.debug("Patched assets[%d].rationale from holistic_justification", i)
+        elif "rationale" not in asset:
+            asset["rationale"] = f"No explicit rationale for {asset.get('symbol', '?')}"
+            logger.debug("Patched assets[%d].rationale with fallback", i)
+
+    # meta.analysis_confidence: mean of convictions
+    meta = data.get("meta", {})
+    if not isinstance(meta, dict):
+        data["meta"] = {}
+        meta = data["meta"]
+    if "analysis_confidence" not in meta:
+        convictions = [a.get("conviction", 5) for a in data.get("assets", []) if isinstance(a.get("conviction"), (int, float))]
+        meta["analysis_confidence"] = round(sum(convictions) / len(convictions)) if convictions else 5
+        logger.debug("Patched meta.analysis_confidence=%d", meta["analysis_confidence"])
+
+    return data
+
+
 def _validate_response(raw_text: str):
-    """Parse JSON and validate against GemmaOutput schema."""
+    """Parse JSON, patch missing fields, validate against GemmaOutput schema."""
     if not raw_text or not raw_text.strip():
         return None, ["Empty response from LLM"]
 
@@ -370,6 +409,9 @@ def _validate_response(raw_text: str):
         data = json.loads(raw_text)
     except json.JSONDecodeError as e:
         return None, [f"JSON parse error: {e}"]
+
+    # Patch commonly omitted fields before strict validation
+    data = _patch_missing_fields(data)
 
     try:
         output = GemmaOutput.parse_raw_response(data)
