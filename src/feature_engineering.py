@@ -255,9 +255,12 @@ def compute_indicators(df_closed: pd.DataFrame, tf_label: str) -> Dict[str, Any]
 
     def _safe(col: str) -> Any:
         val = last.get(col)
-        if val is None or (isinstance(val, float) and (pd.isna(val) or np.isinf(val))):
+        if val is None or pd.isna(val):
             return None
-        return round(float(val), 6)
+        val = float(val)
+        if np.isinf(val):
+            return None
+        return round(val, 6)
 
     if tf_label == "15m":
         return {
