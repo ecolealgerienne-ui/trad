@@ -1,10 +1,12 @@
 """
 Ollama wrapper for Gemma 4 26B.
 
-- Calls POST http://localhost:11434/api/chat with format:"json" + think:false
-- Validates response via pydantic GemmaOutput
-- Retry once on validation failure with error feedback + original data
-- Returns dict with parsed output + debug metadata (latency, raw responses, errors)
+Strategy for schema compliance:
+1. Short system prompt (rules only, no verbose explanations)
+2. JSON Schema in Ollama `format` param (structural constraint at token level)
+3. Few-shot example in conversation history (format by mimicry)
+4. Compact user message (data only, no schema repetition)
+5. Retry with error feedback + original data if validation fails
 """
 
 import json
@@ -35,7 +37,7 @@ class LLMValidationError(Exception):
         self.errors = errors
 
 
-def load_system_prompt(filename: str = "gemma_system_v1.txt") -> str:
+def load_system_prompt(filename: str = "gemma_system_v2.txt") -> str:
     """Read the system prompt from disk."""
     path = PROMPTS_DIR / filename
     if not path.exists():
@@ -52,107 +54,9 @@ def ping_ollama(base_url: str = OLLAMA_BASE_URL, timeout: float = 5.0) -> bool:
         return False
 
 
-def call_gemma(
-    system_prompt: str,
-    user_payload: dict,
-    temperature: float = 0.2,
-    model: str = "gemma4:26b",
-    base_url: str = OLLAMA_BASE_URL,
-    timeout: float = 300.0,
-) -> Dict[str, Any]:
-    """Call Gemma via Ollama and return validated output + metadata.
-
-    Returns dict with keys:
-        - parsed: dict (the validated GemmaOutput as dict), or None if failed
-        - raw_response_first_attempt: str (always present)
-        - raw_response_retry: str or None
-        - validation_errors: list of str (empty if OK)
-        - latency_sec: float (total, including retry)
-        - retried: bool
-        - success: bool
-    """
-    # Prefix user message with compact schema reminder — Gemma prioritizes
-    # the last thing it sees over a long system prompt
-    user_content = (
-        'Analyze this market data and respond with EXACTLY this JSON structure:\n'
-        '{"global": {"btc_regime": "trending_up|trending_down|range|chaotic", '
-        '"market_mode": "risk_on|risk_off|rotation|neutral", '
-        '"market_coherence": "aligned|diverging|rotating", '
-        '"sector_flow": "btc_led|alt_led|mixed|defensive", '
-        '"relative_strength_ranking": ["ASSET_X","ASSET_X","ASSET_X","ASSET_X","ASSET_X"], '
-        '"risk_adjustment": "normal|defensive|aggressive", '
-        '"max_concurrent_positions": 1-5, '
-        '"rationale": "one sentence"}, '
-        '"assets": [{"symbol": "ASSET_A", "regime": "...", "setup": "breakout|pullback|mean_reversion|none", '
-        '"action": "buy|close|hold|skip", "conviction": 0-10, "relative_strength_rank": 1-5, '
-        '"entry_zone": {"min": N, "max": N}|null, "atr_stop_multiplier": N|null, '
-        '"atr_tp_multiplier": N|null, "expected_horizon_hours": 1-8|null, '
-        '"holistic_justification": "...", "rationale": "..."}, ... for all 5 assets], '
-        '"meta": {"analysis_confidence": 0-10}}\n'
-        'Rules: if action="buy" then entry_zone/multipliers/horizon are REQUIRED. '
-        'If action="skip"|"hold"|"close" then those fields MUST be null. '
-        'All 5 assets must appear in order A,B,C,D,E.\n\n'
-        'DATA:\n'
-        + json.dumps(user_payload, default=str)
-    )
-
-    result = {
-        "parsed": None,
-        "raw_response_first_attempt": None,
-        "raw_response_retry": None,
-        "validation_errors": [],
-        "latency_sec": 0.0,
-        "retried": False,
-        "success": False,
-    }
-
-    t_start = time.perf_counter()
-
-    # --- First attempt ---
-    raw_text = _call_ollama(system_prompt, user_content, temperature, model, base_url, timeout)
-    result["raw_response_first_attempt"] = raw_text
-
-    parsed, errors = _validate_response(raw_text)
-
-    if parsed is not None:
-        result["parsed"] = parsed
-        result["success"] = True
-        result["latency_sec"] = round(time.perf_counter() - t_start, 2)
-        return result
-
-    # --- Retry with error feedback + original data ---
-    result["retried"] = True
-    result["validation_errors"] = errors
-    logger.warning("First attempt failed validation: %s — retrying", errors)
-
-    error_msg = "; ".join(errors)
-    retry_user = (
-        f"Your previous output violated the schema: {error_msg}.\n\n"
-        f"Here is the data again. Output ONLY the JSON matching the schema "
-        f"from the system prompt. No other text.\n\n"
-        f"{user_content}"
-    )
-
-    raw_retry = _call_ollama(system_prompt, retry_user, temperature, model, base_url, timeout)
-    result["raw_response_retry"] = raw_retry
-
-    parsed_retry, errors_retry = _validate_response(raw_retry)
-
-    if parsed_retry is not None:
-        result["parsed"] = parsed_retry
-        result["success"] = True
-        result["validation_errors"] = []  # Cleared on success
-        result["latency_sec"] = round(time.perf_counter() - t_start, 2)
-        return result
-
-    # --- Both attempts failed ---
-    all_errors = errors + errors_retry
-    result["validation_errors"] = all_errors
-    result["latency_sec"] = round(time.perf_counter() - t_start, 2)
-    logger.error("Both attempts failed validation: %s", all_errors)
-
-    return result
-
+# ---------------------------------------------------------------------------
+# JSON Schema for Ollama structured output
+# ---------------------------------------------------------------------------
 
 _OLLAMA_JSON_SCHEMA = {
     "type": "object",
@@ -220,9 +124,12 @@ _OLLAMA_JSON_SCHEMA = {
 }
 
 
-# Minimal few-shot example to teach the output format via conversation history.
-# This is the most reliable way to force schema compliance with local LLMs.
-_FEW_SHOT_USER = "Analyze this market snapshot and respond with the required JSON."
+# ---------------------------------------------------------------------------
+# Few-shot example (conversation history teaches format by mimicry)
+# ---------------------------------------------------------------------------
+
+_FEW_SHOT_USER = '{"cycle_index":100,"timeframe_reference":"15m","global":{"btc":{"price":68000,"chg_1h_pct":0.3,"chg_24h_pct":1.2},"btc_dominance":{"value":55},"time":{"minutes_to_close":300},"portfolio":{"open_positions":0,"total_exposure_pct":0}},"assets":[{"id":"ASSET_A","price":68000,"session":{"chg_pct":0.5},"trend":{"ema20_15m":{"slope_pct":0.02,"dist_pct":0.1}},"regime":{"adx_1h":22},"momentum":{"rsi_15m":55,"rsi_1h":52},"volatility":{"atr_15m_pct":0.2,"atr_ratio_vs_avg50":1.1,"bb_position_15m":0.6},"volume":{"vol_rel_15m":1.0},"correlation":{"corr_btc_24h":null}},{"id":"ASSET_B","price":3500,"session":{"chg_pct":0.8},"trend":{"ema20_15m":{"slope_pct":0.05,"dist_pct":-0.2}},"regime":{"adx_1h":28},"momentum":{"rsi_15m":48,"rsi_1h":55},"volatility":{"atr_15m_pct":0.3,"atr_ratio_vs_avg50":1.2,"bb_position_15m":0.4},"volume":{"vol_rel_15m":0.9},"correlation":{"corr_btc_24h":0.7}},{"id":"ASSET_C","price":150,"session":{"chg_pct":-0.3},"trend":{"ema20_15m":{"slope_pct":-0.01,"dist_pct":-0.5}},"regime":{"adx_1h":18},"momentum":{"rsi_15m":42,"rsi_1h":45},"volatility":{"atr_15m_pct":0.4,"atr_ratio_vs_avg50":0.9,"bb_position_15m":0.3},"volume":{"vol_rel_15m":0.7},"correlation":{"corr_btc_24h":0.65}},{"id":"ASSET_D","price":0.6,"session":{"chg_pct":-0.8},"trend":{"ema20_15m":{"slope_pct":-0.03,"dist_pct":-1.0}},"regime":{"adx_1h":15},"momentum":{"rsi_15m":35,"rsi_1h":38},"volatility":{"atr_15m_pct":0.2,"atr_ratio_vs_avg50":0.8,"bb_position_15m":0.15},"volume":{"vol_rel_15m":0.5},"correlation":{"corr_btc_24h":0.72}},{"id":"ASSET_E","price":600,"session":{"chg_pct":-1.2},"trend":{"ema20_15m":{"slope_pct":-0.04,"dist_pct":-1.5}},"regime":{"adx_1h":30},"momentum":{"rsi_15m":30,"rsi_1h":32},"volatility":{"atr_15m_pct":0.3,"atr_ratio_vs_avg50":1.4,"bb_position_15m":0.05},"volume":{"vol_rel_15m":1.8},"correlation":{"corr_btc_24h":0.8}}]}'
+
 _FEW_SHOT_ASSISTANT = json.dumps({
     "global": {
         "btc_regime": "range",
@@ -232,17 +139,98 @@ _FEW_SHOT_ASSISTANT = json.dumps({
         "relative_strength_ranking": ["ASSET_B", "ASSET_A", "ASSET_C", "ASSET_D", "ASSET_E"],
         "risk_adjustment": "normal",
         "max_concurrent_positions": 3,
-        "rationale": "BTC ranging, alts diverging with B leading on momentum."
+        "rationale": "BTC ranging, B shows strongest momentum with pullback to EMA20."
     },
     "assets": [
-        {"symbol": "ASSET_A", "regime": "range", "setup": "none", "action": "skip", "conviction": 4, "relative_strength_rank": 2, "entry_zone": None, "atr_stop_multiplier": None, "atr_tp_multiplier": None, "expected_horizon_hours": None, "holistic_justification": "Neutral regime, B is stronger.", "rationale": "No clean setup on 15m."},
-        {"symbol": "ASSET_B", "regime": "trending_up", "setup": "pullback", "action": "buy", "conviction": 7, "relative_strength_rank": 1, "entry_zone": {"min": 3500, "max": 3520}, "atr_stop_multiplier": 1.5, "atr_tp_multiplier": 3.0, "expected_horizon_hours": 4, "holistic_justification": "Strongest asset, BTC stable enough for alt entry.", "rationale": "Pullback to EMA20 with RSI 48, volume cooling."},
-        {"symbol": "ASSET_C", "regime": "range", "setup": "none", "action": "skip", "conviction": 2, "relative_strength_rank": 3, "entry_zone": None, "atr_stop_multiplier": None, "atr_tp_multiplier": None, "expected_horizon_hours": None, "holistic_justification": "Mid-pack, no edge.", "rationale": "ADX 16, sideways."},
-        {"symbol": "ASSET_D", "regime": "trending_down", "setup": "none", "action": "skip", "conviction": 1, "relative_strength_rank": 4, "entry_zone": None, "atr_stop_multiplier": None, "atr_tp_multiplier": None, "expected_horizon_hours": None, "holistic_justification": "Laggard, R2 blocks.", "rationale": "Below EMA50 1h."},
-        {"symbol": "ASSET_E", "regime": "trending_down", "setup": "none", "action": "skip", "conviction": 0, "relative_strength_rank": 5, "entry_zone": None, "atr_stop_multiplier": None, "atr_tp_multiplier": None, "expected_horizon_hours": None, "holistic_justification": "Weakest, avoid.", "rationale": "Downtrend on all TFs."},
+        {"symbol": "ASSET_A", "regime": "range", "setup": "none", "action": "skip", "conviction": 4, "relative_strength_rank": 2, "entry_zone": None, "atr_stop_multiplier": None, "atr_tp_multiplier": None, "expected_horizon_hours": None, "holistic_justification": "B offers stronger setup at rank 1.", "rationale": "Sideways, no trigger."},
+        {"symbol": "ASSET_B", "regime": "trending_up", "setup": "pullback", "action": "buy", "conviction": 7, "relative_strength_rank": 1, "entry_zone": {"min": 3490, "max": 3510}, "atr_stop_multiplier": 1.5, "atr_tp_multiplier": 3.0, "expected_horizon_hours": 4, "holistic_justification": "Strongest asset, BTC stable enough.", "rationale": "Pullback to EMA20 with RSI 48, volume cooling."},
+        {"symbol": "ASSET_C", "regime": "range", "setup": "none", "action": "skip", "conviction": 2, "relative_strength_rank": 3, "entry_zone": None, "atr_stop_multiplier": None, "atr_tp_multiplier": None, "expected_horizon_hours": None, "holistic_justification": "Mid-pack, no edge vs B.", "rationale": "ADX 18, sideways."},
+        {"symbol": "ASSET_D", "regime": "range", "setup": "none", "action": "skip", "conviction": 1, "relative_strength_rank": 4, "entry_zone": None, "atr_stop_multiplier": None, "atr_tp_multiplier": None, "expected_horizon_hours": None, "holistic_justification": "Rank 4, R2 blocks buy.", "rationale": "Weak momentum."},
+        {"symbol": "ASSET_E", "regime": "trending_down", "setup": "none", "action": "skip", "conviction": 0, "relative_strength_rank": 5, "entry_zone": None, "atr_stop_multiplier": None, "atr_tp_multiplier": None, "expected_horizon_hours": None, "holistic_justification": "Weakest, high vol selloff.", "rationale": "Below all EMAs, ATR expanding."},
     ],
     "meta": {"analysis_confidence": 6}
 })
+
+
+# ---------------------------------------------------------------------------
+# Main API
+# ---------------------------------------------------------------------------
+
+
+def call_gemma(
+    system_prompt: str,
+    user_payload: dict,
+    temperature: float = 0.2,
+    model: str = "gemma4:26b",
+    base_url: str = OLLAMA_BASE_URL,
+    timeout: float = 300.0,
+) -> Dict[str, Any]:
+    """Call Gemma via Ollama and return validated output + metadata."""
+    user_content = json.dumps(user_payload, default=str)
+
+    result = {
+        "parsed": None,
+        "raw_response_first_attempt": None,
+        "raw_response_retry": None,
+        "validation_errors": [],
+        "latency_sec": 0.0,
+        "retried": False,
+        "success": False,
+    }
+
+    t_start = time.perf_counter()
+
+    # --- First attempt ---
+    raw_text = _call_ollama(system_prompt, user_content, temperature, model, base_url, timeout)
+    result["raw_response_first_attempt"] = raw_text
+
+    parsed, errors = _validate_response(raw_text)
+
+    if parsed is not None:
+        result["parsed"] = parsed
+        result["success"] = True
+        result["latency_sec"] = round(time.perf_counter() - t_start, 2)
+        return result
+
+    # --- Retry with error feedback + original data ---
+    result["retried"] = True
+    result["validation_errors"] = errors
+    logger.warning("First attempt failed validation: %s — retrying", errors)
+
+    error_msg = "; ".join(errors[:5])  # Limit error length
+    retry_user = (
+        f"SCHEMA ERROR: {error_msg}. "
+        f"Output the JSON with keys: global, assets (5 items), meta. "
+        f"Each asset needs: symbol, regime, setup, action, conviction, "
+        f"relative_strength_rank, entry_zone, atr_stop_multiplier, "
+        f"atr_tp_multiplier, expected_horizon_hours, holistic_justification, rationale.\n\n"
+        f"{user_content}"
+    )
+
+    raw_retry = _call_ollama(system_prompt, retry_user, temperature, model, base_url, timeout)
+    result["raw_response_retry"] = raw_retry
+
+    parsed_retry, errors_retry = _validate_response(raw_retry)
+
+    if parsed_retry is not None:
+        result["parsed"] = parsed_retry
+        result["success"] = True
+        result["validation_errors"] = []
+        result["latency_sec"] = round(time.perf_counter() - t_start, 2)
+        return result
+
+    # --- Both attempts failed ---
+    all_errors = errors + errors_retry
+    result["validation_errors"] = all_errors
+    result["latency_sec"] = round(time.perf_counter() - t_start, 2)
+    logger.error("Both attempts failed validation: %s", all_errors[:5])
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Internal
+# ---------------------------------------------------------------------------
 
 
 def _call_ollama(
@@ -253,19 +241,13 @@ def _call_ollama(
     base_url: str,
     timeout: float,
 ) -> str:
-    """Raw HTTP call to Ollama chat endpoint. Returns response text.
-
-    Uses few-shot conversation history + JSON Schema format constraint
-    to force Gemma to produce the exact schema we need.
-    """
+    """Raw HTTP call to Ollama chat endpoint."""
     payload = {
         "model": model,
         "messages": [
             {"role": "system", "content": system_prompt},
-            # Few-shot: teach the format by example
             {"role": "user", "content": _FEW_SHOT_USER},
             {"role": "assistant", "content": _FEW_SHOT_ASSISTANT},
-            # Actual request
             {"role": "user", "content": user_content},
         ],
         "stream": False,
@@ -283,29 +265,19 @@ def _call_ollama(
 
     data = resp.json()
     content = data.get("message", {}).get("content", "")
-
-    # Strip markdown code fences if present (```json ... ```)
-    content = _strip_code_fences(content)
-
-    return content
+    return _clean_response(content)
 
 
-def _strip_code_fences(text: str) -> str:
-    """Remove markdown code fences that some models wrap JSON in."""
+def _clean_response(text: str) -> str:
+    """Clean LLM response: strip fences, extract first JSON object."""
     text = text.strip()
-    # Match ```json ... ``` or ``` ... ```
+
+    # Strip markdown code fences
     match = re.match(r"^```(?:json)?\s*\n?(.*?)\n?\s*```$", text, re.DOTALL)
     if match:
-        return match.group(1).strip()
-    return text
+        text = match.group(1).strip()
 
-
-def _extract_first_json_object(text: str) -> str:
-    """Extract the first complete top-level JSON object from text.
-
-    Handles cases where Gemma appends comments or extra text after the JSON.
-    Uses brace counting to find the matching closing brace.
-    """
+    # Extract first complete JSON object (ignore trailing text)
     start = text.find("{")
     if start == -1:
         return text
@@ -316,23 +288,17 @@ def _extract_first_json_object(text: str) -> str:
 
     for i in range(start, len(text)):
         c = text[i]
-
         if escape:
             escape = False
             continue
-
-        if c == "\\":
-            if in_string:
-                escape = True
+        if c == "\\" and in_string:
+            escape = True
             continue
-
         if c == '"' and not escape:
             in_string = not in_string
             continue
-
         if in_string:
             continue
-
         if c == "{":
             depth += 1
         elif c == "}":
@@ -340,28 +306,19 @@ def _extract_first_json_object(text: str) -> str:
             if depth == 0:
                 return text[start : i + 1]
 
-    # No complete object found, return as-is for downstream error
     return text
 
 
 def _validate_response(raw_text: str):
-    """Parse JSON and validate against GemmaOutput schema.
-
-    Returns (parsed_dict, []) on success, or (None, [error_strings]) on failure.
-    """
+    """Parse JSON and validate against GemmaOutput schema."""
     if not raw_text or not raw_text.strip():
         return None, ["Empty response from LLM"]
 
-    # Extract first JSON object (ignore trailing text)
-    cleaned = _extract_first_json_object(raw_text.strip())
-
-    # Step 1: JSON parse
     try:
-        data = json.loads(cleaned)
+        data = json.loads(raw_text)
     except json.JSONDecodeError as e:
         return None, [f"JSON parse error: {e}"]
 
-    # Step 2: Pydantic validation
     try:
         output = GemmaOutput.parse_raw_response(data)
         return output.model_dump(by_alias=True), []
