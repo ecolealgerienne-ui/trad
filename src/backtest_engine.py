@@ -273,47 +273,40 @@ def process_entries(
     as_of: pd.Timestamp,
     fee_rate: float,
     risk_pct: float,
+    funnel: dict,
 ) -> Tuple[List[Position], float]:
-    """Process buy signals from Qwen. Returns (new_positions, updated_cash)."""
+    """Process buy signals from Qwen. No Python-side filters on conviction,
+    market_mode, or max_positions — trust Qwen's decisions directly.
+
+    Only filters: already_in_position, insufficient_cash, missing ATR/multipliers.
+    Returns (new_positions, updated_cash).
+    """
     new_positions = []
-
-    global_sec = qwen_decision.get("global", {})
     assets = qwen_decision.get("assets", [])
-    max_pos = global_sec.get("max_concurrent_positions", 5)
-
-    # R1: No buys in risk_off or chaotic
-    market_mode = global_sec.get("market_mode", "")
-    btc_regime = global_sec.get("btc_regime", "")
-    if market_mode == "risk_off" or btc_regime == "chaotic":
-        return new_positions, cash
-
     current_symbols = {p.symbol for p in positions}
-    total_open = len(positions)
 
     for asset_dec in assets:
         if asset_dec.get("action") != "buy":
             continue
-        if asset_dec.get("conviction", 0) < 7:
-            continue
 
+        funnel["total_buys"] += 1
         anon_sym = asset_dec.get("symbol", "")
         real_sym = ANON_TO_REAL.get(anon_sym, anon_sym)
 
-        # Already in position
+        # Only filter: already in position on this symbol
         if real_sym in current_symbols:
+            funnel["filtered_already_in_pos"] += 1
             continue
-
-        # Max positions
-        if total_open + len(new_positions) >= min(5, max_pos):
-            break
 
         # Get entry price from last closed candle
         key = (real_sym, "15m")
         if key not in data_sources:
+            funnel["filtered_no_data"] += 1
             continue
         try:
             df_closed = filter_closed_candles(data_sources[key], 15, as_of)
         except ValueError:
+            funnel["filtered_no_data"] += 1
             continue
         entry_price = float(df_closed.iloc[-1]["close"])
 
@@ -321,19 +314,21 @@ def process_entries(
         snap = features_snapshot.get(anon_sym, {})
         atr = snap.get("atr_15m_abs")
         if atr is None or atr <= 0:
-            logger.warning("No ATR for %s, skipping entry", real_sym)
+            funnel["filtered_no_atr"] += 1
             continue
 
         # Calculate stop/TP from ATR multipliers
         stop_mult = asset_dec.get("atr_stop_multiplier")
         tp_mult = asset_dec.get("atr_tp_multiplier")
         if stop_mult is None or tp_mult is None:
+            funnel["filtered_no_multipliers"] += 1
             continue
 
         stop_price = entry_price - atr * stop_mult
         tp_price = entry_price + atr * tp_mult
 
         if stop_price <= 0:
+            funnel["filtered_invalid_stop"] += 1
             continue
 
         # Size position
@@ -341,6 +336,7 @@ def process_entries(
             capital, risk_pct, entry_price, stop_price, fee_rate, cash
         )
         if result is None:
+            funnel["filtered_insufficient_cash"] += 1
             continue
 
         qty, size_usd, entry_fee_usd = result
@@ -358,6 +354,7 @@ def process_entries(
         new_positions.append(pos)
         cash -= (size_usd + entry_fee_usd)
         current_symbols.add(real_sym)
+        funnel["executed"] += 1
 
         logger.debug(
             "ENTRY %s @ %.2f | qty=%.6f size=$%.2f | stop=%.2f tp=%.2f",
@@ -378,9 +375,19 @@ def run_backtest(
     capital: float = 10000.0,
     fee_rate: float = 0.001,
     risk_pct: float = 0.02,
-) -> Tuple[List[Trade], List[dict]]:
-    """Main backtest loop. Returns (all_trades, equity_curve)."""
+) -> Tuple[List[Trade], List[dict], dict]:
+    """Main backtest loop. Returns (all_trades, equity_curve, execution_funnel)."""
     all_trades: List[Trade] = []
+    funnel = {
+        "total_buys": 0,
+        "filtered_already_in_pos": 0,
+        "filtered_insufficient_cash": 0,
+        "filtered_no_data": 0,
+        "filtered_no_atr": 0,
+        "filtered_no_multipliers": 0,
+        "filtered_invalid_stop": 0,
+        "executed": 0,
+    }
     equity_curve: List[dict] = []
     positions: List[Position] = []
     cash = capital
@@ -389,7 +396,7 @@ def run_backtest(
     timestamps = sorted(decisions.keys())
     if not timestamps:
         logger.error("No decisions to replay.")
-        return all_trades, equity_curve
+        return all_trades, equity_curve, funnel
 
     logger.info(
         "Running backtest: %d cycles, capital=$%.2f, fee=%.2f%%, risk=%.1f%%",
@@ -418,7 +425,7 @@ def run_backtest(
         # --- 2. Process entries ---
         new_pos, cash = process_entries(
             parsed, snapshot, data_sources, positions,
-            capital, cash, as_of, fee_rate, risk_pct,
+            capital, cash, as_of, fee_rate, risk_pct, funnel,
         )
         positions.extend(new_pos)
 
@@ -476,7 +483,7 @@ def run_backtest(
                 duration_minutes=duration,
             ))
 
-    return all_trades, equity_curve
+    return all_trades, equity_curve, funnel
 
 
 # ---------------------------------------------------------------------------
@@ -489,6 +496,7 @@ def compute_report(
     equity_curve: List[dict],
     data_sources: dict,
     capital: float,
+    funnel: Optional[dict] = None,
 ) -> dict:
     """Compute aggregate stats."""
     report: Dict[str, Any] = {
@@ -591,6 +599,10 @@ def compute_report(
             symbols[s]["winners"] / symbols[s]["count"] * 100, 1
         ) if symbols[s]["count"] > 0 else 0
     report["by_symbol"] = symbols
+
+    # Execution funnel
+    if funnel:
+        report["execution_funnel"] = funnel
 
     # Buy & Hold benchmark (equi-weighted 20% each)
     if equity_curve:
@@ -713,6 +725,19 @@ def write_outputs(
             for sym, stats in sorted(by_sym.items()):
                 f.write(f"    {sym:10s}: {stats['count']:3d} trades, ${stats['pnl_usd']:8.2f}, WR={stats['win_rate_pct']:.0f}%\n")
 
+        # Execution funnel
+        ef = report.get("execution_funnel", {})
+        if ef:
+            f.write(f"\n  Execution funnel:\n")
+            f.write(f"    Total buy signals from Qwen:  {ef.get('total_buys', 0)}\n")
+            f.write(f"    Filtered already_in_pos:      {ef.get('filtered_already_in_pos', 0)}\n")
+            f.write(f"    Filtered insufficient_cash:   {ef.get('filtered_insufficient_cash', 0)}\n")
+            f.write(f"    Filtered no_atr:              {ef.get('filtered_no_atr', 0)}\n")
+            f.write(f"    Filtered no_multipliers:      {ef.get('filtered_no_multipliers', 0)}\n")
+            f.write(f"    Filtered invalid_stop:        {ef.get('filtered_invalid_stop', 0)}\n")
+            f.write(f"    Filtered no_data:             {ef.get('filtered_no_data', 0)}\n")
+            f.write(f"    Executed:                     {ef.get('executed', 0)}\n")
+
         f.write("\n" + "=" * 60 + "\n")
 
     logger.info("Summary written to %s", summary_path)
@@ -749,12 +774,12 @@ def main():
         sys.exit(1)
 
     # Run backtest
-    trades, equity_curve = run_backtest(
+    trades, equity_curve, funnel = run_backtest(
         data_sources, decisions, args.capital, args.fee_rate, args.risk_pct,
     )
 
     # Report
-    report = compute_report(trades, equity_curve, data_sources, args.capital)
+    report = compute_report(trades, equity_curve, data_sources, args.capital, funnel)
 
     # Write outputs
     write_outputs(trades, equity_curve, report, args.output_dir)
