@@ -28,6 +28,7 @@ from src.schemas import GemmaOutput
 logger = logging.getLogger(__name__)
 
 OLLAMA_BASE_URL = "http://localhost:11434"
+DEFAULT_MODEL = "qwen2.5:14b"
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 
 
@@ -206,7 +207,7 @@ def call_gemma(
     system_prompt: str,
     user_payload: dict,
     temperature: float = 0.2,
-    model: str = "gemma4:26b",
+    model: str = DEFAULT_MODEL,
     base_url: str = OLLAMA_BASE_URL,
     timeout: float = 300.0,
 ) -> Dict[str, Any]:

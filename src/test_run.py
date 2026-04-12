@@ -216,7 +216,7 @@ def main():
     parser.add_argument("--start", type=str, default=None, help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end", type=str, default=None, help="End date (YYYY-MM-DD)")
     parser.add_argument("--data-dir", type=str, default="src/data_trad", help="Data directory")
-    parser.add_argument("--model", type=str, default="gemma4:26b", help="Ollama model name")
+    parser.add_argument("--model", type=str, default="qwen2.5:14b", help="Ollama model name")
     parser.add_argument("--temperature", type=float, default=0.2, help="LLM temperature")
     args = parser.parse_args()
 
