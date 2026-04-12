@@ -3,12 +3,13 @@ Ollama wrapper for Gemma 4 26B.
 
 - Calls POST http://localhost:11434/api/chat with format:"json" + think:false
 - Validates response via pydantic GemmaOutput
-- Retry once on validation failure with error feedback
+- Retry once on validation failure with error feedback + original data
 - Returns dict with parsed output + debug metadata (latency, raw responses, errors)
 """
 
 import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -96,15 +97,17 @@ def call_gemma(
         result["latency_sec"] = round(time.perf_counter() - t_start, 2)
         return result
 
-    # --- Retry with error feedback ---
+    # --- Retry with error feedback + original data ---
     result["retried"] = True
     result["validation_errors"] = errors
     logger.warning("First attempt failed validation: %s — retrying", errors)
 
     error_msg = "; ".join(errors)
     retry_user = (
-        f"Your previous output violated the schema: {error_msg}. "
-        f"Output again, strict JSON only."
+        f"Your previous output violated the schema: {error_msg}.\n\n"
+        f"Here is the data again. Output ONLY the JSON matching the schema "
+        f"from the system prompt. No other text.\n\n"
+        f"{user_content}"
     )
 
     raw_retry = _call_ollama(system_prompt, retry_user, temperature, model, base_url, timeout)
@@ -157,7 +160,22 @@ def _call_ollama(
     resp.raise_for_status()
 
     data = resp.json()
-    return data.get("message", {}).get("content", "")
+    content = data.get("message", {}).get("content", "")
+
+    # Strip markdown code fences if present (```json ... ```)
+    content = _strip_code_fences(content)
+
+    return content
+
+
+def _strip_code_fences(text: str) -> str:
+    """Remove markdown code fences that some models wrap JSON in."""
+    text = text.strip()
+    # Match ```json ... ``` or ``` ... ```
+    match = re.match(r"^```(?:json)?\s*\n?(.*?)\n?\s*```$", text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return text
 
 
 def _validate_response(raw_text: str):
@@ -165,6 +183,9 @@ def _validate_response(raw_text: str):
 
     Returns (parsed_dict, []) on success, or (None, [error_strings]) on failure.
     """
+    if not raw_text or not raw_text.strip():
+        return None, ["Empty response from LLM"]
+
     # Step 1: JSON parse
     try:
         data = json.loads(raw_text)
