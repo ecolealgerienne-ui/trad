@@ -127,38 +127,39 @@ def calculate_position_size(
     stop_price: float,
     fee_rate: float,
     cash: float,
+    sizing_mode: str = "risk",
 ) -> Optional[Tuple[float, float, float]]:
-    """Calculate position size based on risk.
+    """Calculate position size.
+
+    Two modes:
+    - "risk": risk_amount = capital * risk_pct, qty = risk_amount / stop_distance
+      (can create huge positions on tight stops)
+    - "fixed_pct": size_usd = capital * risk_pct (direct % of capital per trade)
 
     Returns (qty, size_usd, entry_fee_usd) or None if can't afford.
-
-    Formula:
-        risk_amount_usd = capital * risk_pct
+    """
+    if sizing_mode == "fixed_pct":
+        size_usd = capital * risk_pct
+        qty = size_usd / entry_price
+        entry_fee_usd = size_usd * fee_rate
+    else:
         stop_distance = entry_price - stop_price
+        if stop_distance <= 0:
+            logger.warning("Invalid stop: entry=%.4f stop=%.4f", entry_price, stop_price)
+            return None
+        risk_amount_usd = capital * risk_pct
         qty = risk_amount_usd / stop_distance
         size_usd = qty * entry_price
         entry_fee_usd = size_usd * fee_rate
-        Total cost = size_usd + entry_fee_usd  (must fit in cash)
-    """
-    stop_distance = entry_price - stop_price
-    if stop_distance <= 0:
-        logger.warning("Invalid stop: entry=%.4f stop=%.4f", entry_price, stop_price)
-        return None
-
-    risk_amount_usd = capital * risk_pct
-    qty = risk_amount_usd / stop_distance
-    size_usd = qty * entry_price
-    entry_fee_usd = size_usd * fee_rate
 
     # Check cash
     total_cost = size_usd + entry_fee_usd
     if total_cost > cash:
-        # Reduce qty to fit
         max_size = cash / (1 + fee_rate)
         qty = max_size / entry_price
         size_usd = qty * entry_price
         entry_fee_usd = size_usd * fee_rate
-        if qty * entry_price < 1.0:  # Too small
+        if size_usd < 1.0:
             return None
 
     return qty, size_usd, entry_fee_usd
@@ -274,6 +275,7 @@ def process_entries(
     fee_rate: float,
     risk_pct: float,
     funnel: dict,
+    sizing_mode: str = "risk",
 ) -> Tuple[List[Position], float]:
     """Process buy signals from Qwen. No Python-side filters on conviction,
     market_mode, or max_positions — trust Qwen's decisions directly.
@@ -333,7 +335,7 @@ def process_entries(
 
         # Size position
         result = calculate_position_size(
-            capital, risk_pct, entry_price, stop_price, fee_rate, cash
+            capital, risk_pct, entry_price, stop_price, fee_rate, cash, sizing_mode
         )
         if result is None:
             funnel["filtered_insufficient_cash"] += 1
@@ -375,6 +377,7 @@ def run_backtest(
     capital: float = 10000.0,
     fee_rate: float = 0.001,
     risk_pct: float = 0.02,
+    sizing_mode: str = "risk",
 ) -> Tuple[List[Trade], List[dict], dict]:
     """Main backtest loop. Returns (all_trades, equity_curve, execution_funnel)."""
     all_trades: List[Trade] = []
@@ -425,7 +428,7 @@ def run_backtest(
         # --- 2. Process entries ---
         new_pos, cash = process_entries(
             parsed, snapshot, data_sources, positions,
-            capital, cash, as_of, fee_rate, risk_pct, funnel,
+            capital, cash, as_of, fee_rate, risk_pct, funnel, sizing_mode,
         )
         positions.extend(new_pos)
 
@@ -758,7 +761,9 @@ def main():
     parser.add_argument("--data-dir", default="src/data_trad", help="OHLCV data directory")
     parser.add_argument("--capital", type=float, default=10000.0, help="Initial capital (USD)")
     parser.add_argument("--fee-rate", type=float, default=0.001, help="Fee rate per side (default 0.1%%)")
-    parser.add_argument("--risk-pct", type=float, default=0.02, help="Risk per trade (default 2%%)")
+    parser.add_argument("--risk-pct", type=float, default=0.10, help="Risk/size per trade (default 10%%)")
+    parser.add_argument("--sizing-mode", choices=["risk", "fixed_pct"], default="fixed_pct",
+                        help="risk=2%%risk/stop_distance, fixed_pct=%%capital per trade (default: fixed_pct)")
     parser.add_argument("--output-dir", default="results", help="Output directory")
     args = parser.parse_args()
 
@@ -776,6 +781,7 @@ def main():
     # Run backtest
     trades, equity_curve, funnel = run_backtest(
         data_sources, decisions, args.capital, args.fee_rate, args.risk_pct,
+        args.sizing_mode,
     )
 
     # Report
