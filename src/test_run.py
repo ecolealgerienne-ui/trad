@@ -293,6 +293,18 @@ def main():
                 features = compute_features(data_sources, as_of, FAKE_CONTEXT)
                 record["cycle_index"] = features.get("cycle_index")
 
+                # Build features_snapshot for backtest (price + ATR per asset)
+                snapshot = {}
+                for asset_data in features.get("assets", []):
+                    sym = asset_data.get("_symbol", "")
+                    anon_id = ANON_MAPPING.get(sym, sym)
+                    snapshot[anon_id] = {
+                        "real_symbol": sym,
+                        "price": asset_data.get("price"),
+                        "atr_15m_abs": (asset_data.get("volatility") or {}).get("atr_15m_abs"),
+                    }
+                record["features_snapshot"] = snapshot
+
                 # Anonymize
                 anon_features = anonymize_and_format(features, ANON_MAPPING)
 
