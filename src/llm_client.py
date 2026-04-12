@@ -37,7 +37,7 @@ class LLMValidationError(Exception):
         self.errors = errors
 
 
-def load_system_prompt(filename: str = "gemma_system_v2.txt") -> str:
+def load_system_prompt(filename: str = "gemma_system_v1.txt") -> str:
     """Read the system prompt from disk."""
     path = PROMPTS_DIR / filename
     if not path.exists():
@@ -253,7 +253,7 @@ def _call_ollama(
         "stream": False,
         "think": False,
         "options": {"temperature": temperature},
-        "format": _OLLAMA_JSON_SCHEMA,
+        "format": "json",
     }
 
     resp = requests.post(
