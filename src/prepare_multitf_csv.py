@@ -518,29 +518,39 @@ def validate_at_closure(name: str, live_vals: np.ndarray, std_vals: np.ndarray,
 
 
 def run_validation(result: pd.DataFrame, df_5min: pd.DataFrame,
-                   tf_minutes: int, suffix: str):
+                   tf_minutes: int, suffix: str, indicators: list = None):
     """
-    Run all 4 validation checks (MACD, RSI, CCI, Kalman) for one timeframe.
+    Run validation checks for computed indicators on one timeframe.
+    Only validates indicators that were actually computed.
     Compares live values at candle closure vs standard resample approach.
     """
+    if indicators is None:
+        indicators = ['macd', 'rsi', 'cci']
+
     max_step = tf_minutes // 5
     mask = result[f'step_{suffix}'] == max_step
 
     # Standard reference (resample then compute)
     df_tf = resample_ohlcv(df_5min, tf_minutes)
-    macd_std = calculate_macd_standard(df_tf).values
-    rsi_std = calculate_rsi_standard(df_tf).values
-    cci_std = calculate_cci_standard(df_tf).values
-    # Kalman on standard MACD (forward-only)
-    kalman_macd_std = kalman_filter_standard(macd_std)
 
     logger.info(f"\n  --- Validation {suffix} (at step=={max_step}) ---")
 
     all_ok = True
-    all_ok &= validate_at_closure("MACD", result.loc[mask, f'macd_{suffix}_live'].values, macd_std, suffix)
-    all_ok &= validate_at_closure("RSI", result.loc[mask, f'rsi_{suffix}_live'].values, rsi_std, suffix)
-    all_ok &= validate_at_closure("CCI", result.loc[mask, f'cci_{suffix}_live'].values, cci_std, suffix)
-    all_ok &= validate_at_closure("Kalman_MACD", result.loc[mask, f'macd_{suffix}_filtered'].values, kalman_macd_std, suffix)
+
+    if 'macd' in indicators:
+        macd_std = calculate_macd_standard(df_tf).values
+        all_ok &= validate_at_closure("MACD", result.loc[mask, f'macd_{suffix}_live'].values, macd_std, suffix)
+        # Kalman validation on MACD
+        kalman_macd_std = kalman_filter_standard(macd_std)
+        all_ok &= validate_at_closure("Kalman_MACD", result.loc[mask, f'macd_{suffix}_filtered'].values, kalman_macd_std, suffix)
+
+    if 'rsi' in indicators:
+        rsi_std = calculate_rsi_standard(df_tf).values
+        all_ok &= validate_at_closure("RSI", result.loc[mask, f'rsi_{suffix}_live'].values, rsi_std, suffix)
+
+    if 'cci' in indicators:
+        cci_std = calculate_cci_standard(df_tf).values
+        all_ok &= validate_at_closure("CCI", result.loc[mask, f'cci_{suffix}_live'].values, cci_std, suffix)
 
     if all_ok:
         logger.info(f"  ALL {suffix} VALIDATIONS PASSED")
@@ -554,15 +564,26 @@ def run_validation(result: pd.DataFrame, df_5min: pd.DataFrame,
 # MAIN PIPELINE
 # =============================================================================
 
-def generate_multitf_csv(asset_name: str, output_dir: str) -> str:
+def generate_multitf_csv(asset_name: str, output_dir: str,
+                         indicators: list = None) -> str:
     """
     Generate multi-timeframe CSV for one asset with live indicators,
     Kalman filtered values, and direction labels.
+
+    Args:
+        asset_name: 'BTC', 'ETH', etc.
+        output_dir: Output directory
+        indicators: List of indicators to compute, e.g. ['macd'], ['macd','rsi','cci']
+                    Default: all three
     """
+    if indicators is None:
+        indicators = ['macd', 'rsi', 'cci']
+
     file_path = AVAILABLE_ASSETS_5M[asset_name]
 
     logger.info(f"\n{'='*60}")
     logger.info(f"  ASSET: {asset_name}")
+    logger.info(f"  INDICATORS: {[i.upper() for i in indicators]}")
     logger.info(f"{'='*60}")
 
     # --- Step 1: Load 5min data ---
@@ -593,24 +614,32 @@ def generate_multitf_csv(asset_name: str, output_dir: str) -> str:
 
         logger.info(f"    Live OHLCV + step index computed")
 
-        # Step 4: Live indicators (incremental EMA with freeze)
+        # Step 4: Live indicators (only those requested)
         high_live = live_ohlcv['high'].values
         low_live = live_ohlcv['low'].values
 
-        logger.info(f"    Computing MACD live...")
-        macd_live = compute_macd_live(close_5min, step_arr, max_step)
-        result[f'macd_{suffix}_live'] = macd_live
+        ind_results = {}  # name -> array, for Kalman step
 
-        logger.info(f"    Computing RSI live...")
-        rsi_live = compute_rsi_live(close_5min, step_arr, max_step)
-        result[f'rsi_{suffix}_live'] = rsi_live
+        if 'macd' in indicators:
+            logger.info(f"    Computing MACD live...")
+            macd_live = compute_macd_live(close_5min, step_arr, max_step)
+            result[f'macd_{suffix}_live'] = macd_live
+            ind_results['macd'] = macd_live
 
-        logger.info(f"    Computing CCI live...")
-        cci_live = compute_cci_live(high_live, low_live, close_5min, step_arr, max_step)
-        result[f'cci_{suffix}_live'] = cci_live
+        if 'rsi' in indicators:
+            logger.info(f"    Computing RSI live...")
+            rsi_live = compute_rsi_live(close_5min, step_arr, max_step)
+            result[f'rsi_{suffix}_live'] = rsi_live
+            ind_results['rsi'] = rsi_live
 
-        # Step 5: Kalman on each indicator (freeze at closure)
-        for ind_name, ind_vals in [('macd', macd_live), ('rsi', rsi_live), ('cci', cci_live)]:
+        if 'cci' in indicators:
+            logger.info(f"    Computing CCI live...")
+            cci_live = compute_cci_live(high_live, low_live, close_5min, step_arr, max_step)
+            result[f'cci_{suffix}_live'] = cci_live
+            ind_results['cci'] = cci_live
+
+        # Step 5: Kalman on each computed indicator (freeze at closure)
+        for ind_name, ind_vals in ind_results.items():
             logger.info(f"    Computing Kalman on {ind_name}_{suffix}...")
             filtered = compute_kalman_live(ind_vals, step_arr, max_step)
             result[f'{ind_name}_{suffix}_filtered'] = filtered
@@ -623,16 +652,18 @@ def generate_multitf_csv(asset_name: str, output_dir: str) -> str:
             result[f'{ind_name}_{suffix}_label'] = label
 
         # Stats
-        n_changes_macd = (result[f'macd_{suffix}_label'].diff().abs() > 0).sum()
-        logger.info(f"    MACD label changes: {n_changes_macd:,}")
+        if 'macd' in indicators:
+            n_changes = (result[f'macd_{suffix}_label'].diff().abs() > 0).sum()
+            logger.info(f"    MACD label changes: {n_changes:,}")
 
-        # Step 7: Validation
-        run_validation(result, df_5min, tf_minutes, suffix)
+        # Step 7: Validation (only for computed indicators)
+        run_validation(result, df_5min, tf_minutes, suffix, indicators)
 
     # --- Save CSV ---
     os.makedirs(output_dir, exist_ok=True)
     asset_filename = file_path.split('/')[-1].replace('_all_5m.csv', '')
-    output_path = os.path.join(output_dir, f'{asset_filename}_multitf.csv')
+    ind_tag = '_'.join(indicators)
+    output_path = os.path.join(output_dir, f'{asset_filename}_multitf_{ind_tag}.csv')
 
     result_save = result.reset_index()
     result_save.to_csv(output_path, index=False)
@@ -656,6 +687,10 @@ def main():
     parser.add_argument('--assets', nargs='+',
                         default=['BTC', 'ETH', 'BNB', 'ADA', 'LTC'],
                         help='Assets to process (default: all)')
+    parser.add_argument('--indicators', nargs='+',
+                        default=['macd', 'rsi', 'cci'],
+                        choices=['macd', 'rsi', 'cci'],
+                        help='Indicators to compute (default: all). Use --indicators macd for fast test.')
     parser.add_argument('--output-dir', type=str, default=PREPARED_DATA_DIR,
                         help=f'Output directory (default: {PREPARED_DATA_DIR})')
 
@@ -665,8 +700,8 @@ def main():
     logger.info("MULTI-TIMEFRAME CSV PREPARATION (LIVE-STYLE)")
     logger.info("=" * 60)
     logger.info(f"Assets: {args.assets}")
+    logger.info(f"Indicators: {[i.upper() for i in args.indicators]}")
     logger.info(f"Timeframes: 30m (step 1-6), 1h (step 1-12)")
-    logger.info(f"Indicators: MACD({MACD_FAST},{MACD_SLOW},{MACD_SIGNAL}), RSI({RSI_PERIOD}), CCI({CCI_PERIOD})")
     logger.info(f"Kalman: PROCESS_VAR={KALMAN_PROCESS_VAR}, MEASURE_VAR={KALMAN_MEASURE_VAR}")
     logger.info(f"Output: {args.output_dir}/")
 
@@ -674,7 +709,7 @@ def main():
         if asset_name not in AVAILABLE_ASSETS_5M:
             logger.warning(f"Asset {asset_name} not found, skipping")
             continue
-        generate_multitf_csv(asset_name, args.output_dir)
+        generate_multitf_csv(asset_name, args.output_dir, args.indicators)
 
 
 if __name__ == '__main__':
