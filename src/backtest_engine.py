@@ -532,7 +532,7 @@ def run_backtest_live(
             logf.write(json.dumps(record, default=str) + "\n")
             logf.flush()
 
-            # Progress every 10 cycles + every 100 cycles detailed
+            # Progress every 10 cycles
             if (i + 1) % 10 == 0:
                 pct = (i + 1) / total * 100
                 lat = record["latency_sec"]
@@ -540,6 +540,29 @@ def run_backtest_live(
                 logger.info(
                     "[%d/%d %.0f%%] %s | lat=%.1fs | equity=$%.0f | pos=%d | trades=%d",
                     i + 1, total, pct, status, lat, equity, len(positions), len(all_trades),
+                )
+
+            # Intermediate report every 500 cycles (~12h market data)
+            if (i + 1) % 500 == 0:
+                n_trades = len(all_trades)
+                total_pnl = sum(t.pnl_usd for t in all_trades)
+                n_win = sum(1 for t in all_trades if t.pnl_usd > 0)
+                wr = n_win / n_trades * 100 if n_trades > 0 else 0
+                syms = {}
+                for t in all_trades:
+                    syms[t.symbol] = syms.get(t.symbol, 0) + 1
+                reasons = {}
+                for t in all_trades:
+                    reasons[t.exit_reason] = reasons.get(t.exit_reason, 0) + 1
+                logger.info(
+                    "\n" + "=" * 50 +
+                    f"\n  INTERMEDIATE REPORT @ cycle {i+1}/{total}"
+                    f"\n  Equity: ${equity:,.2f} | P&L: ${total_pnl:+,.2f} ({total_pnl/capital*100:+.1f}%)"
+                    f"\n  Trades: {n_trades} | WR: {wr:.0f}%"
+                    f"\n  By symbol: {syms}"
+                    f"\n  By exit: {reasons}"
+                    f"\n  Open positions: {len(positions)}"
+                    f"\n" + "=" * 50
                 )
 
     # Force-close remaining
