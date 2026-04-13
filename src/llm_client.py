@@ -418,7 +418,7 @@ class OllamaProvider:
 
 class AnthropicProvider:
     def __init__(self, api_key: str, model: str = DEFAULT_ANTHROPIC_MODEL,
-                 temperature: float = 0.2, max_tokens: int = 2000):
+                 temperature: float = 0.2, max_tokens: int = 4096):
         from anthropic import Anthropic
         self.client = Anthropic(api_key=api_key)
         self.model = model
