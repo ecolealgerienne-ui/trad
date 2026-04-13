@@ -19,8 +19,7 @@
 
 - **Source** : Fichiers CSV locaux (pré-téléchargés, pas d'API live)
 - **Symbols** : BTC, ETH, BNB, ADA, LTC (5 crypto majeurs, paires USD)
-- **Timeframe principal** : 5 minutes
-- **Timeframe secondaire testé** : 30 minutes (abandonné rapidement)
+- **Timeframes** : 5 minutes, 15 minutes et 30 minutes
 - **Période couverte** : ~8.5 ans de données BTC (2017-08 → 2026-01), ~4.3M séquences sur 5 assets
 - **Splits** : 70% train / 15% val / 15% test (split temporel strict, test = données les plus récentes)
 
@@ -235,7 +234,7 @@ Cause identifiée : Le modèle rate 42% des retournements (transitions).
 | **Reinforcement Learning** | Absent | Pas de gym/stable_baselines dans les imports |
 | **Transformer / Attention** | Absent | Architecture restée CNN-LSTM uniquement |
 | **Données tick-by-tick** | Absent | Mentionné comme option (microstructure) |
-| **Multi-timeframe ensemble** | Partiellement | 30min testé puis abandonné ; 15min/1h/4h jamais testés |
+| **Multi-timeframe ensemble** | Partiellement | 5min, 15min et 30min testés |
 | **Volume / OBV comme signal** | Absent | Mentionné comme piste, jamais implémenté comme feature ML |
 | **Returns forecasting (régression)** | Absent | Recommandé par expert (Gu, Kelly & Xiu 2020), pas implémenté |
 
