@@ -286,45 +286,80 @@ def compute_kalman_live(indicator_live, is_close):
     """
     Kalman filter_update with frozen/provisional state. Freeze at closure.
     Same logic as indicators: state advances only at bucket closure.
+
+    Initialization matches kf.filter() behavior: first observation sets the
+    initial state via a single filter_update from the prior (initial_state_mean,
+    initial_state_covariance). Subsequent closures advance the state normally.
     """
     from pykalman import KalmanFilter as KF
 
     n = len(indicator_live)
     out = np.full(n, np.nan)
 
-    # Find first valid value
-    fvi = -1
+    # Collect closure values to run standard kf.filter for exact state sequence
+    closure_indices = []
+    closure_values = []
     for i in range(n):
-        if not np.isnan(indicator_live[i]):
-            fvi = i; break
-    if fvi < 0:
+        if not np.isnan(indicator_live[i]) and is_close[i]:
+            closure_indices.append(i)
+            closure_values.append(indicator_live[i])
+
+    if len(closure_values) < 2:
         return out
 
-    iv = indicator_live[fvi]
+    # Run standard kf.filter on closure values to get exact state sequence
+    cv = np.array(closure_values)
     kf = KF(transition_matrices=np.array([[1,1],[0,1]]),
             observation_matrices=np.array([[1,0]]),
-            initial_state_mean=np.array([iv, 0.0]),
+            initial_state_mean=np.array([cv[0], 0.0]),
             initial_state_covariance=np.eye(2),
             observation_covariance=KALMAN_MEASURE_VAR,
             transition_covariance=np.eye(2) * KALMAN_PROCESS_VAR)
 
-    sm_cl = np.array([iv, 0.0])
-    sc_cl = np.eye(2)
-    init = False
+    state_means, state_covs = kf.filter(cv)
+
+    # Now replay: at each 5min step, compute provisional from the frozen state
+    # of the previous closure. At closures, advance to next frozen state.
+    #
+    # frozen_state[k] = state after processing closure k
+    # Between closure k and k+1, provisional = filter_update(frozen_state[k], obs)
+
+    # Build lookup: for each closure index, the state AFTER processing it
+    # closure_states[k] = (state_mean, state_cov) after kf processed closure k
+    closure_states = [(state_means[k], state_covs[k]) for k in range(len(closure_values))]
+
+    # Also need the state BEFORE the first closure (initial state)
+    init_mean = np.array([cv[0], 0.0])
+    init_cov = np.eye(2)
+
+    # Assign output at closure points (these are exact by construction)
+    for k, ci in enumerate(closure_indices):
+        out[ci] = state_means[k, 0]
+
+    # For provisional (non-closure) points, find which closure they follow
+    # and compute filter_update from that closure's state
+    closure_set = set(closure_indices)
+    current_closure_k = -1  # index into closure_states
+    sm_cl = init_mean
+    sc_cl = init_cov
 
     for i in range(n):
         obs = indicator_live[i]
         if np.isnan(obs):
             continue
-        if not init:
-            if is_close[i]:
-                sm_cl, sc_cl = kf.filter_update(sm_cl, sc_cl, observation=obs)
-                out[i] = sm_cl[0]; init = True
+
+        if i in closure_set:
+            # This is a closure point — output already set, advance frozen state
+            current_closure_k += 1
+            sm_cl = closure_states[current_closure_k][0]
+            sc_cl = closure_states[current_closure_k][1]
             continue
-        sm_p, sc_p = kf.filter_update(sm_cl, sc_cl, observation=obs)
-        out[i] = sm_p[0]
-        if is_close[i]:
-            sm_cl = sm_p; sc_cl = sc_p
+
+        # Non-closure: provisional from frozen state
+        if current_closure_k >= 0:
+            sm_p, _ = kf.filter_update(sm_cl, sc_cl, observation=obs)
+            out[i] = sm_p[0]
+
     return out
 
 
