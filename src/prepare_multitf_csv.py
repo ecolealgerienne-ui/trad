@@ -1,39 +1,54 @@
 #!/usr/bin/env python3
 """
-Préparation CSV multi-timeframe : indicateurs 30min et 1h à résolution 5min.
+Multi-Timeframe CSV Preparation: 30min and 1h indicators at 5min resolution.
 
-OBJECTIF:
-Générer un CSV enrichi par asset avec les indicateurs 30min et 1h pré-calculés,
-forward-fillés à résolution 5min. Ce fichier sert de base unique pour tous les
-tests et entraînements ultérieurs.
+PURPOSE:
+    Generate one enriched CSV per asset containing 30min and 1h indicators
+    pre-computed and forward-filled at 5min resolution. This file serves as
+    the single source of truth for all subsequent tests and training.
 
-PRINCIPE:
-- Les données brutes sont en 5min
-- On resample en 30min et 1h pour calculer les indicateurs
-- Les indicateurs sont forward-fillés vers 5min (chaque 5min hérite de la
-  dernière bougie 30min/1h COMPLÉTÉE)
-- Causalité stricte : aucun look-ahead, label disponible seulement après
-  complétion de la bougie
+APPROACH:
+    - Raw data is in 5min candles
+    - We resample to 30min and 1h to compute indicators on completed candles
+    - Indicators are forward-filled to 5min resolution from the PREVIOUS
+      completed candle (strict causality via shift(1))
 
-CE QUI EST INCLUS (données causales pures):
-- OHLCV 5min brut
-- OHLCV 30min (forward-filled depuis bougies complétées)
-- OHLCV 1h (forward-filled depuis bougies complétées)
-- Indicateurs MACD/RSI/CCI sur 30min et 1h
-- Step index (position dans la bougie 30min et 1h)
+CAUSALITY GUARANTEE:
+    The 30min candle at 10:00 covers data from 10:00 to 10:29.
+    Its close price is only available after ~10:29.
+    Therefore, the indicator computed from this candle is only assigned
+    starting at 10:30 (the next 30min boundary), NOT at 10:00.
+    This is implemented via shift(1) before forward-fill.
 
-CE QUI N'EST PAS INCLUS (calculé à la demande):
-- Valeurs Kalman filtrées (non-causal, doit être appliqué après split)
-- Labels de direction (dépendent du Kalman)
+    Example timeline for 30min:
+        09:30-09:59 candle completes → MACD_09:30 computed
+        10:00 (step 1): receives MACD_09:30 (from previous completed candle)
+        10:05 (step 2): same MACD_09:30
+        ...
+        10:25 (step 6): same MACD_09:30
+        10:30 (step 1): receives MACD_10:00 (candle 10:00-10:29 now completed)
 
-CAUSALITÉ:
-- Bougie 30min 10:00 = données 10:00-10:29, close disponible après ~10:29
-- Indicateur de cette bougie forward-fillé à partir de 10:30 (pas 10:00)
-- Implémenté via shift(1) sur l'index 30min avant forward-fill
+COLUMNS IN OUTPUT CSV:
+    --- 5min raw ---
+    open, high, low, close, volume
+
+    --- 30min (forward-filled from completed candles) ---
+    open_30m, high_30m, low_30m, close_30m, volume_30m
+    macd_30m, rsi_30m, cci_30m
+    step_30m  (position 1-6 within the current 30min candle)
+
+    --- 1h (forward-filled from completed candles) ---
+    open_1h, high_1h, low_1h, close_1h, volume_1h
+    macd_1h, rsi_1h, cci_1h
+    step_1h  (position 1-12 within the current 1h candle)
+
+NOT INCLUDED (must be computed separately after train/test split):
+    - Kalman filtered values (non-causal RTS smoother, uses future data)
+    - Direction labels (depend on Kalman)
 
 Usage:
     python src/prepare_multitf_csv.py --assets BTC ETH BNB ADA LTC
-    python src/prepare_multitf_csv.py --assets BTC      # Un seul asset
+    python src/prepare_multitf_csv.py --assets BTC
 
 Output:
     data/prepared/BTCUSD_multitf.csv
@@ -55,11 +70,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Import constants
+# Import constants from project
 sys.path.insert(0, str(Path(__file__).parent))
 from constants import AVAILABLE_ASSETS_5M, PREPARED_DATA_DIR
 
-# Périodes STANDARD des indicateurs (copiées de prepare_data_direction_only.py)
+# Standard indicator periods (copied from prepare_data_direction_only.py)
 RSI_PERIOD = 14
 CCI_PERIOD = 20
 MACD_FAST = 12
@@ -68,16 +83,27 @@ MACD_SIGNAL = 9
 
 
 # =============================================================================
-# CHARGEMENT DONNÉES 5min
+# DATA LOADING
 # =============================================================================
 
 def load_csv_5min(file_path: str, asset_name: str) -> pd.DataFrame:
     """
-    Charge données 5min brutes depuis CSV.
-    Copié de test_oracle_30min_pure.py → load_csv_5min.
+    Load raw 5min OHLCV data from CSV file.
+
+    Handles multiple date column names and normalizes column names to lowercase.
+    Returns DataFrame with DatetimeIndex sorted chronologically.
+
+    Args:
+        file_path: Path to the CSV file
+        asset_name: Asset name for logging (e.g., 'BTC')
+
+    Returns:
+        DataFrame with columns: open, high, low, close, volume
+        Index: DatetimeIndex named 'datetime'
     """
     df = pd.read_csv(file_path)
 
+    # Find date column (supports multiple naming conventions)
     date_col = None
     for col in ['date', 'datetime', 'time', 'timestamp', 'Date', 'Datetime']:
         if col in df.columns:
@@ -85,7 +111,7 @@ def load_csv_5min(file_path: str, asset_name: str) -> pd.DataFrame:
             break
 
     if date_col is None:
-        raise ValueError(f"Colonne date non trouvée dans {file_path}")
+        raise ValueError(f"Date column not found in {file_path}")
 
     df[date_col] = pd.to_datetime(df[date_col])
     df = df.set_index(date_col)
@@ -93,12 +119,13 @@ def load_csv_5min(file_path: str, asset_name: str) -> pd.DataFrame:
     df.columns = df.columns.str.lower()
     df = df.sort_index()
 
+    # Verify required columns exist
     required = ['open', 'high', 'low', 'close', 'volume']
     missing = [c for c in required if c not in df.columns]
     if missing:
-        raise ValueError(f"Colonnes manquantes: {missing}")
+        raise ValueError(f"Missing columns: {missing}")
 
-    logger.info(f"  {asset_name}: {len(df):,} bougies 5min, {df.index[0]} → {df.index[-1]}")
+    logger.info(f"  {asset_name}: {len(df):,} 5min candles, {df.index[0]} -> {df.index[-1]}")
 
     return df
 
@@ -109,10 +136,21 @@ def load_csv_5min(file_path: str, asset_name: str) -> pd.DataFrame:
 
 def resample_ohlcv(df_5min: pd.DataFrame, tf_minutes: int) -> pd.DataFrame:
     """
-    Resample 5min → tf_minutes avec agrégation OHLCV standard.
+    Resample 5min OHLCV data to a higher timeframe using standard aggregation.
+
+    Aggregation rules:
+        - open:   first value in the period
+        - high:   maximum value in the period
+        - low:    minimum value in the period
+        - close:  last value in the period
+        - volume: sum of all values in the period
+
+    Args:
+        df_5min: DataFrame with 5min DatetimeIndex and OHLCV columns
+        tf_minutes: Target timeframe in minutes (e.g., 30 or 60)
 
     Returns:
-        DataFrame avec DatetimeIndex, colonnes open/high/low/close/volume
+        DataFrame with resampled OHLCV at the target timeframe
     """
     agg_dict = {
         'open': 'first',
@@ -123,17 +161,28 @@ def resample_ohlcv(df_5min: pd.DataFrame, tf_minutes: int) -> pd.DataFrame:
     }
 
     df_tf = df_5min.resample(f'{tf_minutes}min').agg(agg_dict)
+
+    # Drop rows where resampling produced NaN (incomplete candles at boundaries)
     df_tf = df_tf.dropna()
 
     return df_tf
 
 
 # =============================================================================
-# CALCUL INDICATEURS (copié de prepare_data_direction_only.py)
+# INDICATOR CALCULATIONS
+# Copied from prepare_data_direction_only.py to avoid import dependencies.
+# These use standard EWM/rolling calculations — all causal (no future data).
 # =============================================================================
 
 def calculate_rsi(df: pd.DataFrame) -> pd.Series:
-    """Calcule RSI sur un DataFrame OHLCV."""
+    """
+    Calculate Relative Strength Index (RSI) on close prices.
+
+    RSI = 100 - 100 / (1 + RS)
+    RS = avg_gain / avg_loss (exponential moving average)
+
+    Uses only close prices. Warm-up period: ~RSI_PERIOD candles produce NaN.
+    """
     delta = df['close'].diff()
     gain = delta.where(delta > 0, 0)
     loss = (-delta).where(delta < 0, 0)
@@ -144,7 +193,14 @@ def calculate_rsi(df: pd.DataFrame) -> pd.Series:
 
 
 def calculate_cci(df: pd.DataFrame) -> pd.Series:
-    """Calcule CCI sur un DataFrame OHLCV."""
+    """
+    Calculate Commodity Channel Index (CCI) on typical price.
+
+    CCI = (TP - SMA(TP)) / (0.015 * Mean Absolute Deviation(TP))
+    TP = (high + low + close) / 3
+
+    Uses high, low, close. Warm-up period: ~CCI_PERIOD candles produce NaN.
+    """
     tp = (df['high'] + df['low'] + df['close']) / 3
     sma_tp = tp.rolling(CCI_PERIOD).mean()
     mad = tp.rolling(CCI_PERIOD).apply(lambda x: np.abs(x - x.mean()).mean())
@@ -152,7 +208,15 @@ def calculate_cci(df: pd.DataFrame) -> pd.Series:
 
 
 def calculate_macd(df: pd.DataFrame) -> pd.Series:
-    """Calcule MACD histogram sur un DataFrame OHLCV."""
+    """
+    Calculate MACD histogram on close prices.
+
+    MACD Line = EMA(fast) - EMA(slow)
+    Signal Line = EMA(MACD Line)
+    Histogram = MACD Line - Signal Line
+
+    Uses only close prices. Warm-up period: ~MACD_SLOW candles produce NaN.
+    """
     ema_fast = df['close'].ewm(span=MACD_FAST, adjust=False).mean()
     ema_slow = df['close'].ewm(span=MACD_SLOW, adjust=False).mean()
     macd_line = ema_fast - ema_slow
@@ -161,82 +225,97 @@ def calculate_macd(df: pd.DataFrame) -> pd.Series:
 
 
 # =============================================================================
-# FORWARD-FILL CAUSAL
+# CAUSAL FORWARD-FILL
 # =============================================================================
 
 def forward_fill_causal(series_tf: pd.Series, index_5min: pd.DatetimeIndex,
                         col_name: str) -> pd.Series:
     """
-    Forward-fill une série timeframe vers résolution 5min avec causalité stricte.
+    Forward-fill a higher-timeframe series to 5min resolution with strict causality.
 
-    CAUSALITÉ:
-    - La valeur de la bougie tf à 10:00 (données 10:00-10:29) n'est disponible
-      qu'après complétion (~10:29)
-    - On l'assigne donc à partir de la PROCHAINE bougie tf (10:30)
-    - Implémenté via shift(1) avant le forward-fill
+    CAUSALITY MECHANISM:
+        shift(1) delays the values by one tf candle before forward-filling.
+        This ensures a candle's value is only available AFTER it completes.
+
+        Example for 30min:
+            Candle 10:00 (data 10:00-10:29) → value available at 10:30
+            Candle 10:30 (data 10:30-10:59) → value available at 11:00
+
+    NOTE: This same shift applies to both OHLCV and indicators. So close_30m
+    at 10:30 contains the close of the 09:30-09:59 candle (previous completed),
+    not the 10:00-10:29 candle. This is intentional and consistent.
 
     Args:
-        series_tf: Série avec DatetimeIndex au timeframe supérieur
-        index_5min: Index 5min vers lequel forward-filler
-        col_name: Nom de la colonne (pour debug)
+        series_tf: Series with DatetimeIndex at the higher timeframe
+        index_5min: 5min DatetimeIndex to forward-fill into
+        col_name: Column name (for debugging)
 
     Returns:
-        Série à résolution 5min, forward-fillée causalement
+        Series at 5min resolution, causally forward-filled
+        First values will be NaN (no completed candle yet = warm-up)
     """
-    # Shift de 1 période tf pour causalité
+    # Shift by 1 tf period: value only available after candle completion
     shifted = series_tf.shift(1)
 
-    # Forward-fill vers résolution 5min
+    # Forward-fill to 5min resolution
     result = shifted.reindex(index_5min, method='ffill')
 
     return result
 
 
 # =============================================================================
-# CALCUL STEP INDEX
+# STEP INDEX CALCULATION
 # =============================================================================
 
 def compute_step_index(index_5min: pd.DatetimeIndex, tf_minutes: int) -> pd.Series:
     """
-    Calcule la position (1-based) de chaque bougie 5min dans sa bougie tf.
+    Compute the position (1-based) of each 5min candle within its parent tf candle.
 
-    Exemple 30min:
-        10:00 → step 1, 10:05 → step 2, ..., 10:25 → step 6
-    Exemple 1h:
-        10:00 → step 1, 10:05 → step 2, ..., 10:55 → step 12
+    This tells you "where are we" within the current 30min or 1h candle.
+
+    Examples:
+        30min (6 steps): 10:00→1, 10:05→2, 10:10→3, 10:15→4, 10:20→5, 10:25→6
+        1h (12 steps):   10:00→1, 10:05→2, ..., 10:55→12
+
+    Args:
+        index_5min: 5min DatetimeIndex
+        tf_minutes: Parent timeframe in minutes (30 or 60)
 
     Returns:
-        Série avec valeurs 1 à (tf_minutes / 5)
+        Series with integer values from 1 to (tf_minutes / 5)
     """
+    # Convert to total minutes since midnight
     minutes = index_5min.minute + index_5min.hour * 60
-    steps_per_candle = tf_minutes // 5
-    step = (minutes % tf_minutes) // 5 + 1  # 1-based
+
+    # Position within the tf candle (0-based then +1 for 1-based)
+    step = (minutes % tf_minutes) // 5 + 1
 
     return pd.Series(step, index=index_5min, dtype=int)
 
 
 # =============================================================================
-# PIPELINE PRINCIPAL
+# MAIN PIPELINE
 # =============================================================================
 
 def generate_multitf_csv(asset_name: str, output_dir: str) -> str:
     """
-    Génère le CSV multi-timeframe pour un asset.
+    Generate the multi-timeframe CSV for one asset.
 
     Pipeline:
-    1. Charger 5min CSV brut
-    2. Resampler en 30min et 1h
-    3. Calculer indicateurs (MACD, RSI, CCI) sur 30min et 1h
-    4. Forward-fill causal vers 5min
-    5. Calculer step index
-    6. Sauvegarder CSV
+        1. Load raw 5min CSV
+        2. Resample to 30min and 1h
+        3. Compute indicators (MACD, RSI, CCI) on each timeframe
+        4. Causal forward-fill all values to 5min resolution
+        5. Compute step index for each timeframe
+        6. Run consistency checks
+        7. Save CSV
 
     Args:
-        asset_name: 'BTC', 'ETH', etc.
-        output_dir: Dossier de sortie
+        asset_name: Asset identifier ('BTC', 'ETH', etc.)
+        output_dir: Output directory path
 
     Returns:
-        Chemin du fichier CSV généré
+        Path to the generated CSV file
     """
     file_path = AVAILABLE_ASSETS_5M[asset_name]
 
@@ -245,12 +324,12 @@ def generate_multitf_csv(asset_name: str, output_dir: str) -> str:
     logger.info(f"{'='*60}")
 
     # =========================================================================
-    # 1. Charger 5min
+    # Step 1: Load raw 5min data
     # =========================================================================
     df_5min = load_csv_5min(file_path, asset_name)
     index_5min = df_5min.index
 
-    # Commencer le DataFrame résultat avec les données 5min brutes
+    # Start result DataFrame with raw 5min OHLCV
     result = pd.DataFrame(index=index_5min)
     result['open'] = df_5min['open']
     result['high'] = df_5min['high']
@@ -259,94 +338,98 @@ def generate_multitf_csv(asset_name: str, output_dir: str) -> str:
     result['volume'] = df_5min['volume']
 
     # =========================================================================
-    # 2-4. Pour chaque timeframe (30min, 1h)
+    # Steps 2-5: Process each higher timeframe (30min, 1h)
     # =========================================================================
     for tf_minutes, suffix in [(30, '30m'), (60, '1h')]:
         logger.info(f"\n  --- Timeframe {tf_minutes}min ({suffix}) ---")
 
-        # 2. Resampler
+        # Step 2: Resample 5min → tf
         df_tf = resample_ohlcv(df_5min, tf_minutes)
-        logger.info(f"    Resample: {len(df_tf):,} bougies {suffix}")
+        logger.info(f"    Resample: {len(df_tf):,} candles")
 
-        # Forward-fill OHLCV causal
+        # Step 3a: Causal forward-fill OHLCV from completed candles
+        # NOTE: The shift(1) in forward_fill_causal means close_30m at 10:30
+        # contains the close of the 09:30-09:59 candle (previous completed).
         for col in ['open', 'high', 'low', 'close', 'volume']:
             result[f'{col}_{suffix}'] = forward_fill_causal(
                 df_tf[col], index_5min, f'{col}_{suffix}'
             )
 
-        # 3. Calculer indicateurs sur données resamplees
+        # Step 3b: Compute indicators on the resampled data
+        # Indicators are computed on COMPLETED candles only (no partial candle).
+        # The EWM/rolling calculations are causal by nature (no future data).
         macd_values = calculate_macd(df_tf)
         rsi_values = calculate_rsi(df_tf)
         cci_values = calculate_cci(df_tf)
+        logger.info(f"    Indicators computed (MACD, RSI, CCI)")
 
-        logger.info(f"    Indicateurs calculés (MACD, RSI, CCI)")
-
-        # 4. Forward-fill causal des indicateurs
+        # Step 4: Causal forward-fill indicators to 5min resolution
+        # Same shift(1) as OHLCV: indicator from candle 10:00-10:29
+        # is only available starting at 10:30.
         result[f'macd_{suffix}'] = forward_fill_causal(macd_values, index_5min, f'macd_{suffix}')
         result[f'rsi_{suffix}'] = forward_fill_causal(rsi_values, index_5min, f'rsi_{suffix}')
         result[f'cci_{suffix}'] = forward_fill_causal(cci_values, index_5min, f'cci_{suffix}')
 
-        # 5. Step index
+        # Step 5: Compute step index (position within the tf candle)
         result[f'step_{suffix}'] = compute_step_index(index_5min, tf_minutes)
 
-        # Stats
+        # Log stats
         n_nan = result[f'macd_{suffix}'].isna().sum()
         n_valid = len(result) - n_nan
-        logger.info(f"    Forward-fill causal: {n_valid:,} valeurs valides, {n_nan:,} NaN (début)")
+        logger.info(f"    Causal forward-fill: {n_valid:,} valid values, {n_nan:,} NaN (warm-up)")
 
     # =========================================================================
-    # Vérifications de cohérence
+    # Step 6: Consistency checks
     # =========================================================================
-    logger.info(f"\n  --- Vérifications ---")
+    logger.info(f"\n  --- Consistency checks ---")
 
-    # Vérifier que les NaN sont uniquement au début (warm-up)
+    # Check 1: NaN should only appear at the beginning (warm-up period)
+    # Any NaN after the first valid value indicates a data gap or bug
     for suffix in ['30m', '1h']:
         for col_name in [f'macd_{suffix}', f'rsi_{suffix}', f'cci_{suffix}']:
             series = result[col_name]
             first_valid = series.first_valid_index()
-            last_nan_after_valid = series.loc[first_valid:].isna().sum()
-            if last_nan_after_valid > 0:
-                logger.warning(f"    ⚠️ {col_name}: {last_nan_after_valid} NaN APRÈS première valeur valide!")
-            else:
-                logger.info(f"    ✅ {col_name}: NaN uniquement au début (warm-up)")
+            if first_valid is not None:
+                nan_after_valid = series.loc[first_valid:].isna().sum()
+                if nan_after_valid > 0:
+                    logger.warning(f"    WARNING {col_name}: {nan_after_valid} NaN AFTER first valid value!")
+                else:
+                    logger.info(f"    OK {col_name}: NaN only at start (warm-up)")
 
-    # Vérifier step index
+    # Check 2: Step index range should be 1 to (tf_minutes / 5)
     for suffix, tf in [('30m', 30), ('1h', 60)]:
         steps = result[f'step_{suffix}']
         expected_max = tf // 5
-        actual_max = steps.max()
-        actual_min = steps.min()
-        logger.info(f"    ✅ step_{suffix}: min={actual_min}, max={actual_max} (attendu 1-{expected_max})")
+        logger.info(f"    OK step_{suffix}: min={steps.min()}, max={steps.max()} (expected 1-{expected_max})")
 
-    # Vérifier causalité : les données tf ne changent qu'au bon moment
+    # Check 3: Causality — tf values should only change at step 1
+    # (beginning of a new tf candle, when the previous candle just completed)
     for suffix, tf in [('30m', 30), ('1h', 60)]:
         changes = result[f'close_{suffix}'].diff().abs() > 0
         change_steps = result.loc[changes, f'step_{suffix}']
         if len(change_steps) > 0:
-            # Les changements devraient se produire au step 1 (début de nouvelle bougie)
             pct_step1 = (change_steps == 1).sum() / len(change_steps) * 100
-            logger.info(f"    ✅ close_{suffix}: {pct_step1:.1f}% des changements au step 1 (causalité)")
+            logger.info(f"    OK close_{suffix}: {pct_step1:.1f}% of value changes occur at step 1 (causality verified)")
 
     # =========================================================================
-    # 6. Sauvegarder
+    # Step 7: Save to CSV
     # =========================================================================
     os.makedirs(output_dir, exist_ok=True)
 
-    # Nom du fichier basé sur l'asset
+    # Build output filename from the input CSV name
     asset_filename = file_path.split('/')[-1].replace('_all_5m.csv', '')
     output_path = os.path.join(output_dir, f'{asset_filename}_multitf.csv')
 
-    # Sauvegarder avec timestamp comme colonne (pas index) pour compatibilité
+    # Save with datetime as column (not index) for broad compatibility
     result_save = result.copy()
     result_save.index.name = 'datetime'
     result_save = result_save.reset_index()
     result_save.to_csv(output_path, index=False)
 
     file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
-    logger.info(f"\n  ✅ Sauvegardé: {output_path} ({file_size_mb:.1f} MB)")
-    logger.info(f"     Lignes: {len(result):,}")
-    logger.info(f"     Colonnes: {len(result.columns)}")
-    logger.info(f"     Colonnes: {list(result.columns)}")
+    logger.info(f"\n  Saved: {output_path} ({file_size_mb:.1f} MB)")
+    logger.info(f"     Rows: {len(result):,}")
+    logger.info(f"     Columns ({len(result.columns)}): {list(result.columns)}")
 
     return output_path
 
@@ -357,52 +440,52 @@ def generate_multitf_csv(asset_name: str, output_dir: str) -> str:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Prépare CSV multi-timeframe (30min + 1h) à résolution 5min'
+        description='Prepare multi-timeframe CSV (30min + 1h) at 5min resolution'
     )
     parser.add_argument('--assets', nargs='+',
                         default=['BTC', 'ETH', 'BNB', 'ADA', 'LTC'],
-                        help='Assets à traiter (défaut: tous)')
+                        help='Assets to process (default: all)')
     parser.add_argument('--output-dir', type=str,
                         default=PREPARED_DATA_DIR,
-                        help=f'Dossier de sortie (défaut: {PREPARED_DATA_DIR})')
+                        help=f'Output directory (default: {PREPARED_DATA_DIR})')
 
     args = parser.parse_args()
 
     logger.info("=" * 60)
-    logger.info("PRÉPARATION CSV MULTI-TIMEFRAME")
+    logger.info("MULTI-TIMEFRAME CSV PREPARATION")
     logger.info("=" * 60)
     logger.info(f"Assets: {args.assets}")
-    logger.info(f"Timeframes: 5min (brut) + 30min + 1h")
-    logger.info(f"Indicateurs: MACD, RSI, CCI")
-    logger.info(f"Causalité: shift(1) avant forward-fill (label après complétion bougie)")
+    logger.info(f"Timeframes: 5min (raw) + 30min + 1h")
+    logger.info(f"Indicators: MACD, RSI, CCI")
+    logger.info(f"Causality: shift(1) before forward-fill (value available after candle completion)")
     logger.info(f"Output: {args.output_dir}/")
 
     generated_files = []
 
     for asset_name in args.assets:
         if asset_name not in AVAILABLE_ASSETS_5M:
-            logger.warning(f"⚠️ Asset {asset_name} non trouvé, skip")
+            logger.warning(f"Asset {asset_name} not found, skipping")
             continue
 
         output_path = generate_multitf_csv(asset_name, args.output_dir)
         generated_files.append(output_path)
 
-    # Résumé final
+    # Final summary
     logger.info(f"\n{'='*60}")
-    logger.info(f"RÉSUMÉ")
+    logger.info(f"SUMMARY")
     logger.info(f"{'='*60}")
-    logger.info(f"Fichiers générés: {len(generated_files)}")
+    logger.info(f"Files generated: {len(generated_files)}")
     for f in generated_files:
         size_mb = os.path.getsize(f) / (1024 * 1024)
         logger.info(f"  {f} ({size_mb:.1f} MB)")
 
-    logger.info(f"\nStructure des colonnes:")
-    logger.info(f"  5min brut:  open, high, low, close, volume")
-    logger.info(f"  30min:      open_30m, high_30m, low_30m, close_30m, volume_30m")
-    logger.info(f"              macd_30m, rsi_30m, cci_30m, step_30m")
-    logger.info(f"  1h:         open_1h, high_1h, low_1h, close_1h, volume_1h")
-    logger.info(f"              macd_1h, rsi_1h, cci_1h, step_1h")
-    logger.info(f"\n⚠️ Kalman et labels NON inclus (appliquer après split train/test)")
+    logger.info(f"\nColumn structure:")
+    logger.info(f"  5min raw:  open, high, low, close, volume")
+    logger.info(f"  30min:     open_30m, high_30m, low_30m, close_30m, volume_30m")
+    logger.info(f"             macd_30m, rsi_30m, cci_30m, step_30m")
+    logger.info(f"  1h:        open_1h, high_1h, low_1h, close_1h, volume_1h")
+    logger.info(f"             macd_1h, rsi_1h, cci_1h, step_1h")
+    logger.info(f"\nNOTE: Kalman and labels NOT included (apply after train/test split)")
 
 
 if __name__ == '__main__':

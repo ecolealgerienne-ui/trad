@@ -1,33 +1,37 @@
 #!/usr/bin/env python3
 """
-Test Oracle 30min Pur - Indicateurs 30min estimés toutes les 5min, SANS features 5min.
+Oracle Test: Pure Higher-Timeframe Indicators (30min or 1h), NO 5min features.
 
-OBJECTIF:
-Valider que le signal 30min pur (indicateurs calculés sur données resamplees 30min)
-donne un PnL net positif grâce à la réduction naturelle du nombre de trades.
+PURPOSE:
+    Validate that the pure 30min/1h signal (indicators computed on resampled
+    candles) yields a positive net PnL thanks to the natural reduction in
+    trade frequency.
 
-APPROCHE:
-1. Charger données 5min brutes (CSV)
-2. Resampler en 30min (OHLCV standard)
-3. Calculer indicateur (MACD/RSI/CCI) sur 30min
-4. Appliquer filtre Kalman sur indicateur 30min
-5. Labels: filtered[t] > filtered[t-1] (formule Phase 2.15)
-6. Forward-fill labels vers résolution 5min (chaque 5min hérite du label 30min courant)
-7. Backtest Oracle sur prix 5min avec labels 30min
+PIPELINE:
+    1. Load raw 5min OHLCV data from CSV files
+    2. Resample to target timeframe (30min or 1h)
+    3. Compute indicator (MACD/RSI/CCI) on resampled candles
+    4. Apply Kalman smoother (RTS, non-causal) on the indicator
+    5. Compute direction labels: filtered[t] > filtered[t-1] (Phase 2.15 formula)
+    6. Causal forward-fill labels to 5min resolution via shift(1)
+       (label from candle 10:00-10:29 only available at 10:30)
+    7. Backtest on 5min prices using these labels
 
-LOGIQUE CAUSALE:
-- Indicateur 30min calculé sur bougie 30min COMPLÉTÉE
-- Label assigné au premier pas 5min de la PROCHAINE bougie 30min
-- Exécution à Open du pas 5min suivant le signal
+CAUSALITY:
+    - Kalman smoother is non-causal (uses future data) — standard for Oracle/label
+      generation, same as the 5min pipeline (prepare_data_direction_only.py)
+    - shift(1) before forward-fill ensures the label is only used AFTER the
+      candle that produced it has completed (~30min or ~1h delay)
+    - Backtest executes trades at Open[i+1] (one 5min bar after signal)
+    - This is MORE conservative than the 5min Oracle (which has only ~5min delay)
 
-COMPARAISON ATTENDUE:
-- Oracle 5min (Phase 2.15): 68,924 trades, Win Rate 53.4%, PnL Net +14,359%
-- Oracle 30min (ce test): ~10,000-15,000 trades, WR ~50-55%, PnL Net positif?
+REFERENCE RESULTS (5min Oracle, Phase 2.15):
+    MACD: 68,924 trades, Win Rate 53.4%, PnL Net +14,359%
 
 Usage:
     python tests/test_oracle_30min_pure.py --indicator macd --fees 0.001
-    python tests/test_oracle_30min_pure.py --indicator macd --fees 0.001 --assets BTC ETH
     python tests/test_oracle_30min_pure.py --indicator macd --fees 0.001 --timeframe 60
+    python tests/test_oracle_30min_pure.py --indicator macd --fees 0.001 --assets BTC ETH
 """
 
 import sys
@@ -51,21 +55,22 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# CONSTANTES (copiées de prepare_data_direction_only.py)
+# CONSTANTS
+# Indicator periods copied from prepare_data_direction_only.py to avoid
+# import dependencies. Must stay in sync with the main pipeline.
 # =============================================================================
 
-# Périodes STANDARD des indicateurs
 RSI_PERIOD = 14
 CCI_PERIOD = 20
 MACD_FAST = 12
 MACD_SLOW = 26
 MACD_SIGNAL = 9
 
-# Kalman
-KALMAN_PROCESS_VAR = 0.01
-KALMAN_MEASURE_VAR = 0.1
+# Kalman filter parameters (same as project-wide defaults)
+KALMAN_PROCESS_VAR = 0.01   # Process noise (Q) — how much the true state changes
+KALMAN_MEASURE_VAR = 0.1    # Measurement noise (R) — how noisy the observations are
 
-# Assets
+# Asset CSV file paths (raw 5min data)
 ASSET_FILES = {
     'BTC': 'data_trad/BTCUSD_all_5m.csv',
     'ETH': 'data_trad/ETHUSD_all_5m.csv',
@@ -78,7 +83,8 @@ ASSET_ID_MAP = {'BTC': 0, 'ETH': 1, 'BNB': 2, 'ADA': 3, 'LTC': 4}
 
 
 # =============================================================================
-# TYPES (copiés de test_oracle_direction_only.py)
+# DATA TYPES
+# Copied from test_oracle_direction_only.py for self-containment.
 # =============================================================================
 
 class Position(IntEnum):
@@ -140,14 +146,14 @@ class MonthlyResult:
 
 
 # =============================================================================
-# CHARGEMENT ET RESAMPLING
+# DATA LOADING AND RESAMPLING
 # =============================================================================
 
 def load_csv_5min(file_path: str, asset_name: str) -> pd.DataFrame:
-    """Charge données 5min brutes depuis CSV."""
+    """Load raw 5min OHLCV data from CSV. Returns DataFrame with DatetimeIndex."""
     df = pd.read_csv(file_path)
 
-    # Trouver colonne date
+    # Find date column (supports multiple naming conventions)
     date_col = None
     for col in ['date', 'datetime', 'time', 'timestamp', 'Date', 'Datetime']:
         if col in df.columns:
