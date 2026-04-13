@@ -478,6 +478,7 @@ def run_backtest_live(
                 record["success"] = llm_result["success"]
                 record["latency_sec"] = llm_result["latency_sec"]
                 record["parsed"] = llm_result["parsed"]
+                record["thinking"] = llm_result.get("thinking")
 
                 if not llm_result["success"]:
                     record["error"] = str(llm_result.get("validation_errors", []))
@@ -844,8 +845,8 @@ def main():
     parser.add_argument("--capital", type=float, default=10000.0)
     parser.add_argument("--fee-rate", type=float, default=0.001)
     parser.add_argument("--risk-pct", type=float, default=0.20)
-    parser.add_argument("--model", default="qwen2.5:14b")
-    parser.add_argument("--prompt", default="gemma_system_v5.txt")
+    parser.add_argument("--model", default="qwen3:8b")
+    parser.add_argument("--prompt", default="gemma_system_v6.txt")
     parser.add_argument("--output-dir", default="results")
     args = parser.parse_args()
 

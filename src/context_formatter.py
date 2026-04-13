@@ -201,17 +201,21 @@ def format_user_message(
                 if cb_parts:
                     lines.append(f"  current_bar_{tf_key}: {' '.join(cb_parts)}")
 
-        # Series last 5 (compact)
+        # Series 20 points (compact formatting per type)
         series = a.get("series_20", {})
         if series:
+            lines.append("  series_20:")
             price_s = series.get("price", [])
             rsi_s = series.get("rsi_15m", [])
             vol_s = series.get("vol_rel_15m", [])
+            ema_s = series.get("ema20_dist_15m", [])
             if price_s:
-                lines.append(f"  price last 5: {', '.join(f'{v:.0f}' if v else '?' for v in price_s)}")
+                lines.append(f"    price: {', '.join(f'{v:.0f}' if v else '?' for v in price_s)}")
             if rsi_s:
-                lines.append(f"  rsi_15m last 5: {', '.join(f'{v:.0f}' if v else '?' for v in rsi_s)}")
+                lines.append(f"    rsi_15m: {', '.join(f'{v:.0f}' if v else '?' for v in rsi_s)}")
             if vol_s:
-                lines.append(f"  vol_rel last 5: {', '.join(f'{v:.1f}' if v else '?' for v in vol_s)}")
+                lines.append(f"    vol_rel: {', '.join(f'{v:.1f}' if v else '?' for v in vol_s)}")
+            if ema_s:
+                lines.append(f"    ema20_dist: {', '.join(f'{v:.2f}' if v else '?' for v in ema_s)}")
 
     return "\n".join(lines)

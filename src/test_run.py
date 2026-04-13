@@ -216,7 +216,7 @@ def main():
     parser.add_argument("--start", type=str, default=None, help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end", type=str, default=None, help="End date (YYYY-MM-DD)")
     parser.add_argument("--data-dir", type=str, default="src/data_trad", help="Data directory")
-    parser.add_argument("--model", type=str, default="qwen2.5:14b", help="Ollama model name")
+    parser.add_argument("--model", type=str, default="qwen3:8b", help="Ollama model name")
     parser.add_argument("--temperature", type=float, default=0.2, help="LLM temperature")
     args = parser.parse_args()
 
@@ -323,6 +323,7 @@ def main():
                 record["validation_errors"] = llm_result["validation_errors"]
                 record["raw_response_first_attempt"] = llm_result["raw_response_first_attempt"]
                 record["raw_response_retry"] = llm_result["raw_response_retry"]
+                record["thinking"] = llm_result.get("thinking")
 
                 # Update progress bar
                 status = "OK" if llm_result["success"] else "FAIL"

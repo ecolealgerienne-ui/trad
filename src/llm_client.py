@@ -18,7 +18,7 @@ import logging
 import re
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import requests
 from pydantic import ValidationError
@@ -28,7 +28,9 @@ from src.schemas import QwenOutput
 logger = logging.getLogger(__name__)
 
 OLLAMA_BASE_URL = "http://localhost:11434"
-DEFAULT_MODEL = "qwen2.5:14b"
+DEFAULT_MODEL = "qwen3:8b"
+PROMPT_VERSION = "v6"
+THINKING = True
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 
 
@@ -42,7 +44,7 @@ class LLMValidationError(Exception):
         self.errors = errors
 
 
-def load_system_prompt(filename: str = "gemma_system_v5.txt") -> str:
+def load_system_prompt(filename: str = "gemma_system_v6.txt") -> str:
     """Read the system prompt from disk."""
     path = PROMPTS_DIR / filename
     if not path.exists():
@@ -224,6 +226,7 @@ def call_gemma(
         "parsed": None,
         "raw_response_first_attempt": None,
         "raw_response_retry": None,
+        "thinking": None,
         "validation_errors": [],
         "latency_sec": 0.0,
         "retried": False,
@@ -233,8 +236,9 @@ def call_gemma(
     t_start = time.perf_counter()
 
     # --- First attempt ---
-    raw_text = _call_ollama(system_prompt, user_content, temperature, model, base_url, timeout)
+    raw_text, thinking = _call_ollama(system_prompt, user_content, temperature, model, base_url, timeout)
     result["raw_response_first_attempt"] = raw_text
+    result["thinking"] = thinking
 
     parsed, errors = _validate_response(raw_text)
 
@@ -267,7 +271,7 @@ def call_gemma(
         {"role": "user", "content": retry_correction},
     ]
 
-    raw_retry = _call_ollama_messages(retry_messages, temperature, model, base_url, timeout)
+    raw_retry, _ = _call_ollama_messages(retry_messages, temperature, model, base_url, timeout)
     result["raw_response_retry"] = raw_retry
 
     parsed_retry, errors_retry = _validate_response(raw_retry)
@@ -300,8 +304,8 @@ def _call_ollama(
     model: str,
     base_url: str,
     timeout: float,
-) -> str:
-    """Simple 2-message call (system + user)."""
+) -> Tuple[str, str]:
+    """Simple 2-message call (system + user). Returns (content, thinking)."""
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_content},
@@ -321,7 +325,7 @@ def _call_ollama_messages(
         "model": model,
         "messages": messages,
         "stream": False,
-        "think": False,
+        "think": THINKING,
         "format": "json",
         "options": {"temperature": temperature},
     }
@@ -329,8 +333,8 @@ def _call_ollama_messages(
     # Debug: log payload structure
     msg_sizes = [(m["role"], len(m["content"])) for m in messages]
     logger.info(
-        "PAYLOAD: model=%s think=%s format=%s temp=%s | messages: %s | total=%d chars",
-        model, payload["think"], payload["format"],
+        "PAYLOAD: model=%s prompt=%s think=%s format=%s temp=%s | messages: %s | total=%d chars",
+        model, PROMPT_VERSION, payload["think"], payload["format"],
         temperature, msg_sizes, sum(s for _, s in msg_sizes)
     )
 
@@ -343,7 +347,8 @@ def _call_ollama_messages(
 
     data = resp.json()
     content = data.get("message", {}).get("content", "")
-    return _clean_response(content)
+    thinking = data.get("message", {}).get("thinking", "")
+    return _clean_response(content), thinking
 
 
 def _clean_response(text: str) -> str:

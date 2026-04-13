@@ -741,9 +741,10 @@ def compute_features(
                 "tf_4h": cb_4h_feat,
             },
             "series_20": {
-                "price": get_series(df_15m, "close", 5),
-                "rsi_15m": get_series(df_15m, "rsi14", 5),
-                "vol_rel_15m": get_series(df_15m, "vol_rel", 5),
+                "price": get_series(df_15m, "close", 20),
+                "rsi_15m": get_series(df_15m, "rsi14", 20),
+                "vol_rel_15m": get_series(df_15m, "vol_rel", 20),
+                "ema20_dist_15m": get_series(df_15m, "ema20_dist_pct", 20),
             },
         }
         assets.append(asset_dict)
