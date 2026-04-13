@@ -418,12 +418,13 @@ def compute_kalman_live(indicator_live: np.ndarray, step_index: np.ndarray,
 
     # Build KalmanFilter object (needed for filter_update method)
     init_val = indicator_live[first_valid_idx]
+    # observation_covariance as scalar to match kalman_filter_standard exactly
     kf = KF(
         transition_matrices=np.array([[1, 1], [0, 1]]),
         observation_matrices=np.array([[1, 0]]),
         initial_state_mean=np.array([init_val, 0.0]),
         initial_state_covariance=np.eye(2),
-        observation_covariance=np.array([[KALMAN_MEASURE_VAR]]),
+        observation_covariance=KALMAN_MEASURE_VAR,
         transition_covariance=np.eye(2) * KALMAN_PROCESS_VAR,
     )
 
