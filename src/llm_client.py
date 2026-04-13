@@ -54,39 +54,72 @@ def ping_ollama(base_url: str = OLLAMA_BASE_URL, timeout: float = 5.0) -> bool:
 # ---------------------------------------------------------------------------
 
 def parse_thinking_and_json(text: str) -> Tuple[str, str, str]:
-    """Extract <thinking>...</thinking> and JSON from response.
+    """Extract thinking and JSON from response.
+
+    Handles 3 formats:
+    1. <thinking>...</thinking> {json}  → standard tagged format
+    2. text analysis... {json}          → untagged (Claude style)
+    3. {json} only                      → no thinking
 
     Returns (thinking, json_text, parse_method).
-    parse_method: "thinking_and_json" | "brace_counting_fallback"
     """
-    thinking = ""
+    text = text.strip()
+
+    # Case 1: Explicit <thinking> tags
     thinking_match = re.search(
         r'<thinking>(.*?)</thinking>', text, re.DOTALL | re.IGNORECASE
     )
     if thinking_match:
         thinking = thinking_match.group(1).strip()
         json_part = text[thinking_match.end():].strip()
-    else:
-        json_part = text.strip()
+        json_part = re.sub(r'^```(?:json)?\s*', '', json_part)
+        json_part = re.sub(r'\s*```$', '', json_part)
+        json_text = _extract_last_json_object(json_part)
+        if json_text:
+            return thinking, json_text, "thinking_and_json"
 
-    # Clean code fences
-    json_part = re.sub(r'^```(?:json)?\s*', '', json_part)
-    json_part = re.sub(r'\s*```$', '', json_part)
-    json_part = json_part.strip()
+    # Case 2 & 3: No tags — find the LAST complete JSON object in the text
+    # Everything before it is thinking
+    json_text = _extract_last_json_object(text)
+    if json_text:
+        json_start = text.rfind(json_text)
+        thinking = text[:json_start].strip() if json_start > 0 else ""
+        # Clean thinking: remove code fences, trailing punctuation
+        thinking = re.sub(r'```(?:json)?', '', thinking).strip()
+        method = "thinking_and_json" if thinking else "brace_counting_fallback"
+        return thinking, json_text, method
 
-    # Try direct JSON parse
-    start = json_part.find('{')
-    end = json_part.rfind('}')
-    if start != -1 and end != -1:
-        candidate = json_part[start:end + 1]
-        try:
-            json.loads(candidate)
-            method = "thinking_and_json" if thinking_match else "brace_counting_fallback"
-            return thinking, candidate, method
-        except json.JSONDecodeError:
-            pass
+    # Nothing found
+    return "", text, "brace_counting_fallback"
 
-    # Fallback: brace counting (handles nested objects)
+
+def _extract_last_json_object(text: str) -> str:
+    """Extract the last complete top-level JSON object from text.
+
+    Searches backwards from the last '}' to find its matching '{'.
+    """
+    end = text.rfind("}")
+    if end == -1:
+        return ""
+
+    # Walk backwards to find the matching opening brace
+    depth = 0
+    in_string = False
+    escape = False
+
+    # We need to scan forward from a candidate start to validate.
+    # Strategy: find the last '}', then search backwards for candidates.
+    for candidate_start in range(end, -1, -1):
+        if text[candidate_start] == '{':
+            # Try parsing from here to end
+            candidate = text[candidate_start:end + 1]
+            try:
+                json.loads(candidate)
+                return candidate
+            except json.JSONDecodeError:
+                continue
+
+    return ""
     json_text = _extract_first_json_object(json_part)
     return thinking, json_text, "brace_counting_fallback"
 
