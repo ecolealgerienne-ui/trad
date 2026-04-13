@@ -237,6 +237,8 @@ Cause identifiée : Le modèle rate 42% des retournements (transitions).
 | **Transformer / Attention** | Absent | Architecture restée CNN-LSTM uniquement |
 | **Données tick-by-tick** | Absent | Mentionné comme option (microstructure) |
 | **Multi-timeframe ensemble** | Partiellement | 5min avec estimation 30min testée (Clock-Injected), 15min aussi testé |
+| **30min pur (sans indicateurs 5min)** | Absent | Jamais testé : prédire labels 30min avec uniquement indicateurs 30min (estimés toutes les 5min) + step index, sans injecter les indicateurs 5min |
+| **1h pur** | Absent | Jamais testé : même approche sur timeframe 1h |
 | **Volume / OBV comme signal** | Absent | Mentionné comme piste, jamais implémenté comme feature ML |
 | **Returns forecasting (régression)** | Absent | Recommandé par expert (Gu, Kelly & Xiu 2020), pas implémenté |
 
