@@ -478,6 +478,12 @@ def main():
     parser.add_argument('--lr', type=float, default=LR)
     parser.add_argument('--patience', type=int, default=PATIENCE)
     parser.add_argument('--grad-clip', type=float, default=GRAD_CLIP)
+    parser.add_argument('--cnn-filters', type=int, default=64)
+    parser.add_argument('--lstm-hidden', type=int, default=64)
+    parser.add_argument('--lstm-layers', type=int, default=2)
+    parser.add_argument('--lstm-dropout', type=float, default=0.2)
+    parser.add_argument('--dense-hidden', type=int, default=32)
+    parser.add_argument('--dense-dropout', type=float, default=0.3)
     parser.add_argument('--device', default='auto', choices=['auto', 'cuda', 'cpu'])
     parser.add_argument('--seed', type=int, default=SEED)
     args = parser.parse_args()
@@ -532,7 +538,12 @@ def main():
     # 3. Model
     # =========================================================================
     logger.info("\n3. Creating model...")
-    model = CNNLSTMClassifier(n_features=2, window=WINDOW).to(device)
+    model = CNNLSTMClassifier(
+        n_features=2, window=WINDOW,
+        cnn_filters=args.cnn_filters, lstm_hidden=args.lstm_hidden,
+        lstm_layers=args.lstm_layers, lstm_dropout=args.lstm_dropout,
+        dense_hidden=args.dense_hidden, dense_dropout=args.dense_dropout,
+    ).to(device)
     loss_fn = nn.BCEWithLogitsLoss()
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
