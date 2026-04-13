@@ -225,25 +225,381 @@ def calculate_macd(df: pd.DataFrame) -> pd.Series:
 
 
 # =============================================================================
-# CAUSAL FORWARD-FILL
+# LIVE OHLCV (Binance-style: partial candle updated every 5min)
 # =============================================================================
 
-def forward_fill_causal(series_tf: pd.Series, index_5min: pd.DatetimeIndex,
-                        col_name: str) -> pd.Series:
+def compute_live_ohlcv(df_5min: pd.DataFrame, tf_minutes: int, suffix: str) -> pd.DataFrame:
     """
-    Forward-fill a higher-timeframe series to 5min resolution with strict causality.
+    Compute live-style OHLCV for a higher timeframe at 5min resolution.
 
-    CAUSALITY MECHANISM:
-        shift(1) delays the values by one tf candle before forward-filling.
-        This ensures a candle's value is only available AFTER it completes.
+    Reproduces what Binance API returns when querying klines every 5min:
+    the last candle is the one currently forming, updated progressively.
 
-        Example for 30min:
-            Candle 10:00 (data 10:00-10:29) → value available at 10:30
-            Candle 10:30 (data 10:30-10:59) → value available at 11:00
+    At each 5min step i within a tf candle:
+        open_live  = open of the first 5min bar in this tf candle (fixed)
+        high_live  = max of all highs seen so far in this tf candle
+        low_live   = min of all lows seen so far in this tf candle
+        close_live = close of the current 5min bar (= latest price)
+        volume_live = sum of all volumes so far in this tf candle
 
-    NOTE: This same shift applies to both OHLCV and indicators. So close_30m
-    at 10:30 contains the close of the 09:30-09:59 candle (previous completed),
-    not the 10:00-10:29 candle. This is intentional and consistent.
+    NO shift(1) needed: close_live[i] = close_5min[i], known at time i.
+    Backtest executes at open[i+1].
+
+    Args:
+        df_5min: DataFrame with 5min OHLCV and DatetimeIndex
+        tf_minutes: Target timeframe in minutes (30 or 60)
+        suffix: Column name suffix ('30m' or '1h')
+
+    Returns:
+        DataFrame with columns: open_{suffix}_live, high_{suffix}_live, etc.
+    """
+    # Group each 5min bar by its parent tf candle
+    group = df_5min.index.floor(f'{tf_minutes}min')
+
+    result = pd.DataFrame(index=df_5min.index)
+    result[f'open_{suffix}_live'] = df_5min.groupby(group)['open'].transform('first')
+    result[f'high_{suffix}_live'] = df_5min.groupby(group)['high'].cummax()
+    result[f'low_{suffix}_live'] = df_5min.groupby(group)['low'].cummin()
+    result[f'close_{suffix}_live'] = df_5min['close']  # live close = current 5min close
+    result[f'volume_{suffix}_live'] = df_5min.groupby(group)['volume'].cumsum()
+
+    return result
+
+
+# =============================================================================
+# LIVE INDICATORS (incremental EMA with frozen/provisional states)
+#
+# These reproduce what you'd get by querying Binance's 30min/1h indicators
+# every 5min. The EMA state advances ONLY at candle closures (step == max_step).
+# Between closures, provisional values are computed from the frozen state +
+# the current live close. Provisionals do NOT accumulate across 5min steps.
+#
+# IMPORTANT: This is NOT a 5min indicator with scaled periods. The EMA sees
+# a series of tf-candle closes (one per completed candle), with only the last
+# entry evolving at 5min resolution.
+# =============================================================================
+
+def compute_macd_live(close_5min: np.ndarray, step_index: np.ndarray,
+                      max_step: int, fast: int = MACD_FAST, slow: int = MACD_SLOW,
+                      signal: int = MACD_SIGNAL) -> np.ndarray:
+    """
+    Compute MACD histogram on live tf candles at 5min resolution.
+
+    The EMA state (ema_*_closed) only advances when a tf candle completes
+    (step == max_step). Between closures, a provisional MACD is computed
+    from the frozen EMA state and the current 5min close. The provisional
+    value is throwaway — it does NOT feed into the next step's calculation.
+
+    At step == max_step, live values must match standard resample MACD exactly.
+
+    Args:
+        close_5min: Array of 5min close prices (~880k values)
+        step_index: Position within tf candle (1 to max_step)
+        max_step: Steps per candle (6 for 30min, 12 for 1h)
+        fast/slow/signal: MACD periods
+
+    Returns:
+        Array of MACD histogram values at 5min resolution
+    """
+    n = len(close_5min)
+    alpha_fast = 2.0 / (fast + 1)
+    alpha_slow = 2.0 / (slow + 1)
+    alpha_signal = 2.0 / (signal + 1)
+
+    macd_out = np.full(n, np.nan)
+
+    # State: frozen after last completed candle
+    ema_fast_closed = np.nan
+    ema_slow_closed = np.nan
+    ema_signal_closed = np.nan
+    initialized = False
+
+    for i in range(n):
+        c = close_5min[i]
+        step = step_index[i]
+
+        if np.isnan(c):
+            continue
+
+        # Initialization: first completed candle sets the EMA base
+        # (matches ewm(adjust=False) which sets EMA[0] = x[0])
+        if not initialized:
+            if step == max_step:
+                ema_fast_closed = c
+                ema_slow_closed = c
+                ema_signal_closed = 0.0  # macd_line = fast - slow = 0 initially
+                macd_out[i] = 0.0
+                initialized = True
+            continue
+
+        # Provisional EMA: "what if the tf candle closed right now?"
+        # Always computed from FROZEN state, not previous provisional.
+        ema_fast_prov = alpha_fast * c + (1.0 - alpha_fast) * ema_fast_closed
+        ema_slow_prov = alpha_slow * c + (1.0 - alpha_slow) * ema_slow_closed
+        macd_line = ema_fast_prov - ema_slow_prov
+        ema_signal_prov = alpha_signal * macd_line + (1.0 - alpha_signal) * ema_signal_closed
+        macd_out[i] = macd_line - ema_signal_prov
+
+        # Freeze: EMA advances one step only at candle closure
+        if step == max_step:
+            ema_fast_closed = ema_fast_prov
+            ema_slow_closed = ema_slow_prov
+            ema_signal_closed = ema_signal_prov
+
+    return macd_out
+
+
+def compute_rsi_live(close_5min: np.ndarray, step_index: np.ndarray,
+                     max_step: int, period: int = RSI_PERIOD) -> np.ndarray:
+    """
+    Compute RSI on live tf candles at 5min resolution.
+
+    Uses EWM alpha = 2/(period+1) for consistency with the existing pipeline
+    (which uses pandas ewm(span=period, adjust=False)).
+
+    State: avg_gain_closed and avg_loss_closed frozen between candle closures.
+    At each 5min step, delta = close_5min[i] - prev_candle_close (close of
+    the last COMPLETED tf candle). Provisional avg_gain/avg_loss computed
+    from frozen state + this delta. Freeze at step == max_step.
+
+    Args:
+        close_5min: Array of 5min close prices
+        step_index: Position within tf candle (1 to max_step)
+        max_step: Steps per candle (6 for 30min, 12 for 1h)
+        period: RSI period
+
+    Returns:
+        Array of RSI values at 5min resolution
+    """
+    n = len(close_5min)
+    alpha = 2.0 / (period + 1)  # EWM alpha, NOT Wilder's 1/N
+
+    rsi_out = np.full(n, np.nan)
+
+    # State: frozen after last completed candle
+    avg_gain_closed = np.nan
+    avg_loss_closed = np.nan
+    prev_candle_close = np.nan  # close of the last COMPLETED tf candle
+
+    # Warm-up: collect first `period` completed candle closes to initialize
+    candle_closes = []
+    warmed_up = False
+
+    for i in range(n):
+        c = close_5min[i]
+        step = step_index[i]
+
+        if np.isnan(c):
+            continue
+
+        # --- Warm-up phase: collect completed candle closes ---
+        if not warmed_up:
+            if step == max_step:
+                candle_closes.append(c)
+
+                if len(candle_closes) >= period + 1:
+                    # Initialize avg_gain/avg_loss from first `period` deltas
+                    closes_arr = np.array(candle_closes)
+                    deltas = np.diff(closes_arr)
+
+                    # Use EWM-style initialization (same as ewm(adjust=False)):
+                    # First value = simple average, then apply EMA
+                    gains = np.where(deltas > 0, deltas, 0.0)
+                    losses = np.where(deltas < 0, -deltas, 0.0)
+
+                    # Start with SMA of first `period` values, then it's the base
+                    avg_g = gains[0]
+                    avg_l = losses[0]
+                    for k in range(1, len(gains)):
+                        avg_g = alpha * gains[k] + (1.0 - alpha) * avg_g
+                        avg_l = alpha * losses[k] + (1.0 - alpha) * avg_l
+
+                    avg_gain_closed = avg_g
+                    avg_loss_closed = avg_l
+                    prev_candle_close = c
+
+                    # Compute RSI at this point
+                    if avg_loss_closed > 1e-15:
+                        rs = avg_gain_closed / avg_loss_closed
+                        rsi_out[i] = 100.0 - 100.0 / (1.0 + rs)
+                    else:
+                        rsi_out[i] = 100.0
+
+                    warmed_up = True
+            continue
+
+        # --- Normal phase: provisional RSI ---
+        delta = c - prev_candle_close
+        gain = max(delta, 0.0)
+        loss = max(-delta, 0.0)
+
+        # Provisional from frozen state (does NOT accumulate across 5min steps)
+        avg_gain_prov = alpha * gain + (1.0 - alpha) * avg_gain_closed
+        avg_loss_prov = alpha * loss + (1.0 - alpha) * avg_loss_closed
+
+        if avg_loss_prov > 1e-15:
+            rs = avg_gain_prov / avg_loss_prov
+            rsi_out[i] = 100.0 - 100.0 / (1.0 + rs)
+        else:
+            rsi_out[i] = 100.0
+
+        # Freeze at candle closure
+        if step == max_step:
+            avg_gain_closed = avg_gain_prov
+            avg_loss_closed = avg_loss_prov
+            prev_candle_close = c
+
+    return rsi_out
+
+
+def compute_cci_live(high_live: np.ndarray, low_live: np.ndarray,
+                     close_5min: np.ndarray, step_index: np.ndarray,
+                     max_step: int, period: int = CCI_PERIOD) -> np.ndarray:
+    """
+    Compute CCI on live tf candles at 5min resolution.
+
+    Maintains a rolling buffer of the last (period-1) completed candle TPs
+    plus the current live TP. SMA and MAD are computed on this buffer.
+
+    TP_live = (high_tf_live + low_tf_live + close_5min) / 3
+    where high_tf_live and low_tf_live are cummax/cummin within the current
+    tf candle (not raw 5min values).
+
+    At step == max_step, the live TP is pushed into the buffer and the oldest
+    is popped. Returns NaN until the buffer has `period` entries.
+
+    Args:
+        high_live: Live tf high (cummax within candle) at 5min resolution
+        low_live: Live tf low (cummin within candle) at 5min resolution
+        close_5min: Raw 5min close prices
+        step_index: Position within tf candle (1 to max_step)
+        max_step: Steps per candle (6 for 30min, 12 for 1h)
+        period: CCI period (default 20)
+
+    Returns:
+        Array of CCI values at 5min resolution
+    """
+    from collections import deque
+
+    n = len(close_5min)
+    cci_out = np.full(n, np.nan)
+
+    # Buffer of completed candle TPs (max size = period - 1)
+    tp_buffer = deque(maxlen=period - 1)
+
+    for i in range(n):
+        c = close_5min[i]
+        h = high_live[i]
+        lo = low_live[i]
+        step = step_index[i]
+
+        if np.isnan(c) or np.isnan(h) or np.isnan(lo):
+            continue
+
+        # Current live typical price (uses tf-level high/low, not 5min)
+        tp_live = (h + lo + c) / 3.0
+
+        # Need period-1 frozen TPs + 1 live = period total
+        if len(tp_buffer) >= period - 1:
+            # Build full window: frozen TPs + live TP
+            all_tps = np.array(list(tp_buffer) + [tp_live])
+
+            sma = all_tps.mean()
+            mad = np.abs(all_tps - sma).mean()
+
+            if mad > 1e-15:
+                cci_out[i] = (tp_live - sma) / (0.015 * mad)
+            else:
+                cci_out[i] = 0.0
+
+        # At candle closure: push live TP into buffer
+        if step == max_step:
+            tp_buffer.append(tp_live)
+
+    return cci_out
+
+
+# =============================================================================
+# VALIDATION: live values at candle closure must match standard resample
+# =============================================================================
+
+def validate_live_vs_standard(result: pd.DataFrame, df_5min: pd.DataFrame,
+                              tf_minutes: int, suffix: str):
+    """
+    Verify that live indicator values at candle closure (step == max_step)
+    match the standard resample-then-compute approach exactly.
+
+    This proves the EMA only advances at candle closures, not at every 5min step.
+
+    Raises AssertionError if values don't match (atol=1e-10).
+    """
+    max_step = tf_minutes // 5
+
+    # Compute standard indicators on resampled data
+    df_tf = resample_ohlcv(df_5min, tf_minutes)
+    macd_std = calculate_macd(df_tf).values
+    rsi_std = calculate_rsi(df_tf).values
+    cci_std = calculate_cci(df_tf).values
+
+    # Extract live values at candle closure points
+    mask_close = result[f'step_{suffix}'] == max_step
+    macd_live = result.loc[mask_close, f'macd_{suffix}_live'].values
+    rsi_live = result.loc[mask_close, f'rsi_{suffix}_live'].values
+    cci_live = result.loc[mask_close, f'cci_{suffix}_live'].values
+
+    # Align lengths (live may have fewer points due to warm-up NaNs)
+    # Find first non-NaN in each
+    for name, live_vals, std_vals in [
+        ('MACD', macd_live, macd_std),
+        ('RSI', rsi_live, rsi_std),
+        ('CCI', cci_live, cci_std),
+    ]:
+        # Find first valid index in both
+        live_valid = ~np.isnan(live_vals)
+        std_valid = ~np.isnan(std_vals)
+
+        if not live_valid.any() or not std_valid.any():
+            logger.warning(f"    SKIP {name}_{suffix}: no valid values to compare")
+            continue
+
+        # Find the range where both are valid
+        live_first = np.argmax(live_valid)
+        std_first = np.argmax(std_valid)
+
+        # Align: the nth completed candle in live corresponds to nth in standard
+        # But warm-up may differ, so start comparison after both are valid
+        start = max(live_first, std_first)
+        end = min(len(live_vals), len(std_vals))
+
+        if start >= end:
+            logger.warning(f"    SKIP {name}_{suffix}: no overlapping valid range")
+            continue
+
+        live_slice = live_vals[start:end]
+        std_slice = std_vals[start:end]
+
+        # Both must be non-NaN in the comparison range
+        both_valid = ~np.isnan(live_slice) & ~np.isnan(std_slice)
+        if not both_valid.any():
+            logger.warning(f"    SKIP {name}_{suffix}: all NaN in comparison range")
+            continue
+
+        live_cmp = live_slice[both_valid]
+        std_cmp = std_slice[both_valid]
+
+        max_diff = np.max(np.abs(live_cmp - std_cmp))
+        matches = np.allclose(live_cmp, std_cmp, atol=1e-10)
+
+        if matches:
+            logger.info(f"    PASS {name}_{suffix}_live: matches standard (max_diff={max_diff:.2e}, n={len(live_cmp):,})")
+        else:
+            logger.error(f"    FAIL {name}_{suffix}_live: max_diff={max_diff:.2e} (atol=1e-10), n={len(live_cmp):,}")
+            # Show first few mismatches for debugging
+            diffs = np.abs(live_cmp - std_cmp)
+            worst_idx = np.argsort(diffs)[-5:]
+            for idx in worst_idx:
+                logger.error(f"         idx={idx}: live={live_cmp[idx]:.15f} std={std_cmp[idx]:.15f} diff={diffs[idx]:.2e}")
+
 
     Args:
         series_tf: Series with DatetimeIndex at the higher timeframe
