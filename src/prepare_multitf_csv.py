@@ -522,7 +522,10 @@ def run_validation(result: pd.DataFrame, df_5min: pd.DataFrame,
     """
     Run validation checks for computed indicators on one timeframe.
     Only validates indicators that were actually computed.
-    Compares live values at candle closure vs standard resample approach.
+
+    ALIGNMENT: Uses timestamp matching (floor to tf boundary) instead of
+    positional indexing. This avoids misalignment when resample+dropna
+    produces fewer candles than step==max_step extraction.
     """
     if indicators is None:
         indicators = ['macd', 'rsi', 'cci']
@@ -535,22 +538,58 @@ def run_validation(result: pd.DataFrame, df_5min: pd.DataFrame,
 
     logger.info(f"\n  --- Validation {suffix} (at step=={max_step}) ---")
 
+    # Build alignment: map step-6 5min timestamps to tf candle timestamps
+    # Step 6 at 10:25 → candle at 10:00 (floor to 30min boundary)
+    live_at_closure = result.loc[mask].copy()
+    live_at_closure['tf_ts'] = live_at_closure.index.floor(f'{tf_minutes}min')
+
+    # Standard has tf_ts as index
+    # Find common timestamps
+    common_ts = live_at_closure['tf_ts'].values
+    std_ts = df_tf.index.values
+    common_set = set(common_ts) & set(std_ts)
+    logger.info(f"    Alignment: {len(common_set):,} common candles "
+                f"(live step-6: {len(live_at_closure):,}, standard: {len(df_tf):,})")
+
+    # Build aligned arrays: for each common timestamp, get live and standard values
+    # Use standard index as reference
+    std_mask = np.isin(std_ts, list(common_set))
+    live_ts_to_idx = {ts: idx for idx, ts in enumerate(common_ts)}
+
+    # Reorder live values to match standard order
+    std_order_indices = []
+    for ts in std_ts[std_mask]:
+        if ts in live_ts_to_idx:
+            std_order_indices.append(live_ts_to_idx[ts])
+
     all_ok = True
 
+    def compare_aligned(name, live_col, std_series):
+        """Compare live vs standard using timestamp alignment."""
+        live_all = live_at_closure[live_col].values
+        std_all = std_series.values
+
+        # Extract aligned values
+        live_aligned = live_all[std_order_indices]
+        std_aligned = std_all[std_mask]
+
+        return validate_at_closure(name, live_aligned, std_aligned, suffix)
+
     if 'macd' in indicators:
-        macd_std = calculate_macd_standard(df_tf).values
-        all_ok &= validate_at_closure("MACD", result.loc[mask, f'macd_{suffix}_live'].values, macd_std, suffix)
+        macd_std = calculate_macd_standard(df_tf)
+        all_ok &= compare_aligned("MACD", f'macd_{suffix}_live', macd_std)
         # Kalman validation on MACD
-        kalman_macd_std = kalman_filter_standard(macd_std)
-        all_ok &= validate_at_closure("Kalman_MACD", result.loc[mask, f'macd_{suffix}_filtered'].values, kalman_macd_std, suffix)
+        kalman_macd_std_vals = kalman_filter_standard(macd_std.values)
+        kalman_std_series = pd.Series(kalman_macd_std_vals, index=df_tf.index)
+        all_ok &= compare_aligned("Kalman_MACD", f'macd_{suffix}_filtered', kalman_std_series)
 
     if 'rsi' in indicators:
-        rsi_std = calculate_rsi_standard(df_tf).values
-        all_ok &= validate_at_closure("RSI", result.loc[mask, f'rsi_{suffix}_live'].values, rsi_std, suffix)
+        rsi_std = calculate_rsi_standard(df_tf)
+        all_ok &= compare_aligned("RSI", f'rsi_{suffix}_live', rsi_std)
 
     if 'cci' in indicators:
-        cci_std = calculate_cci_standard(df_tf).values
-        all_ok &= validate_at_closure("CCI", result.loc[mask, f'cci_{suffix}_live'].values, cci_std, suffix)
+        cci_std = calculate_cci_standard(df_tf)
+        all_ok &= compare_aligned("CCI", f'cci_{suffix}_live', cci_std)
 
     if all_ok:
         logger.info(f"  ALL {suffix} VALIDATIONS PASSED")
