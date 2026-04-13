@@ -76,7 +76,7 @@ def parse_thinking_and_json(text: str) -> Tuple[str, str, str]:
         json_part = re.sub(r'\s*```$', '', json_part)
         json_text = _extract_last_json_object(json_part)
         if json_text:
-            return thinking, json_text, "thinking_and_json"
+            return thinking, json_text, "thinking_tag_found"
 
     # Case 2 & 3: No tags — find the LAST complete JSON object in the text
     # Everything before it is thinking
@@ -86,7 +86,7 @@ def parse_thinking_and_json(text: str) -> Tuple[str, str, str]:
         thinking = text[:json_start].strip() if json_start > 0 else ""
         # Clean thinking: remove code fences, trailing punctuation
         thinking = re.sub(r'```(?:json)?', '', thinking).strip()
-        method = "thinking_and_json" if thinking else "brace_counting_fallback"
+        method = "thinking_tag_found" if thinking else "brace_counting_fallback"
         return thinking, json_text, method
 
     # Nothing found
@@ -364,7 +364,7 @@ class OllamaProvider:
         if parsed2 is not None:
             result["parsed"] = parsed2
             result["success"] = True
-            result["parse_method"] = "retry"
+            result["parse_method"] = "retry_after_failure"
             result["validation_errors"] = []
         else:
             result["validation_errors"] = errors + errors2
@@ -473,6 +473,34 @@ class AnthropicProvider:
             "cache_creation_tokens": cache_write,
         }
 
+        # System prompt token estimate & cache diagnostics
+        # input_tokens = system_tokens + user_tokens, so system ~ input - user_estimate
+        user_token_est = len(user_message) // 4  # rough: 1 token ≈ 4 chars
+        system_token_est = usage.input_tokens - user_token_est
+        self._call_count = getattr(self, '_call_count', 0) + 1
+
+        if self._call_count == 1:
+            self._system_hash = hash(system_prompt)
+            logger.info(
+                "ANTHROPIC tokens: input=%d (system~%d, user~%d) output=%d | "
+                "cache_read=%d cache_write=%d | system_hash=%d",
+                usage.input_tokens, system_token_est, user_token_est,
+                usage.output_tokens, cache_read, cache_write, self._system_hash,
+            )
+            if system_token_est < 1024:
+                logger.warning(
+                    "System prompt ~%d tokens — below 1024 minimum for Anthropic cache!",
+                    system_token_est,
+                )
+        else:
+            current_hash = hash(system_prompt)
+            if current_hash != self._system_hash:
+                logger.warning("System prompt hash CHANGED between cycles! Cache will miss.")
+            logger.info(
+                "ANTHROPIC tokens: input=%d output=%d | cache_read=%d cache_write=%d",
+                usage.input_tokens, usage.output_tokens, cache_read, cache_write,
+            )
+
         # Parse thinking and JSON
         thinking, json_text, method = parse_thinking_and_json(content)
         result["thinking"] = thinking
@@ -525,7 +553,7 @@ class AnthropicProvider:
         if parsed2 is not None:
             result["parsed"] = parsed2
             result["success"] = True
-            result["parse_method"] = "retry"
+            result["parse_method"] = "retry_after_failure"
             result["validation_errors"] = []
         else:
             result["validation_errors"] = errors + errors2
