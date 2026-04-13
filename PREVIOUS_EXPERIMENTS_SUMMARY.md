@@ -19,7 +19,9 @@
 
 - **Source** : Fichiers CSV locaux (pré-téléchargés, pas d'API live)
 - **Symbols** : BTC, ETH, BNB, ADA, LTC (5 crypto majeurs, paires USD)
-- **Timeframes** : 5 minutes, 15 minutes et 30 minutes
+- **Timeframe de base** : 5 minutes (récupération des données)
+- **Horizon de prédiction** : 30 minutes (labels = pente indicateurs 30min, estimée à chaque bougie 5min avec un Step Index indiquant la position dans la bougie 30min en cours)
+- **Timeframe 15min** : également testé
 - **Période couverte** : ~8.5 ans de données BTC (2017-08 → 2026-01), ~4.3M séquences sur 5 assets
 - **Splits** : 70% train / 15% val / 15% test (split temporel strict, test = données les plus récentes)
 
@@ -71,7 +73,7 @@ Output: probabilités binaires (direction UP/DOWN)
 
 ### Jours 2-3 (02-03 janv.) — Optimisations architecture
 
-- **Clock-Injected** (features 30min injectées dans le modèle 5min) : **85.1% accuracy** (+1.8%)
+- **Clock-Injected** : Données récupérées en 5min, indicateurs calculés aussi en 30min, Step Index (position 1-6 dans la bougie 30min en cours), labels = pente 30min. 7 features au total (3 indicateurs 5min + 3 indicateurs 30min + step index). Résultat : **85.1% accuracy** (vs 83.3% baseline de cette phase, soit +1.8% — chiffre obsolète, dépassé ensuite par Dual-Binary à 92.4%)
 - **Multi-View Learning** (synchroniser features avec cible) : **-0.7%** → abandonné
 - **Single-output** (1 modèle par indicateur) : gain négligeable
 - **Bollinger Bands** : retiré (impossible à synchroniser, toujours lag +1)
@@ -160,7 +162,7 @@ Output: probabilités binaires (direction UP/DOWN)
 | Phase | Modèle | Indicateur | Accuracy | Notes |
 |-------|--------|------------|----------|-------|
 | Baseline | CNN-LSTM 3 feat | Moyenne | 83.3% | Premier modèle |
-| Clock-Injected | CNN-LSTM 7 feat | Moyenne | 85.1% | +30min features |
+| Clock-Injected | CNN-LSTM 7 feat | Moyenne | 85.1% | Données 5min + indicateurs 30min + step index |
 | Dual-Binary | CNN-LSTM purified | MACD | 92.4% | Meilleur accuracy |
 | Direction-Only (t vs t-1) | CNN-LSTM | MACD | 81.1% | Nouvelle formule |
 | Regime Classifier | CNN-LSTM raw | 3 classes | 86.3% | Valide (pas leakage) |
@@ -234,7 +236,7 @@ Cause identifiée : Le modèle rate 42% des retournements (transitions).
 | **Reinforcement Learning** | Absent | Pas de gym/stable_baselines dans les imports |
 | **Transformer / Attention** | Absent | Architecture restée CNN-LSTM uniquement |
 | **Données tick-by-tick** | Absent | Mentionné comme option (microstructure) |
-| **Multi-timeframe ensemble** | Partiellement | 5min, 15min et 30min testés |
+| **Multi-timeframe ensemble** | Partiellement | 5min avec estimation 30min testée (Clock-Injected), 15min aussi testé |
 | **Volume / OBV comme signal** | Absent | Mentionné comme piste, jamais implémenté comme feature ML |
 | **Returns forecasting (régression)** | Absent | Recommandé par expert (Gu, Kelly & Xiu 2020), pas implémenté |
 
