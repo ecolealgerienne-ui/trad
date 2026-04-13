@@ -247,7 +247,7 @@ def main():
     parser.add_argument('--assets', nargs='+', default=['BTC','ETH','BNB','ADA','LTC'])
     args = parser.parse_args()
 
-    label_col = f'{args.indicator}_{args.timeframe}_label'
+    label_col = f'oracle_label_{args.indicator}_{args.timeframe}'
 
     logger.info(f"ORACLE LIVE — {args.indicator.upper()} {args.timeframe}")
     logger.info(f"Label column: {label_col}")
