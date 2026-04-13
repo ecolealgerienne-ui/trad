@@ -50,9 +50,13 @@ MACD_FAST = 12
 MACD_SLOW = 26
 MACD_SIGNAL = 9
 
-# Kalman parameters (project-wide defaults)
+# Kalman parameters for LIVE features (causal filter_update)
 KALMAN_PROCESS_VAR = 0.01
 KALMAN_MEASURE_VAR = 0.1
+
+# Kalman parameters for ORACLE LABELS (non-causal smooth, tunable separately)
+KALMAN_LABEL_PROCESS_VAR = 0.01
+KALMAN_LABEL_MEASURE_VAR = 0.1
 
 
 # =============================================================================
@@ -135,6 +139,61 @@ def kalman_filter_standard(data):
     out = np.full(len(data), np.nan)
     out[valid] = sm[:, 0]
     return out
+
+
+# =============================================================================
+# ORACLE LABEL (non-causal smooth — ML training target)
+# =============================================================================
+
+def compute_oracle_label(indicator_tf: np.ndarray) -> np.ndarray:
+    """
+    Compute non-causal oracle labels from a resampled indicator series.
+
+    Uses kf.smooth() — NON-CAUSAL by design (RTS smoother, uses future data).
+    This is the target label for ML training: what the model should predict.
+
+    Label[t] = 1 if smoothed[t-1] > smoothed[t-2] else 0.
+    Positions 0 and 1 get label 0 (not enough history).
+
+    Uses KALMAN_LABEL_* parameters (tunable separately from live Kalman).
+
+    Args:
+        indicator_tf: indicator values at candle-close resolution (30min or 1h)
+
+    Returns:
+        Array of int labels (0 or 1), same length as input.
+    """
+    from pykalman import KalmanFilter as KF
+
+    n = len(indicator_tf)
+    labels = np.zeros(n, dtype=int)
+
+    valid = ~np.isnan(indicator_tf)
+    if valid.sum() < 3:
+        return labels
+
+    vd = indicator_tf[valid]
+
+    kf = KF(
+        transition_matrices=[[1, 1], [0, 1]],
+        observation_matrices=[[1, 0]],
+        initial_state_mean=[vd[0], 0.0],
+        initial_state_covariance=np.eye(2),
+        observation_covariance=KALMAN_LABEL_MEASURE_VAR,
+        transition_covariance=np.eye(2) * KALMAN_LABEL_PROCESS_VAR,
+    )
+
+    # SMOOTH (non-causal, RTS smoother) — INTENTIONAL for labels
+    smoothed_means, _ = kf.smooth(vd)
+    smoothed = np.full(n, np.nan)
+    smoothed[valid] = smoothed_means[:, 0]
+
+    # Label[t] = 1 if smoothed[t-1] > smoothed[t-2] else 0
+    for t in range(2, n):
+        if not np.isnan(smoothed[t - 1]) and not np.isnan(smoothed[t - 2]):
+            labels[t] = 1 if smoothed[t - 1] > smoothed[t - 2] else 0
+
+    return labels
 
 
 # =============================================================================
@@ -512,8 +571,41 @@ def generate_multitf_csv(asset_name, output_dir, indicators=None):
             nc = (result[f'{ind}_{suffix}_label'].diff().abs() > 0).sum()
             logger.info(f"    {ind.upper()} label changes: {nc:,}")
 
-        # Validation
+        # Validation (live features only)
         run_validation(result, df_5min, tf_minutes, suffix, indicators)
+
+        # =================================================================
+        # ORACLE LABELS (non-causal smooth — ML training targets)
+        # =================================================================
+        logger.info(f"    Computing oracle labels ({suffix}, Kalman SMOOTH)...")
+        df_tf = resample_ohlcv(df_5min, tf_minutes)
+
+        for ind_name in indicators:
+            if ind_name == 'macd':
+                ind_tf_values = calculate_macd_standard(df_tf).values
+            elif ind_name == 'rsi':
+                ind_tf_values = calculate_rsi_standard(df_tf).values
+            elif ind_name == 'cci':
+                ind_tf_values = calculate_cci_standard(df_tf).values
+            else:
+                continue
+
+            # Compute labels at tf resolution (non-causal)
+            labels_tf = compute_oracle_label(ind_tf_values)
+
+            # Forward-fill to 5min resolution
+            # No shift — label is non-causal by construction
+            labels_series = pd.Series(labels_tf, index=df_tf.index)
+            labels_5min = labels_series.reindex(df_5min.index, method='ffill').fillna(0).astype(int)
+
+            col_name = f'oracle_label_{ind_name}_{suffix}'
+            result[col_name] = labels_5min.values
+
+            n_up = (labels_5min == 1).sum()
+            n_down = (labels_5min == 0).sum()
+            n_changes = (labels_5min.diff().abs() > 0).sum()
+            logger.info(f"      {col_name}: {n_up:,} UP, {n_down:,} DOWN "
+                        f"({n_up/(n_up+n_down)*100:.1f}% UP), {n_changes:,} direction changes")
 
     # Save
     os.makedirs(output_dir, exist_ok=True)
