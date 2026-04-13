@@ -901,6 +901,22 @@ def main():
     report = compute_report(trades, eq, data_sources, args.capital, funnel)
     write_outputs(trades, eq, report, args.output_dir)
 
+    # Auto-generate post-mortem if we have a JSONL log
+    try:
+        from src.postmortem_reporter import generate_report as gen_postmortem
+        jsonl_source = str(log_path) if args.mode == "live" else args.jsonl
+        if jsonl_source:
+            pm_path = gen_postmortem(
+                jsonl_source,
+                f"{args.output_dir}/trades.csv",
+                f"{args.output_dir}/report.json",
+                f"{args.output_dir}/equity_curve.csv",
+                "logs",
+            )
+            logger.info("Post-mortem written to %s", pm_path)
+    except Exception as e:
+        logger.warning("Post-mortem generation failed: %s", e)
+
 
 if __name__ == "__main__":
     main()
