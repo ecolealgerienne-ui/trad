@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+import pandas as pd
 
 # ---------------------------------------------------------------------------
 # Data loading
@@ -664,6 +665,7 @@ def generate_report(
     report_json: str = "results/report.json",
     equity_csv: str = "results/equity_curve.csv",
     output_dir: str = "logs",
+    prompt_version: str = "v6",
 ) -> str:
     """Generate full post-mortem markdown."""
     data = load_backtest_data(jsonl_path, trades_csv, report_json, equity_csv)
@@ -690,11 +692,30 @@ def generate_report(
     if len(report_md) > 100000:
         report_md = report_md[:100000] + "\n\n[... truncated ...]\n"
 
+    # Compute duration label from data
+    cycles = data["cycles"]
+    if len(cycles) >= 2:
+        first = cycles[0].get("as_of", "")
+        last = cycles[-1].get("as_of", "")
+        try:
+            t0 = pd.Timestamp(first)
+            t1 = pd.Timestamp(last)
+            delta_days = (t1 - t0).days
+            if delta_days <= 1:
+                duration = "1day"
+            elif delta_days <= 7:
+                duration = f"{delta_days}days"
+            else:
+                duration = f"{delta_days // 30}month" if delta_days >= 28 else f"{delta_days}days"
+        except Exception:
+            duration = "unknown"
+    else:
+        duration = "unknown"
+
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    backtest_id = Path(jsonl_path).stem
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_path = out_dir / f"postmortem_{backtest_id}_{ts}.md"
+    ts = datetime.now().strftime("%Y%m%d_%H%M")
+    out_path = out_dir / f"postmortem_{ts}_{prompt_version}_{duration}.md"
 
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(report_md)
@@ -712,8 +733,12 @@ def main():
     parser.add_argument("--report-json", default="results/report.json")
     parser.add_argument("--equity-csv", default="results/equity_curve.csv")
     parser.add_argument("--output-dir", default="logs")
+    parser.add_argument("--prompt-version", default="v6", help="Prompt version for filename (e.g. v6, v7)")
     args = parser.parse_args()
-    path = generate_report(args.jsonl, args.trades_csv, args.report_json, args.equity_csv, args.output_dir)
+    path = generate_report(
+        args.jsonl, args.trades_csv, args.report_json, args.equity_csv,
+        args.output_dir, args.prompt_version,
+    )
     print(f"Post-mortem written to: {path}")
 
 

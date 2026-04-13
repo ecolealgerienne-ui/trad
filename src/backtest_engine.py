@@ -906,12 +906,15 @@ def main():
         from src.postmortem_reporter import generate_report as gen_postmortem
         jsonl_source = str(log_path) if args.mode == "live" else args.jsonl
         if jsonl_source:
+            # Extract prompt version from filename (gemma_system_vN.txt → vN)
+            prompt_ver = Path(args.prompt).stem.split("_")[-1] if args.prompt else "v?"
             pm_path = gen_postmortem(
                 jsonl_source,
                 f"{args.output_dir}/trades.csv",
                 f"{args.output_dir}/report.json",
                 f"{args.output_dir}/equity_curve.csv",
                 "logs",
+                prompt_ver,
             )
             logger.info("Post-mortem written to %s", pm_path)
     except Exception as e:
