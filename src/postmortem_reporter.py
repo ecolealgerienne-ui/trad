@@ -162,14 +162,17 @@ def section_context(data: Dict) -> str:
     last_ts = cycles[-1].get("as_of", "?") if cycles else "?"
     n_cycles = len(cycles)
     n_success = sum(1 for c in cycles if c.get("success"))
+    n_trades = len(data["trades"])
     latencies = [c.get("latency_sec", 0) for c in cycles if c.get("latency_sec")]
     wall_clock = sum(latencies)
+    run_type = "short run" if n_trades < 30 else "full run"
 
     lines = [
         "## 1. Context",
         "",
         f"- **Period**: {first_ts} → {last_ts}",
         f"- **Cycles**: {n_cycles} ({n_success} successful, {n_cycles - n_success} failed)",
+        f"- **Run type**: {run_type} ({n_trades} trades)",
         f"- **Model**: qwen3:8b",
         f"- **Prompt**: v6",
         f"- **Thinking**: enabled",
@@ -305,6 +308,8 @@ def section_conviction(data: Dict) -> str:
     trades = data["trades"]
     if not trades:
         return "## 5. Conviction Analysis\n\nNo trades.\n"
+    if len(trades) < 10:
+        return f"## 5. Conviction Analysis\n\n*{len(trades)} trades — too few for meaningful conviction buckets. Skipped.*\n"
 
     buckets = {"1-3": [], "4-6": [], "7-8": [], "9-10": []}
     for t in trades:
@@ -361,6 +366,8 @@ def section_conviction(data: Dict) -> str:
 
 def section_multipliers(data: Dict) -> str:
     """Section 6: ATR Multipliers Effectiveness."""
+    if len(data["trades"]) < 10:
+        return f"## 6. ATR Multipliers Effectiveness\n\n*{len(data['trades'])} trades — too few for multiplier analysis. Skipped.*\n"
     trades = data["trades"]
     if not trades:
         return "## 6. ATR Multipliers Effectiveness\n\nNo trades.\n"
