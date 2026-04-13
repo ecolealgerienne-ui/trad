@@ -32,7 +32,6 @@ from src.feature_engineering import (
     load_all_data,
 )
 from src.llm_client import (
-    call_gemma,
     load_system_prompt,
     ping_ollama,
 )
@@ -211,13 +210,15 @@ def print_stats(stats: dict):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Dry-run: features → Gemma → log")
+    parser = argparse.ArgumentParser(description="Dry-run: features → LLM → log")
     parser.add_argument("--days", type=int, default=3, help="Number of days to test (default: 3)")
     parser.add_argument("--start", type=str, default=None, help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end", type=str, default=None, help="End date (YYYY-MM-DD)")
     parser.add_argument("--data-dir", type=str, default="src/data_trad", help="Data directory")
-    parser.add_argument("--model", type=str, default="qwen3:8b", help="Ollama model name")
+    parser.add_argument("--model", type=str, default=None, help="Model override")
     parser.add_argument("--temperature", type=float, default=0.2, help="LLM temperature")
+    parser.add_argument("--provider", choices=["ollama", "anthropic"], default="ollama",
+                        help="LLM provider (default: ollama)")
     args = parser.parse_args()
 
     # --- Setup logs directory ---
@@ -227,24 +228,37 @@ def main():
     log_filename = f"test_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
     log_path = logs_dir / log_filename
 
-    # --- Ping Ollama ---
-    logger.info("Pinging Ollama at %s ...", "http://localhost:11434")
-    if not ping_ollama():
-        logger.error(
-            "Ollama is not reachable at http://localhost:11434. "
-            "Start it with: ollama serve"
-        )
-        sys.exit(1)
-    logger.info("Ollama OK.")
+    # --- Create provider ---
+    if args.provider == "anthropic":
+        import os
+        from dotenv import load_dotenv
+        load_dotenv()
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            logger.error("ANTHROPIC_API_KEY missing in .env")
+            sys.exit(1)
+        from src.llm_client import AnthropicProvider, DEFAULT_ANTHROPIC_MODEL
+        model = args.model or DEFAULT_ANTHROPIC_MODEL
+        provider = AnthropicProvider(api_key=api_key, model=model, temperature=args.temperature)
+        system_prompt = load_system_prompt("gemma_system_v6_anthropic.txt")
+        logger.info("Using Anthropic provider: %s", model)
+    else:
+        logger.info("Pinging Ollama at %s ...", "http://localhost:11434")
+        if not ping_ollama():
+            logger.error("Ollama is not reachable. Start with: ollama serve")
+            sys.exit(1)
+        logger.info("Ollama OK.")
+        from src.llm_client import OllamaProvider, DEFAULT_OLLAMA_MODEL
+        model = args.model or DEFAULT_OLLAMA_MODEL
+        provider = OllamaProvider(model=model, temperature=args.temperature)
+        system_prompt = load_system_prompt("gemma_system_v6.txt")
 
     # --- Load data ---
     logger.info("Loading data from %s ...", args.data_dir)
     data_sources = load_all_data(args.data_dir)
     logger.info("Loaded %d datasets.", len(data_sources))
 
-    # --- Load system prompt ---
-    system_prompt = load_system_prompt()
-    logger.info("System prompt loaded (%d chars).", len(system_prompt))
+    logger.info("System prompt: %d chars.", len(system_prompt))
 
     # --- Generate timestamps ---
     timestamps = generate_timestamps(data_sources, args.days, args.start, args.end)
@@ -308,22 +322,20 @@ def main():
                 # Anonymize
                 anon_features = anonymize_and_format(features, ANON_MAPPING)
 
-                # Call Gemma
-                llm_result = call_gemma(
-                    system_prompt,
-                    anon_features,
-                    temperature=args.temperature,
-                    model=args.model,
-                )
+                # Call LLM
+                from src.llm_client import features_to_text
+                user_msg = features_to_text(anon_features)
+                llm_result = provider.call(system_prompt, user_msg)
 
                 record["success"] = llm_result["success"]
                 record["retried"] = llm_result["retried"]
                 record["latency_sec"] = llm_result["latency_sec"]
                 record["parsed"] = llm_result["parsed"]
-                record["validation_errors"] = llm_result["validation_errors"]
-                record["raw_response_first_attempt"] = llm_result["raw_response_first_attempt"]
-                record["raw_response_retry"] = llm_result["raw_response_retry"]
+                record["validation_errors"] = llm_result.get("validation_errors", [])
+                record["raw_response"] = llm_result.get("raw_response")
                 record["thinking"] = llm_result.get("thinking")
+                record["parse_method"] = llm_result.get("parse_method")
+                record["usage"] = llm_result.get("usage")
 
                 # Update progress bar
                 status = "OK" if llm_result["success"] else "FAIL"
@@ -350,6 +362,20 @@ def main():
         json.dump(stats, f, indent=2, default=str)
     logger.info("Stats saved to %s", stats_path)
     logger.info("Full log: %s (%d records)", log_path, len(records))
+
+    # Cost summary for Anthropic
+    cost = provider.get_cost_estimate()
+    if cost:
+        print("\n" + "=" * 50)
+        print("  ANTHROPIC COST SUMMARY")
+        print("=" * 50)
+        print(f"  Total cost:           ${cost['total_usd']:.4f}")
+        print(f"    Input (non-cached): ${cost['input_usd']:.4f}  ({cost['total_input_tokens']} tokens)")
+        print(f"    Cached reads:       ${cost['cache_read_usd']:.4f}  ({cost['cache_read_tokens']} tokens)")
+        print(f"    Output:             ${cost['output_usd']:.4f}  ({cost['total_output_tokens']} tokens)")
+        print(f"    Cache writes:       ${cost['cache_write_usd']:.4f}  ({cost['cache_write_tokens']} tokens)")
+        print(f"  Cache hit rate:       {cost['cache_hit_rate_pct']:.1f}%")
+        print("=" * 50)
 
 
 if __name__ == "__main__":

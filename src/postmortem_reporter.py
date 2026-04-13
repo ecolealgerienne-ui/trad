@@ -179,8 +179,26 @@ def section_context(data: Dict) -> str:
         f"- **Thinking**: enabled",
         f"- **Wall clock**: {wall_clock/3600:.1f} hours ({wall_clock:.0f}s)",
         f"- **Avg latency**: {np.mean(latencies):.1f}s" if latencies else "",
-        "",
     ]
+
+    # Provider info from first cycle with usage data
+    for c in cycles:
+        usage = c.get("usage")
+        if usage:
+            lines.append(f"- **Provider**: anthropic")
+            total_cost_tokens = sum(c2.get("usage", {}).get("input_tokens", 0) for c2 in cycles if c2.get("usage"))
+            total_out = sum(c2.get("usage", {}).get("output_tokens", 0) for c2 in cycles if c2.get("usage"))
+            total_cache = sum(c2.get("usage", {}).get("cache_read_tokens", 0) for c2 in cycles if c2.get("usage"))
+            est_cost = total_cost_tokens * 3.0 / 1e6 + total_out * 15.0 / 1e6 + total_cache * 0.3 / 1e6
+            lines.append(f"- **Estimated cost**: ${est_cost:.4f}")
+            if total_cost_tokens > 0:
+                cache_rate = total_cache / total_cost_tokens * 100
+                lines.append(f"- **Cache hit rate**: {cache_rate:.1f}%")
+            break
+    else:
+        lines.append(f"- **Provider**: ollama (local)")
+
+    lines.append("")
     return "\n".join(lines)
 
 

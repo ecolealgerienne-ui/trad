@@ -38,7 +38,7 @@ from src.feature_engineering import (
     load_all_data,
 )
 from src.context_formatter import format_user_message
-from src.llm_client import call_gemma, load_system_prompt, ping_ollama
+from src.llm_client import load_system_prompt, ping_ollama
 
 logging.basicConfig(
     level=logging.INFO,
@@ -399,10 +399,10 @@ def load_resume_state(jsonl_path: str) -> Tuple[str, List[dict]]:
 def run_backtest_live(
     data_sources: dict, timestamps: List[pd.Timestamp],
     capital: float, fee_rate: float, risk_pct: float,
-    model: str, system_prompt: str, log_path: Path,
+    provider, system_prompt: str, log_path: Path,
     resume_records: Optional[List[dict]] = None,
 ) -> Tuple[List[Trade], List[dict], dict]:
-    """Live backtest: call Qwen each cycle with full context."""
+    """Live backtest: call LLM each cycle with full context."""
     all_trades: List[Trade] = []
     equity_curve: List[dict] = []
     positions: List[Position] = []
@@ -472,13 +472,14 @@ def run_backtest_live(
                     anon_features, portfolio, list(recent_trades), session.to_dict(),
                 )
 
-                # Call Qwen
-                llm_result = call_gemma(system_prompt, anon_features, model=model,
-                                        _override_user_content=user_msg)
+                # Call LLM
+                llm_result = provider.call(system_prompt, user_msg)
                 record["success"] = llm_result["success"]
                 record["latency_sec"] = llm_result["latency_sec"]
                 record["parsed"] = llm_result["parsed"]
                 record["thinking"] = llm_result.get("thinking")
+                record["parse_method"] = llm_result.get("parse_method")
+                record["usage"] = llm_result.get("usage")
 
                 if not llm_result["success"]:
                     record["error"] = str(llm_result.get("validation_errors", []))
@@ -845,9 +846,10 @@ def main():
     parser.add_argument("--capital", type=float, default=10000.0)
     parser.add_argument("--fee-rate", type=float, default=0.001)
     parser.add_argument("--risk-pct", type=float, default=0.20)
-    parser.add_argument("--model", default="qwen3:8b")
-    parser.add_argument("--prompt", default="gemma_system_v6.txt")
+    parser.add_argument("--model", default=None, help="Model override")
+    parser.add_argument("--prompt", default=None, help="Prompt file override")
     parser.add_argument("--output-dir", default="results")
+    parser.add_argument("--provider", choices=["ollama", "anthropic"], default="ollama")
     args = parser.parse_args()
 
     logger.info("Loading OHLCV data from %s ...", args.data_dir)
@@ -862,13 +864,32 @@ def main():
             data_sources, args.jsonl, args.capital, args.fee_rate, args.risk_pct,
         )
     else:
-        # Live mode
-        if not ping_ollama():
-            logger.error("Ollama not reachable. Start with: ollama serve")
-            sys.exit(1)
+        # Live mode — create provider
+        if args.provider == "anthropic":
+            import os
+            from dotenv import load_dotenv
+            load_dotenv()
+            api_key = os.environ.get("ANTHROPIC_API_KEY")
+            if not api_key:
+                logger.error("ANTHROPIC_API_KEY missing in .env")
+                sys.exit(1)
+            from src.llm_client import AnthropicProvider, DEFAULT_ANTHROPIC_MODEL
+            model = args.model or DEFAULT_ANTHROPIC_MODEL
+            prompt_file = args.prompt or "gemma_system_v6_anthropic.txt"
+            live_provider = AnthropicProvider(api_key=api_key, model=model)
+            logger.info("Using Anthropic: %s", model)
+        else:
+            if not ping_ollama():
+                logger.error("Ollama not reachable. Start with: ollama serve")
+                sys.exit(1)
+            from src.llm_client import OllamaProvider, DEFAULT_OLLAMA_MODEL
+            model = args.model or DEFAULT_OLLAMA_MODEL
+            prompt_file = args.prompt or "gemma_system_v6.txt"
+            live_provider = OllamaProvider(model=model)
+            logger.info("Using Ollama: %s", model)
 
-        system_prompt = load_system_prompt(args.prompt)
-        logger.info("Prompt loaded: %s (%d chars)", args.prompt, len(system_prompt))
+        system_prompt = load_system_prompt(prompt_file)
+        logger.info("Prompt loaded: %s (%d chars)", prompt_file, len(system_prompt))
 
         # Determine timestamps
         if args.resume:
@@ -895,8 +916,23 @@ def main():
 
         trades, eq, funnel = run_backtest_live(
             data_sources, timestamps, args.capital, args.fee_rate, args.risk_pct,
-            args.model, system_prompt, log_path,
+            live_provider, system_prompt, log_path,
         )
+
+        # Cost summary for Anthropic
+        cost = live_provider.get_cost_estimate()
+        if cost:
+            logger.info(
+                "\n" + "=" * 50 +
+                f"\n  ANTHROPIC COST SUMMARY"
+                f"\n  Total cost:           ${cost['total_usd']:.4f}"
+                f"\n    Input (non-cached): ${cost['input_usd']:.4f}  ({cost['total_input_tokens']} tokens)"
+                f"\n    Cached reads:       ${cost['cache_read_usd']:.4f}  ({cost['cache_read_tokens']} tokens)"
+                f"\n    Output:             ${cost['output_usd']:.4f}  ({cost['total_output_tokens']} tokens)"
+                f"\n    Cache writes:       ${cost['cache_write_usd']:.4f}  ({cost['cache_write_tokens']} tokens)"
+                f"\n  Cache hit rate:       {cost['cache_hit_rate_pct']:.1f}%"
+                f"\n" + "=" * 50
+            )
 
     report = compute_report(trades, eq, data_sources, args.capital, funnel)
     write_outputs(trades, eq, report, args.output_dir)
