@@ -23,10 +23,11 @@ def find_switches(preds):
     return np.where(np.diff(preds) != 0)[0] + 1
 
 
-def analyze_model(indicator, timeframe, threshold=0.5):
+def analyze_model(indicator, timeframe, threshold=0.5, crossfeat=False):
     """Run full KPI analysis for one model. Returns dict of metrics."""
-    model_name = f'{indicator}_{timeframe}'
-    npz_path = f'{PREPARED_DATA_DIR}/{model_name}_dataset.npz'
+    suffix = '_crossfeat' if crossfeat else ''
+    model_name = f'{indicator}_{timeframe}{suffix}'
+    npz_path = f'{PREPARED_DATA_DIR}/{indicator}_{timeframe}{suffix}_dataset.npz'
 
     if not Path(npz_path).exists():
         return None
@@ -127,18 +128,24 @@ def analyze_model(indicator, timeframe, threshold=0.5):
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description='Compare all models KPIs')
+    parser.add_argument('--crossfeat', action='store_true', help='Analyze crossfeat models')
+    args = parser.parse_args()
+
     models = [
         ('macd', '30m'), ('cci', '30m'), ('rsi', '30m'),
         ('macd', '1h'), ('cci', '1h'), ('rsi', '1h'),
     ]
 
+    suffix_label = ' (crossfeat)' if args.crossfeat else ''
     results = []
     for ind, tf in models:
-        r = analyze_model(ind, tf)
+        r = analyze_model(ind, tf, crossfeat=args.crossfeat)
         if r:
             results.append(r)
         else:
-            print(f"  SKIP {ind}_{tf}: NPZ not found")
+            print(f"  SKIP {ind}_{tf}{suffix_label}: NPZ not found")
 
     if not results:
         print("No models found!")

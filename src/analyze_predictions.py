@@ -345,10 +345,12 @@ def main():
     parser.add_argument('--indicator', default='macd', choices=['macd', 'rsi', 'cci'])
     parser.add_argument('--timeframe', default='30m', choices=['30m', '1h'])
     parser.add_argument('--threshold', type=float, default=0.5, help='Decision threshold')
+    parser.add_argument('--crossfeat', action='store_true', help='Analyze crossfeat model')
     args = parser.parse_args()
 
-    model_name = f'{args.indicator}_{args.timeframe}'
-    npz_path = f'{PREPARED_DATA_DIR}/{model_name}_dataset.npz'
+    suffix = '_crossfeat' if args.crossfeat else ''
+    model_name = f'{args.indicator}_{args.timeframe}{suffix}'
+    npz_path = f'{PREPARED_DATA_DIR}/{args.indicator}_{args.timeframe}{suffix}_dataset.npz'
 
     if not Path(npz_path).exists():
         logger.error(f"NPZ not found: {npz_path}")

@@ -33,14 +33,16 @@ def main():
     parser = argparse.ArgumentParser(description='Evaluate multitf pilot model')
     parser.add_argument('--indicator', default='macd', choices=['macd', 'rsi', 'cci'])
     parser.add_argument('--timeframe', default='30m', choices=['30m', '1h'])
+    parser.add_argument('--crossfeat', action='store_true', help='Evaluate crossfeat model')
     args = parser.parse_args()
 
-    model_name = f'{args.indicator}_{args.timeframe}'
-    npz_path = f'{PREPARED_DATA_DIR}/{model_name}_dataset.npz'
+    suffix = '_crossfeat' if args.crossfeat else ''
+    model_name = f'{args.indicator}_{args.timeframe}{suffix}'
+    npz_path = f'{PREPARED_DATA_DIR}/{args.indicator}_{args.timeframe}{suffix}_dataset.npz'
 
     if not Path(npz_path).exists():
         logger.error(f"NPZ not found: {npz_path}")
-        logger.error(f"Run: python src/train_multitf.py --indicator {args.indicator} --timeframe {args.timeframe}")
+        logger.error(f"Run: python src/train_multitf.py --indicator {args.indicator} --timeframe {args.timeframe} {'--crossfeat' if args.crossfeat else ''}")
         return
 
     data = np.load(npz_path, allow_pickle=True)
