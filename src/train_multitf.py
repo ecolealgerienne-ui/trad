@@ -98,16 +98,22 @@ def load_asset_data(asset_name, indicator, timeframe, crossfeat=False):
         all_indicators = ['macd', 'rsi', 'cci']
         feature_cols = []
 
-        # Always include 30m features for all indicators
+        # Always include 30m features for all indicators (live + filtered + velocity)
         for ind in all_indicators:
             feature_cols.append(f'{ind}_30m_live')
             feature_cols.append(f'{ind}_30m_filtered')
+            vel_col = f'{ind}_30m_velocity'
+            if vel_col in df.columns:
+                feature_cols.append(vel_col)
 
         # For 1h targets, also include 1h features
         if timeframe == '1h':
             for ind in all_indicators:
                 feature_cols.append(f'{ind}_1h_live')
                 feature_cols.append(f'{ind}_1h_filtered')
+                vel_col = f'{ind}_1h_velocity'
+                if vel_col in df.columns:
+                    feature_cols.append(vel_col)
     else:
         # Single-indicator features (original behavior)
         feature_cols = [f'{indicator}_{timeframe}_live', f'{indicator}_{timeframe}_filtered']
