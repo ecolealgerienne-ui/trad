@@ -77,9 +77,14 @@ def find_csv(asset_name, indicator):
         f"Run: python src/prepare_multitf_csv.py --assets {asset_name}")
 
 
-def load_asset_data(asset_name, indicator, timeframe):
+def load_asset_data(asset_name, indicator, timeframe, crossfeat=False):
     """
     Load CSV and extract feature + label columns for one asset.
+
+    Normal mode (crossfeat=False): 2-3 features from the target indicator only.
+    Cross-feature mode (crossfeat=True):
+      - 30m target: 6 features (macd/rsi/cci × _live + _filtered at 30m)
+      - 1h target: 12 features (6 at 30m + 6 at 1h)
 
     Returns:
         DataFrame with columns: feature_0, feature_1, ..., label
@@ -88,12 +93,27 @@ def load_asset_data(asset_name, indicator, timeframe):
     csv_path = find_csv(asset_name, indicator)
     df = pd.read_csv(csv_path, parse_dates=['datetime']).set_index('datetime').sort_index()
 
-    feature_cols = [f'{indicator}_{timeframe}_live', f'{indicator}_{timeframe}_filtered']
+    if crossfeat:
+        # Cross-indicator features
+        all_indicators = ['macd', 'rsi', 'cci']
+        feature_cols = []
 
-    # Add velocity as 3rd feature if available
-    vel_col = f'{indicator}_{timeframe}_velocity'
-    if vel_col in df.columns:
-        feature_cols.append(vel_col)
+        # Always include 30m features for all indicators
+        for ind in all_indicators:
+            feature_cols.append(f'{ind}_30m_live')
+            feature_cols.append(f'{ind}_30m_filtered')
+
+        # For 1h targets, also include 1h features
+        if timeframe == '1h':
+            for ind in all_indicators:
+                feature_cols.append(f'{ind}_1h_live')
+                feature_cols.append(f'{ind}_1h_filtered')
+    else:
+        # Single-indicator features (original behavior)
+        feature_cols = [f'{indicator}_{timeframe}_live', f'{indicator}_{timeframe}_filtered']
+        vel_col = f'{indicator}_{timeframe}_velocity'
+        if vel_col in df.columns:
+            feature_cols.append(vel_col)
 
     label_col = f'oracle_label_{indicator}_{timeframe}'
 
@@ -112,7 +132,7 @@ def load_asset_data(asset_name, indicator, timeframe):
     result = result.dropna()
     n_dropped = n_before - len(result)
 
-    logger.info(f"  {asset_name}: {len(result):,} rows (dropped {n_dropped:,} warm-up NaN)")
+    logger.info(f"  {asset_name}: {len(result):,} rows, {n_features} features (dropped {n_dropped:,} NaN)")
 
     return result
 
@@ -195,7 +215,7 @@ def create_sequences(df, window=WINDOW):
     return X, y
 
 
-def prepare_all_assets(assets, indicator, timeframe):
+def prepare_all_assets(assets, indicator, timeframe, crossfeat=False):
     """
     Full pipeline: load → split → normalize → sequences → concatenate.
 
@@ -212,7 +232,7 @@ def prepare_all_assets(assets, indicator, timeframe):
         logger.info(f"\n  --- {asset} ---")
 
         # Load
-        df = load_asset_data(asset, indicator, timeframe)
+        df = load_asset_data(asset, indicator, timeframe, crossfeat=crossfeat)
 
         # Detect feature columns from loaded data
         feature_cols = [c for c in df.columns if c.startswith('feature_')]
@@ -498,6 +518,8 @@ def main():
     parser.add_argument('--dense-dropout', type=float, default=0.3)
     parser.add_argument('--device', default='auto', choices=['auto', 'cuda', 'cpu'])
     parser.add_argument('--seed', type=int, default=SEED)
+    parser.add_argument('--crossfeat', action='store_true',
+                        help='Use cross-indicator features (6 for 30m, 12 for 1h)')
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -507,12 +529,21 @@ def main():
     if device == 'auto':
         device = 'cpu'
 
-    model_name = f'{args.indicator}_{args.timeframe}'
+    suffix = '_crossfeat' if args.crossfeat else ''
+    model_name = f'{args.indicator}_{args.timeframe}{suffix}'
 
     logger.info("=" * 60)
     logger.info(f"TRAINING Net_{model_name}")
     logger.info("=" * 60)
-    logger.info(f"Features: {args.indicator}_{args.timeframe}_live, {args.indicator}_{args.timeframe}_filtered")
+    if args.crossfeat:
+        feat_desc = "ALL indicators (macd+rsi+cci) × _live + _filtered"
+        if args.timeframe == '1h':
+            feat_desc += " × (30m + 1h)"
+        else:
+            feat_desc += f" at {args.timeframe}"
+        logger.info(f"Features: {feat_desc}")
+    else:
+        logger.info(f"Features: {args.indicator}_{args.timeframe}_live, _filtered [+velocity if available]")
     logger.info(f"Target:   oracle_label_{args.indicator}_{args.timeframe}")
     logger.info(f"Assets:   {args.assets}")
     logger.info(f"Device:   {device}")
@@ -523,7 +554,7 @@ def main():
     # =========================================================================
     logger.info("\n1. Data preparation...")
     X_train, y_train, X_val, y_val, X_test, y_test, norm_stats, metadata = \
-        prepare_all_assets(args.assets, args.indicator, args.timeframe)
+        prepare_all_assets(args.assets, args.indicator, args.timeframe, crossfeat=args.crossfeat)
 
     # Save norm stats
     norm_path = f'{PREPARED_DATA_DIR}/norm_stats_{model_name}.json'
