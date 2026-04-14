@@ -265,4 +265,59 @@ MACD 30m with threshold 0.1 achieves **1.2× ratio, 60.5% justified, 11.7% spuri
 
 ---
 
+## ÉTAPES 7-8 — Complete Analyses (post-normalization)
+
+### Step 7: Binary vs Regression
+
+| Model | Binary ratio | Regression ratio | R_strong_agree ratio | R_strong_agree det<6% |
+|-------|-------------|-----------------|---------------------|----------------------|
+| macd_30m | **2.5×** | 2.7× | **1.2×** | 73.4% |
+| cci_30m | **2.5×** | 2.5× | **1.2×** | 73.1% |
+| rsi_30m | 2.8× | **2.7×** | **1.2×** | 66.0% |
+| macd_1h | **3.1×** | 3.9× | **1.3×** | 48.8% |
+| cci_1h | **3.4×** | 3.7× | **1.2×** | 43.3% |
+| rsi_1h | **3.4×** | 3.5× | **1.2×** | 35.4% |
+
+Binary wins 4/6 on switch ratio. R_strong_agree consistently 1.2× across all models.
+
+### Step 8: All discrimination analyses
+
+| Analysis | Best ratio | Same as before? |
+|----------|-----------|----------------|
+| Magnitude filter | 1.2× | Yes |
+| Magnitude dynamics | 1.4× | Yes |
+| Cross-model | 1.0-1.4× | Yes |
+| Cross-timeframe | 1.0-1.7× | Yes |
+
+All below 5× threshold. Normalization changed nothing.
+
+### Complete Experiment Log (~40 experiments)
+
+| # | Approach | Best result | Verdict |
+|---|----------|-------------|---------|
+| 1 | Single 2-feat | ratio 2.8× | Baseline |
+| 2 | + velocity (3-feat) | ratio 2.7× | Marginal |
+| 3 | **Crossfeat 6-feat** | **ratio 2.2-2.5×** | **Best single** |
+| 4 | Cross + velocity (9-feat) | ratio 2.4× | Worse |
+| 5 | CNN-GRU | loss better, ratio worse | No help |
+| 6 | TCN causal | loss better, ratio worse | No help |
+| 7 | Window 12/50 | ±0.2% acc | No help |
+| 8 | Regression | R²=0.91 global, −0.24 transition | Plateau prediction |
+| 9 | Magnitude filter/dynamics | ratio 1.2-1.4× | Cannot discriminate |
+| 10 | Cross-model/TF filter | ratio 1.0-1.7× | Same signal |
+| 11 | R_strong_agree | **ratio 1.2×** | Best filter, −20-30% det |
+| 12 | **Unanimous 3-arch** | **ratio 0.5×** | **Best absolute**, −37% det |
+| 13 | MACD normalization | R² transition worse | Mixed |
+
+### Recommended for Backtest PnL
+
+| Mode | Method | Ratio | Det<6% | Models needed |
+|------|--------|-------|--------|--------------|
+| Ultra-conservative | Unanimous 3-arch | 0.5× | 63% | 3 (LSTM+GRU+TCN) |
+| Conservative | R_strong_agree | 1.2× | 73% | 2 (binary + regression) |
+| Moderate | Majority 2/3 | 1.8× | 84% | 3 (LSTM+GRU+TCN) |
+| Aggressive | No filter | 2.5× | 91% | 1 |
+
+---
+
 ## ÉTAPE 9 — Final Decision (pending)
