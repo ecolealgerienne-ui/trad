@@ -689,3 +689,65 @@ The crossfeat approach is the first modification that meaningfully reduces false
 - **The model still can't anticipate transitions** (prob before = prob mid-plateau, diff = 0.006)
 
 The fundamental limitation remains: transitions in crypto are unpredictable from price-derived features alone. But crossfeat provides the best noise reduction so far.
+
+### 9-Feature Variant (crossfeat + velocity)
+
+Added velocity (Kalman state[1]) for each indicator: 3 × (live + filtered + velocity) = 9 features.
+
+| KPI | 6-feat (cross) | 9-feat (cross+vel) |
+|-----|----------------|-------------------|
+| Val accuracy | 89.8% | **90.7%** |
+| Switch ratio | **2.2×** | 2.4× |
+| Justified switches | 57.4% | **62.7%** |
+| Spurious switches | 20.1% | **18.0%** |
+| Plateaus 1 switch | **33.3%** | 27.6% |
+| Best epoch | 8 | **3** (overfits faster) |
+
+The 9-feat variant improves accuracy and switch precision but loses the discipline advantage (ratio 2.4× vs 2.2×). The velocity helps accuracy but doesn't reduce the overall switch count.
+
+**Best configurations:**
+- **For discipline (fewest switches):** 6-feat crossfeat (ratio 2.2×)
+- **For precision (best switch quality):** 9-feat crossfeat+vel (62.7% justified, 18% spurious)
+
+---
+
+## Complete Experiment Summary
+
+### All Configurations Tested (BTC, MACD 30m target)
+
+| # | Config | Features | Val Acc | Ratio | Justified | Spurious | Best Epoch |
+|---|--------|----------|---------|-------|-----------|----------|------------|
+| 1 | Single | live + filtered (2) | **90.8%** | 2.8× | 58.3% | 21.8% | 21 |
+| 2 | + velocity | + velocity (3) | 91.1% | 2.7× | 59.6% | 21.1% | 17 |
+| 3 | **Crossfeat** | 3 ind × (live+filt) (6) | 89.8% | **2.2×** | 57.4% | 20.1% | 8 |
+| 4 | Cross + vel | 3 ind × (live+filt+vel) (9) | 90.7% | 2.4× | **62.7%** | **18.0%** | 3 |
+
+### What Worked
+
+1. **Cross-indicator features (6-feat):** Only approach to meaningfully reduce switch ratio (2.8× → 2.2×, −21%)
+2. **Velocity helps accuracy** when combined with cross-features (+0.9%)
+3. **CNN-LSTM learns non-linear cross-indicator patterns** that simple rules couldn't capture
+
+### What Didn't Work
+
+1. **Velocity alone:** Marginal improvement (2.8× → 2.7×)
+2. **Cross-model filtering rules:** Ratios 1.0-1.5× (same signal)
+3. **Cross-timeframe filtering:** Ratios 1.0-1.7× (too correlated)
+4. **All models still can't anticipate transitions:** prob before ≈ prob mid-plateau
+
+### Structural Limitation Confirmed
+
+Despite testing 4 feature configurations, 5 filtering approaches, and 6 models:
+- **Best switch ratio: 2.2×** (still 2.2× more switches than Oracle)
+- **Persistence baseline (98%) still beats all models (89-91%)**
+- **Transition accuracy: 44-53%** (barely above random)
+- **No model anticipates transitions** (probability gap < 0.01)
+
+The signal exists (Oracle +8,316% PnL net) but requires future information (kf.smooth). Causal approximation from price-derived features alone hits a fundamental ceiling.
+
+### Recommended Next Directions
+
+1. **Volume features** — only price-derived signal NOT yet tested, exists in CSV but never used as ML feature
+2. **Non-price data** — funding rates, order book depth, liquidation data
+3. **Post-processing** — hysteresis/holding minimum on the 6-feat crossfeat predictions to reduce remaining false switches from 2.2× toward 1.5×
+4. **LLM approach** — fundamentally different paradigm, already being explored in parallel
