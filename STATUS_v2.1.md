@@ -535,3 +535,94 @@ Cross-model filtering is NOT a viable path. To filter false switches, we would n
 - **Independent signals**: volume, volatility (ATR), order flow, funding rates
 - **Post-processing**: hysteresis, holding minimum, confidence thresholds on the SAME model
 - **Architecture changes**: predict transition probability directly instead of direction
+
+---
+
+## Cross-Timeframe Switch Discrimination (30m ↔ 1h)
+
+### Results
+
+| Filtering | Best Ratio | Best Rule |
+|-----------|-----------|-----------|
+| macd_30m filtered by macd_1h | 1.0× | 1h no switch before [t-3,t] |
+| macd_1h filtered by macd_30m | 1.7× | 30m direction disagrees at t+3 |
+| cci_30m filtered by cci_1h | 1.2× | 1h no switch in [t-3,t+3] |
+| cci_1h filtered by cci_30m | 1.1× | 30m direction disagrees at t+3 |
+| rsi_30m filtered by rsi_1h | 1.3× | 1h no switch in [t-3,t+3] |
+| rsi_1h filtered by rsi_30m | 1.0× | 30m no switch after [t,t+3] |
+
+All ratios 0.8-1.7×. No viable rule (need >3× to be useful).
+
+### Conclusion
+
+Cross-timeframe signals are as useless as cross-model signals. The 30m and 1h of the same indicator are highly correlated — when 30m makes a false switch, 1h is in the same state of confusion.
+
+---
+
+## Velocity Feature Experiment
+
+### Hypothesis
+
+The Kalman state contains [position, velocity]. Position was used (filtered column), but velocity (slope estimate) was never given to the model. The velocity approaching zero could signal imminent transitions — the missing information identified in KPI 4.
+
+### Background
+
+In the original project, velocity was used as a MODEL OUTPUT (Force STRONG/WEAK label), never as an INPUT feature. It was abandoned in Phase 2.8 because Force didn't help trading. But it was never tested as a feature for ML prediction.
+
+### Implementation
+
+Added `{ind}_{tf}_velocity` column to CSV (Kalman state[1], same freeze/provisional logic as position). Training with 3 features: `_live`, `_filtered`, `_velocity`.
+
+### Results (BTC, MACD 30m, 128/128/64 architecture)
+
+| Metric | 2-features | 3-features (+velocity) | Delta |
+|--------|-----------|------------------------|-------|
+| Val accuracy | 90.8% | 91.1% | +0.3% |
+| **Switch ratio** | **2.8×** | **2.7×** | **-0.1×** |
+| Clean plateaus | 22.3% | 26.0% | +3.7% |
+| Spurious switches | 21.8% | 21.1% | -0.7% |
+| Justified switches | 58.3% | 59.6% | +1.3% |
+| Prob before transition | 0.4957 | 0.5119 | +0.016 |
+| Grey zone | 4.9% | 4.0% | -0.9% |
+
+### Verdict
+
+**Marginal improvement across all KPIs, no significant change.** Switch ratio 2.7× >> 2.0× threshold. The velocity feature helps very slightly with plateau stability (+3.7% clean plateaus) but does not solve the transition detection problem.
+
+The causal velocity is just the smoothed diff of the filtered position — information the model could already infer implicitly from the 25-step sequence of `macd_30m_filtered`.
+
+---
+
+## Final Diagnosis — Structural Limitation
+
+### Three filtering approaches tested, all failed
+
+| Approach | Best Ratio | Verdict |
+|----------|-----------|---------|
+| Cross-model (MACD↔RSI↔CCI, same TF) | 1.0-1.5× | Same latent signal |
+| Cross-timeframe (30m↔1h, same indicator) | 1.0-1.7× | Too correlated |
+| Additional feature (Kalman velocity) | 2.7× ratio (was 2.8×) | Marginal |
+
+### Root cause confirmed
+
+The model knows the **current direction** with 91% accuracy and AUC 0.97. But it **cannot predict when the direction will change** because:
+
+1. **Transitions are inherently unpredictable** from past price data alone in crypto markets (sudden, news-driven, liquidation-driven)
+2. **All features are derived from the same price** — MACD, RSI, CCI, Kalman position, Kalman velocity are all projections of close/high/low. No independent information.
+3. **The non-causal smooth (Oracle) requires future data** — the quality of the Oracle labels comes precisely from seeing what happens AFTER the transition. No causal feature can replicate this.
+4. **The persistence baseline (98.3%) beats all models (91%)** — confirming that for this label structure (constant blocks with rare transitions), prediction is trivial except at the hard points.
+
+### What would be needed
+
+To break through this ceiling, the model needs **information that is NOT derived from price**:
+- **Volume spikes** (precede some transitions)
+- **Order book imbalance** (bid/ask pressure)
+- **Funding rates** (leverage positioning)
+- **Liquidation data** (cascade events)
+- **Sentiment / news** (external catalysts)
+- **On-chain data** (whale movements)
+
+Or a fundamentally different approach:
+- **LLM-based analysis** of market context
+- **Regime detection** from external signals
+- **Event-driven** trading instead of continuous prediction
