@@ -973,3 +973,48 @@ Both true and false switches show the **same V-shape** pattern: magnitude decrea
 | 7 | Regression R² | 0.91 global, −0.14 transitions | Plateau prediction |
 | 8 | Magnitude threshold | 1.2-1.3× | Cannot discriminate |
 | 9 | Magnitude dynamics | 1.8× max | Same shape, level diff only |
+
+---
+
+## All 6 Regression Models — Complete Results
+
+### Training Summary
+
+| Model | Val MSE | Best Epoch | Test/Train std |
+|-------|---------|------------|----------------|
+| macd_30m | **0.1570** | 8 | 2.21× ⚠️ |
+| cci_30m | 0.1729 | 6 | 0.99× ✅ |
+| rsi_30m | 0.2248 | 7 | 1.02× ✅ |
+| macd_1h | 0.1827 | 6 | 2.21× ⚠️ |
+| cci_1h | 0.1953 | 2 | 0.99× ✅ |
+| rsi_1h | 0.2384 | 4 | 0.98× ✅ |
+
+### Evaluation (test set, BTC only)
+
+| Model | R² | Correlation | Sign Acc | Persistence | Kurt |
+|-------|-----|------------|----------|-------------|------|
+| **macd_30m** | **0.9110** | **0.9546** | 91.3% | 98.3% | 12.96 |
+| cci_30m | 0.8297 | 0.9110 | 88.5% | 97.9% | 3.59 |
+| rsi_30m | 0.7774 | 0.8817 | 84.6% | 97.5% | 0.76 |
+| **macd_1h** | **0.8911** | **0.9449** | 91.0% | 99.2% | 12.33 |
+| cci_1h | 0.8106 | 0.9004 | 87.8% | 99.0% | 4.18 |
+| rsi_1h | 0.7584 | 0.8710 | 84.3% | 98.8% | 1.01 |
+
+### Key Observations
+
+1. **Hierarchy preserved**: MACD > CCI > RSI across all metrics, 30m ≈ 1h
+2. **All R² > 0.75**: substantial continuous signal for all 6 models
+3. **Sign accuracy ≈ classification accuracy**: regression doesn't improve binary prediction (91.3% vs 90.8% for MACD 30m)
+4. **MACD test divergent** (std ×2.2): BTC MACD dynamics differ between train period ($4k-$60k) and test period ($60k-$100k). CCI and RSI are perfectly stable.
+5. **Heavy tails on MACD** (kurtosis 12-13): rare but extreme prediction errors. CCI/RSI have lighter tails.
+6. **Persistence still beats all models** on sign accuracy (97-99% vs 84-91%)
+
+### Deep Analysis Reminder (from MACD 30m)
+
+The global R²=0.91 is misleading:
+- **R² plateau = 0.92** (87.9% of data, easy)
+- **R² transition = −0.14** (12.1% of data, the part that matters)
+- **Magnitude filter ratio: 1.2-1.3×** (cannot discriminate true/false switches)
+- **Dynamics ratio: 1.8×** (same V-shape for true and false)
+
+These patterns likely apply to all 6 models: high global R² driven by plateau prediction.
