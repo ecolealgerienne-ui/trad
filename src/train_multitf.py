@@ -89,6 +89,12 @@ def load_asset_data(asset_name, indicator, timeframe):
     df = pd.read_csv(csv_path, parse_dates=['datetime']).set_index('datetime').sort_index()
 
     feature_cols = [f'{indicator}_{timeframe}_live', f'{indicator}_{timeframe}_filtered']
+
+    # Add velocity as 3rd feature if available
+    vel_col = f'{indicator}_{timeframe}_velocity'
+    if vel_col in df.columns:
+        feature_cols.append(vel_col)
+
     label_col = f'oracle_label_{indicator}_{timeframe}'
 
     missing = [c for c in feature_cols + [label_col] if c not in df.columns]
@@ -96,8 +102,10 @@ def load_asset_data(asset_name, indicator, timeframe):
         raise ValueError(f"Missing columns in {csv_path}: {missing}")
 
     # Extract only needed columns
+    n_features = len(feature_cols)
     result = df[feature_cols + [label_col]].copy()
-    result.columns = ['feature_0', 'feature_1', 'label']
+    new_col_names = [f'feature_{i}' for i in range(n_features)] + ['label']
+    result.columns = new_col_names
 
     # Drop warm-up NaN rows (features NaN at the start)
     n_before = len(result)
@@ -170,16 +178,18 @@ def create_sequences(df, window=WINDOW):
         X: (n_sequences, window, n_features) float32
         y: (n_sequences,) int
     """
-    features = df[['feature_0', 'feature_1']].values.astype(np.float32)
+    feat_cols = [c for c in df.columns if c.startswith('feature_')]
+    features = df[feat_cols].values.astype(np.float32)
     labels = df['label'].values.astype(np.int64)
 
     n = len(df)
+    n_feat = features.shape[1]
     if n < window:
-        return np.empty((0, window, 2), dtype=np.float32), np.empty((0,), dtype=np.int64)
+        return np.empty((0, window, n_feat), dtype=np.float32), np.empty((0,), dtype=np.int64)
 
     # Sliding window (vectorized)
     indices = np.arange(window)[None, :] + np.arange(n - window + 1)[:, None]
-    X = features[indices]  # (n_seq, window, 2)
+    X = features[indices]  # (n_seq, window, n_feat)
     y = labels[window - 1:]  # label at last step of each window
 
     return X, y
@@ -194,7 +204,7 @@ def prepare_all_assets(assets, indicator, timeframe):
         norm_stats: dict of per-asset normalization stats
         metadata: dict with pipeline info
     """
-    feature_cols = ['feature_0', 'feature_1']
+    feature_cols = [c for c in df_train.columns if c.startswith('feature_')]
     all_norm_stats = {}
 
     splits = {'train': [], 'val': [], 'test': []}
@@ -538,8 +548,10 @@ def main():
     # 3. Model
     # =========================================================================
     logger.info("\n3. Creating model...")
+    n_features = X_train.shape[2]
+    logger.info(f"  Detected {n_features} features")
     model = CNNLSTMClassifier(
-        n_features=2, window=WINDOW,
+        n_features=n_features, window=WINDOW,
         cnn_filters=args.cnn_filters, lstm_hidden=args.lstm_hidden,
         lstm_layers=args.lstm_layers, lstm_dropout=args.lstm_dropout,
         dense_hidden=args.dense_hidden, dense_dropout=args.dense_dropout,

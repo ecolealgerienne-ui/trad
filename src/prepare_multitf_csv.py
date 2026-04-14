@@ -125,20 +125,22 @@ def calculate_cci_standard(df):
     return (tp - sma) / (0.015 * mad)
 
 def kalman_filter_standard(data):
-    """Forward-only Kalman on 1D series. For validation."""
+    """Forward-only Kalman on 1D series. Returns (position, velocity) arrays."""
     from pykalman import KalmanFilter as KF
     valid = ~np.isnan(data)
     if valid.sum() < 2:
-        return np.full(len(data), np.nan)
+        return np.full(len(data), np.nan), np.full(len(data), np.nan)
     vd = data[valid]
     kf = KF(transition_matrices=[[1,1],[0,1]], observation_matrices=[[1,0]],
             initial_state_mean=[vd[0], 0.0], initial_state_covariance=np.eye(2),
             observation_covariance=KALMAN_MEASURE_VAR,
             transition_covariance=np.eye(2) * KALMAN_PROCESS_VAR)
     sm, _ = kf.filter(vd)
-    out = np.full(len(data), np.nan)
-    out[valid] = sm[:, 0]
-    return out
+    pos = np.full(len(data), np.nan)
+    vel = np.full(len(data), np.nan)
+    pos[valid] = sm[:, 0]
+    vel[valid] = sm[:, 1]
+    return pos, vel
 
 
 # =============================================================================
@@ -346,14 +348,14 @@ def compute_kalman_live(indicator_live, is_close):
     Kalman filter_update with frozen/provisional state. Freeze at closure.
     Same logic as indicators: state advances only at bucket closure.
 
-    Initialization matches kf.filter() behavior: first observation sets the
-    initial state via a single filter_update from the prior (initial_state_mean,
-    initial_state_covariance). Subsequent closures advance the state normally.
+    Returns (n, 2) array: [position, velocity] at each 5min step.
+    Position = smoothed indicator value (state[0])
+    Velocity = estimated slope/rate of change (state[1])
     """
     from pykalman import KalmanFilter as KF
 
     n = len(indicator_live)
-    out = np.full(n, np.nan)
+    out = np.full((n, 2), np.nan)  # (n, 2) = [position, velocity]
 
     # Collect closure values to run standard kf.filter for exact state sequence
     closure_indices = []
@@ -377,28 +379,20 @@ def compute_kalman_live(indicator_live, is_close):
 
     state_means, state_covs = kf.filter(cv)
 
-    # Now replay: at each 5min step, compute provisional from the frozen state
-    # of the previous closure. At closures, advance to next frozen state.
-    #
-    # frozen_state[k] = state after processing closure k
-    # Between closure k and k+1, provisional = filter_update(frozen_state[k], obs)
-
-    # Build lookup: for each closure index, the state AFTER processing it
-    # closure_states[k] = (state_mean, state_cov) after kf processed closure k
+    # Build lookup: closure_states[k] = (state_mean, state_cov) after processing closure k
     closure_states = [(state_means[k], state_covs[k]) for k in range(len(closure_values))]
 
-    # Also need the state BEFORE the first closure (initial state)
     init_mean = np.array([cv[0], 0.0])
     init_cov = np.eye(2)
 
-    # Assign output at closure points (these are exact by construction)
+    # Assign output at closure points — both position and velocity
     for k, ci in enumerate(closure_indices):
-        out[ci] = state_means[k, 0]
+        out[ci, 0] = state_means[k, 0]  # position
+        out[ci, 1] = state_means[k, 1]  # velocity
 
-    # For provisional (non-closure) points, find which closure they follow
-    # and compute filter_update from that closure's state
+    # For provisional (non-closure) points, compute from frozen state
     closure_set = set(closure_indices)
-    current_closure_k = -1  # index into closure_states
+    current_closure_k = -1
     sm_cl = init_mean
     sc_cl = init_cov
 
@@ -408,7 +402,6 @@ def compute_kalman_live(indicator_live, is_close):
             continue
 
         if i in closure_set:
-            # This is a closure point — output already set, advance frozen state
             current_closure_k += 1
             sm_cl = closure_states[current_closure_k][0]
             sc_cl = closure_states[current_closure_k][1]
@@ -417,7 +410,8 @@ def compute_kalman_live(indicator_live, is_close):
         # Non-closure: provisional from frozen state
         if current_closure_k >= 0:
             sm_p, _ = kf.filter_update(sm_cl, sc_cl, observation=obs)
-            out[i] = sm_p[0]
+            out[i, 0] = sm_p[0]  # position
+            out[i, 1] = sm_p[1]  # velocity
 
     return out
 
@@ -485,12 +479,22 @@ def run_validation(result, df_5min, tf_minutes, suffix, indicators):
     if 'macd' in indicators:
         ms = calculate_macd_standard(df_tf)
         ok &= compare("MACD", f'macd_{suffix}_live', ms)
-        ks = pd.Series(kalman_filter_standard(ms.values), index=df_tf.index)
-        ok &= compare("Kalman_MACD", f'macd_{suffix}_filtered', ks)
+        # Kalman position and velocity validation
+        k_pos, k_vel = kalman_filter_standard(ms.values)
+        ok &= compare("Kalman_MACD_pos", f'macd_{suffix}_filtered',
+                      pd.Series(k_pos, index=df_tf.index))
+        ok &= compare("Kalman_MACD_vel", f'macd_{suffix}_velocity',
+                      pd.Series(k_vel, index=df_tf.index))
     if 'rsi' in indicators:
         ok &= compare("RSI", f'rsi_{suffix}_live', calculate_rsi_standard(df_tf))
+        r_pos, r_vel = kalman_filter_standard(calculate_rsi_standard(df_tf).values)
+        ok &= compare("Kalman_RSI_vel", f'rsi_{suffix}_velocity',
+                      pd.Series(r_vel, index=df_tf.index))
     if 'cci' in indicators:
         ok &= compare("CCI", f'cci_{suffix}_live', calculate_cci_standard(df_tf))
+        c_pos, c_vel = kalman_filter_standard(calculate_cci_standard(df_tf).values)
+        ok &= compare("Kalman_CCI_vel", f'cci_{suffix}_velocity',
+                      pd.Series(c_vel, index=df_tf.index))
 
     if ok:
         logger.info(f"  ALL {suffix} VALIDATIONS PASSED")
@@ -554,13 +558,16 @@ def generate_multitf_csv(asset_name, output_dir, indicators=None):
         for ind, vals in ind_results.items():
             result[f'{ind}_{suffix}_live'] = vals
 
-        # Kalman on each indicator
+        # Kalman on each indicator — extract both position and velocity
         for ind, vals in ind_results.items():
             logger.info(f"    Computing Kalman on {ind}_{suffix}...")
-            filt = compute_kalman_live(vals, is_close)
+            kalman_out = compute_kalman_live(vals, is_close)  # (n, 2) = [position, velocity]
+            filt = kalman_out[:, 0]  # position
+            vel = kalman_out[:, 1]   # velocity (slope estimate)
             result[f'{ind}_{suffix}_filtered'] = filt
+            result[f'{ind}_{suffix}_velocity'] = vel
 
-            # Direction label
+            # Direction label (from position)
             fs = pd.Series(filt, index=df_5min.index)
             lab = (fs > fs.shift(1)).astype(float)
             lab.iloc[0] = 0
