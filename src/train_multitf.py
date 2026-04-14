@@ -434,22 +434,13 @@ def train_one_epoch(model, loader, loss_fn, optimizer, device, grad_clip, target
         optimizer.step()
 
         total_loss += loss.item() * len(X_batch)
-        if target_type == 'continuous':
-            all_preds.append(logits.cpu())
-            all_targets.append(y_batch.cpu())
-        else:
+        if target_type != 'continuous':
             preds = (torch.sigmoid(logits) > 0.5).float()
             correct += (preds == y_batch).sum().item()
         total += len(X_batch)
 
     if target_type == 'continuous':
-        # R² = 1 - SS_res / SS_tot
-        all_p = torch.cat(all_preds).squeeze()
-        all_t = torch.cat(all_targets).squeeze()
-        ss_res = ((all_t - all_p) ** 2).sum()
-        ss_tot = ((all_t - all_t.mean()) ** 2).sum()
-        r2 = 1.0 - (ss_res / ss_tot).item() if ss_tot > 0 else 0.0
-        return total_loss / total, r2
+        return total_loss / total, None  # R² computed in eval script, not here
     else:
         return total_loss / total, correct / total
 
@@ -460,8 +451,6 @@ def evaluate(model, loader, loss_fn, device, target_type='binary'):
     total_loss = 0
     correct = 0
     total = 0
-    all_preds = []
-    all_targets = []
 
     for X_batch, y_batch in loader:
         X_batch, y_batch = X_batch.to(device), y_batch.to(device)
@@ -469,21 +458,13 @@ def evaluate(model, loader, loss_fn, device, target_type='binary'):
         loss = loss_fn(logits, y_batch)
 
         total_loss += loss.item() * len(X_batch)
-        if target_type == 'continuous':
-            all_preds.append(logits.cpu())
-            all_targets.append(y_batch.cpu())
-        else:
+        if target_type != 'continuous':
             preds = (torch.sigmoid(logits) > 0.5).float()
             correct += (preds == y_batch).sum().item()
         total += len(X_batch)
 
     if target_type == 'continuous':
-        all_p = torch.cat(all_preds).squeeze()
-        all_t = torch.cat(all_targets).squeeze()
-        ss_res = ((all_t - all_p) ** 2).sum()
-        ss_tot = ((all_t - all_t.mean()) ** 2).sum()
-        r2 = 1.0 - (ss_res / ss_tot).item() if ss_tot > 0 else 0.0
-        return total_loss / total, r2
+        return total_loss / total, None
     else:
         return total_loss / total, correct / total
 
@@ -526,8 +507,7 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer, device,
 
         if target_type == 'continuous':
             logger.info(f"  Epoch {epoch:3d}/{epochs} — "
-                        f"Train MSE={train_loss:.4f} R²={train_metric:.4f} | "
-                        f"Val MSE={val_loss:.4f} R²={val_metric:.4f}"
+                        f"Train MSE={train_loss:.6f} | Val MSE={val_loss:.6f}"
                         f"{' *' if val_loss < best_val_loss else ''}")
         else:
             logger.info(f"  Epoch {epoch:3d}/{epochs} — "
@@ -727,8 +707,10 @@ def main():
     logger.info("=" * 60)
     logger.info(f"  Best epoch: {history['best_epoch']}")
     logger.info(f"  Best val loss: {history['best_val_loss']:.4f}")
-    metric_name = 'R²' if args.target_type == 'continuous' else 'acc'
-    logger.info(f"  Best val {metric_name}:  {history['val_acc'][history['best_epoch']-1]:.4f}")
+    if args.target_type == 'continuous':
+        logger.info(f"  Best val MSE: {history['best_val_loss']:.6f}")
+    else:
+        logger.info(f"  Best val acc:  {history['val_acc'][history['best_epoch']-1]:.4f}")
     logger.info(f"  Model: {save_path}")
     logger.info(f"  NPZ:   {npz_path}")
     logger.info(f"  Norms:  {norm_path}")
