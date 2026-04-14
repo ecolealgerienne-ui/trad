@@ -147,32 +147,25 @@ def kalman_filter_standard(data):
 # ORACLE LABEL (non-causal smooth — ML training target)
 # =============================================================================
 
-def compute_oracle_label(indicator_tf: np.ndarray) -> np.ndarray:
+def compute_oracle_label(indicator_tf: np.ndarray):
     """
-    Compute non-causal oracle labels from a resampled indicator series.
+    Compute non-causal oracle labels AND continuous slope from a resampled indicator series.
 
     Uses kf.smooth() — NON-CAUSAL by design (RTS smoother, uses future data).
-    This is the target label for ML training: what the model should predict.
-
-    Label[t] = 1 if smoothed[t-1] > smoothed[t-2] else 0.
-    Positions 0 and 1 get label 0 (not enough history).
-
-    Uses KALMAN_LABEL_* parameters (tunable separately from live Kalman).
-
-    Args:
-        indicator_tf: indicator values at candle-close resolution (30min or 1h)
 
     Returns:
-        Array of int labels (0 or 1), same length as input.
+        labels_binary: int array (0 or 1), label[t] = 1 if smoothed[t-1] > smoothed[t-2]
+        slope_continuous: float32 array, slope[t] = smoothed[t-1] - smoothed[t-2]
     """
     from pykalman import KalmanFilter as KF
 
     n = len(indicator_tf)
-    labels = np.zeros(n, dtype=int)
+    labels_binary = np.zeros(n, dtype=int)
+    slope_continuous = np.full(n, np.nan, dtype=np.float32)
 
     valid = ~np.isnan(indicator_tf)
     if valid.sum() < 3:
-        return labels
+        return labels_binary, slope_continuous
 
     vd = indicator_tf[valid]
 
@@ -190,12 +183,13 @@ def compute_oracle_label(indicator_tf: np.ndarray) -> np.ndarray:
     smoothed = np.full(n, np.nan)
     smoothed[valid] = smoothed_means[:, 0]
 
-    # Label[t] = 1 if smoothed[t-1] > smoothed[t-2] else 0
     for t in range(2, n):
         if not np.isnan(smoothed[t - 1]) and not np.isnan(smoothed[t - 2]):
-            labels[t] = 1 if smoothed[t - 1] > smoothed[t - 2] else 0
+            delta = smoothed[t - 1] - smoothed[t - 2]
+            slope_continuous[t] = delta
+            labels_binary[t] = 1 if delta > 0 else 0
 
-    return labels
+    return labels_binary, slope_continuous
 
 
 # =============================================================================
@@ -648,16 +642,19 @@ def generate_multitf_csv(asset_name, output_dir, indicators=None):
             else:
                 continue
 
-            # Compute labels at tf resolution (non-causal)
-            labels_tf = compute_oracle_label(ind_tf_values)
+            # Compute labels + slope at tf resolution (non-causal)
+            labels_tf, slope_tf = compute_oracle_label(ind_tf_values)
 
             # Forward-fill to 5min resolution
             # No shift — label is non-causal by construction
             labels_series = pd.Series(labels_tf, index=df_tf.index)
             labels_5min = labels_series.reindex(df_5min.index, method='ffill').fillna(0).astype(int)
+            result[f'oracle_label_{ind_name}_{suffix}'] = labels_5min.values
 
-            col_name = f'oracle_label_{ind_name}_{suffix}'
-            result[col_name] = labels_5min.values
+            # Forward-fill slope to 5min resolution
+            slope_series = pd.Series(slope_tf, index=df_tf.index)
+            slope_5min = slope_series.reindex(df_5min.index, method='ffill')
+            result[f'oracle_slope_{ind_name}_{suffix}'] = slope_5min.values
 
             n_up = (labels_5min == 1).sum()
             n_down = (labels_5min == 0).sum()

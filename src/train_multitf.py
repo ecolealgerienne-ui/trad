@@ -77,7 +77,7 @@ def find_csv(asset_name, indicator):
         f"Run: python src/prepare_multitf_csv.py --assets {asset_name}")
 
 
-def load_asset_data(asset_name, indicator, timeframe, crossfeat=False):
+def load_asset_data(asset_name, indicator, timeframe, crossfeat=False, target_type='binary'):
     """
     Load CSV and extract feature + label columns for one asset.
 
@@ -115,7 +115,10 @@ def load_asset_data(asset_name, indicator, timeframe, crossfeat=False):
         if vel_col in df.columns:
             feature_cols.append(vel_col)
 
-    label_col = f'oracle_label_{indicator}_{timeframe}'
+    if target_type == 'continuous':
+        label_col = f'oracle_slope_{indicator}_{timeframe}'
+    else:
+        label_col = f'oracle_label_{indicator}_{timeframe}'
 
     missing = [c for c in feature_cols + [label_col] if c not in df.columns]
     if missing:
@@ -187,7 +190,7 @@ def apply_norm(df, stats):
     return df
 
 
-def create_sequences(df, window=WINDOW):
+def create_sequences(df, window=WINDOW, target_type='binary'):
     """
     Create sliding window sequences from DataFrame.
 
@@ -196,11 +199,14 @@ def create_sequences(df, window=WINDOW):
 
     Returns:
         X: (n_sequences, window, n_features) float32
-        y: (n_sequences,) int
+        y: (n_sequences,) int64 (binary) or float32 (continuous)
     """
     feat_cols = [c for c in df.columns if c.startswith('feature_')]
     features = df[feat_cols].values.astype(np.float32)
-    labels = df['label'].values.astype(np.int64)
+    if target_type == 'continuous':
+        labels = df['label'].values.astype(np.float32)
+    else:
+        labels = df['label'].values.astype(np.int64)
 
     n = len(df)
     n_feat = features.shape[1]
@@ -215,7 +221,7 @@ def create_sequences(df, window=WINDOW):
     return X, y
 
 
-def prepare_all_assets(assets, indicator, timeframe, crossfeat=False):
+def prepare_all_assets(assets, indicator, timeframe, crossfeat=False, target_type='binary'):
     """
     Full pipeline: load → split → normalize → sequences → concatenate.
 
@@ -232,7 +238,7 @@ def prepare_all_assets(assets, indicator, timeframe, crossfeat=False):
         logger.info(f"\n  --- {asset} ---")
 
         # Load
-        df = load_asset_data(asset, indicator, timeframe, crossfeat=crossfeat)
+        df = load_asset_data(asset, indicator, timeframe, crossfeat=crossfeat, target_type=target_type)
 
         # Detect feature columns from loaded data
         feature_cols = [c for c in df.columns if c.startswith('feature_')]
@@ -260,14 +266,28 @@ def prepare_all_assets(assets, indicator, timeframe, crossfeat=False):
         logger.info(f"    Post-norm train: f0 mean={t_mean_0:.4f} std={t_std_0:.4f}, "
                     f"f1 mean={t_mean_1:.4f} std={t_std_1:.4f}")
 
-        # Label distribution in train
-        n_up = (df_train['label'] == 1).sum()
-        n_down = (df_train['label'] == 0).sum()
-        logger.info(f"    Train labels: {n_up:,} UP ({n_up/(n_up+n_down)*100:.1f}%), {n_down:,} DOWN")
+        # Label stats
+        if target_type == 'continuous':
+            # Normalize target z-score on train only
+            t_label = df_train['label']
+            slope_mean = float(t_label.mean())
+            slope_std = float(t_label.std())
+            if slope_std < 1e-10:
+                slope_std = 1.0
+            all_norm_stats[asset]['target'] = {'mean': slope_mean, 'std': slope_std}
+            df_train['label'] = (df_train['label'] - slope_mean) / slope_std
+            df_val['label'] = (df_val['label'] - slope_mean) / slope_std
+            df_test['label'] = (df_test['label'] - slope_mean) / slope_std
+            logger.info(f"    Target norm (train): mean={slope_mean:.6f} std={slope_std:.6f}")
+            logger.info(f"    Post-norm target train: mean={df_train['label'].mean():.4f} std={df_train['label'].std():.4f}")
+        else:
+            n_up = (df_train['label'] == 1).sum()
+            n_down = (df_train['label'] == 0).sum()
+            logger.info(f"    Train labels: {n_up:,} UP ({n_up/(n_up+n_down)*100:.1f}%), {n_down:,} DOWN")
 
         # Create sequences per asset (no cross-asset sequences)
         for split_name, df_split in [('train', df_train), ('val', df_val), ('test', df_test)]:
-            X, y = create_sequences(df_split)
+            X, y = create_sequences(df_split, target_type=target_type)
             splits[split_name].append((X, y))
             logger.info(f"    {split_name} sequences: {len(X):,}")
 
@@ -390,7 +410,7 @@ class SequenceDataset(Dataset):
 # TRAINING
 # =============================================================================
 
-def train_one_epoch(model, loader, loss_fn, optimizer, device, grad_clip):
+def train_one_epoch(model, loader, loss_fn, optimizer, device, grad_clip, target_type='binary'):
     model.train()
     total_loss = 0
     correct = 0
@@ -410,15 +430,19 @@ def train_one_epoch(model, loader, loss_fn, optimizer, device, grad_clip):
         optimizer.step()
 
         total_loss += loss.item() * len(X_batch)
-        preds = (torch.sigmoid(logits) > 0.5).float()
-        correct += (preds == y_batch).sum().item()
+        if target_type == 'continuous':
+            # Implicit binary accuracy: sign(predicted) == sign(target)
+            correct += ((logits > 0).float() == (y_batch > 0).float()).sum().item()
+        else:
+            preds = (torch.sigmoid(logits) > 0.5).float()
+            correct += (preds == y_batch).sum().item()
         total += len(X_batch)
 
     return total_loss / total, correct / total
 
 
 @torch.no_grad()
-def evaluate(model, loader, loss_fn, device):
+def evaluate(model, loader, loss_fn, device, target_type='binary'):
     model.eval()
     total_loss = 0
     correct = 0
@@ -430,8 +454,11 @@ def evaluate(model, loader, loss_fn, device):
         loss = loss_fn(logits, y_batch)
 
         total_loss += loss.item() * len(X_batch)
-        preds = (torch.sigmoid(logits) > 0.5).float()
-        correct += (preds == y_batch).sum().item()
+        if target_type == 'continuous':
+            correct += ((logits > 0).float() == (y_batch > 0).float()).sum().item()
+        else:
+            preds = (torch.sigmoid(logits) > 0.5).float()
+            correct += (preds == y_batch).sum().item()
         total += len(X_batch)
 
     return total_loss / total, correct / total
@@ -452,7 +479,7 @@ def generate_predictions(model, X, device, batch_size=512):
 
 
 def train_model(model, train_loader, val_loader, loss_fn, optimizer, device,
-                epochs, patience, grad_clip, save_path):
+                epochs, patience, grad_clip, save_path, target_type='binary'):
     """Full training loop with early stopping."""
     best_val_loss = float('inf')
     best_epoch = 0
@@ -460,8 +487,8 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer, device,
     history = {'train_loss': [], 'train_acc': [], 'val_loss': [], 'val_acc': []}
 
     for epoch in range(1, epochs + 1):
-        train_loss, train_acc = train_one_epoch(model, train_loader, loss_fn, optimizer, device, grad_clip)
-        val_loss, val_acc = evaluate(model, val_loader, loss_fn, device)
+        train_loss, train_acc = train_one_epoch(model, train_loader, loss_fn, optimizer, device, grad_clip, target_type)
+        val_loss, val_acc = evaluate(model, val_loader, loss_fn, device, target_type)
 
         history['train_loss'].append(train_loss)
         history['train_acc'].append(train_acc)
@@ -520,6 +547,8 @@ def main():
     parser.add_argument('--seed', type=int, default=SEED)
     parser.add_argument('--crossfeat', action='store_true',
                         help='Use cross-indicator features (6 for 30m, 12 for 1h)')
+    parser.add_argument('--target-type', default='binary', choices=['binary', 'continuous'],
+                        help='Target type: binary (classification) or continuous (regression)')
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -529,7 +558,12 @@ def main():
     if device == 'auto':
         device = 'cpu'
 
-    suffix = '_crossfeat' if args.crossfeat else ''
+    suffix_parts = []
+    if args.crossfeat:
+        suffix_parts.append('crossfeat')
+    if args.target_type == 'continuous':
+        suffix_parts.append('regression')
+    suffix = ('_' + '_'.join(suffix_parts)) if suffix_parts else ''
     model_name = f'{args.indicator}_{args.timeframe}{suffix}'
 
     logger.info("=" * 60)
@@ -544,7 +578,9 @@ def main():
         logger.info(f"Features: {feat_desc}")
     else:
         logger.info(f"Features: {args.indicator}_{args.timeframe}_live, _filtered [+velocity if available]")
-    logger.info(f"Target:   oracle_label_{args.indicator}_{args.timeframe}")
+    target_col = f'oracle_slope_{args.indicator}_{args.timeframe}' if args.target_type == 'continuous' \
+                 else f'oracle_label_{args.indicator}_{args.timeframe}'
+    logger.info(f"Target:   {target_col} ({args.target_type})")
     logger.info(f"Assets:   {args.assets}")
     logger.info(f"Device:   {device}")
     logger.info(f"Epochs:   {args.epochs}, Batch: {args.batch_size}, LR: {args.lr}")
@@ -554,7 +590,8 @@ def main():
     # =========================================================================
     logger.info("\n1. Data preparation...")
     X_train, y_train, X_val, y_val, X_test, y_test, norm_stats, metadata = \
-        prepare_all_assets(args.assets, args.indicator, args.timeframe, crossfeat=args.crossfeat)
+        prepare_all_assets(args.assets, args.indicator, args.timeframe,
+                          crossfeat=args.crossfeat, target_type=args.target_type)
 
     # Save norm stats
     norm_path = f'{PREPARED_DATA_DIR}/norm_stats_{model_name}.json'
@@ -589,12 +626,17 @@ def main():
         lstm_layers=args.lstm_layers, lstm_dropout=args.lstm_dropout,
         dense_hidden=args.dense_hidden, dense_dropout=args.dense_dropout,
     ).to(device)
-    loss_fn = nn.BCEWithLogitsLoss()
+    if args.target_type == 'continuous':
+        loss_fn = nn.MSELoss()
+        loss_name = 'MSELoss (regression)'
+    else:
+        loss_fn = nn.BCEWithLogitsLoss()
+        loss_name = 'BCEWithLogitsLoss (classification)'
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
     n_params = sum(p.numel() for p in model.parameters())
     logger.info(f"  Parameters: {n_params:,}")
-    logger.info(f"  Loss: BCEWithLogitsLoss (no sigmoid in model)")
+    logger.info(f"  Loss: {loss_name}")
 
     # =========================================================================
     # 4. Train
@@ -604,7 +646,7 @@ def main():
 
     history = train_model(
         model, train_loader, val_loader, loss_fn, optimizer, device,
-        args.epochs, args.patience, args.grad_clip, save_path)
+        args.epochs, args.patience, args.grad_clip, save_path, args.target_type)
 
     # Save history
     hist_path = f'models/training_history_{model_name}.json'
