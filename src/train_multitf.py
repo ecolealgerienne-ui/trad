@@ -227,7 +227,7 @@ def create_sequences(df, window=WINDOW, target_type='binary'):
     return X, y
 
 
-def prepare_all_assets(assets, indicator, timeframe, crossfeat=False, target_type='binary'):
+def prepare_all_assets(assets, indicator, timeframe, crossfeat=False, target_type='binary', window=WINDOW):
     """
     Full pipeline: load → split → normalize → sequences → concatenate.
 
@@ -249,8 +249,8 @@ def prepare_all_assets(assets, indicator, timeframe, crossfeat=False, target_typ
         # Detect feature columns from loaded data
         feature_cols = [c for c in df.columns if c.startswith('feature_')]
 
-        # Split
-        df_train, df_val, df_test = split_chronological(df)
+        # Split (gap = window size to prevent sequence overlap)
+        df_train, df_val, df_test = split_chronological(df, gap=window)
         logger.info(f"    Split: train={len(df_train):,}, val={len(df_val):,}, test={len(df_test):,}")
 
         # Normalize (stats from TRAIN ONLY)
@@ -293,7 +293,7 @@ def prepare_all_assets(assets, indicator, timeframe, crossfeat=False, target_typ
 
         # Create sequences per asset (no cross-asset sequences)
         for split_name, df_split in [('train', df_train), ('val', df_val), ('test', df_test)]:
-            X, y = create_sequences(df_split, target_type=target_type)
+            X, y = create_sequences(df_split, window=window, target_type=target_type)
             splits[split_name].append((X, y))
             logger.info(f"    {split_name} sequences: {len(X):,}")
 
@@ -318,8 +318,8 @@ def prepare_all_assets(assets, indicator, timeframe, crossfeat=False, target_typ
         'target_type': target_type,
         'crossfeat': crossfeat,
         'assets': assets,
-        'window': WINDOW,
-        'gap': WINDOW,
+        'window': window,
+        'gap': window,
         'train_ratio': 0.70,
         'val_ratio': 0.15,
         'n_train': len(X_train),
@@ -680,6 +680,8 @@ def main():
     parser.add_argument('--lstm-dropout', type=float, default=0.2)
     parser.add_argument('--dense-hidden', type=int, default=32)
     parser.add_argument('--dense-dropout', type=float, default=0.3)
+    parser.add_argument('--window', type=int, default=WINDOW,
+                        help='Sequence window length in 5min steps (default: 25 = 2h05)')
     parser.add_argument('--device', default='auto', choices=['auto', 'cuda', 'cpu'])
     parser.add_argument('--seed', type=int, default=SEED)
     parser.add_argument('--crossfeat', action='store_true',
@@ -704,6 +706,8 @@ def main():
         suffix_parts.append('regression')
     if args.arch != 'cnn-lstm':
         suffix_parts.append(args.arch.replace('-', ''))
+    if args.window != WINDOW:
+        suffix_parts.append(f'w{args.window}')
     suffix = ('_' + '_'.join(suffix_parts)) if suffix_parts else ''
     model_name = f'{args.indicator}_{args.timeframe}{suffix}'
 
@@ -725,6 +729,7 @@ def main():
     logger.info(f"Assets:   {args.assets}")
     logger.info(f"Device:   {device}")
     logger.info(f"Epochs:   {args.epochs}, Batch: {args.batch_size}, LR: {args.lr}")
+    logger.info(f"Window:   {args.window} steps ({args.window * 5} min)")
 
     # =========================================================================
     # 1. Load + Split + Normalize + Sequences
@@ -732,7 +737,8 @@ def main():
     logger.info("\n1. Data preparation...")
     X_train, y_train, X_val, y_val, X_test, y_test, norm_stats, metadata = \
         prepare_all_assets(args.assets, args.indicator, args.timeframe,
-                          crossfeat=args.crossfeat, target_type=args.target_type)
+                          crossfeat=args.crossfeat, target_type=args.target_type,
+                          window=args.window)
 
     # Save norm stats
     norm_path = f'{PREPARED_DATA_DIR}/norm_stats_{model_name}.json'
@@ -764,7 +770,7 @@ def main():
     logger.info(f"  Architecture: {args.arch}")
     ModelClass = ARCH_MAP[args.arch]
     model = ModelClass(
-        n_features=n_features, window=WINDOW,
+        n_features=n_features, window=args.window,
         cnn_filters=args.cnn_filters, lstm_hidden=args.lstm_hidden,
         lstm_layers=args.lstm_layers, lstm_dropout=args.lstm_dropout,
         dense_hidden=args.dense_hidden, dense_dropout=args.dense_dropout,
