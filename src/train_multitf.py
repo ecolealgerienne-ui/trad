@@ -398,6 +398,122 @@ class CNNLSTMClassifier(nn.Module):
         return self.head(x)    # (batch, 1)
 
 
+class CNNGRUClassifier(nn.Module):
+    """CNN-GRU variant. Same as CNN-LSTM but with GRU instead of LSTM."""
+
+    def __init__(self, n_features=2, window=25,
+                 cnn_filters=64, cnn_kernel=3,
+                 lstm_hidden=64, lstm_layers=2, lstm_dropout=0.2,
+                 dense_hidden=32, dense_dropout=0.3):
+        super().__init__()
+        self.cnn = nn.Sequential(
+            nn.Conv1d(n_features, cnn_filters, kernel_size=cnn_kernel, padding=cnn_kernel // 2),
+            nn.ReLU(), nn.Dropout(0.1))
+        self.layer_norm = nn.LayerNorm(cnn_filters)
+        self.gru = nn.GRU(
+            input_size=cnn_filters, hidden_size=lstm_hidden,
+            num_layers=lstm_layers,
+            dropout=lstm_dropout if lstm_layers > 1 else 0,
+            batch_first=True)
+        self.head = nn.Sequential(
+            nn.Linear(lstm_hidden, dense_hidden), nn.ReLU(),
+            nn.Dropout(dense_dropout), nn.Linear(dense_hidden, 1))
+
+    def forward(self, x):
+        x = x.transpose(1, 2)
+        x = self.cnn(x)
+        x = x.transpose(1, 2)
+        x = self.layer_norm(x)
+        x, _ = self.gru(x)
+        x = x[:, -1, :]
+        return self.head(x)
+
+
+class CausalConv1d(nn.Module):
+    """Causal convolution: pads only on the left side."""
+    def __init__(self, in_channels, out_channels, kernel_size, dilation=1):
+        super().__init__()
+        self.padding = (kernel_size - 1) * dilation
+        self.conv = nn.Conv1d(in_channels, out_channels, kernel_size,
+                              dilation=dilation)
+
+    def forward(self, x):
+        x = nn.functional.pad(x, (self.padding, 0))  # left pad only
+        return self.conv(x)
+
+
+class TCNBlock(nn.Module):
+    """Single TCN block with causal conv + residual connection."""
+    def __init__(self, channels, kernel_size, dilation, dropout=0.2):
+        super().__init__()
+        self.conv1 = CausalConv1d(channels, channels, kernel_size, dilation)
+        self.conv2 = CausalConv1d(channels, channels, kernel_size, dilation)
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(dropout)
+        self.norm1 = nn.LayerNorm(channels)
+        self.norm2 = nn.LayerNorm(channels)
+
+    def forward(self, x):
+        # x: (batch, channels, seq_len)
+        residual = x
+        x = self.conv1(x)
+        x = x.transpose(1, 2)  # (batch, seq_len, channels)
+        x = self.norm1(x)
+        x = x.transpose(1, 2)
+        x = self.relu(x)
+        x = self.dropout(x)
+        x = self.conv2(x)
+        x = x.transpose(1, 2)
+        x = self.norm2(x)
+        x = x.transpose(1, 2)
+        x = self.relu(x)
+        x = self.dropout(x)
+        return x + residual
+
+
+class TCNCausalClassifier(nn.Module):
+    """
+    Temporal Convolutional Network with causal convolutions.
+    No look-ahead: each output depends only on past inputs.
+    """
+
+    def __init__(self, n_features=2, window=25,
+                 cnn_filters=64, cnn_kernel=3,
+                 lstm_hidden=64, lstm_layers=2, lstm_dropout=0.2,
+                 dense_hidden=32, dense_dropout=0.3):
+        super().__init__()
+        # Input projection
+        self.input_proj = nn.Conv1d(n_features, cnn_filters, 1)
+
+        # TCN blocks with increasing dilation
+        dilations = [1, 2, 4]
+        self.tcn_blocks = nn.ModuleList([
+            TCNBlock(cnn_filters, cnn_kernel, d, lstm_dropout) for d in dilations
+        ])
+
+        # Global average pooling → dense head
+        self.head = nn.Sequential(
+            nn.Linear(cnn_filters, dense_hidden), nn.ReLU(),
+            nn.Dropout(dense_dropout), nn.Linear(dense_hidden, 1))
+
+    def forward(self, x):
+        # x: (batch, window, n_features)
+        x = x.transpose(1, 2)  # (batch, n_features, window)
+        x = self.input_proj(x)  # (batch, channels, window)
+        for block in self.tcn_blocks:
+            x = block(x)
+        # Global average pooling
+        x = x.mean(dim=2)  # (batch, channels)
+        return self.head(x)
+
+
+ARCH_MAP = {
+    'cnn-lstm': CNNLSTMClassifier,
+    'cnn-gru': CNNGRUClassifier,
+    'tcn': TCNCausalClassifier,
+}
+
+
 # =============================================================================
 # DATASET
 # =============================================================================
@@ -570,6 +686,8 @@ def main():
                         help='Use cross-indicator features (6 for 30m, 12 for 1h)')
     parser.add_argument('--target-type', default='binary', choices=['binary', 'continuous'],
                         help='Target type: binary (classification) or continuous (regression)')
+    parser.add_argument('--arch', default='cnn-lstm', choices=['cnn-lstm', 'cnn-gru', 'tcn'],
+                        help='Model architecture (default: cnn-lstm)')
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -584,6 +702,8 @@ def main():
         suffix_parts.append('crossfeat')
     if args.target_type == 'continuous':
         suffix_parts.append('regression')
+    if args.arch != 'cnn-lstm':
+        suffix_parts.append(args.arch.replace('-', ''))
     suffix = ('_' + '_'.join(suffix_parts)) if suffix_parts else ''
     model_name = f'{args.indicator}_{args.timeframe}{suffix}'
 
@@ -641,7 +761,9 @@ def main():
     logger.info("\n3. Creating model...")
     n_features = X_train.shape[2]
     logger.info(f"  Detected {n_features} features")
-    model = CNNLSTMClassifier(
+    logger.info(f"  Architecture: {args.arch}")
+    ModelClass = ARCH_MAP[args.arch]
+    model = ModelClass(
         n_features=n_features, window=WINDOW,
         cnn_filters=args.cnn_filters, lstm_hidden=args.lstm_hidden,
         lstm_layers=args.lstm_layers, lstm_dropout=args.lstm_dropout,
