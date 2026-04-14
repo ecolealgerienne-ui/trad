@@ -204,7 +204,6 @@ def prepare_all_assets(assets, indicator, timeframe):
         norm_stats: dict of per-asset normalization stats
         metadata: dict with pipeline info
     """
-    feature_cols = [c for c in df_train.columns if c.startswith('feature_')]
     all_norm_stats = {}
 
     splits = {'train': [], 'val': [], 'test': []}
@@ -214,6 +213,9 @@ def prepare_all_assets(assets, indicator, timeframe):
 
         # Load
         df = load_asset_data(asset, indicator, timeframe)
+
+        # Detect feature columns from loaded data
+        feature_cols = [c for c in df.columns if c.startswith('feature_')]
 
         # Split
         df_train, df_val, df_test = split_chronological(df)
