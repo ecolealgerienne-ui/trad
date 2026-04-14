@@ -176,7 +176,92 @@ MACD MSE improvement is an artifact of scale change, not model improvement. R² 
 
 ---
 
-## ÉTAPE 6-8 — Analyses (pending)
+## ÉTAPE 6-8 — Analyses (complete)
+
+### 6a. KPIs LSTM Crossfeat (identical to step 3)
+
+macd_30m remains best (score 1516). Hierarchy unchanged.
+
+### 6b. Cross-Architecture Vote (post-normalization)
+
+| Metric | Before norm | After norm |
+|--------|------------|-----------|
+| Error Jaccard (3-way) | 68% | **56%** |
+| Unanimous ratio | 0.8× | **0.5×** |
+| Unanimous det<6% | 71.1% | **63.2%** |
+| Unanimous spurious | 17.5% | **16.8%** |
+| Filter "both agree" ratio | 1.6× | **2.0×** |
+
+Error correlation **dropped from 68% to 56%** — normalization made architectures more diverse.
+Unanimous vote now 0.5× (fewer switches than before) but loses more detection (63% vs 71%).
+
+### 6c. Regression Evaluation (post-normalization)
+
+| Model | R² global | Correlation | Sign Acc | Pred std ratio |
+|-------|----------|-------------|----------|---------------|
+| macd_30m | **0.9114** | **0.9547** | 90.6% | 0.57× |
+| cci_30m | 0.8231 | 0.9075 | 88.4% | 0.97× ✅ |
+| rsi_30m | 0.7731 | 0.8794 | 84.4% | 1.00× ✅ |
+| macd_1h | **0.9052** | **0.9516** | 90.3% | 0.61× |
+| cci_1h | 0.7922 | 0.8912 | 86.9% | 0.98× ✅ |
+| rsi_1h | 0.7459 | 0.8638 | 83.9% | 0.99× ✅ |
+
+MACD pred std ratio 0.57-0.61× (over-correction effect). CCI/RSI stable.
+
+### 6d. Deep Regression — R² Conditionnel (THE critical table)
+
+| Model | R² global | **R² transition** | R² plateau | Before norm R² trans |
+|-------|----------|-------------------|------------|---------------------|
+| macd_30m | 0.9114 | **−0.2369** | 0.9216 | −0.1389 |
+| cci_30m | 0.8231 | **−0.4145** | 0.8514 | −0.2790 |
+| rsi_30m | 0.7731 | **−0.6550** | 0.8087 | −0.6235 |
+| macd_1h | 0.9052 | **−0.5933** | 0.9118 | −0.4690 |
+| cci_1h | 0.7922 | **−0.6910** | 0.8089 | −0.4870 |
+| rsi_1h | 0.7459 | **−1.0698** | 0.7676 | −0.8894 |
+
+**R² at transitions got WORSE after normalization** for all 6 models!
+- MACD 30m: −0.14 → **−0.24** (worse)
+- MACD 1h: −0.47 → **−0.59** (worse)
+- RSI 1h: −0.89 → **−1.07** (much worse)
+
+The MACD normalization **degraded** transition prediction. The model was actually using the raw MACD scale as implicit information about price regime.
+
+### Magnitude Threshold (MACD 30m only interesting result)
+
+| Threshold | Switches | Ratio | Justified% | Spurious% |
+|-----------|---------|-------|------------|-----------|
+| 0.0 | 6,102 | 2.7× | 57.6% | 19.7% |
+| **0.1** | **2,674** | **1.2×** | **60.5%** | **11.7%** |
+| 0.2 | 2,048 | 0.9× | 45.9% | 8.6% |
+
+MACD 30m with threshold 0.1 achieves **1.2× ratio, 60.5% justified, 11.7% spurious** — the best single-model result.
+
+---
+
+## FINAL COMPARISON — Post-Normalization
+
+### Best Configurations (all tested on BTC test set)
+
+| Rank | Config | Ratio | Spurious% | Det<6% | Notes |
+|------|--------|-------|-----------|--------|-------|
+| 1 | **Unanimous 3-arch vote** | **0.5×** | **16.8%** | 63.2% | Needs 3 models, loses 37% detection |
+| 2 | **Reg MACD 30m thr=0.1** | **1.2×** | **11.7%** | ~79% | Single model, best spurious rate |
+| 3 | **Majority 2/3 vote** | **1.8×** | 17.7% | 84.1% | Good balance |
+| 4 | Crossfeat LSTM | 2.5× | 19.4% | 90.6% | Simplest, best detection |
+| 5 | TCN crossfeat | 2.4× | 18.2% | 91.4% | Slightly better than LSTM |
+
+### Impact of MACD Normalization
+
+| Metric | Before | After | Verdict |
+|--------|--------|-------|---------|
+| Val loss (classification) | Baseline | Improved 2-5% | ✅ Better |
+| Accuracy | ~89-91% | ~83-91% | ≈ Same |
+| Switch ratio | 2.2-3.4× | 2.5-3.4× | ❌ Slightly worse |
+| R² at transitions | −0.14 to −0.89 | −0.24 to −1.07 | ❌ Worse |
+| Error Jaccard | 68% | 56% | ✅ More diverse |
+| Pred std stability | 2.21× divergent | 0.57× over-corrected | ⚠️ Different bias |
+
+**Conclusion**: MACD normalization was a mixed bag. It improved loss and diversity but degraded transition prediction. The raw MACD scale contained useful regime information.
 
 ---
 
