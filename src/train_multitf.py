@@ -494,18 +494,25 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer, device,
     history = {'train_loss': [], 'train_acc': [], 'val_loss': [], 'val_acc': []}
 
     for epoch in range(1, epochs + 1):
-        train_loss, train_acc = train_one_epoch(model, train_loader, loss_fn, optimizer, device, grad_clip, target_type)
-        val_loss, val_acc = evaluate(model, val_loader, loss_fn, device, target_type)
+        train_loss, train_metric = train_one_epoch(model, train_loader, loss_fn, optimizer, device, grad_clip, target_type)
+        val_loss, val_metric = evaluate(model, val_loader, loss_fn, device, target_type)
 
         history['train_loss'].append(train_loss)
-        history['train_acc'].append(train_acc)
+        history['train_acc'].append(train_metric)
         history['val_loss'].append(val_loss)
-        history['val_acc'].append(val_acc)
+        history['val_acc'].append(val_metric)
 
-        logger.info(f"  Epoch {epoch:3d}/{epochs} — "
-                    f"Train loss={train_loss:.4f} acc={train_acc:.4f} | "
-                    f"Val loss={val_loss:.4f} acc={val_acc:.4f}"
-                    f"{' *' if val_loss < best_val_loss else ''}")
+        if target_type == 'continuous':
+            # R² approximation: 1 - MSE/var(target) — metric is sign accuracy here
+            logger.info(f"  Epoch {epoch:3d}/{epochs} — "
+                        f"Train MSE={train_loss:.4f} sign_acc={train_metric:.4f} | "
+                        f"Val MSE={val_loss:.4f} sign_acc={val_metric:.4f}"
+                        f"{' *' if val_loss < best_val_loss else ''}")
+        else:
+            logger.info(f"  Epoch {epoch:3d}/{epochs} — "
+                        f"Train loss={train_loss:.4f} acc={train_metric:.4f} | "
+                        f"Val loss={val_loss:.4f} acc={val_metric:.4f}"
+                        f"{' *' if val_loss < best_val_loss else ''}")
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
