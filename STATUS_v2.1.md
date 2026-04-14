@@ -486,3 +486,52 @@ This confirms that accuracy is the wrong metric. Signal quality (transition dete
 **6. The real differentiator is noise, not detection**
 
 All models detect 88-94% of 30m transitions within 6 steps (KPI 1 is good everywhere). The models differ most in **how noisy they are between transitions** (KPI 2 and 3). CCI 30m's discipline wins over MACD 30m's raw speed.
+
+---
+
+## Cross-Model Switch Discrimination Analysis
+
+### Objective
+
+Test whether the predictions of the OTHER two 30m models can help distinguish false switches from true switches in a given model. If cross-model signals discriminate well, we can build a filtering rule that eliminates false switches without losing true ones.
+
+### Methodology
+
+For each model X (macd_30m, cci_30m, rsi_30m):
+1. Label each switch as TRUE (oracle transition within ±3 steps) or FALSE
+2. At each switch, compute features from the other two models Y and Z
+3. Compare feature distributions between true and false switches
+4. Test 5 filtering rules and measure benefit/cost ratio
+
+### Results: Cross-Model Signals Have No Discriminative Power
+
+| Model | Best Rule | False Filtered | True Lost | **Ratio** | Verdict |
+|-------|-----------|---------------|-----------|-----------|---------|
+| macd_30m | R1: Both contradict | 31.4% | 22.9% | **1.4×** | Unusable |
+| cci_30m | R3: Low confidence | 24.4% | 16.8% | **1.5×** | Unusable |
+| rsi_30m | R1: Both contradict | 23.4% | 23.2% | **1.0×** | Useless |
+
+A ratio of 1.0-1.5× means the rule filters nearly as many true switches as false ones. A useful rule would need ratio >3×. None of the 5 tested rules achieve this.
+
+### Feature Distribution Gaps (False vs True Switches)
+
+| Feature | MACD Gap | CCI Gap | RSI Gap | Useful? |
+|---------|----------|---------|---------|---------|
+| agree_before (other models) | 10-12pp | 8-11pp | 0-9pp | Weak |
+| prob_mean (other models) | 0.011-0.016 | 0.002-0.004 | 0.002-0.013 | None |
+| stability (other models) | 0.36-0.43 | 0.05-0.42 | 0.06-0.16 | None |
+
+All gaps are too small to build a reliable discriminator.
+
+### Root Cause
+
+MACD, RSI, and CCI are projections of the same latent signal (correlation 1.000, proven in Phase 2.13 of the original project). When one model makes a false switch, the other two are equally confused — they provide no independent information.
+
+> *"On ne peut pas voter entre trois miroirs du même objet."* — Phase 2.13 conclusion
+
+### Conclusion
+
+Cross-model filtering is NOT a viable path. To filter false switches, we would need:
+- **Independent signals**: volume, volatility (ATR), order flow, funding rates
+- **Post-processing**: hysteresis, holding minimum, confidence thresholds on the SAME model
+- **Architecture changes**: predict transition probability directly instead of direction
