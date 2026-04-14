@@ -405,3 +405,84 @@ The 91% accuracy is misleading:
 - It produces **2.8× more switches** than the oracle
 
 These caveats likely apply to all 6 models. The accuracy numbers measure "knows the current direction" — the model's actual utility for trading depends on transition detection quality, which requires dedicated KPI analysis for each model.
+
+---
+
+## All 6 Models — Signal Quality KPIs (BTC test set)
+
+### Full Comparison Table
+
+| Model | Acc% | Pers% | Trans% | AUC | N_trans | Lat_med | Lat_p90 | <6stp% | Sw_ratio | Clean% | Spur% | Grey% |
+|-------|------|-------|--------|-----|---------|---------|---------|--------|----------|--------|-------|-------|
+| **macd_30m** | **91.0** | 98.3 | **53.2** | **0.9718** | 11,151 | **0.0** | 6.0 | **93.7** | 2.8x | 22.3 | 21.8 | 4.9 |
+| cci_30m | 88.4 | 97.9 | 50.3 | 0.9535 | 2,766 | 0.0 | 7.0 | 88.9 | **2.5x** | **25.9** | 19.7 | 7.1 |
+| rsi_30m | 84.4 | 97.5 | 41.1 | 0.9269 | 3,269 | 1.0 | 7.0 | 88.1 | 2.9x | 19.0 | **19.1** | 10.3 |
+| macd_1h | 88.9 | 99.1 | 44.0 | 0.9590 | 1,124 | 1.0 | 13.0 | 63.1 | 3.6x | 15.8 | 42.3 | 5.6 |
+| cci_1h | 87.4 | 99.0 | 52.5 | 0.9482 | 1,324 | 0.0 | 12.0 | 68.9 | 3.4x | 22.5 | 40.9 | 7.4 |
+| rsi_1h | 83.2 | 98.7 | 38.6 | 0.9163 | 1,650 | 2.0 | 12.0 | 67.0 | 4.2x | 14.8 | 39.6 | 10.8 |
+
+### Signal Quality Ranking (not accuracy!)
+
+| Rank | Model | Score | Trans% | <6stp% | Ratio | Spur% |
+|------|-------|-------|--------|--------|-------|-------|
+| 1 ★ | **cci_30m** | **1,507** | 50.3% | 88.9% | 2.5x | 19.7% |
+| 2 | macd_30m | 1,464 | 53.2% | 93.7% | 2.8x | 21.8% |
+| 3 | rsi_30m | 1,059 | 41.1% | 88.1% | 2.9x | 19.1% |
+| 4 | cci_1h | 749 | 52.5% | 68.9% | 3.4x | 40.9% |
+| 5 | macd_1h | 544 | 44.0% | 63.1% | 3.6x | 42.3% |
+| 6 | rsi_1h | 441 | 38.6% | 67.0% | 4.2x | 39.6% |
+
+### Rankings Comparison
+
+```
+Accuracy ranking:        macd_30m > macd_1h > cci_30m > cci_1h > rsi_30m > rsi_1h
+Signal quality ranking:  cci_30m  > macd_30m > rsi_30m > cci_1h > macd_1h > rsi_1h
+→ Rankings DIFFER — accuracy ≠ signal quality
+```
+
+### Key Insights
+
+**1. CCI 30m is the best signal model, not MACD 30m**
+
+Despite lower accuracy (88.4% vs 91.0%), CCI 30m wins on signal quality because it is the **quietest** model:
+- Lowest switch ratio: 2.5× (vs 2.8× MACD)
+- Most clean plateaus: 25.9% (vs 22.3% MACD)
+- Decent transition accuracy: 50.3% (vs 53.2% MACD)
+
+For trading, fewer false switches = fewer bad trades = better net performance.
+
+**2. 30m systematically better than 1h on signal quality**
+
+All 3 indicators in 30m outrank their 1h counterparts:
+- 30m spurious: 19-22% vs 1h: 40-42% (2× more noise in 1h)
+- 30m detection within 6 steps: 88-94% vs 1h: 63-69%
+- 30m switch ratio: 2.5-2.9× vs 1h: 3.4-4.2×
+
+**3. MACD 30m is the best at raw detection**
+
+- Highest transition accuracy: 53.2%
+- Fastest detection: median 0 steps (instant)
+- Best AUC: 0.9718
+- Best within-6-steps: 93.7%
+
+But it generates more noise than CCI 30m (2.8× vs 2.5× ratio).
+
+**4. RSI is consistently the worst signal**
+
+Across both timeframes:
+- Lowest transition accuracy (38-41%)
+- Most grey zone probabilities (10%)
+- Slowest detection (median 1-2 steps)
+
+**5. All persistence baselines beat all models on raw accuracy**
+
+| Timeframe | Persistence | Best model |
+|-----------|-------------|------------|
+| 30m | 97.5-98.3% | 91.0% (MACD) |
+| 1h | 98.7-99.1% | 88.9% (MACD) |
+
+This confirms that accuracy is the wrong metric. Signal quality (transition detection + noise level) is what matters.
+
+**6. The real differentiator is noise, not detection**
+
+All models detect 88-94% of 30m transitions within 6 steps (KPI 1 is good everywhere). The models differ most in **how noisy they are between transitions** (KPI 2 and 3). CCI 30m's discipline wins over MACD 30m's raw speed.
