@@ -659,7 +659,7 @@ def generate_multitf_csv(asset_name, output_dir, indicators=None):
             n_up = (labels_5min == 1).sum()
             n_down = (labels_5min == 0).sum()
             n_changes = (labels_5min.diff().abs() > 0).sum()
-            logger.info(f"      {col_name}: {n_up:,} UP, {n_down:,} DOWN "
+            logger.info(f"      oracle_label_{ind_name}_{suffix}: {n_up:,} UP, {n_down:,} DOWN "
                         f"({n_up/(n_up+n_down)*100:.1f}% UP), {n_changes:,} direction changes")
 
     # Save

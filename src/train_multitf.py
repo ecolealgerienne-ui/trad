@@ -307,8 +307,10 @@ def prepare_all_assets(assets, indicator, timeframe, crossfeat=False, target_typ
     metadata = {
         'indicator': indicator,
         'timeframe': timeframe,
-        'feature_names': [f'{indicator}_{timeframe}_live', f'{indicator}_{timeframe}_filtered'],
-        'target_name': f'oracle_label_{indicator}_{timeframe}',
+        'feature_names': feature_cols if feature_cols else [f'{indicator}_{timeframe}_live', f'{indicator}_{timeframe}_filtered'],
+        'target_name': f'oracle_slope_{indicator}_{timeframe}' if target_type == 'continuous' else f'oracle_label_{indicator}_{timeframe}',
+        'target_type': target_type,
+        'crossfeat': crossfeat,
         'assets': assets,
         'window': WINDOW,
         'gap': WINDOW,
@@ -465,16 +467,21 @@ def evaluate(model, loader, loss_fn, device, target_type='binary'):
 
 
 @torch.no_grad()
-def generate_predictions(model, X, device, batch_size=512):
-    """Generate probability predictions for a dataset."""
+def generate_predictions(model, X, device, batch_size=512, target_type='binary'):
+    """Generate predictions for a dataset.
+    Binary: returns sigmoid probabilities [0, 1].
+    Continuous: returns raw logits (regression values).
+    """
     model.eval()
     ds = SequenceDataset(X, np.zeros(len(X)))
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False)
     preds = []
     for X_batch, _ in loader:
         logits = model(X_batch.to(device))
-        probs = torch.sigmoid(logits).cpu().numpy()
-        preds.append(probs)
+        if target_type == 'continuous':
+            preds.append(logits.cpu().numpy())  # Raw values for regression
+        else:
+            preds.append(torch.sigmoid(logits).cpu().numpy())  # Probabilities for classification
     return np.concatenate(preds).squeeze()
 
 
@@ -664,9 +671,9 @@ def main():
     ckpt = torch.load(save_path, map_location=device)
     model.load_state_dict(ckpt['model_state_dict'])
 
-    y_train_pred = generate_predictions(model, X_train, device)
-    y_val_pred = generate_predictions(model, X_val, device)
-    y_test_pred = generate_predictions(model, X_test, device)
+    y_train_pred = generate_predictions(model, X_train, device, target_type=args.target_type)
+    y_val_pred = generate_predictions(model, X_val, device, target_type=args.target_type)
+    y_test_pred = generate_predictions(model, X_test, device, target_type=args.target_type)
 
     logger.info(f"  Train pred: mean={y_train_pred.mean():.4f}, std={y_train_pred.std():.4f}")
     logger.info(f"  Val pred:   mean={y_val_pred.mean():.4f}, std={y_val_pred.std():.4f}")
