@@ -626,3 +626,66 @@ Or a fundamentally different approach:
 - **LLM-based analysis** of market context
 - **Regime detection** from external signals
 - **Event-driven** trading instead of continuous prediction
+
+---
+
+## Cross-Feature Experiment (6 features)
+
+### Hypothesis
+
+The single-indicator model (2 features: macd_live + macd_filtered) knows direction but can't anticipate transitions. Adding RSI and CCI as INPUT features (instead of separate models) might help the model detect regime changes — when indicators disagree, a transition may be imminent.
+
+Previous cross-model FILTERING failed (ratio 1.0-1.5×), but giving raw features to the model lets it learn non-linear combinations that simple rules can't capture.
+
+### Configuration
+
+| Parameter | Single | Crossfeat |
+|-----------|--------|-----------|
+| Features | macd_30m_live, macd_30m_filtered (2) | + rsi_30m_live/filtered + cci_30m_live/filtered (6) |
+| Target | oracle_label_macd_30m | oracle_label_macd_30m (same) |
+| Architecture | CNN-LSTM 128/128/64 | CNN-LSTM 128/128/64 (same) |
+| Input shape | (25, 2) | (25, 6) |
+
+### Results (BTC, MACD 30m target)
+
+| KPI | 2-feat (single) | 3-feat (+velocity) | **6-feat (crossfeat)** |
+|-----|----------------|-------------------|----------------------|
+| Val accuracy | **90.8%** | 91.1% | 89.8% |
+| **Switch ratio** | **2.8×** | 2.7× | **2.2×** |
+| Total switches | 6,432 | 6,065 | **5,020 (-22%)** |
+| Plateaus 1 switch (ideal) | 26.9% | 25.3% | **33.3%** |
+| Plateaus 4+ (noisy) | 23.7% | 21.1% | **17.6%** |
+| Spurious switches | 21.8% | 21.1% | 20.1% |
+| Detection <6 steps | **93.7%** | 93.3% | 90.8% |
+| Latency median | **0** | 0 | 1 |
+| Best epoch | 21 | 17 | 8 |
+
+### Analysis
+
+**Switch ratio drops from 2.8× to 2.2× (−21%)** — meets the ≥20% relative reduction criterion.
+
+The crossfeat model trades accuracy (−1%) for **discipline**:
+- 22% fewer total switches (5,020 vs 6,432)
+- 33% of plateaus have exactly 1 switch (ideal: transition in + transition out)
+- Only 17.6% of plateaus are very noisy (4+ switches) vs 23.7%
+
+The cost is slightly slower detection (+1 step median latency) and faster overfitting (best epoch 8 vs 21).
+
+### Why Cross-Features Work As Input But Failed As Filter
+
+Cross-model **filtering** (Phase 2.13 analysis) tested simple binary rules ("do RSI and CCI agree?"). The ratios were 1.0-1.5× — useless.
+
+Cross-model **features** work better because:
+1. The CNN-LSTM learns **non-linear** combinations (not just agreement/disagreement)
+2. It sees the **temporal evolution** of all 3 indicators over 25 steps
+3. It can detect **divergence patterns** (MACD changing while RSI stays flat = suspicious)
+4. The model learns to weight each indicator's contribution dynamically
+
+### Verdict
+
+The crossfeat approach is the first modification that meaningfully reduces false switches. However:
+- **2.2× is still far from 1.0×** (oracle)
+- **Val accuracy dropped 1%** (overfitting on extra features)
+- **The model still can't anticipate transitions** (prob before = prob mid-plateau, diff = 0.006)
+
+The fundamental limitation remains: transitions in crypto are unpredictable from price-derived features alone. But crossfeat provides the best noise reduction so far.
