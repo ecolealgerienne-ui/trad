@@ -94,7 +94,7 @@ def load_asset_data(asset_name, indicator, timeframe, crossfeat=False, target_ty
     df = pd.read_csv(csv_path, parse_dates=['datetime']).set_index('datetime').sort_index()
 
     if crossfeat:
-        # Cross-indicator features (live + filtered only, no velocity)
+        # Cross-indicator features (live + filtered + velocity)
         all_indicators = ['macd', 'rsi', 'cci']
         feature_cols = []
 
@@ -102,12 +102,18 @@ def load_asset_data(asset_name, indicator, timeframe, crossfeat=False, target_ty
         for ind in all_indicators:
             feature_cols.append(f'{ind}_30m_live')
             feature_cols.append(f'{ind}_30m_filtered')
+            vel_col = f'{ind}_30m_velocity'
+            if vel_col in df.columns:
+                feature_cols.append(vel_col)
 
         # For 1h targets, also include 1h features
         if timeframe == '1h':
             for ind in all_indicators:
                 feature_cols.append(f'{ind}_1h_live')
                 feature_cols.append(f'{ind}_1h_filtered')
+                vel_col = f'{ind}_1h_velocity'
+                if vel_col in df.columns:
+                    feature_cols.append(vel_col)
     else:
         # Single-indicator features (original behavior)
         feature_cols = [f'{indicator}_{timeframe}_live', f'{indicator}_{timeframe}_filtered']
