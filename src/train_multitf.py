@@ -523,7 +523,7 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer, device,
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'val_loss': val_loss,
-                'val_acc': val_acc,
+                'val_acc': val_metric,
             }, save_path)
         else:
             no_improve += 1
@@ -706,7 +706,8 @@ def main():
     logger.info("=" * 60)
     logger.info(f"  Best epoch: {history['best_epoch']}")
     logger.info(f"  Best val loss: {history['best_val_loss']:.4f}")
-    logger.info(f"  Best val acc:  {history['val_acc'][history['best_epoch']-1]:.4f}")
+    metric_name = 'sign_acc' if args.target_type == 'continuous' else 'acc'
+    logger.info(f"  Best val {metric_name}:  {history['val_acc'][history['best_epoch']-1]:.4f}")
     logger.info(f"  Model: {save_path}")
     logger.info(f"  NPZ:   {npz_path}")
     logger.info(f"  Norms:  {norm_path}")
