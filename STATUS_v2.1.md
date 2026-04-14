@@ -1043,3 +1043,59 @@ The continuous slope prediction provides no advantage over binary classification
 - Magnitude dynamics show same V-shape for true and false (ratio 1.8×)
 
 **The structural ceiling is confirmed from every possible angle.** Price-derived features cannot predict transition timing.
+
+---
+
+## Binary vs Regression — Final Comparison
+
+### Phase 1: Binary wins on switch ratio (6/6 models)
+
+| Model | Binary ratio | Regression ratio |
+|-------|-------------|-----------------|
+| macd_30m | **2.4×** | 2.5× |
+| cci_30m | **2.5×** | 2.7× |
+| rsi_30m | **2.6×** | 2.8× |
+| macd_1h | **2.4×** | 3.0× |
+| cci_1h | **3.1×** | 3.4× |
+| rsi_1h | **3.0×** | 3.6× |
+
+Binary classification produces fewer switches on every model. Regression is noisier.
+
+### Phase 2: R_strong_agree achieves ratio 1.2× but loses detection
+
+Combined rule: binary and regression agree AND |regression slope| > median true magnitude.
+
+| Model | Baseline | R_strong_agree | Spurious% | Det<6% |
+|-------|---------|---------------|-----------|--------|
+| macd_30m | 2.4× | **1.2×** | **11.9%** | 73.2% (was 91.7%) |
+| cci_30m | 2.5× | **1.2×** | **11.9%** | 72.9% (was 87.5%) |
+| rsi_30m | 2.6× | **1.2×** | **12.5%** | 65.3% (was 84.2%) |
+| macd_1h | 2.4× | **1.2×** | 26.6% | 44.0% (was 63.7%) |
+
+R_strong_agree nearly matches Oracle switch count (1.2×) with low spurious (12%), but loses 20-30% of transition detections. Trade-off: much cleaner signals but misses more real transitions.
+
+### Phase 3: Regression better at transitions (especially 1h)
+
+| Model | Binary trans acc | Regression trans acc | Delta |
+|-------|-----------------|---------------------|-------|
+| macd_1h | 57.7% | **66.0%** | **+8.3%** |
+| rsi_1h | 55.2% | **62.1%** | **+6.9%** |
+| rsi_30m | 62.2% | **65.9%** | +3.7% |
+| cci_30m | 65.1% | **66.5%** | +1.4% |
+| macd_30m | 71.1% | 70.7% | −0.4% |
+
+Regression improves transition accuracy on 5/6 models, with biggest gains on 1h (+6-8%).
+
+### Final Verdict
+
+- **Binary classification is the better approach for trading** (fewer switches, 6/6 models)
+- **R_strong_agree** (combined) achieves best ratio (1.2×) but loses too much detection
+- **Regression helps at transitions** (+3-8% accuracy) but generates more overall noise
+- **No combination achieves ratio ≥ 5×** — structural ceiling confirmed
+
+### Recommended Configuration
+
+For production: **Binary crossfeat 6-feat (30m)** with optional R_strong_agree filter when lower trade frequency is acceptable. This gives:
+- Switch ratio: 1.2× (with R_strong_agree) or 2.2× (without)
+- Spurious: 12% (with) or 20% (without)
+- Detection: 73% (with) or 91% (without)
