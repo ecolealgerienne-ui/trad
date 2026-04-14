@@ -121,3 +121,52 @@ With optional post-processing:
 - **3 window sizes** tested
 - **~30 unique experiments** total
 - **Structural ceiling**: confirmed from every angle
+
+---
+
+## All 22 Models — Training Results (crossfeat, BTC)
+
+### Classification (BCEWithLogitsLoss) — 3 architectures × 6 configs
+
+| Model | CNN-LSTM loss | CNN-GRU loss | TCN loss | **Best arch** |
+|-------|-------------|-------------|---------|--------------|
+| macd_30m | 0.2438 | **0.2174** | 0.2189 | GRU |
+| cci_30m | 0.2903 | 0.2822 | **0.2754** | TCN |
+| rsi_30m | 0.3581 | 0.3469 | **0.3397** | TCN |
+| macd_1h | 0.2526 | **0.2418** | 0.2480 | GRU |
+| cci_1h | 0.3314 | **0.3159** | 0.3187 | GRU |
+| rsi_1h | 0.3843 | **0.3706** | 0.3724 | GRU |
+
+**GRU wins 4/6, TCN wins 2/6, LSTM wins 0/6** on val loss.
+
+Note: val loss ≠ switch ratio. MACD 30m GRU had best loss (0.2174) but worst switch ratio (2.7× vs LSTM's 2.4×). KPI analysis needed for all new models before conclusions.
+
+### Regression (MSELoss) — CNN-LSTM only
+
+| Model | Val MSE | R² global | R² transition |
+|-------|---------|----------|---------------|
+| macd_30m | **0.1570** | 0.9110 | −0.14 |
+| cci_30m | 0.1729 | 0.8297 | −0.28 |
+| rsi_30m | 0.2248 | 0.7774 | −0.62 |
+| macd_1h | 0.1827 | 0.8911 | −0.47 |
+| cci_1h | 0.1953 | 0.8106 | −0.49 |
+| rsi_1h | 0.2384 | 0.7584 | −0.89 |
+
+### Hierarchy (consistent across all experiments)
+
+```
+By indicator: MACD > CCI > RSI (all metrics, all architectures)
+By timeframe: 30m ≈ 1h (30m slightly better on switch quality)
+By architecture: GRU best val loss, LSTM best switch ratio (on MACD 30m)
+```
+
+### MACD Price Normalization (in progress)
+
+**Issue identified**: MACD is in price units — BTC $4k→$100k causes MACD to scale 2.3×.
+- Train std: 47.12, Test std: 110.17, Ratio: **2.34×**
+- RSI and CCI unaffected (bounded indicators)
+
+**Fix applied**: `macd_normalized = macd / close * 10000` (basis points)
+- CSV regeneration in progress
+- MACD models (30m + 1h, all 3 architectures) must be retrained after
+- RSI and CCI results remain valid
