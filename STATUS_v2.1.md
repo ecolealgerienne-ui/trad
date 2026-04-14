@@ -921,3 +921,55 @@ This is structural:
 **Post-processing** (incremental improvement):
 - Hysteresis on crossfeat 6-feat predictions (reduce 2.2× → ~1.5×)
 - But cannot eliminate the fundamental 2× floor
+
+---
+
+## Magnitude Dynamics Analysis (Final)
+
+### Hypothesis Tested
+
+True switches might be preceded by a progressive "crescendo" in |predicted slope| while false switches are isolated spikes. If so, the temporal shape of magnitude could discriminate.
+
+### Result: Hypothesis REJECTED
+
+The trajectory is **descending** toward the switch (not ascending):
+
+```
+Offset   True mean   False mean   Gap
+t-10     1.3552      0.8411       +0.51
+t-5      0.7675      0.5050       +0.26
+t-3      0.5508      0.3778       +0.17
+t-1      0.2946      0.1812       +0.11
+t (switch) 0.2567   0.1620       +0.09  ← minimum
+t+1      0.3536      0.2697       +0.08
+t+5      0.6864      0.5522       +0.13
+```
+
+Both true and false switches show the **same V-shape** pattern: magnitude decreases toward the switch (signal crosses zero) then increases after. The gap between true and false is a **level difference** (~0.1 at switch), not a shape difference. No dynamic rule can exploit this.
+
+### Filtering Rules Tested
+
+| Rule | True kept | False filtered | **Ratio** |
+|------|-----------|---------------|-----------|
+| R_avg_window > 0.05 | 94.1% | 11.0% | **1.8×** |
+| R_max_recent > 0.1 | 93.2% | 11.5% | 1.7× |
+| R_avg_window > 0.1 | 82.6% | 25.7% | 1.5× |
+| R_max_recent > 0.2 | 79.9% | 29.2% | 1.5× |
+| max>0.2 AND slope>0 | 10.3% | 90.2% | 1.0× |
+| R_ascending [t-3,t] | 2.0% | 98.5% | 1.0× |
+
+**Best ratio: 1.8×** — all rules below the 5× threshold needed for practical use.
+
+### Complete Experiment Log (9 approaches, all failed to break 2×)
+
+| # | Approach | Best ratio | Verdict |
+|---|----------|-----------|---------|
+| 1 | Binary single (2 feat) | 2.8× switch ratio | Baseline |
+| 2 | + Velocity (3 feat) | 2.7× | Marginal |
+| 3 | Binary crossfeat (6 feat) | 2.2× | Best binary |
+| 4 | + Velocity crossfeat (9 feat) | 2.4× | Worse than 6-feat |
+| 5 | Cross-model filtering | 1.0-1.5× filter ratio | Same signal |
+| 6 | Cross-timeframe filtering | 1.0-1.7× | Too correlated |
+| 7 | Regression R² | 0.91 global, −0.14 transitions | Plateau prediction |
+| 8 | Magnitude threshold | 1.2-1.3× | Cannot discriminate |
+| 9 | Magnitude dynamics | 1.8× max | Same shape, level diff only |
