@@ -345,3 +345,63 @@ scripts/
 4. **Reformulate the problem** — predict "time until next transition" instead of direction
 5. **Train on 5 assets** — current results are BTC only
 6. **Backtest with ML predictions** — measure actual PnL with the noisy predictions vs oracle
+
+---
+
+## All 6 Models — Training Results (BTC only, 128/128/64 architecture)
+
+### Accuracy Summary
+
+| Model | Val Acc | Val Loss | Best Epoch | Train Acc | Overfitting |
+|-------|---------|----------|------------|-----------|-------------|
+| **MACD 30m** | **90.8%** | **0.2197** | 21 | 91.5% | 0.7% |
+| CCI 30m | 87.8% | 0.2837 | 9 | 88.0% | 0.2% |
+| RSI 30m | 84.1% | 0.3484 | 30 | 85.4% | 1.3% |
+| **MACD 1h** | **89.1%** | **0.2616** | 30 | 89.8% | 0.7% |
+| CCI 1h | 86.6% | 0.3075 | 21 | 87.6% | 1.0% |
+| RSI 1h | 82.7% | 0.3766 | 28 | 83.5% | 0.8% |
+
+### Observations
+
+1. **Hierarchy**: MACD > CCI > RSI — consistent across both timeframes, and consistent with the original project (Phase 2.8). MACD (trend indicator) is the most predictable, RSI (speed oscillator) the least.
+
+2. **30m > 1h**: 30m outperforms 1h by 1.2-1.7% on every indicator. 30m has more transitions to learn from (15k vs 7.6k direction changes), giving the model more signal.
+
+3. **Zero overfitting**: All models show <1.5% gap between train and val accuracy. The z-score normalization + architecture size + early stopping keep the model well-regularized.
+
+4. **Convergence speed**: CCI 30m converges fastest (epoch 9), RSI 30m slowest (epoch 30). MACD and CCI are "easier" targets.
+
+5. **All models are confident**: Prediction std ~0.39-0.43 (bimodal distribution near 0 and 1), only ~5% in grey zone [0.4, 0.6].
+
+### Models Saved
+
+```
+models/
+├── best_model_macd_30m.pth    (val_acc=90.8%)
+├── best_model_cci_30m.pth     (val_acc=87.8%)
+├── best_model_rsi_30m.pth     (val_acc=84.1%)
+├── best_model_macd_1h.pth     (val_acc=89.1%)
+├── best_model_cci_1h.pth      (val_acc=86.6%)
+├── best_model_rsi_1h.pth      (val_acc=82.7%)
+├── training_history_*.json    (6 files)
+└── kpi_macd_30m.json, kpi_macd_1h.json
+
+data/prepared/
+├── macd_30m_dataset.npz       (train/val/test + predictions)
+├── cci_30m_dataset.npz
+├── rsi_30m_dataset.npz
+├── macd_1h_dataset.npz
+├── cci_1h_dataset.npz
+├── rsi_1h_dataset.npz
+└── norm_stats_*.json          (6 files)
+```
+
+### Key Caveat (from KPI analysis on MACD 30m)
+
+The 91% accuracy is misleading:
+- **Persistence baseline** (label[t] = label[t-1]) gives **98.3%** accuracy
+- **Transition accuracy** is only **53.2%** (barely above random)
+- The model knows the **direction** but not **when direction changes**
+- It produces **2.8× more switches** than the oracle
+
+These caveats likely apply to all 6 models. The accuracy numbers measure "knows the current direction" — the model's actual utility for trading depends on transition detection quality, which requires dedicated KPI analysis for each model.
