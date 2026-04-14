@@ -417,6 +417,8 @@ def train_one_epoch(model, loader, loss_fn, optimizer, device, grad_clip, target
     total_loss = 0
     correct = 0
     total = 0
+    all_preds = []
+    all_targets = []
 
     for X_batch, y_batch in loader:
         X_batch, y_batch = X_batch.to(device), y_batch.to(device)
@@ -433,14 +435,23 @@ def train_one_epoch(model, loader, loss_fn, optimizer, device, grad_clip, target
 
         total_loss += loss.item() * len(X_batch)
         if target_type == 'continuous':
-            # Implicit binary accuracy: sign(predicted) == sign(target)
-            correct += ((logits > 0).float() == (y_batch > 0).float()).sum().item()
+            all_preds.append(logits.cpu())
+            all_targets.append(y_batch.cpu())
         else:
             preds = (torch.sigmoid(logits) > 0.5).float()
             correct += (preds == y_batch).sum().item()
         total += len(X_batch)
 
-    return total_loss / total, correct / total
+    if target_type == 'continuous':
+        # R² = 1 - SS_res / SS_tot
+        all_p = torch.cat(all_preds).squeeze()
+        all_t = torch.cat(all_targets).squeeze()
+        ss_res = ((all_t - all_p) ** 2).sum()
+        ss_tot = ((all_t - all_t.mean()) ** 2).sum()
+        r2 = 1.0 - (ss_res / ss_tot).item() if ss_tot > 0 else 0.0
+        return total_loss / total, r2
+    else:
+        return total_loss / total, correct / total
 
 
 @torch.no_grad()
@@ -449,6 +460,8 @@ def evaluate(model, loader, loss_fn, device, target_type='binary'):
     total_loss = 0
     correct = 0
     total = 0
+    all_preds = []
+    all_targets = []
 
     for X_batch, y_batch in loader:
         X_batch, y_batch = X_batch.to(device), y_batch.to(device)
@@ -457,13 +470,22 @@ def evaluate(model, loader, loss_fn, device, target_type='binary'):
 
         total_loss += loss.item() * len(X_batch)
         if target_type == 'continuous':
-            correct += ((logits > 0).float() == (y_batch > 0).float()).sum().item()
+            all_preds.append(logits.cpu())
+            all_targets.append(y_batch.cpu())
         else:
             preds = (torch.sigmoid(logits) > 0.5).float()
             correct += (preds == y_batch).sum().item()
         total += len(X_batch)
 
-    return total_loss / total, correct / total
+    if target_type == 'continuous':
+        all_p = torch.cat(all_preds).squeeze()
+        all_t = torch.cat(all_targets).squeeze()
+        ss_res = ((all_t - all_p) ** 2).sum()
+        ss_tot = ((all_t - all_t.mean()) ** 2).sum()
+        r2 = 1.0 - (ss_res / ss_tot).item() if ss_tot > 0 else 0.0
+        return total_loss / total, r2
+    else:
+        return total_loss / total, correct / total
 
 
 @torch.no_grad()
@@ -503,10 +525,9 @@ def train_model(model, train_loader, val_loader, loss_fn, optimizer, device,
         history['val_acc'].append(val_metric)
 
         if target_type == 'continuous':
-            # R² approximation: 1 - MSE/var(target) — metric is sign accuracy here
             logger.info(f"  Epoch {epoch:3d}/{epochs} — "
-                        f"Train MSE={train_loss:.4f} sign_acc={train_metric:.4f} | "
-                        f"Val MSE={val_loss:.4f} sign_acc={val_metric:.4f}"
+                        f"Train MSE={train_loss:.4f} R²={train_metric:.4f} | "
+                        f"Val MSE={val_loss:.4f} R²={val_metric:.4f}"
                         f"{' *' if val_loss < best_val_loss else ''}")
         else:
             logger.info(f"  Epoch {epoch:3d}/{epochs} — "
@@ -706,7 +727,7 @@ def main():
     logger.info("=" * 60)
     logger.info(f"  Best epoch: {history['best_epoch']}")
     logger.info(f"  Best val loss: {history['best_val_loss']:.4f}")
-    metric_name = 'sign_acc' if args.target_type == 'continuous' else 'acc'
+    metric_name = 'R²' if args.target_type == 'continuous' else 'acc'
     logger.info(f"  Best val {metric_name}:  {history['val_acc'][history['best_epoch']-1]:.4f}")
     logger.info(f"  Model: {save_path}")
     logger.info(f"  NPZ:   {npz_path}")
