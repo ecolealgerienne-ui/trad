@@ -94,9 +94,48 @@ macd_30m (1516) > cci_30m (1302) > rsi_30m (1036) > macd_1h (640) > cci_1h (486)
 
 ---
 
-## ÉTAPE 4 — 12 GRU + TCN Crossfeat (in progress)
+## ÉTAPE 4 — 12 GRU + TCN Crossfeat (complete)
 
-*Results pending...*
+### Val Loss — 3 Architectures Post-Normalization
+
+| Model | LSTM | GRU | TCN | **Best** |
+|-------|------|-----|-----|----------|
+| macd_30m | 0.2382 | 0.2317 | **0.2243** | TCN |
+| cci_30m | 0.2855 | 0.2812 | **0.2743** | TCN |
+| rsi_30m | 0.3531 | 0.3428 | **0.3382** | TCN |
+| macd_1h | 0.2466 | **0.2411** | 0.2475 | GRU |
+| cci_1h | 0.3256 | **0.3115** | 0.3135 | GRU |
+| rsi_1h | 0.3826 | **0.3685** | 0.3669 | GRU≈TCN |
+
+### Best Epochs
+
+| Model | LSTM | GRU | TCN |
+|-------|------|-----|-----|
+| macd_30m | 12 | 12 | 29 |
+| cci_30m | 10 | 16 | 19 |
+| rsi_30m | 13 | 21 | 32 |
+| macd_1h | 2 | 4 | 3 |
+| cci_1h | — | 11 | 12 |
+| rsi_1h | 2 | 6 | 8 |
+
+### Observations
+
+- **TCN wins all 3 30m models** on val loss (0.2243, 0.2743, 0.3382)
+- **GRU wins all 3 1h models** (0.2411, 0.3115, 0.3685)
+- **LSTM wins 0/6** on val loss (consistent with pre-normalization finding)
+- **TCN converges slowest** (epochs 19-32 for 30m) but reaches lowest loss
+- **1h models converge very fast** (epochs 2-6 for LSTM, 3-11 for GRU/TCN)
+
+### Before vs After Normalization — Architecture Ranking
+
+```
+BEFORE normalization: GRU wins 4/6, TCN wins 2/6, LSTM wins 0/6
+AFTER normalization:  TCN wins 3/6, GRU wins 3/6, LSTM wins 0/6
+```
+
+MACD normalization shifted the ranking: TCN now dominates on 30m.
+
+**IMPORTANT**: Val loss ≠ switch ratio. Previous analysis showed LSTM had best switch ratio despite worst loss. KPI analysis needed (step 6) to confirm.
 
 ---
 
