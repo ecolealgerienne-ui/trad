@@ -522,7 +522,9 @@ def run_validation(result, df_5min, tf_minutes, suffix, indicators):
 
     ok = True
     if 'macd' in indicators:
-        ms = calculate_macd_standard(df_tf)
+        ms_raw = calculate_macd_standard(df_tf)
+        # Normalize by price (same as live pipeline)
+        ms = ms_raw / df_tf['close'] * 10000
         ok &= compare("MACD", f'macd_{suffix}_live', ms)
         # Kalman position and velocity validation
         k_pos, k_vel = kalman_filter_standard(ms.values)
@@ -592,7 +594,12 @@ def generate_multitf_csv(asset_name, output_dir, indicators=None):
 
         if 'macd' in indicators:
             logger.info(f"    Computing MACD live...")
-            ind_results['macd'] = compute_macd_live(close_5min, is_close)
+            macd_raw = compute_macd_live(close_5min, is_close)
+            # Normalize MACD by price (MACD is in price units, scales with BTC price)
+            # Convert to basis points (stable across price regimes)
+            macd_norm = macd_raw / close_5min * 10000
+            ind_results['macd'] = macd_norm
+            logger.info(f"      MACD normalized by price (×10000/close)")
         if 'rsi' in indicators:
             logger.info(f"    Computing RSI live...")
             ind_results['rsi'] = compute_rsi_live(close_5min, is_close)
@@ -634,7 +641,10 @@ def generate_multitf_csv(asset_name, output_dir, indicators=None):
 
         for ind_name in indicators:
             if ind_name == 'macd':
-                ind_tf_values = calculate_macd_standard(df_tf).values
+                macd_std = calculate_macd_standard(df_tf).values
+                # Normalize by price (same as live MACD normalization)
+                close_tf = df_tf['close'].values
+                ind_tf_values = macd_std / close_tf * 10000
             elif ind_name == 'rsi':
                 ind_tf_values = calculate_rsi_standard(df_tf).values
             elif ind_name == 'cci':
