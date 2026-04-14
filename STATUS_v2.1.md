@@ -1099,3 +1099,30 @@ For production: **Binary crossfeat 6-feat (30m)** with optional R_strong_agree f
 - Switch ratio: 1.2× (with R_strong_agree) or 2.2× (without)
 - Spurious: 12% (with) or 20% (without)
 - Detection: 73% (with) or 91% (without)
+
+---
+
+## Architecture Comparison (CNN-LSTM vs CNN-GRU vs TCN)
+
+### Hypothesis
+
+The CNN-LSTM might be a bottleneck. Test CNN-GRU (KalmanNet-inspired) and TCN causal (dilated convolutions, no recurrence) to see if architecture matters.
+
+### Results (MACD 30m, 9-feat crossfeat+velocity, BTC)
+
+| Architecture | Val Acc | Val Loss | Switchs | **Ratio** | Justified | Spurious | Det<6% | Epoch |
+|-------------|---------|----------|---------|----------|-----------|----------|--------|-------|
+| **CNN-LSTM** | 91.1% | 0.2193 | **5,574** | **2.4×** | **62.7%** | **18.0%** | 91.7% | 17 |
+| CNN-GRU | **91.1%** | **0.2174** | 6,166 | 2.7× | 61.7% | 19.3% | **93.3%** | 10 |
+| TCN causal | 91.0% | 0.2189 | 6,026 | 2.6× | 60.6% | 19.4% | 92.9% | 15 |
+
+### Conclusion
+
+- **CNN-GRU** has marginally better val loss (0.2174 vs 0.2193) and detection (93.3% vs 91.7%)
+- **TCN** converges slower (epoch 15) but similar accuracy
+- **CNN-LSTM has the fewest switches** (5,574 vs 6k+) and best ratio (2.4× vs 2.6-2.7×)
+- Spurious rate nearly identical (~18-19%) across all three
+
+**The ceiling is in the data, not the architecture.** Switching from LSTM to GRU or TCN changes accuracy by ±0.1% and switch ratio by ±0.3×. The fundamental limitation (cannot predict transition timing from price features) persists regardless of architecture.
+
+Criterion: ≥15% ratio improvement needed → NOT met (ratio worsened for GRU/TCN).
