@@ -814,3 +814,110 @@ Hierarchy preserved. MACD 30m is the best model in both configurations.
 3. **Post-processing** — hysteresis/holding minimum on the crossfeat predictions to reduce remaining false switches from 2.2-2.4× toward 1.5×
 4. **LLM approach** — fundamentally different paradigm, already being explored in parallel
 5. **Regularization** — crossfeat overfits fast (epoch 3-8); dropout increase, weight decay, or smaller model might help maintain accuracy while keeping the noise reduction benefit
+
+---
+
+## Regression Experiment — Continuous Slope Prediction
+
+### Objective
+
+Test if predicting the continuous slope (smoothed[t-1] - smoothed[t-2]) instead of binary direction captures more information. R² > 0.3 = substantial signal, R² < 0.1 = structural ceiling confirmed.
+
+### Configuration
+
+- **Features**: 9 crossfeat (live + filtered + velocity × 3 indicators at 30m)
+- **Target**: `oracle_slope_macd_30m` (continuous, z-scored per asset)
+- **Loss**: MSELoss
+- **Architecture**: Same CNN-LSTM 128/128/64
+
+### Training Results (BTC, MACD 30m)
+
+| Config | Val MSE | Best Epoch |
+|--------|---------|------------|
+| 6-feat (no velocity) | 0.1803 | 13 |
+| **9-feat (with velocity)** | **0.1570** | **8** |
+
+Velocity improves regression MSE by −13% (relevant: velocity IS the slope estimate).
+
+### Evaluation — Surface Metrics
+
+| Metric | Value |
+|--------|-------|
+| R² (z-scored) | **0.9110** |
+| Correlation | **0.9546** |
+| MAE (real) | 3.80 |
+| Sign accuracy | 91.30% |
+| Persistence baseline | 98.27% |
+| Test/Train std ratio | 2.21× ⚠️ |
+
+### Deep Analysis — R² is Misleading
+
+| Zone | R² | Correlation | % of data |
+|------|-----|------------|-----------|
+| **Plateau** (>3 steps from transition) | **0.9203** | 0.9597 | 87.9% |
+| **Transition** (±3 steps) | **−0.1389** | 0.6036 | 12.1% |
+| Global | 0.9110 | 0.9546 | 100% |
+
+**R² is negative at transitions** — the model is WORSE than predicting the mean at the critical moments. The 0.91 global R² comes entirely from the 88% of easy plateau samples.
+
+### Magnitude Threshold Analysis
+
+Tested: does |predicted slope| > threshold help filter false switches?
+
+| Threshold | False filtered | True filtered | **Ratio** |
+|-----------|---------------|-------------|-----------|
+| 0.05 | 33.7% | 25.2% | 1.3× |
+| 0.10 | 53.0% | 42.4% | 1.3× |
+| 0.20 | 74.4% | 61.1% | 1.2× |
+| 0.50 | 93.4% | 83.9% | 1.1× |
+
+**Ratio 1.2-1.3× everywhere** — the magnitude does NOT discriminate. True and false switches have very similar magnitudes (median 0.13 vs 0.09).
+
+Mann-Whitney U test: p=3.57e-16 (statistically significant) but practically useless (gap too small).
+
+### Regression Verdict
+
+The regression gives an impressive global R²=0.91 but it is **plateau prediction** (R²=0.92 on plateaus, R²=−0.14 on transitions). At the moments that matter for trading (transitions and switches), the regression provides **no exploitable advantage** over binary classification.
+
+---
+
+## FINAL STRUCTURAL DIAGNOSIS
+
+### All Approaches Tested
+
+| # | Approach | Key metric | Verdict |
+|---|----------|-----------|---------|
+| 1 | Binary single (2 feat) | Switch ratio 2.8× | Baseline |
+| 2 | + Velocity (3 feat) | 2.7× | Marginal |
+| 3 | Binary crossfeat (6 feat) | **2.2×** | Best switch ratio |
+| 4 | + Velocity crossfeat (9 feat) | 2.4× | Better precision, worse ratio |
+| 5 | Cross-model filtering | 1.0-1.5× ratio | Failed (same signal) |
+| 6 | Cross-timeframe filtering | 1.0-1.7× ratio | Failed (too correlated) |
+| 7 | Regression (9 feat) | R²=0.91 (plateau), −0.14 (transition) | Plateau prediction only |
+| 8 | Magnitude filter | 1.2-1.3× ratio | Cannot discriminate |
+
+### Root Cause (Confirmed)
+
+The model predicts **what** (direction: 91% accuracy, R²=0.91 on plateaus) but not **when** (transitions: R²=−0.14, switch ratio 2.2-2.8×).
+
+This is structural:
+1. **Transitions in crypto are unpredictable** from past price alone (sudden, news/liquidation driven)
+2. **All features derive from the same price** — no independent information source
+3. **The Oracle requires future data** (kf.smooth) — no causal feature can replicate it at transitions
+4. **Persistence baseline (98%) beats all models (89-91%)** for this label structure
+
+### What Would Be Needed to Break Through
+
+**Non-price signals** (independent information):
+- Volume, order book depth, bid/ask imbalance
+- Funding rates, open interest, liquidation data
+- Sentiment, news events, on-chain data
+
+**Different paradigm**:
+- LLM-based market context analysis
+- Event-driven trading (react to events, don't predict)
+- Regime detection from external signals
+
+**Post-processing** (incremental improvement):
+- Hysteresis on crossfeat 6-feat predictions (reduce 2.2× → ~1.5×)
+- But cannot eliminate the fundamental 2× floor
