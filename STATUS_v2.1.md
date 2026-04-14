@@ -1018,3 +1018,28 @@ The global R²=0.91 is misleading:
 - **Dynamics ratio: 1.8×** (same V-shape for true and false)
 
 These patterns likely apply to all 6 models: high global R² driven by plateau prediction.
+
+### Deep Analysis — All 6 Models Confirmed
+
+| Model | R² global | **R² transitions** | R² plateaux | Best mag ratio |
+|-------|----------|-------------------|-------------|---------------|
+| macd_30m | 0.9110 | **−0.1389** | 0.9203 | 1.3× |
+| cci_30m | 0.8297 | **−0.2790** | 0.8551 | — |
+| rsi_30m | 0.7774 | **−0.6235** | 0.8123 | — |
+| macd_1h | 0.8911 | **−0.4690** | 0.8970 | — |
+| cci_1h | 0.8106 | **−0.4870** | 0.8252 | — |
+| rsi_1h | 0.7584 | **−0.8894** | 0.7781 | — |
+
+**All 6 models have NEGATIVE R² at transitions.** No model achieves R² > 0 at transitions, let alone the 0.2 threshold. The regression is definitively plateau prediction only.
+
+Hierarchy at transitions: MACD (−0.14, −0.47) > CCI (−0.28, −0.49) > RSI (−0.62, −0.89). RSI is the worst, consistent with all previous experiments.
+
+### Conclusion: Regression Closed
+
+The continuous slope prediction provides no advantage over binary classification:
+- Sign accuracy ≈ classification accuracy (91% vs 91%)
+- R² at transitions is negative for all 6 models
+- Magnitude cannot discriminate true vs false switches (ratio 1.2-1.3×)
+- Magnitude dynamics show same V-shape for true and false (ratio 1.8×)
+
+**The structural ceiling is confirmed from every possible angle.** Price-derived features cannot predict transition timing.
