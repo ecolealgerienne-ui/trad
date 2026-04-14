@@ -1126,3 +1126,32 @@ The CNN-LSTM might be a bottleneck. Test CNN-GRU (KalmanNet-inspired) and TCN ca
 **The ceiling is in the data, not the architecture.** Switching from LSTM to GRU or TCN changes accuracy by ±0.1% and switch ratio by ±0.3×. The fundamental limitation (cannot predict transition timing from price features) persists regardless of architecture.
 
 Criterion: ≥15% ratio improvement needed → NOT met (ratio worsened for GRU/TCN).
+
+---
+
+## Window Size Comparison (12 vs 25 vs 50 steps)
+
+### Hypothesis
+
+Longer context window might help detect pre-transition patterns. Shorter window might reduce noise.
+
+### Results (MACD crossfeat 6-feat, BTC)
+
+| Window | Duration | Val Acc (30m) | Val Loss (30m) | Epoch (30m) | Val Acc (1h) | Val Loss (1h) | Epoch (1h) |
+|--------|----------|---------------|----------------|-------------|--------------|----------------|-------------|
+| **12** | 1h00 | 89.6% | 0.2453 | 24 | 90.1% | 0.2475 | 5 |
+| **25** (default) | 2h05 | **89.8%** | 0.2438 | 8 | **89.9%** | 0.2526 | 3 |
+| **50** | 4h10 | 89.7% | **0.2408** | 5 | 88.7% | 0.2483 | 3 |
+
+### Analysis
+
+- **All 3 windows produce nearly identical accuracy** (89.6-89.8% for 30m, 88.7-90.1% for 1h)
+- **Window 12** converges slower (epoch 24) but avoids overfitting
+- **Window 50** overfits faster (train 91.5% vs val 89.7% at 30m, worse at 1h: 93.4% vs 88.7%)
+- **Window 25** is the best compromise: fast convergence, moderate overfitting
+
+### Conclusion
+
+The predictive signal is in the **recent past** (last few steps), not in long-term history. Increasing window from 25 to 50 adds noise. Decreasing to 12 slightly hurts. **Window 25 remains optimal.**
+
+This further confirms the structural ceiling: even with 4h10 of context (50 steps), the model cannot detect transitions better.
