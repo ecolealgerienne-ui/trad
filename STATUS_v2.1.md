@@ -745,9 +745,72 @@ Despite testing 4 feature configurations, 5 filtering approaches, and 6 models:
 
 The signal exists (Oracle +8,316% PnL net) but requires future information (kf.smooth). Causal approximation from price-derived features alone hits a fundamental ceiling.
 
-### Recommended Next Directions
+---
+
+## Full Crossfeat Experiment — All 6 Models
+
+### Configuration
+
+| Timeframe | Features | Count |
+|-----------|----------|-------|
+| 30m targets | macd/rsi/cci × (live + filtered) at 30m | 6 |
+| 1h targets | 6 × 30m + macd/rsi/cci × (live + filtered) at 1h | 12 |
+
+### Training Results
+
+| Model | Val Acc (single) | Val Acc (crossfeat) | Best Epoch (single) | Best Epoch (cross) |
+|-------|-----------------|--------------------|--------------------|-------------------|
+| macd_30m | 90.8% | 89.8% | 21 | 8 |
+| cci_30m | 87.8% | 87.4% | 9 | 10 |
+| rsi_30m | 84.1% | 83.8% | 30 | 13 |
+| macd_1h | 89.1% | 89.9% | 30 | 3 |
+| cci_1h | 86.6% | 85.6% | 21 | 5 |
+| rsi_1h | 82.7% | 82.5% | 28 | 3 |
+
+### KPI Comparison: Baseline vs Crossfeat
+
+| Model | Ratio (base→cross) | Delta | Spurious (base→cross) | Trans% (base→cross) |
+|-------|-------------------|-------|----------------------|---------------------|
+| **macd_30m** | 2.8× → **2.4×** | **−14%** | 21.8% → **18.0%** | 53.2% → 50.0% |
+| cci_30m | 2.5× → 2.5× | 0% | 19.7% → 21.0% | 50.3% → 42.1% |
+| rsi_30m | 2.9× → **2.6×** | **−10%** | 19.1% → **18.0%** | 41.1% → 34.8% |
+| **macd_1h** | 3.6× → **2.4×** | **−33%** | 42.3% → **32.5%** | 44.0% → 33.3% |
+| cci_1h | 3.4× → **3.1×** | **−9%** | 40.9% → 42.0% | 52.5% → 39.6% |
+| rsi_1h | 4.2× → **3.0×** | **−29%** | 39.6% → **37.2%** | 38.6% → 30.2% |
+
+### Key Findings
+
+1. **Crossfeat reduces switch ratio on 5/6 models** (CCI 30m unchanged)
+2. **Biggest gains on 1h models**: MACD 1h −33% (3.6×→2.4×), RSI 1h −29% (4.2×→3.0×)
+3. **Transition accuracy drops everywhere** (−3pp to −13pp) — model switches less but also detects fewer real transitions
+4. **MACD 30m crossfeat remains overall best** (signal quality score 1594)
+5. **1h models benefit most** because they were the noisiest (4.2× down to 3.0×)
+
+### The Trade-off
+
+```
+Crossfeat = LESS noise + LESS detection
+
+More features → model becomes more conservative → fewer switches overall
+This reduces false switches (good) but also reduces true switch detection (bad)
+Net effect: switch ratio improves but transition accuracy degrades
+```
+
+### Signal Quality Rankings
+
+```
+Baseline:   macd_30m > cci_30m > rsi_30m > cci_1h > macd_1h > rsi_1h
+Crossfeat:  macd_30m > cci_30m > rsi_30m > macd_1h > cci_1h > rsi_1h
+```
+
+Hierarchy preserved. MACD 30m is the best model in both configurations.
+
+---
+
+## Recommended Next Directions
 
 1. **Volume features** — only price-derived signal NOT yet tested, exists in CSV but never used as ML feature
 2. **Non-price data** — funding rates, order book depth, liquidation data
-3. **Post-processing** — hysteresis/holding minimum on the 6-feat crossfeat predictions to reduce remaining false switches from 2.2× toward 1.5×
+3. **Post-processing** — hysteresis/holding minimum on the crossfeat predictions to reduce remaining false switches from 2.2-2.4× toward 1.5×
 4. **LLM approach** — fundamentally different paradigm, already being explored in parallel
+5. **Regularization** — crossfeat overfits fast (epoch 3-8); dropout increase, weight decay, or smaller model might help maintain accuracy while keeping the noise reduction benefit
