@@ -139,7 +139,40 @@ MACD normalization shifted the ranking: TCN now dominates on 30m.
 
 ---
 
-## ÉTAPE 5 — 6 Regression Crossfeat (pending)
+## ÉTAPE 5 — 6 Regression Crossfeat (complete)
+
+### Val MSE — Before vs After Normalization
+
+| Model | Val MSE (before) | Val MSE (after) | Target std | Pred std test/train |
+|-------|-----------------|----------------|-----------|-------------------|
+| macd_30m | 0.1570 | **0.0311** | 3.62 | 0.57× |
+| cci_30m | 0.1729 | **0.1820** | 21.82 | 0.97× ✅ |
+| rsi_30m | 0.2248 | **0.2328** | 2.66 | 1.00× ✅ |
+| macd_1h | 0.1827 | **0.0371** | 4.84 | 0.61× |
+| cci_1h | 0.1953 | **0.2255** | 21.80 | 0.98× ✅ |
+| rsi_1h | 0.2384 | **0.2572** | 2.71 | 0.99× ✅ |
+
+### Analysis
+
+- **MACD MSE dropped 5× (0.157→0.031, 0.183→0.037)** — but this is an AMPLITUDE effect, not a model improvement. MACD targets are now in smaller basis points, so MSE is mechanically lower.
+- **CCI and RSI MSE slightly WORSE** (0.173→0.182, 0.225→0.233) — the MACD feature normalization slightly degraded the crossfeat for non-MACD targets.
+- **MACD pred std ratio = 0.57-0.61×** — model predicts less dispersed values on val/test because MACD basis points have lower variance in recent data (BTC high price → smaller percentage moves).
+- **CCI and RSI pred std stable** (0.97-1.00×) — as expected for bounded indicators.
+
+### Best Epochs
+
+| Model | Best Epoch | Val MSE |
+|-------|-----------|---------|
+| macd_30m | 30 | 0.0311 |
+| cci_30m | 18 | 0.1820 |
+| rsi_30m | 17 | 0.2328 |
+| macd_1h | 7 | 0.0371 |
+| cci_1h | 6 | 0.2255 |
+| rsi_1h | 5 | 0.2572 |
+
+### Key Takeaway
+
+MACD MSE improvement is an artifact of scale change, not model improvement. R² conditionnel (step 6d) will reveal the true picture.
 
 ---
 
