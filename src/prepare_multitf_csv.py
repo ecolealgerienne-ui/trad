@@ -326,12 +326,13 @@ def compute_rsi_live(close_5min, is_close):
         closure_states.append((ag, al, closure_closes[k]))
 
     # Step 3: Assign RSI at closure points
+    # Match standard behavior: when avg_loss=0, RSI=NaN (not 100.0)
+    # Standard: rs = avg_gain / avg_loss.replace(0, np.nan) → NaN when avg_loss=0
     for k, ci in enumerate(closure_indices):
         ag_k, al_k, _ = closure_states[k]
         if al_k > 1e-15:
             out[ci] = 100.0 - 100.0 / (1.0 + ag_k / al_k)
-        else:
-            out[ci] = 100.0
+        # else: stay NaN (matches standard RSI behavior)
 
     # Step 4: Replay for provisional (inter-closure) points
     closure_set = set(closure_indices)
@@ -359,8 +360,7 @@ def compute_rsi_live(close_5min, is_close):
             al_p = alpha * ls + (1.0 - alpha) * al_cl
             if al_p > 1e-15:
                 out[i] = 100.0 - 100.0 / (1.0 + ag_p / al_p)
-            else:
-                out[i] = 100.0
+            # else: stay NaN (matches standard RSI behavior)
 
     return out
 
