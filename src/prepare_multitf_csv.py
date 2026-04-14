@@ -276,41 +276,92 @@ def compute_macd_live(close_5min, is_close):
 # =============================================================================
 
 def compute_rsi_live(close_5min, is_close):
-    """RSI with frozen/provisional EWM avg_gain/avg_loss. Freeze at closure."""
+    """
+    RSI with frozen/provisional EWM avg_gain/avg_loss. Freeze at closure.
+
+    Same approach as Kalman: compute exact state on ALL closures first,
+    then replay for provisional (inter-closure) points.
+    This guarantees exact match with standard RSI at closures (atol=1e-10).
+    """
     n = len(close_5min)
     alpha = 2.0 / (RSI_PERIOD + 1)
 
     out = np.full(n, np.nan)
-    ag_cl = np.nan; al_cl = np.nan; prev_cl = np.nan
-    candle_closes = []; warmed = False
+
+    # Step 1: Collect ALL closure closes
+    closure_indices = []
+    closure_closes = []
+    for i in range(n):
+        if not np.isnan(close_5min[i]) and is_close[i]:
+            closure_indices.append(i)
+            closure_closes.append(close_5min[i])
+
+    if len(closure_closes) < 2:
+        return out
+
+    # Step 2: Compute standard RSI states on closure closes
+    # This matches ewm(span=RSI_PERIOD, adjust=False) exactly
+    closes_arr = np.array(closure_closes)
+    deltas = np.diff(closes_arr)
+    gains = np.where(deltas > 0, deltas, 0.0)
+    losses = np.where(deltas < 0, -deltas, 0.0)
+
+    # ewm(adjust=False) starts: EMA[0] = x[0]
+    # But delta[0] = close[1]-close[0], gain[0] is for candle 1 (not 0)
+    # Standard RSI: gain = delta.where(delta>0, 0), first delta is NaN → gain[0]=0
+    # Then ewm starts with EMA[0] = 0 (the NaN-derived zero)
+    # Our gains start from the first real diff. Prepend 0 to match.
+    gains_padded = np.concatenate([[0.0], gains])
+    losses_padded = np.concatenate([[0.0], losses])
+
+    # Run EWM to get avg_gain/avg_loss at each closure
+    # closure_states[k] = (avg_gain, avg_loss, close) after processing closure k
+    ag = gains_padded[0]  # = 0, matches ewm init
+    al = losses_padded[0]  # = 0
+    closure_states = [(ag, al, closure_closes[0])]  # state after first closure
+
+    for k in range(1, len(gains_padded)):
+        ag = alpha * gains_padded[k] + (1.0 - alpha) * ag
+        al = alpha * losses_padded[k] + (1.0 - alpha) * al
+        closure_states.append((ag, al, closure_closes[k]))
+
+    # Step 3: Assign RSI at closure points
+    for k, ci in enumerate(closure_indices):
+        ag_k, al_k, _ = closure_states[k]
+        if al_k > 1e-15:
+            out[ci] = 100.0 - 100.0 / (1.0 + ag_k / al_k)
+        else:
+            out[ci] = 100.0
+
+    # Step 4: Replay for provisional (inter-closure) points
+    closure_set = set(closure_indices)
+    current_k = -1
+    ag_cl = 0.0
+    al_cl = 0.0
+    prev_cl = np.nan
 
     for i in range(n):
         c = close_5min[i]
         if np.isnan(c):
             continue
-        if not warmed:
-            if is_close[i]:
-                candle_closes.append(c)
-                if len(candle_closes) >= RSI_PERIOD + 1:
-                    arr = np.array(candle_closes)
-                    d = np.diff(arr)
-                    g = np.where(d > 0, d, 0.0)
-                    l = np.where(d < 0, -d, 0.0)
-                    ag = g[0]; al = l[0]
-                    for k in range(1, len(g)):
-                        ag = alpha * g[k] + (1.0 - alpha) * ag
-                        al = alpha * l[k] + (1.0 - alpha) * al
-                    ag_cl = ag; al_cl = al; prev_cl = c
-                    out[i] = 100.0 - 100.0 / (1.0 + ag / al) if al > 1e-15 else 100.0
-                    warmed = True
+
+        if i in closure_set:
+            current_k += 1
+            ag_cl, al_cl, prev_cl = closure_states[current_k]
             continue
-        delta = c - prev_cl
-        gn = max(delta, 0.0); ls = max(-delta, 0.0)
-        ag_p = alpha * gn + (1.0 - alpha) * ag_cl
-        al_p = alpha * ls + (1.0 - alpha) * al_cl
-        out[i] = 100.0 - 100.0 / (1.0 + ag_p / al_p) if al_p > 1e-15 else 100.0
-        if is_close[i]:
-            ag_cl = ag_p; al_cl = al_p; prev_cl = c
+
+        # Provisional from frozen state
+        if current_k >= 0 and not np.isnan(prev_cl):
+            delta = c - prev_cl
+            gn = max(delta, 0.0)
+            ls = max(-delta, 0.0)
+            ag_p = alpha * gn + (1.0 - alpha) * ag_cl
+            al_p = alpha * ls + (1.0 - alpha) * al_cl
+            if al_p > 1e-15:
+                out[i] = 100.0 - 100.0 / (1.0 + ag_p / al_p)
+            else:
+                out[i] = 100.0
+
     return out
 
 
