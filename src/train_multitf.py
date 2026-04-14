@@ -108,7 +108,6 @@ def load_asset_data(asset_name, indicator, timeframe, crossfeat=False, target_ty
             for ind in all_indicators:
                 feature_cols.append(f'{ind}_1h_live')
                 feature_cols.append(f'{ind}_1h_filtered')
-                    feature_cols.append(vel_col)
     else:
         # Single-indicator features (original behavior)
         feature_cols = [f'{indicator}_{timeframe}_live', f'{indicator}_{timeframe}_filtered']
