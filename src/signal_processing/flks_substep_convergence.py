@@ -5,14 +5,16 @@ FLKS convergence par sous-pas 5min — à quel moment le signe converge ?
 
 Oracle : pykalman.smooth() sur 5000 bougies MACD 30min (référence fixe).
 
-Pour chaque variante k=1..6 :
-  - Injecter les k premiers MACD live 5min par bougie dans le FLKS
-  - Calculer pente[t] = pos[t-1] - pos[t-2]
-  - Mesurer % concordance de signe vs oracle sur [1000:5000]
+Test 1 : FLKS 30min pur
+  - Forward filter 30min, puis backward 2 pas depuis x_filt[t]
+  - slope[t] = smoothed[t-1] - smoothed[t-2]
 
-Baseline : FLKS 30min pur (1 observation par bougie, pas de sous-pas).
+Test 2 : FLKS 30min + sous-pas 5min (k=1..6)
+  - Même forward filter 30min, mêmes gains C
+  - Mais backward 2 pas depuis x_provisoire (x_filt[t] + k micro-updates 5min)
+  - slope[t,k] = smoothed[t-1] - smoothed[t-2]
 
-Question : à partir de quel sous-pas le signe converge vers l'oracle ?
+Métrique : % concordance de signe vs oracle sur [eval_start:n30]
 
 Usage:
     python src/signal_processing/flks_substep_convergence.py \
@@ -45,6 +47,11 @@ H = np.array([[1.0, 0.0]])
 Q = np.eye(2) * KALMAN_PROCESS_VAR
 R = np.array([[KALMAN_MEASURE_VAR]])
 
+DT_SUB = 1.0 / 6.0
+A_SUB = np.array([[1.0, DT_SUB],
+                   [0.0, 1.0]])
+Q_SUB = Q * DT_SUB
+
 MACD_FAST = 12
 MACD_SLOW = 26
 MACD_SIGNAL = 9
@@ -54,7 +61,7 @@ MACD_SIGNAL = 9
 # DATA LOADING (from pipeline)
 # ============================================================================
 
-def load_csv(path: str) -> pd.DataFrame:
+def load_csv(path):
     df = pd.read_csv(path)
     date_col = None
     for col in ['date', 'datetime', 'time', 'timestamp', 'Date', 'Datetime']:
@@ -67,8 +74,7 @@ def load_csv(path: str) -> pd.DataFrame:
     df = df.set_index(date_col)
     df.index.name = 'datetime'
     df.columns = df.columns.str.lower()
-    df = df.sort_index()
-    return df
+    return df.sort_index()
 
 
 def resample_ohlcv(df_5min, tf_minutes):
@@ -92,13 +98,9 @@ def compute_macd_live(close_5min, is_close):
     alpha_f = 2.0 / (MACD_FAST + 1)
     alpha_s = 2.0 / (MACD_SLOW + 1)
     alpha_sig = 2.0 / (MACD_SIGNAL + 1)
-
     out = np.full(n, np.nan)
-    ema_f_cl = np.nan
-    ema_s_cl = np.nan
-    ema_sig_cl = np.nan
+    ema_f_cl = ema_s_cl = ema_sig_cl = np.nan
     init = False
-
     for i in range(n):
         c = close_5min[i]
         if np.isnan(c):
@@ -135,11 +137,8 @@ def compute_bucket_close_mask(index_5min, tf_minutes):
 
 def compute_oracle(indicator_30m):
     from pykalman import KalmanFilter as KF
-
     n = len(indicator_30m)
-    valid = ~np.isnan(indicator_30m)
-    vd = indicator_30m[valid]
-
+    vd = indicator_30m[~np.isnan(indicator_30m)]
     kf = KF(
         transition_matrices=[[1, 1], [0, 1]],
         observation_matrices=[[1, 0]],
@@ -148,16 +147,14 @@ def compute_oracle(indicator_30m):
         observation_covariance=KALMAN_MEASURE_VAR,
         transition_covariance=np.eye(2) * KALMAN_PROCESS_VAR,
     )
-
     smooth_means, _ = kf.smooth(vd)
     positions = np.full(n, np.nan)
-    positions[valid] = smooth_means[:, 0]
+    positions[~np.isnan(indicator_30m)] = smooth_means[:, 0]
 
     slopes = np.full(n, np.nan)
     for t in range(2, n):
         if not np.isnan(positions[t - 1]) and not np.isnan(positions[t - 2]):
             slopes[t] = positions[t - 1] - positions[t - 2]
-
     return positions, slopes
 
 
@@ -165,121 +162,117 @@ def compute_oracle(indicator_30m):
 # KALMAN PRIMITIVES
 # ============================================================================
 
-def kf_predict(x, P):
-    """Predict with 30min transition."""
-    return A @ x, A @ P @ A.T + Q
-
-
-# Sub-step transition (5min = 1/6 of 30min)
-DT_SUB = 1.0 / 6.0
-A_SUB = np.array([[1.0, DT_SUB],
-                   [0.0, 1.0]])
-Q_SUB = Q * DT_SUB
-
-
-def kf_predict_sub(x, P):
-    """Predict with 5min sub-step transition."""
-    return A_SUB @ x, A_SUB @ P @ A_SUB.T + Q_SUB
-
-
 def kf_update(x_p, P_p, z_obs):
     y = z_obs - H @ x_p
     S = H @ P_p @ H.T + R
     K = P_p @ H.T / S[0, 0]
-    x_f = x_p + (K @ y).ravel()
-    P_f = (np.eye(2) - K @ H) @ P_p
-    return x_f, P_f
+    return x_p + (K @ y).ravel(), (np.eye(2) - K @ H) @ P_p
+
+
+def kf_predict_sub(x, P):
+    return A_SUB @ x, A_SUB @ P @ A_SUB.T + Q_SUB
 
 
 # ============================================================================
-# FLKS with configurable number of sub-steps per candle
+# FORWARD FILTER 30min (shared by Test 1 and Test 2)
 # ============================================================================
 
-def run_flks_with_substeps(indicator_30m, macd_live_per_candle,
-                           n_substeps, lag=2):
+def forward_filter_30m(indicator_30m):
     """
-    FLKS(N=lag) where each 30min candle gets n_substeps micro-updates.
-
-    n_substeps=0 : pure 30min (1 update per candle with indicator_30m)
-    n_substeps=k : inject the first k MACD live values, then fix state
-
-    Returns:
-        slopes: (N,) pente[t] = pos[t-1] - pos[t-2]
+    Standard Kalman forward filter on 30min MACD.
+    Returns all states needed for backward smoothing.
     """
     n = len(indicator_30m)
-
     x_filt = np.zeros((n, 2))
     P_filt = np.zeros((n, 2, 2))
     x_pred = np.zeros((n, 2))
     P_pred = np.zeros((n, 2, 2))
 
-    # Forward pass
-    # x_pred[t] / P_pred[t] must satisfy the RTS invariant:
-    #   x_pred[t] = A @ x_filt[t-1]
-    #   P_pred[t] = A @ P_filt[t-1] @ A.T + Q
-    # For sub-step variants, x_filt[t] comes from micro-updates,
-    # so x_pred[t+1] must be recomputed AFTER x_filt[t] is finalized.
-
     for t in range(n):
         if t == 0:
             x_p = np.array([indicator_30m[0], 0.0])
             P_p = np.eye(2)
-            x_pred[0] = x_p
-            P_pred[0] = P_p
-            x_filt[0], P_filt[0] = kf_update(x_p, P_p, indicator_30m[0])
         else:
-            # x_pred[t] / P_pred[t] already set at end of previous iteration
-            x_p = x_pred[t]
-            P_p = P_pred[t]
+            x_p = A @ x_filt[t - 1]
+            P_p = A @ P_filt[t - 1] @ A.T + Q
 
-            if n_substeps == 0:
-                # Pure 30min: single update
-                x_filt[t], P_filt[t] = kf_update(x_p, P_p, indicator_30m[t])
-            else:
-                # Sub-step forward: n_substeps cycles of (predict_5min + update)
-                # Start from previous candle state
-                macd_vals = macd_live_per_candle[t]
-                valid_vals = [v for v in macd_vals if not np.isnan(v)]
-                use = valid_vals[:n_substeps]
+        x_pred[t] = x_p
+        P_pred[t] = P_p
+        x_filt[t], P_filt[t] = kf_update(x_p, P_p, indicator_30m[t])
 
-                x_cur = x_filt[t - 1].copy()
-                P_cur = P_filt[t - 1].copy()
+    # Precompute RTS smoother gains C[t] for t = 0..n-2
+    # C[t] = P_filt[t] @ A.T @ inv(P_pred[t+1])
+    C = np.zeros((n, 2, 2))
+    for t in range(n - 1):
+        P_pk1 = P_pred[t + 1]
+        det = P_pk1[0, 0] * P_pk1[1, 1] - P_pk1[0, 1] * P_pk1[1, 0]
+        if abs(det) > 1e-15:
+            inv_P = np.array([[P_pk1[1, 1], -P_pk1[0, 1]],
+                              [-P_pk1[1, 0], P_pk1[0, 0]]]) / det
+        else:
+            inv_P = np.linalg.pinv(P_pk1)
+        C[t] = P_filt[t] @ A.T @ inv_P
 
-                if len(use) > 0:
-                    for k, m5 in enumerate(use):
-                        x_cur, P_cur = kf_predict_sub(x_cur, P_cur)
-                        x_cur, P_cur = kf_update(x_cur, P_cur, m5)
-                else:
-                    x_cur, P_cur = kf_update(x_p, P_p, indicator_30m[t])
+    return x_filt, P_filt, x_pred, P_pred, C
 
-                x_filt[t] = x_cur
-                P_filt[t] = P_cur
 
-        # Compute x_pred[t+1] from finalized x_filt[t] — ensures RTS consistency
-        if t < n - 1:
-            x_pred[t + 1], P_pred[t + 1] = kf_predict(x_filt[t], P_filt[t])
+# ============================================================================
+# TEST 1: FLKS 30min pur
+# ============================================================================
 
-    # FLKS backward
-    positions = np.copy(x_filt[:, 0])
-    for t in range(n):
-        end = min(t + lag, n - 1)
-        if end <= t:
-            continue
-        x_s = np.copy(x_filt[end])
-        P_s = np.copy(P_filt[end])
-        for k in range(end - 1, t - 1, -1):
-            P_pk1 = P_pred[k + 1]
-            try:
-                C = P_filt[k] @ A.T @ np.linalg.inv(P_pk1)
-            except np.linalg.LinAlgError:
-                C = P_filt[k] @ A.T @ np.linalg.pinv(P_pk1)
-            x_s = x_filt[k] + C @ (x_s - x_pred[k + 1])
-            P_s = P_filt[k] + C @ (P_s - P_pk1) @ C.T
-        positions[t] = x_s[0]
-
+def compute_slopes_test1(x_filt, x_pred, C):
+    """
+    Backward 2 pas depuis x_filt[t] pour chaque t >= 2.
+    slope[t] = smoothed[t-1][0] - smoothed[t-2][0]
+    """
+    n = len(x_filt)
     slopes = np.full(n, np.nan)
+
     for t in range(2, n):
-        slopes[t] = positions[t - 1] - positions[t - 2]
+        # Backward pas 1 : smooth t-1 using x_filt[t]
+        sm_t1 = x_filt[t - 1] + C[t - 1] @ (x_filt[t] - x_pred[t])
+        # Backward pas 2 : smooth t-2 using smoothed[t-1]
+        sm_t2 = x_filt[t - 2] + C[t - 2] @ (sm_t1 - x_pred[t - 1])
+        slopes[t] = sm_t1[0] - sm_t2[0]
+
+    return slopes
+
+
+# ============================================================================
+# TEST 2: FLKS 30min + sous-pas 5min
+# ============================================================================
+
+def compute_slopes_test2(x_filt, P_filt, x_pred, C,
+                          macd_live_per_candle, n_substeps):
+    """
+    Backward 2 pas depuis x_provisoire pour chaque t >= 2.
+    x_provisoire = x_filt[t] + n_substeps micro-updates 5min de la bougie t+1.
+    slope[t] = smoothed[t-1][0] - smoothed[t-2][0]
+    """
+    n = len(x_filt)
+    slopes = np.full(n, np.nan)
+
+    for t in range(2, n - 1):  # n-1 : besoin de bougie t+1
+        # Construire x_provisoire : partir de x_filt[t], injecter k sous-pas
+        x_cur = x_filt[t].copy()
+        P_cur = P_filt[t].copy()
+
+        macd_vals = macd_live_per_candle[t + 1]
+        valid_vals = [v for v in macd_vals if not np.isnan(v)]
+        use = valid_vals[:n_substeps]
+
+        if len(use) > 0:
+            for m5 in use:
+                x_cur, P_cur = kf_predict_sub(x_cur, P_cur)
+                x_cur, P_cur = kf_update(x_cur, P_cur, m5)
+
+        x_prov = x_cur
+
+        # Backward pas 1 : smooth t-1 using x_provisoire
+        sm_t1 = x_filt[t - 1] + C[t - 1] @ (x_prov - x_pred[t])
+        # Backward pas 2 : smooth t-2 using smoothed[t-1]
+        sm_t2 = x_filt[t - 2] + C[t - 2] @ (sm_t1 - x_pred[t - 1])
+        slopes[t] = sm_t1[0] - sm_t2[0]
 
     return slopes
 
@@ -292,45 +285,32 @@ def sign_concordance(slopes_test, slopes_oracle, start, end):
     EPSILON = 1e-8
     s_t = slopes_test[start:end]
     s_o = slopes_oracle[start:end]
-    mask = (~np.isnan(s_t) & ~np.isnan(s_o)
-            & (np.abs(s_o) > EPSILON))
-    st = np.sign(s_t[mask])
-    so = np.sign(s_o[mask])
-    n_valid = len(st)
+    mask = ~np.isnan(s_t) & ~np.isnan(s_o) & (np.abs(s_o) > EPSILON)
+    n_valid = mask.sum()
     if n_valid == 0:
         return np.nan, 0
-    return np.mean(st == so) * 100.0, n_valid
+    return np.mean(np.sign(s_t[mask]) == np.sign(s_o[mask])) * 100.0, n_valid
 
 
 def find_oracle_transitions(slopes_oracle, start, end):
-    """
-    Find indices where oracle slope changes sign (positive <-> negative).
-    These are the only samples that matter for trading.
-    Returns boolean mask over [start:end].
-    """
     EPSILON = 1e-8
     s_o = slopes_oracle[start:end]
     sign_o = np.where(np.abs(s_o) < EPSILON, 0, np.sign(s_o))
-    transitions = np.zeros(len(s_o), dtype=bool)
+    trans = np.zeros(len(s_o), dtype=bool)
     for i in range(1, len(s_o)):
         if sign_o[i] != 0 and sign_o[i - 1] != 0 and sign_o[i] != sign_o[i - 1]:
-            transitions[i] = True
-    return transitions
+            trans[i] = True
+    return trans
 
 
-def sign_concordance_at_transitions(slopes_test, slopes_oracle, start, end,
-                                     transition_mask):
-    """Concordance only at oracle transition points."""
+def sign_concordance_at_transitions(slopes_test, slopes_oracle, start, end, trans):
     s_t = slopes_test[start:end]
     s_o = slopes_oracle[start:end]
-    mask = (transition_mask
-            & ~np.isnan(s_t) & ~np.isnan(s_o))
-    st = np.sign(s_t[mask])
-    so = np.sign(s_o[mask])
-    n_valid = len(st)
+    mask = trans & ~np.isnan(s_t) & ~np.isnan(s_o)
+    n_valid = mask.sum()
     if n_valid == 0:
         return np.nan, 0
-    return np.mean(st == so) * 100.0, n_valid
+    return np.mean(np.sign(s_t[mask]) == np.sign(s_o[mask])) * 100.0, n_valid
 
 
 # ============================================================================
@@ -343,7 +323,6 @@ def main():
     parser.add_argument('--csv', type=str, default='data_trad/BTCUSD_all_5m.csv')
     parser.add_argument('--n-candles-30m', type=int, default=5000)
     parser.add_argument('--eval-start', type=int, default=1000)
-    parser.add_argument('--flks-lag', type=int, default=2)
     parser.add_argument('--output-dir', type=str, default='plots')
     args = parser.parse_args()
 
@@ -352,12 +331,12 @@ def main():
     n30 = args.n_candles_30m
 
     # ------------------------------------------------------------------
-    print(f"[1/6] Loading {args.csv} ...")
+    print(f"[1/7] Loading {args.csv} ...")
     df_5m = load_csv(args.csv)
     print(f"       {len(df_5m):,} 5min candles")
 
     # ------------------------------------------------------------------
-    print("[2/6] Resampling to 30min ...")
+    print("[2/7] Resampling to 30min ...")
     df_30m = resample_ohlcv(df_5m, 30)
     if len(df_30m) > n30:
         df_30m = df_30m.iloc[-n30:]
@@ -365,154 +344,129 @@ def main():
     print(f"       {len(df_30m):,} bougies 30min, {len(df_5m):,} bougies 5min")
 
     # ------------------------------------------------------------------
-    print("[3/6] Computing MACD 30min + MACD live 5min ...")
+    print("[3/7] Computing MACD 30min + MACD live 5min ...")
     macd_30m = calculate_macd(df_30m).values.astype(np.float64)
 
     is_close_30m = compute_bucket_close_mask(df_5m.index, 30)
     macd_live_5m = compute_macd_live(
         df_5m['close'].values.astype(np.float64), is_close_30m)
 
-    # Group MACD live per 30min candle
     macd_live_per_candle = []
     for ts_30m in df_30m.index:
         bucket_end = ts_30m + pd.Timedelta(minutes=29, seconds=59)
         mask = (df_5m.index >= ts_30m) & (df_5m.index <= bucket_end)
         macd_live_per_candle.append(macd_live_5m[mask])
 
-    print(f"       MACD 30m range: [{np.nanmin(macd_30m):.1f}, {np.nanmax(macd_30m):.1f}]")
-
-    # Vérification cohérence : dernier MACD live du bucket == MACD 30min
-    print("       Vérification cohérence MACD live vs MACD 30min ...")
-    n_checked = 0
+    # Vérification cohérence
     max_err = 0.0
+    n_checked = 0
     for t in range(n30):
-        vals = macd_live_per_candle[t]
-        valid = [v for v in vals if not np.isnan(v)]
-        if len(valid) > 0 and not np.isnan(macd_30m[t]):
-            err = abs(valid[-1] - macd_30m[t])
-            max_err = max(max_err, err)
+        vals = [v for v in macd_live_per_candle[t] if not np.isnan(v)]
+        if len(vals) > 0 and not np.isnan(macd_30m[t]):
+            max_err = max(max_err, abs(vals[-1] - macd_30m[t]))
             n_checked += 1
-    print(f"       Checked {n_checked} candles, max |last_5m - macd_30m| = {max_err:.6f}")
-    if max_err > 1e-6:
-        print(f"       WARNING: écart > 1e-6 entre MACD live closure et MACD 30min!")
+    print(f"       MACD coherence: {n_checked} candles, max err = {max_err:.2e}")
 
     # ------------------------------------------------------------------
     print("[4/7] Oracle: pykalman.smooth() on 30min ...")
     _, slopes_oracle = compute_oracle(macd_30m)
 
-    # Detect oracle transitions for transition-only metric
     trans_mask = find_oracle_transitions(slopes_oracle, args.eval_start, n30)
     n_trans = trans_mask.sum()
     n_eval = n30 - args.eval_start
-    print(f"       Transitions oracle dans [{args.eval_start}:{n30}]: "
-          f"{n_trans} ({n_trans / n_eval * 100:.1f}% des samples)")
 
-    # Persistence baseline: % of time sign stays the same
     EPSILON = 1e-8
     s_o = slopes_oracle[args.eval_start:n30]
     sign_o = np.where(np.abs(s_o) < EPSILON, 0, np.sign(s_o))
     valid_signs = sign_o[sign_o != 0]
-    if len(valid_signs) > 1:
-        persistence = np.mean(valid_signs[1:] == valid_signs[:-1]) * 100.0
-        print(f"       Persistence oracle (sign[t]==sign[t-1]): {persistence:.1f}%")
+    persistence = np.mean(valid_signs[1:] == valid_signs[:-1]) * 100.0
+
+    print(f"       Transitions: {n_trans} ({n_trans/n_eval*100:.1f}%)  "
+          f"Persistence: {persistence:.1f}%")
 
     # ------------------------------------------------------------------
-    print("[5/7] Running FLKS for each substep count (0=baseline, 1..6) ...")
+    print("[5/7] Forward filter 30min (shared) ...")
+    x_filt, P_filt, x_pred, P_pred, C = forward_filter_30m(macd_30m)
+    print("       Done.")
 
-    all_slopes = {}  # k -> slopes array
+    # ------------------------------------------------------------------
+    print("[6/7] Computing slopes ...")
 
-    # k=0 : baseline FLKS 30min pur
-    print("       k=0 (30min pur) ...", end=" ", flush=True)
-    slopes_0 = run_flks_with_substeps(macd_30m, macd_live_per_candle,
-                                       n_substeps=0, lag=args.flks_lag)
-    all_slopes[0] = slopes_0
-    conc_0, _ = sign_concordance(slopes_0, slopes_oracle, args.eval_start, n30)
-    conc_0_t, _ = sign_concordance_at_transitions(
-        slopes_0, slopes_oracle, args.eval_start, n30, trans_mask)
-    print(f"all={conc_0:.2f}%  trans={conc_0_t:.2f}%")
+    # Test 1
+    print("       Test 1 (30min pur) ...", end=" ", flush=True)
+    slopes_t1 = compute_slopes_test1(x_filt, x_pred, C)
+    c_all, _ = sign_concordance(slopes_t1, slopes_oracle, args.eval_start, n30)
+    c_tr, _ = sign_concordance_at_transitions(
+        slopes_t1, slopes_oracle, args.eval_start, n30, trans_mask)
+    print(f"all={c_all:.2f}%  trans={c_tr:.2f}%")
 
-    # k=1..6
+    # Test 2 : k=1..6
+    results_t2 = []
     for k in range(1, 7):
-        label = f"{k*5}min"
-        print(f"       k={k} ({label}) ...", end=" ", flush=True)
-        slopes_k = run_flks_with_substeps(macd_30m, macd_live_per_candle,
-                                           n_substeps=k, lag=args.flks_lag)
-        all_slopes[k] = slopes_k
-        conc_k, _ = sign_concordance(slopes_k, slopes_oracle,
-                                      args.eval_start, n30)
-        conc_k_t, _ = sign_concordance_at_transitions(
+        print(f"       Test 2 k={k} ({k*5}min) ...", end=" ", flush=True)
+        slopes_k = compute_slopes_test2(
+            x_filt, P_filt, x_pred, C, macd_live_per_candle, k)
+        ck_all, nk_all = sign_concordance(
+            slopes_k, slopes_oracle, args.eval_start, n30)
+        ck_tr, nk_tr = sign_concordance_at_transitions(
             slopes_k, slopes_oracle, args.eval_start, n30, trans_mask)
-        print(f"all={conc_k:.2f}%  trans={conc_k_t:.2f}%")
+        results_t2.append((k, ck_all, nk_all, ck_tr, nk_tr))
+        print(f"all={ck_all:.2f}%  trans={ck_tr:.2f}%")
 
     # ------------------------------------------------------------------
-    print(f"\n[6/7] Résultats")
-
-    # Build results table
-    results = []
-    for k in range(7):
-        conc_all, n_all = sign_concordance(
-            all_slopes[k], slopes_oracle, args.eval_start, n30)
-        conc_trans, n_t = sign_concordance_at_transitions(
-            all_slopes[k], slopes_oracle, args.eval_start, n30, trans_mask)
-        results.append((k, conc_all, n_all, conc_trans, n_t))
-
-    conc_all_base = results[0][1]
-    conc_trans_base = results[0][3]
-
-    print(f"{'=' * 80}")
+    print(f"\n[7/7] Résultats")
+    print(f"{'=' * 75}")
     print(f"  Concordance de signe vs Oracle (pykalman.smooth 30min)")
-    print(f"  Évaluation: [{args.eval_start}:{n30}]  |  FLKS lag N={args.flks_lag}")
-    print(f"  Transitions: {n_trans}  |  Persistence: {persistence:.1f}%")
-    print(f"  Pente: pos[t-1] - pos[t-2]")
-    print(f"{'=' * 80}")
-    print(f"  {'Sous-pas':<10} {'Temps':<8} {'All':>8} {'d/k=0':>8}"
-          f"  {'Trans':>8} {'d/k=0':>8}  {'N_trans':>7}")
-    print(f"  {'-' * 68}")
+    print(f"  Éval: [{args.eval_start}:{n30}]  |  Transitions: {n_trans}  |"
+          f"  Persistence: {persistence:.1f}%")
+    print(f"  Pente: smoothed[t-1] - smoothed[t-2]")
+    print(f"{'=' * 75}")
+    print(f"  {'Méthode':<30} {'All':>8} {'d/T1':>8}  {'Trans':>8} {'d/T1':>8}")
+    print(f"  {'-' * 65}")
 
-    for k, conc_a, n_a, conc_t, n_t in results:
-        if k == 0:
-            label = "30m pur"
-            d_a = "  base"
-            d_t = "  base"
-        else:
-            label = f"{k*5}min"
-            d_a = f"{conc_a - conc_all_base:+6.2f}"
-            d_t = f"{conc_t - conc_trans_base:+6.2f}"
-        print(f"  k={k:<6} {label:<8} {conc_a:>7.2f}% {d_a:>8}"
-              f"  {conc_t:>7.2f}% {d_t:>8}  {n_t:>7,}")
+    c_t1_all, _ = sign_concordance(slopes_t1, slopes_oracle, args.eval_start, n30)
+    c_t1_tr, _ = sign_concordance_at_transitions(
+        slopes_t1, slopes_oracle, args.eval_start, n30, trans_mask)
 
-    print(f"  {'-' * 68}")
-    print(f"{'=' * 80}")
+    print(f"  {'Test 1: FLKS 30min pur':<30} {c_t1_all:>7.2f}% {'  base':>8}"
+          f"  {c_t1_tr:>7.2f}% {'  base':>8}")
+
+    for k, ck_a, _, ck_t, _ in results_t2:
+        da = ck_a - c_t1_all
+        dt = ck_t - c_t1_tr
+        print(f"  {'Test 2: k=' + str(k) + ' (' + str(k*5) + 'min)':<30}"
+              f" {ck_a:>7.2f}% {da:>+7.2f}p"
+              f"  {ck_t:>7.2f}% {dt:>+7.2f}p")
+
+    print(f"  {'-' * 65}")
+    print(f"{'=' * 75}")
 
     # ------------------------------------------------------------------
-    print(f"\n[7/7] Plots ...")
-
-    concs_all = [r[1] for r in results]
-    concs_trans = [r[3] for r in results]
-    ks = [r[0] for r in results]
-    x_pos = np.arange(len(ks))
-    bar_w = 0.35
+    # Plot
+    labels = ['T1\n30m'] + [f'k={k}\n{k*5}m' for k in range(1, 7)]
+    all_concs_all = [c_t1_all] + [r[1] for r in results_t2]
+    all_concs_tr = [c_t1_tr] + [r[3] for r in results_t2]
+    x_pos = np.arange(len(labels))
+    w = 0.35
 
     fig, ax = plt.subplots(figsize=(12, 6))
-    bars1 = ax.bar(x_pos - bar_w / 2, concs_all, bar_w,
-                    color='steelblue', alpha=0.8, label='All samples')
-    bars2 = ax.bar(x_pos + bar_w / 2, concs_trans, bar_w,
-                    color='tomato', alpha=0.8, label='Transitions only')
-
+    b1 = ax.bar(x_pos - w / 2, all_concs_all, w,
+                color='steelblue', alpha=0.8, label='All samples')
+    b2 = ax.bar(x_pos + w / 2, all_concs_tr, w,
+                color='tomato', alpha=0.8, label='Transitions only')
     ax.set_xticks(x_pos)
-    ax.set_xticklabels(['30m\npur'] + [f'k={k}\n{k*5}min' for k in range(1, 7)])
+    ax.set_xticklabels(labels)
     ax.set_ylabel('Sign concordance vs oracle (%)')
-    ax.set_title(f'FLKS(N={args.flks_lag}) — Convergence par sous-pas 5min\n'
-                 f'Oracle = pykalman.smooth MACD 30min BTC  |  '
-                 f'Transitions: {n_trans}  |  Persistence: {persistence:.0f}%')
-    ax.set_ylim(max(0, min(min(concs_all), min(concs_trans)) - 10), 100)
+    ax.set_title(f'FLKS — Convergence par sous-pas 5min de la bougie suivante\n'
+                 f'Oracle=pykalman.smooth MACD 30min BTC | '
+                 f'Trans={n_trans} | Persist={persistence:.0f}%')
+    ax.set_ylim(max(0, min(min(all_concs_all), min(all_concs_tr)) - 10), 100)
     ax.legend()
     ax.grid(True, axis='y', alpha=0.3)
-
-    for bar in bars1:
+    for bar in b1:
         ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.5,
                 f'{bar.get_height():.1f}', ha='center', va='bottom', fontsize=8)
-    for bar in bars2:
+    for bar in b2:
         ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.5,
                 f'{bar.get_height():.1f}', ha='center', va='bottom', fontsize=8)
 
@@ -520,7 +474,7 @@ def main():
     out_path = output_dir / 'flks_substep_convergence.png'
     plt.savefig(out_path, dpi=150, bbox_inches='tight')
     plt.close()
-    print(f"  Plot saved: {out_path}")
+    print(f"\n  Plot saved: {out_path}")
     print("Done.")
 
 
