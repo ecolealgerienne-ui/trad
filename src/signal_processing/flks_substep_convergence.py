@@ -360,16 +360,8 @@ def forward_filter_30m_adaptive(indicator_30m, window=30, Q_min=1e-6):
     """
     Kalman forward filter with adaptive Q (Myers-Tapley).
 
-    At each step t:
-      1. Predict with Q_current
-      2. Update
-      3. Compute innovation v[t]
-      4. Over sliding window W: C_vv = mean(v[k]^2)
-      5. C_rts = P_filt[t] @ A.T @ inv(A @ P_filt[t] @ A.T + Q_current)
-      6. Q_new = max(0, C_vv - S[t]) * C_rts @ C_rts.T
-      7. If Q_new positive semi-definite and > Q_min → adopt, else keep Q_current
-
     Returns same format as forward_filter_30m: (x_filt, P_filt, x_pred, P_pred, C)
+    Plus diagnostics dict with Q_history, K_history, innovation_history.
     """
     n = len(indicator_30m)
     first_valid_val = indicator_30m[~np.isnan(indicator_30m)][0]
@@ -383,6 +375,11 @@ def forward_filter_30m_adaptive(indicator_30m, window=30, Q_min=1e-6):
     innovation_buffer = []
     Q_min_mat = np.eye(2) * Q_min
 
+    # Diagnostics
+    Q_history = np.full((n, 2, 2), np.nan)
+    K_history = np.full((n, 2), np.nan)
+    innov_history = np.full(n, np.nan)
+
     for t in range(n):
         # 1. Predict
         if t == 0:
@@ -394,6 +391,7 @@ def forward_filter_30m_adaptive(indicator_30m, window=30, Q_min=1e-6):
 
         x_pred[t] = x_p
         P_pred[t] = P_p
+        Q_history[t] = Q_current
 
         # 2. Update
         if np.isnan(indicator_30m[t]):
@@ -401,45 +399,45 @@ def forward_filter_30m_adaptive(indicator_30m, window=30, Q_min=1e-6):
             P_filt[t] = P_p
             continue
 
+        # Compute Kalman gain before update (for diagnostics)
+        S_t = (H @ P_p @ H.T + R)[0, 0]
+        K_t = P_p @ H.T / S_t  # (2,1)
+        K_history[t] = K_t.ravel()
+
         x_filt[t], P_filt[t] = kf_update(x_p, P_p, indicator_30m[t])
 
         # 3. Innovation
         v_t = indicator_30m[t] - (H @ x_p)[0]
+        innov_history[t] = v_t
         innovation_buffer.append(v_t)
         if len(innovation_buffer) > window:
             innovation_buffer.pop(0)
 
         # 4-6. Adaptive Q update (only when window full and t > 0)
         if len(innovation_buffer) >= window and t > 0:
-            # Empirical innovation variance (scalar)
             C_vv = np.mean(np.array(innovation_buffer) ** 2)
-
-            # Theoretical innovation variance (scalar)
-            S_t = (H @ P_p @ H.T + R)[0, 0]
-
-            # Excess variance
             delta = C_vv - S_t
 
             if delta > 0:
-                # C_rts = P_filt[t] @ A.T @ inv(P_pred[t+1])
-                # where P_pred[t+1] = A @ P_filt[t] @ A.T + Q_current
                 P_pred_next = A @ P_filt[t] @ A.T + Q_current
                 C_rts = P_filt[t] @ A.T @ _inv2x2(P_pred_next)
-
-                # Myers-Tapley: Q_new = delta * C_rts @ C_rts.T
                 Q_candidate = delta * (C_rts @ C_rts.T)
 
-                # Validate and clip
                 if _is_pos_semidef(Q_candidate):
                     Q_current = np.maximum(Q_candidate, Q_min_mat)
-                # else: keep Q_current
 
-    # Precompute RTS gains (same as standard filter)
+    # Precompute RTS gains
     C_gains = np.zeros((n, 2, 2))
     for t in range(n - 1):
         C_gains[t] = P_filt[t] @ A.T @ _inv2x2(P_pred[t + 1])
 
-    return x_filt, P_filt, x_pred, P_pred, C_gains
+    diagnostics = {
+        'Q_history': Q_history,
+        'K_history': K_history,
+        'innov_history': innov_history,
+    }
+
+    return x_filt, P_filt, x_pred, P_pred, C_gains, diagnostics
 
 
 # ============================================================================
@@ -546,22 +544,99 @@ def sign_concordance_at_transitions(slopes_test, slopes_oracle, start, end, tran
 # ============================================================================
 
 def run_indicator_adaptive(name, indicator_30m, live_per_candle, eval_start, n30,
-                           slopes_oracle, trans_mask, window=30):
+                           slopes_oracle, trans_mask, window=30, output_dir=None):
     """Run AQ-KF Test 1 + Test 2 for one indicator with adaptive Q."""
     print(f"\n  --- AQ-KF {name} (window={window}) ---")
 
     # Adaptive forward filter
     print(f"  Forward filter adaptive ...", end=" ", flush=True)
-    x_filt, P_filt, x_pred, P_pred, C = forward_filter_30m_adaptive(
+    x_filt, P_filt, x_pred, P_pred, C, diag = forward_filter_30m_adaptive(
         indicator_30m, window=window)
     print("done.")
 
+    # --- Diagnostics ---
+    Q_00 = diag['Q_history'][:, 0, 0]
+    Q_11 = diag['Q_history'][:, 1, 1]
+    K_0 = diag['K_history'][:, 0]
+    K_1 = diag['K_history'][:, 1]
+    valid_q = ~np.isnan(Q_00)
+    valid_k = ~np.isnan(K_0)
+
+    print(f"\n  Q[0,0] (position process noise):")
+    print(f"    Fixed Q = {KALMAN_PROCESS_VAR}")
+    q_vals = Q_00[valid_q]
+    print(f"    Adaptive: min={q_vals.min():.2e}  median={np.median(q_vals):.2e}"
+          f"  P95={np.percentile(q_vals, 95):.2e}  max={q_vals.max():.2e}")
+
+    print(f"  Q[1,1] (velocity process noise):")
+    q1_vals = Q_11[valid_q]
+    print(f"    Adaptive: min={q1_vals.min():.2e}  median={np.median(q1_vals):.2e}"
+          f"  P95={np.percentile(q1_vals, 95):.2e}  max={q1_vals.max():.2e}")
+
+    print(f"  Kalman gain K[0] (position):")
+    k_vals = K_0[valid_k]
+    print(f"    min={k_vals.min():.4f}  median={np.median(k_vals):.4f}"
+          f"  P95={np.percentile(k_vals, 95):.4f}  max={k_vals.max():.4f}")
+
+    print(f"  Kalman gain K[1] (velocity):")
+    k1_vals = K_1[valid_k]
+    print(f"    min={k1_vals.min():.4f}  median={np.median(k1_vals):.4f}"
+          f"  P95={np.percentile(k1_vals, 95):.4f}  max={k1_vals.max():.4f}")
+
+    # Plot diagnostics
+    if output_dir is not None:
+        fig, axes = plt.subplots(3, 1, figsize=(16, 10), sharex=True)
+        t_range = np.arange(len(Q_00))
+
+        ax = axes[0]
+        ax.semilogy(t_range[valid_q], Q_00[valid_q], linewidth=0.5, color='tab:blue',
+                    label='Q[0,0] adaptive')
+        ax.axhline(y=KALMAN_PROCESS_VAR, color='red', linestyle='--',
+                   label=f'Q fixed = {KALMAN_PROCESS_VAR}')
+        ax.set_ylabel('Q[0,0]')
+        ax.set_title(f'AQ-KF Diagnostics — {name} (window={window})')
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+
+        ax = axes[1]
+        ax.plot(t_range[valid_k], K_0[valid_k], linewidth=0.5, color='tab:green',
+                label='K[0] (position gain)')
+        ax.plot(t_range[valid_k], K_1[valid_k], linewidth=0.5, color='tab:orange',
+                label='K[1] (velocity gain)')
+        ax.set_ylabel('Kalman Gain')
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+
+        ax = axes[2]
+        innov = diag['innov_history']
+        valid_i = ~np.isnan(innov)
+        ax.plot(t_range[valid_i], innov[valid_i], linewidth=0.3, color='gray',
+                alpha=0.5, label='Innovation v[t]')
+        # Rolling variance
+        w = window
+        if valid_i.sum() > w:
+            innov_sq = innov[valid_i] ** 2
+            roll_var = np.convolve(innov_sq, np.ones(w) / w, mode='same')
+            ax.plot(t_range[valid_i], np.sqrt(roll_var), linewidth=1.0,
+                    color='tab:red', label=f'sqrt(C_vv) MA({w})')
+        ax.set_ylabel('Innovation')
+        ax.set_xlabel('Candle index')
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        out_path = output_dir / f'aq_diagnostics_{name.lower()}.png'
+        plt.savefig(out_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"  Diagnostics plot saved: {out_path}")
+
+    # --- Tests ---
     # AQ-KF Test 1
     slopes_t1 = compute_slopes_test1(x_filt, x_pred, C)
     c_t1_all, _ = sign_concordance(slopes_t1, slopes_oracle, eval_start, n30)
     c_t1_tr, _ = sign_concordance_at_transitions(
         slopes_t1, slopes_oracle, eval_start, n30, trans_mask)
-    print(f"  AQ T1 (30m pur): all={c_t1_all:.2f}%  trans={c_t1_tr:.2f}%")
+    print(f"\n  AQ T1 (30m pur): all={c_t1_all:.2f}%  trans={c_t1_tr:.2f}%")
 
     # AQ-KF Test 2 k=1..6
     results_k = []
@@ -579,6 +654,7 @@ def run_indicator_adaptive(name, indicator_30m, live_per_candle, eval_start, n30
         't1_all': c_t1_all,
         't1_tr': c_t1_tr,
         'results_k': results_k,
+        'diagnostics': diag,
     }
 
 
@@ -730,7 +806,8 @@ def main():
     slopes_oracle_macd, trans_mask_macd = oracle_data['MACD']
     aq_result = run_indicator_adaptive(
         'MACD', macd_30m, macd_live_pc, args.eval_start, n30,
-        slopes_oracle_macd, trans_mask_macd, window=30)
+        slopes_oracle_macd, trans_mask_macd, window=30,
+        output_dir=output_dir)
 
     # ------------------------------------------------------------------
     print(f"\n[6/6] Résultats comparatifs")
