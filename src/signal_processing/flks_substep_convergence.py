@@ -356,7 +356,8 @@ def _is_pos_semidef(M):
     return M[0, 0] >= 0 and M[1, 1] >= 0 and (M[0, 0] * M[1, 1] - M[0, 1] * M[1, 0]) >= -1e-12
 
 
-def forward_filter_30m_adaptive(indicator_30m, window=30, Q_min=1e-6):
+def forward_filter_30m_adaptive(indicator_30m, window=30, Q_min=1e-6,
+                                 Q_max_factor=None, Q_min_factor=None):
     """
     Kalman forward filter with adaptive Q (Myers-Tapley).
 
@@ -376,11 +377,17 @@ def forward_filter_30m_adaptive(indicator_30m, window=30, Q_min=1e-6):
     # Clipping symétrique : Q reste dans [Q*0.1, Q*10]
     Q_FLOOR = Q * 0.1    # 0.001 * I
     Q_CEIL = Q * 10.0    # 0.1 * I
+    # Allow override via parameter
+    if Q_max_factor is not None:
+        Q_CEIL = Q * Q_max_factor
+    if Q_min_factor is not None:
+        Q_FLOOR = Q * Q_min_factor
 
     # Diagnostics
     Q_history = np.full((n, 2, 2), np.nan)
     K_history = np.full((n, 2), np.nan)
     innov_history = np.full(n, np.nan)
+    delta_history = np.full(n, np.nan)  # C_vv - S before clipping
 
     for t in range(n):
         # 1. Predict
@@ -419,6 +426,7 @@ def forward_filter_30m_adaptive(indicator_30m, window=30, Q_min=1e-6):
         if len(innovation_buffer) >= window and t > 0:
             C_vv = np.mean(np.array(innovation_buffer) ** 2)
             delta = C_vv - S_t
+            delta_history[t] = delta
 
             if delta > 0:
                 P_pred_next = A @ P_filt[t] @ A.T + Q_current
@@ -437,6 +445,7 @@ def forward_filter_30m_adaptive(indicator_30m, window=30, Q_min=1e-6):
         'Q_history': Q_history,
         'K_history': K_history,
         'innov_history': innov_history,
+        'delta_history': delta_history,
     }
 
     return x_filt, P_filt, x_pred, P_pred, C_gains, diagnostics
@@ -546,14 +555,16 @@ def sign_concordance_at_transitions(slopes_test, slopes_oracle, start, end, tran
 # ============================================================================
 
 def run_indicator_adaptive(name, indicator_30m, live_per_candle, eval_start, n30,
-                           slopes_oracle, trans_mask, window=30, output_dir=None):
+                           slopes_oracle, trans_mask, window=30, output_dir=None,
+                           Q_max_factor=10.0, Q_min_factor=0.1):
     """Run AQ-KF Test 1 + Test 2 for one indicator with adaptive Q."""
-    print(f"\n  --- AQ-KF {name} (window={window}) ---")
+    print(f"\n  --- AQ-KF {name} (window={window}, Q_max={Q_max_factor}×Q) ---")
 
     # Adaptive forward filter
     print(f"  Forward filter adaptive ...", end=" ", flush=True)
     x_filt, P_filt, x_pred, P_pred, C, diag = forward_filter_30m_adaptive(
-        indicator_30m, window=window)
+        indicator_30m, window=window,
+        Q_max_factor=Q_max_factor, Q_min_factor=Q_min_factor)
     print("done.")
 
     # --- Diagnostics ---
@@ -585,9 +596,22 @@ def run_indicator_adaptive(name, indicator_30m, live_per_candle, eval_start, n30
     print(f"    min={k1_vals.min():.4f}  median={np.median(k1_vals):.4f}"
           f"  P95={np.percentile(k1_vals, 95):.4f}  max={k1_vals.max():.4f}")
 
+    # Delta diagnostics
+    delta = diag['delta_history']
+    valid_d = ~np.isnan(delta)
+    if valid_d.sum() > 0:
+        d_vals = delta[valid_d]
+        pct_pos = np.mean(d_vals > 0) * 100
+        pct_neg = np.mean(d_vals < 0) * 100
+        print(f"  Delta (C_vv - S) before clipping:")
+        print(f"    min={d_vals.min():.2f}  median={np.median(d_vals):.2f}"
+              f"  P95={np.percentile(d_vals, 95):.2f}  max={d_vals.max():.2f}")
+        print(f"    delta > 0: {pct_pos:.1f}% (Q wants to increase)")
+        print(f"    delta < 0: {pct_neg:.1f}% (Q wants to decrease)")
+
     # Plot diagnostics
     if output_dir is not None:
-        fig, axes = plt.subplots(3, 1, figsize=(16, 10), sharex=True)
+        fig, axes = plt.subplots(4, 1, figsize=(16, 13), sharex=True)
         t_range = np.arange(len(Q_00))
 
         ax = axes[0]
@@ -622,6 +646,21 @@ def run_indicator_adaptive(name, indicator_30m, live_per_candle, eval_start, n30
             ax.plot(t_range[valid_i], np.sqrt(roll_var), linewidth=1.0,
                     color='tab:red', label=f'sqrt(C_vv) MA({w})')
         ax.set_ylabel('Innovation')
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+
+        ax = axes[3]
+        if valid_d.sum() > 0:
+            ax.plot(t_range[valid_d], delta[valid_d], linewidth=0.5,
+                    color='tab:purple', alpha=0.7, label='delta = C_vv - S')
+            ax.axhline(y=0, color='black', linestyle='-', linewidth=0.5)
+            ax.fill_between(t_range[valid_d], 0, delta[valid_d],
+                            where=delta[valid_d] > 0, color='red', alpha=0.15,
+                            label='Q wants to increase')
+            ax.fill_between(t_range[valid_d], 0, delta[valid_d],
+                            where=delta[valid_d] < 0, color='blue', alpha=0.15,
+                            label='Q wants to decrease')
+        ax.set_ylabel('Delta (C_vv - S)')
         ax.set_xlabel('Candle index')
         ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)
@@ -803,13 +842,13 @@ def main():
         oracle_data[name] = (slopes_oracle, trans_mask)
 
     # ------------------------------------------------------------------
-    print("\n[5/6] Running AQ-KF (adaptive Q) for MACD only ...")
+    print("\n[5/6] Running AQ-KF (adaptive Q) for MACD ...")
 
     slopes_oracle_macd, trans_mask_macd = oracle_data['MACD']
     aq_result = run_indicator_adaptive(
         'MACD', macd_30m, macd_live_pc, args.eval_start, n30,
         slopes_oracle_macd, trans_mask_macd, window=30,
-        output_dir=output_dir)
+        output_dir=output_dir, Q_max_factor=10.0)
 
     # ------------------------------------------------------------------
     print(f"\n[6/6] Résultats comparatifs")
@@ -866,9 +905,9 @@ def main():
 
     print(f"  {'-' * (22 + 20 * len(all_results))}")
 
-    # AQ-KF section (MACD only, first column)
-    print(f"\n  --- Adaptive Q (MACD only) ---")
-    macd_std = all_results[0]  # MACD standard results
+    # AQ-KF section (MACD only)
+    print(f"\n  --- Adaptive Q (MACD only, Q_max=Q×10) ---")
+    macd_std = all_results[0]
     print(f"  {'Method':<22} │ {'All':>7}  {'Trans':>7}  │ {'d/Std All':>9} {'d/Std Tr':>9}")
     print(f"  {'-' * 70}")
     # AQ T1
