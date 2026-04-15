@@ -842,13 +842,18 @@ def main():
         oracle_data[name] = (slopes_oracle, trans_mask)
 
     # ------------------------------------------------------------------
-    print("\n[5/6] Running AQ-KF (adaptive Q) for MACD ...")
+    print("\n[5/6] Running AQ-KF (adaptive Q) for MACD — Q_max sweep ...")
 
     slopes_oracle_macd, trans_mask_macd = oracle_data['MACD']
-    aq_result = run_indicator_adaptive(
-        'MACD', macd_30m, macd_live_pc, args.eval_start, n30,
-        slopes_oracle_macd, trans_mask_macd, window=30,
-        output_dir=output_dir, Q_max_factor=10.0)
+    q_max_factors = [10, 50, 100, 500]
+    aq_sweep = {}
+    for qmf in q_max_factors:
+        res = run_indicator_adaptive(
+            'MACD', macd_30m, macd_live_pc, args.eval_start, n30,
+            slopes_oracle_macd, trans_mask_macd, window=30,
+            output_dir=output_dir, Q_max_factor=qmf)
+        aq_sweep[qmf] = res
+    aq_result = aq_sweep[q_max_factors[0]]  # default for backward compat
 
     # ------------------------------------------------------------------
     print(f"\n[6/6] Résultats comparatifs")
@@ -905,29 +910,35 @@ def main():
 
     print(f"  {'-' * (22 + 20 * len(all_results))}")
 
-    # AQ-KF section (MACD only)
-    print(f"\n  --- Adaptive Q (MACD only, Q_max=Q×10) ---")
+    # AQ-KF section — Q_max sweep
+    print(f"\n  --- Adaptive Q (MACD) — Q_max sweep (Trans only) ---")
     macd_std = all_results[0]
-    print(f"  {'Method':<22} │ {'All':>7}  {'Trans':>7}  │ {'d/Std All':>9} {'d/Std Tr':>9}")
-    print(f"  {'-' * 70}")
-    # AQ T1
-    d_a = aq_result['t1_all'] - macd_std['t1_all']
-    d_t = aq_result['t1_tr'] - macd_std['t1_tr']
-    print(f"  {'AQ T1: 30m pur':<22} │ {aq_result['t1_all']:>6.2f}% {aq_result['t1_tr']:>7.2f}%"
-          f"  │ {d_a:>+8.2f}p {d_t:>+8.2f}p")
-    # AQ T2 k=1..6
+
+    hdr = f"  {'Method':<22}"
+    for qmf in q_max_factors:
+        hdr += f" │ {'Q×' + str(qmf):>8}"
+    hdr += f" │ {'Standard':>10}"
+    print(hdr)
+    print(f"  {'-' * (24 + 11 * len(q_max_factors) + 13)}")
+
+    # T1 row
+    row = f"  {'AQ T1: 30m pur':<22}"
+    for qmf in q_max_factors:
+        row += f" │ {aq_sweep[qmf]['t1_tr']:>7.2f}%"
+    row += f" │ {macd_std['t1_tr']:>9.2f}%"
+    print(row)
+
+    # T2 k=1..6
     for ki in range(6):
         k = ki + 1
-        aq_all = aq_result['results_k'][ki][1]
-        aq_tr = aq_result['results_k'][ki][2]
-        std_all = macd_std['results_k'][ki][1]
-        std_tr = macd_std['results_k'][ki][2]
-        d_a = aq_all - std_all
-        d_t = aq_tr - std_tr
-        label = f"AQ T2: k={k} ({k*5}min)"
-        print(f"  {label:<22} │ {aq_all:>6.2f}% {aq_tr:>7.2f}%"
-              f"  │ {d_a:>+8.2f}p {d_t:>+8.2f}p")
-    print(f"  {'-' * 70}")
+        label = f"  AQ T2: k={k} ({k*5}min)"
+        row = f"{label:<24}"
+        for qmf in q_max_factors:
+            row += f" │ {aq_sweep[qmf]['results_k'][ki][2]:>7.2f}%"
+        row += f" │ {macd_std['results_k'][ki][2]:>9.2f}%"
+        print(row)
+
+    print(f"  {'-' * (24 + 11 * len(q_max_factors) + 13)}")
 
     print(f"{'=' * 90}")
 
