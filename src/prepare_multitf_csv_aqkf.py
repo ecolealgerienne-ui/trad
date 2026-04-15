@@ -566,9 +566,8 @@ def run_validation(result, df_5min, tf_minutes, suffix, indicators):
     ok = True
     if 'macd' in indicators:
         ms_raw = calculate_macd_standard(df_tf)
-        # Normalize by price (same as live pipeline)
-        ms = ms_raw / df_tf['close'] * 10000
-        ok &= compare("MACD", f'macd_{suffix}_live', ms)
+        # AQ-KF: raw MACD (no normalization)
+        ok &= compare("MACD", f'macd_{suffix}_live', ms_raw)
         # NOTE: Kalman validation skipped — AQ-KF produces different values
         # than fixed-Q pykalman by design. Only indicator values are validated.
     if 'rsi' in indicators:
@@ -628,11 +627,9 @@ def generate_multitf_csv(asset_name, output_dir, indicators=None):
         if 'macd' in indicators:
             logger.info(f"    Computing MACD live...")
             macd_raw = compute_macd_live(close_5min, is_close)
-            # Normalize MACD by price (MACD is in price units, scales with BTC price)
-            # Convert to basis points (stable across price regimes)
-            macd_norm = macd_raw / close_5min * 10000
-            ind_results['macd'] = macd_norm
-            logger.info(f"      MACD normalized by price (×10000/close)")
+            # AQ-KF: use RAW MACD (no normalization) to match FLKS tests
+            ind_results['macd'] = macd_raw
+            logger.info(f"      MACD RAW (no normalization, aligned with FLKS tests)")
         if 'rsi' in indicators:
             logger.info(f"    Computing RSI live...")
             ind_results['rsi'] = compute_rsi_live(close_5min, is_close)
@@ -675,9 +672,8 @@ def generate_multitf_csv(asset_name, output_dir, indicators=None):
         for ind_name in indicators:
             if ind_name == 'macd':
                 macd_std = calculate_macd_standard(df_tf).values
-                # Normalize by price (same as live MACD normalization)
-                close_tf = df_tf['close'].values
-                ind_tf_values = macd_std / close_tf * 10000
+                # AQ-KF: use RAW MACD (no normalization, aligned with FLKS tests)
+                ind_tf_values = macd_std
             elif ind_name == 'rsi':
                 ind_tf_values = calculate_rsi_standard(df_tf).values
             elif ind_name == 'cci':
