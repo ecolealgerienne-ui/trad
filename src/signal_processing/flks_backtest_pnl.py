@@ -391,27 +391,32 @@ def _exec_trade(position, entry_price, exec_price, fees):
     return pnl - fees
 
 
-def backtest_30m(slopes, closes_30m, start, end, fees, label="", threshold=0.0):
+def backtest_30m(slopes, closes_30m, start, end, fees, label="",
+                 threshold=0.0, holding_min=0):
     """
     Backtest pour Oracle et Test 1.
     Signal slope[t] disponible à close de t.
     Exécution au close[t] ≈ open[t+1].
     threshold: magnitude minimale de pente pour déclencher un reversal.
+    holding_min: nombre minimum de bougies 30min avant de reverser.
     """
     pnl_total = 0.0
     n_trades = 0
     n_wins = 0
     position = 0
     entry_price = 0.0
+    entry_t = -holding_min  # allow first trade immediately
 
     for t in range(start, end):
         if np.isnan(slopes[t]):
             continue
         if abs(slopes[t]) < threshold:
-            continue  # pente trop faible, ignorer
+            continue
         target = 1 if slopes[t] > 0 else -1
         if position == target:
             continue
+        if position != 0 and (t - entry_t) < holding_min:
+            continue  # holding minimum not reached
 
         # Prix d'exécution = close[t] ≈ open[t+1]
         if t + 1 >= len(closes_30m):
@@ -431,6 +436,7 @@ def backtest_30m(slopes, closes_30m, start, end, fees, label="", threshold=0.0):
         entry_price = exec_price
         position = target
         n_trades += 1
+        entry_t = t
         pnl_total -= fees
 
     # Clôturer dernière position
@@ -448,26 +454,30 @@ def backtest_30m(slopes, closes_30m, start, end, fees, label="", threshold=0.0):
 
 
 def backtest_5m(slopes, closes_5m_per_candle, k_substep, start, end, fees,
-                label="", threshold=0.0):
+                label="", threshold=0.0, holding_min=0):
     """
     Backtest pour Test 2 k=1..6.
     Signal slope[t] disponible au step k de la bougie t+1.
     Exécution au close du step k de la bougie t+1.
     threshold: magnitude minimale de pente pour déclencher un reversal.
+    holding_min: nombre minimum de bougies 30min avant de reverser.
     """
     pnl_total = 0.0
     n_trades = 0
     n_wins = 0
     position = 0
     entry_price = 0.0
+    entry_t = -holding_min
 
     for t in range(start, end):
         if np.isnan(slopes[t]):
             continue
         if abs(slopes[t]) < threshold:
-            continue  # pente trop faible, ignorer
+            continue
         target = 1 if slopes[t] > 0 else -1
         if position == target:
+            continue
+        if position != 0 and (t - entry_t) < holding_min:
             continue
 
         # Prix d'exécution = close du step k dans la bougie t+1
@@ -475,7 +485,7 @@ def backtest_5m(slopes, closes_5m_per_candle, k_substep, start, end, fees,
         if candle_idx >= len(closes_5m_per_candle):
             continue
         closes_5m = closes_5m_per_candle[candle_idx]
-        step_idx = k_substep - 1  # k=1 → index 0, k=6 → index 5
+        step_idx = k_substep - 1
         if step_idx >= len(closes_5m):
             continue
         exec_price = closes_5m[step_idx]
@@ -493,6 +503,7 @@ def backtest_5m(slopes, closes_5m_per_candle, k_substep, start, end, fees,
         entry_price = exec_price
         position = target
         n_trades += 1
+        entry_t = t
         pnl_total -= fees
 
     # Clôturer dernière position
@@ -627,37 +638,21 @@ def main():
         print(f"  Slopes computed (oracle + T1 + k=1..6)")
 
     # ==================================================================
-    # Compute slope percentiles for threshold calibration
-    print("\n[7/9] Calibrating thresholds from slope distributions ...")
-    thresholds = [0.0]
-    for name in ['MACD']:  # calibrate from MACD T1 slopes
-        s = all_slopes[name]['t1'][args.eval_start:n30]
-        s = s[~np.isnan(s)]
-        abs_s = np.abs(s)
-        for pct in [25, 50, 75, 90]:
-            val = np.percentile(abs_s, pct)
-            thresholds.append(round(val, 4))
-        print(f"  {name} T1 |slope| percentiles: "
-              f"P25={np.percentile(abs_s,25):.4f} "
-              f"P50={np.percentile(abs_s,50):.4f} "
-              f"P75={np.percentile(abs_s,75):.4f} "
-              f"P90={np.percentile(abs_s,90):.4f}")
-    thresholds = sorted(set(thresholds))
-    print(f"  Thresholds to test: {thresholds}")
-
-    # ==================================================================
-    print(f"\n[8/9] Backtest grid: thresholds × methods × indicators ...")
+    holding_values = [0, 2, 4, 6, 8, 10, 15, 20]
+    print(f"\n[7/9] Backtest grid: holding_min × methods × indicators ...")
+    print(f"       Holding values (bougies 30min): {holding_values}")
+    print(f"       En temps: {[f'{h*30}min' for h in holding_values]}")
 
     all_results = {}
     for name in ['MACD', 'RSI', 'CCI']:
         slopes = all_slopes[name]
-        results_by_thr = {}
+        results_by_hold = {}
 
-        for thr in thresholds:
-            print(f"  {name} thr={thr:.4f} ...", end=" ", flush=True)
+        for hold in holding_values:
+            print(f"  {name} hold={hold} ({hold*30}min) ...", end=" ", flush=True)
             results = []
 
-            # Oracle (no threshold — reference)
+            # Oracle (no holding — reference)
             r = backtest_30m(slopes['oracle'], closes_30m,
                              args.eval_start, n30 - 1, fees, "Oracle")
             results.append(r)
@@ -665,95 +660,102 @@ def main():
             # T1
             r = backtest_30m(slopes['t1'], closes_30m,
                              args.eval_start, n30 - 1, fees, "T1: 30m",
-                             threshold=thr)
+                             holding_min=hold)
             results.append(r)
 
             # T2 k=1..6
             for k in range(1, 7):
                 r = backtest_5m(slopes[f'k{k}'], closes_5m_per_candle, k,
                                 args.eval_start, n30 - 1, fees,
-                                f"T2:k={k}", threshold=thr)
+                                f"T2:k={k}", holding_min=hold)
                 results.append(r)
 
-            results_by_thr[thr] = results
-            # Show best non-oracle PnL for this threshold
+            results_by_hold[hold] = results
             best = max(results[1:], key=lambda x: x['pnl_pct'])
             print(f"best={best['label']} PnL={best['pnl_pct']:+.1f}% "
                   f"trades={best['trades']} WR={best['win_rate']:.1f}%")
 
-        all_results[name] = results_by_thr
+        all_results[name] = results_by_hold
 
     # ==================================================================
-    print(f"\n[9/9] Tableaux comparatifs")
+    print(f"\n[8/9] Tableaux comparatifs")
 
     for name in ['MACD', 'RSI', 'CCI']:
-        print(f"\n{'=' * 85}")
+        print(f"\n{'=' * 95}")
         print(f"  {name} — FLKS Backtest PnL — BTC 30min — Fees {fees*100:.1f}%/trade")
         print(f"  Buy & Hold: {bh:+.2f}%  |  Eval: [{args.eval_start}:{n30}]")
-        print(f"{'=' * 85}")
-        print(f"  {'Threshold':<12} {'Oracle':>9} │"
+        print(f"{'=' * 95}")
+        print(f"  {'Hold(30m)':<12} {'Oracle':>9} │"
               f" {'T1':>9} {'T2k1':>9} {'T2k2':>9} {'T2k3':>9}"
               f" {'T2k4':>9} {'T2k5':>9} {'T2k6':>9}")
-        print(f"  {'-' * 82}")
+        print(f"  {'-' * 92}")
 
-        for thr in thresholds:
-            results = all_results[name][thr]
-            row = f"  {thr:<12.4f}"
+        for hold in holding_values:
+            results = all_results[name][hold]
+            row = f"  {hold:<4} ({hold*30:>3}m) "
             for r in results:
                 row += f" {r['pnl_pct']:>+8.1f}%"
                 if r == results[0]:
                     row += " │"
             print(row)
 
-        print(f"  {'-' * 82}")
+        print(f"  {'-' * 92}")
 
-        # Trades count for thr=0
-        results_0 = all_results[name][0.0]
-        row = f"  {'(trades)':12}"
-        for r in results_0:
-            row += f" {r['trades']:>9}"
-            if r == results_0[0]:
-                row += " │"
-        print(row)
+        # Trades count per holding
+        print(f"  {'Trades:':<12}")
+        for hold in holding_values:
+            results = all_results[name][hold]
+            row = f"  {hold:<4} ({hold*30:>3}m) "
+            for r in results:
+                row += f" {r['trades']:>9}"
+                if r == results[0]:
+                    row += " │"
+            print(row)
+
+        print(f"  {'-' * 92}")
 
         # Best config
         best_pnl = -1e9
         best_cfg = ""
-        for thr in thresholds:
-            for r in all_results[name][thr][1:]:  # skip oracle
+        for hold in holding_values:
+            for r in all_results[name][hold][1:]:
                 if r['pnl_pct'] > best_pnl:
                     best_pnl = r['pnl_pct']
-                    best_cfg = f"{r['label']} thr={thr:.4f}"
+                    best_cfg = f"{r['label']} hold={hold} ({hold*30}min)"
         print(f"\n  Best: {best_cfg} → PnL={best_pnl:+.1f}%")
-        print(f"{'=' * 85}")
+        print(f"{'=' * 95}")
 
-    # Buy & Hold
     print(f"\n  Buy & Hold: {bh:+.2f}%")
 
     # ==================================================================
-    # Plot: best k for each threshold (MACD only)
-    print(f"\nGenerating plot ...")
-    name = 'MACD'
-    fig, ax = plt.subplots(figsize=(12, 6))
+    print(f"\n[9/9] Plot ...")
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6), sharey=True)
     methods = ['T1'] + [f'T2:k={k}' for k in range(1, 7)]
     colors = plt.cm.viridis(np.linspace(0.2, 0.9, len(methods)))
 
-    for mi, method_label in enumerate(methods):
-        pnls = []
-        for thr in thresholds:
-            results = all_results[name][thr]
-            r = results[mi + 1]  # +1 skip oracle
-            pnls.append(r['pnl_pct'])
-        ax.plot(thresholds, pnls, 'o-', color=colors[mi], label=method_label, markersize=5)
+    for idx, name in enumerate(['MACD', 'RSI', 'CCI']):
+        ax = axes[idx]
+        for mi, method_label in enumerate(methods):
+            pnls = []
+            for hold in holding_values:
+                results = all_results[name][hold]
+                r = results[mi + 1]
+                pnls.append(r['pnl_pct'])
+            ax.plot(holding_values, pnls, 'o-', color=colors[mi],
+                    label=method_label, markersize=4, linewidth=1)
 
-    ax.axhline(y=bh, color='green', linestyle='--', linewidth=1, label=f'B&H {bh:+.1f}%')
-    ax.axhline(y=0, color='black', linestyle='-', linewidth=0.5)
-    ax.set_xlabel('Slope magnitude threshold')
-    ax.set_ylabel('PnL net (%)')
-    ax.set_title(f'{name} — PnL vs Slope Threshold — Fees {fees*100:.1f}%/trade')
-    ax.legend(fontsize=8, ncol=2)
-    ax.grid(True, alpha=0.3)
+        ax.axhline(y=bh, color='green', linestyle='--', linewidth=1,
+                   label=f'B&H {bh:+.1f}%')
+        ax.axhline(y=0, color='black', linestyle='-', linewidth=0.5)
+        ax.set_xlabel('Holding minimum (bougies 30min)')
+        ax.set_title(name, fontsize=11)
+        ax.grid(True, alpha=0.3)
+        if idx == 0:
+            ax.set_ylabel('PnL net (%)')
+            ax.legend(fontsize=7, ncol=2)
 
+    plt.suptitle(f'FLKS PnL vs Holding Minimum — BTC 30min — Fees {fees*100:.1f}%/trade',
+                 fontsize=12)
     plt.tight_layout()
     out_path = output_dir / 'flks_backtest_pnl.png'
     plt.savefig(out_path, dpi=150, bbox_inches='tight')
