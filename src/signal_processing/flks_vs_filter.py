@@ -161,6 +161,8 @@ def _mean_deviation(data: np.ndarray, period: int) -> np.ndarray:
 def kalman_filter_forward(z: np.ndarray):
     """
     Standard Kalman filter (forward-only, causal).
+    Matches pykalman.KalmanFilter.filter() behavior exactly:
+    at t=0, the initial prior is updated with z[0] (predict+update).
 
     Returns:
         x_filt: (T, 2) filtered state means [position, velocity]
@@ -174,19 +176,24 @@ def kalman_filter_forward(z: np.ndarray):
     x_pred = np.zeros((T, 2))
     P_pred = np.zeros((T, 2, 2))
 
-    # Initialize
-    x_filt[0] = [z[0], 0.0]
-    P_filt[0] = np.eye(2)
+    # Initial prior (before seeing any data)
+    x0 = np.array([z[0], 0.0])
+    P0 = np.eye(2)
 
-    for t in range(1, T):
-        # Predict
-        x_p = A @ x_filt[t - 1]
-        P_p = A @ P_filt[t - 1] @ A.T + Q
+    for t in range(T):
+        if t == 0:
+            # At t=0: prior = initial state, then update with z[0]
+            x_p = x0
+            P_p = P0
+        else:
+            # Predict from previous posterior
+            x_p = A @ x_filt[t - 1]
+            P_p = A @ P_filt[t - 1] @ A.T + Q
 
         x_pred[t] = x_p
         P_pred[t] = P_p
 
-        # Update
+        # Update with observation z[t]
         y = z[t] - H @ x_p                         # innovation
         S = H @ P_p @ H.T + R                       # innovation covariance
         K = P_p @ H.T @ np.linalg.inv(S)            # Kalman gain
