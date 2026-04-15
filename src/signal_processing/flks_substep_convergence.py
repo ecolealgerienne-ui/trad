@@ -166,7 +166,20 @@ def compute_oracle(indicator_30m):
 # ============================================================================
 
 def kf_predict(x, P):
+    """Predict with 30min transition."""
     return A @ x, A @ P @ A.T + Q
+
+
+# Sub-step transition (5min = 1/6 of 30min)
+DT_SUB = 1.0 / 6.0
+A_SUB = np.array([[1.0, DT_SUB],
+                   [0.0, 1.0]])
+Q_SUB = Q * DT_SUB
+
+
+def kf_predict_sub(x, P):
+    """Predict with 5min sub-step transition."""
+    return A_SUB @ x, A_SUB @ P @ A_SUB.T + Q_SUB
 
 
 def kf_update(x_p, P_p, z_obs):
@@ -216,19 +229,22 @@ def run_flks_with_substeps(indicator_30m, macd_live_per_candle,
                 # Pure 30min: single update
                 x_filt[t], P_filt[t] = kf_update(x_p, P_p, indicator_30m[t])
             else:
-                # Inject first n_substeps MACD live values
+                # Sub-step forward: replace the 30min predict+update
+                # with n_substeps cycles of (predict_5min + update_5min).
+                # Start from previous candle state, NOT from x_pred[t].
                 macd_vals = macd_live_per_candle[t]
                 valid_vals = [v for v in macd_vals if not np.isnan(v)]
                 use = valid_vals[:n_substeps]
 
-                x_cur, P_cur = x_p, P_p
+                x_cur = x_filt[t - 1].copy()
+                P_cur = P_filt[t - 1].copy()
+
                 if len(use) > 0:
                     for k, m5 in enumerate(use):
+                        x_cur, P_cur = kf_predict_sub(x_cur, P_cur)
                         x_cur, P_cur = kf_update(x_cur, P_cur, m5)
-                        if k < len(use) - 1:
-                            x_cur, P_cur = kf_predict(x_cur, P_cur)
                 else:
-                    x_cur, P_cur = kf_update(x_cur, P_cur, indicator_30m[t])
+                    x_cur, P_cur = kf_update(x_p, P_p, indicator_30m[t])
 
                 x_filt[t] = x_cur
                 P_filt[t] = P_cur
