@@ -204,33 +204,29 @@ def kalman_filter_forward(z: np.ndarray):
     return x_filt, P_filt, x_pred, P_pred
 
 
-def kalman_smoother_rts(z: np.ndarray):
+def pykalman_filter_and_smooth(z: np.ndarray):
     """
-    Rauch-Tung-Striebel smoother (non-causal, uses all data).
-    This is the ORACLE reference.
+    Run pykalman's filter() and smooth() — the pipeline reference implementation.
 
     Returns:
-        x_smooth: (T, 2) smoothed state means
+        filter_means: (T, 2) forward-filtered state means [position, velocity]
+        smooth_means: (T, 2) RTS-smoothed state means (oracle, non-causal)
     """
-    x_filt, P_filt, x_pred, P_pred = kalman_filter_forward(z)
-    T = len(z)
+    from pykalman import KalmanFilter as KF
 
-    x_smooth = np.copy(x_filt)
-    P_smooth = np.copy(P_filt)
+    kf = KF(
+        transition_matrices=[[1, 1], [0, 1]],
+        observation_matrices=[[1, 0]],
+        initial_state_mean=[z[0], 0.0],
+        initial_state_covariance=np.eye(2),
+        observation_covariance=KALMAN_MEASURE_VAR,
+        transition_covariance=np.eye(2) * KALMAN_PROCESS_VAR,
+    )
 
-    for t in range(T - 2, -1, -1):
-        # Smoother gain
-        P_pred_t1 = P_pred[t + 1]
-        # Guard against singular matrix
-        try:
-            C = P_filt[t] @ A.T @ np.linalg.inv(P_pred_t1)
-        except np.linalg.LinAlgError:
-            C = P_filt[t] @ A.T @ np.linalg.pinv(P_pred_t1)
+    filter_means, _ = kf.filter(z)
+    smooth_means, _ = kf.smooth(z)
 
-        x_smooth[t] = x_filt[t] + C @ (x_smooth[t + 1] - x_pred[t + 1])
-        P_smooth[t] = P_filt[t] + C @ (P_smooth[t + 1] - P_pred_t1) @ C.T
-
-    return x_smooth
+    return filter_means, smooth_means
 
 
 def kalman_flks(z: np.ndarray, lag: int = 2):
@@ -338,9 +334,9 @@ def plot_slopes(pente_filtre, pente_flks, pente_oracle, window_start, window_siz
 
     # --- Panel 1: 3 slopes overlay ---
     ax = axes[0]
-    ax.plot(t, pente_oracle[ws:we], color='black', linewidth=1.5, alpha=0.8, label='Oracle (RTS smoother)')
-    ax.plot(t, pente_flks[ws:we], color='tab:blue', linewidth=1.0, alpha=0.8, label='FLKS (N=2)')
-    ax.plot(t, pente_filtre[ws:we], color='tab:red', linewidth=0.8, alpha=0.6, label='Filter (forward-only)')
+    ax.plot(t, pente_oracle[ws:we], color='black', linewidth=1.5, alpha=0.8, label='Oracle (pykalman.smooth)')
+    ax.plot(t, pente_flks[ws:we], color='tab:blue', linewidth=1.0, alpha=0.8, label='FLKS (N=2, numpy)')
+    ax.plot(t, pente_filtre[ws:we], color='tab:red', linewidth=0.8, alpha=0.6, label='Filter (pykalman.filter)')
     ax.set_ylabel(f'Slope ({indicator.upper()})')
     ax.set_title(f'Slope Estimation — {indicator.upper()} 5min BTC (index {ws}:{we})')
     ax.legend(loc='upper right')
@@ -484,17 +480,14 @@ def main():
     # ------------------------------------------------------------------
     # 3. Run the 3 methods
     # ------------------------------------------------------------------
-    print("\n--- Running Kalman Filter (forward-only) ---")
-    x_filt, P_filt, x_pred, P_pred = kalman_filter_forward(z)
-    pos_filter = x_filt[:, 0]
+    print("\n--- Running pykalman filter + smooth (pipeline reference) ---")
+    filter_means, smooth_means = pykalman_filter_and_smooth(z)
+    pos_filter = filter_means[:, 0]
+    pos_oracle = smooth_means[:, 0]
 
-    print(f"--- Running FLKS (N={args.flks_lag}) ---")
+    print(f"--- Running FLKS (N={args.flks_lag}, numpy) ---")
     x_flks = kalman_flks(z, lag=args.flks_lag)
     pos_flks = x_flks[:, 0]
-
-    print("--- Running RTS Smoother (oracle) ---")
-    x_oracle = kalman_smoother_rts(z)
-    pos_oracle = x_oracle[:, 0]
 
     # ------------------------------------------------------------------
     # 4. Compute slopes: pente[t] = position[t-1] - position[t-2]
