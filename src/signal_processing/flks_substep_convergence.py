@@ -374,8 +374,29 @@ def compute_slopes_test2(x_filt, P_filt, x_pred, C,
                 x_cur, P_cur = kf_update(x_cur, P_cur, m5)
 
         x_prov = x_cur
-        sm_t1 = x_filt[t - 1] + C[t - 1] @ (x_prov - x_pred[t])
+        k_actual = len(use) if len(use) > 0 else 1
+
+        # Pas 1 : lisser t avec x_prov (backward depuis t+k/6 vers t)
+        # Transition partielle = A_SUB^k (k sous-pas entre t et x_prov)
+        A_k = np.linalg.matrix_power(A_SUB, k_actual)
+        Q_k = Q_SUB * k_actual
+        x_pred_partial = A_k @ x_filt[t]
+        P_pred_partial = A_k @ P_filt[t] @ A_k.T + Q_k
+        det = P_pred_partial[0, 0] * P_pred_partial[1, 1] - P_pred_partial[0, 1] * P_pred_partial[1, 0]
+        if abs(det) > 1e-15:
+            inv_Pp = np.array([[P_pred_partial[1, 1], -P_pred_partial[0, 1]],
+                               [-P_pred_partial[1, 0], P_pred_partial[0, 0]]]) / det
+        else:
+            inv_Pp = np.linalg.pinv(P_pred_partial)
+        C_partial = P_filt[t] @ A_k.T @ inv_Pp
+        sm_t = x_filt[t] + C_partial @ (x_prov - x_pred_partial)
+
+        # Pas 2 : lisser t-1 avec smoothed[t]
+        sm_t1 = x_filt[t - 1] + C[t - 1] @ (sm_t - x_pred[t])
+
+        # Pas 3 : lisser t-2 avec smoothed[t-1]
         sm_t2 = x_filt[t - 2] + C[t - 2] @ (sm_t1 - x_pred[t - 1])
+
         slopes[t] = sm_t1[0] - sm_t2[0]
     return slopes
 
