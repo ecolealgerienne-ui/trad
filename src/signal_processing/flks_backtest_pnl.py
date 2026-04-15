@@ -321,6 +321,78 @@ def forward_filter_30m(indicator_30m):
 
 
 # ============================================================================
+# FORWARD FILTER 30min — ADAPTIVE Q (Myers-Tapley)
+# ============================================================================
+
+def _inv2x2(M):
+    det = M[0, 0] * M[1, 1] - M[0, 1] * M[1, 0]
+    if abs(det) > 1e-15:
+        return np.array([[M[1, 1], -M[0, 1]],
+                         [-M[1, 0], M[0, 0]]]) / det
+    return np.linalg.pinv(M)
+
+
+def _is_pos_semidef(M):
+    return M[0, 0] >= 0 and M[1, 1] >= 0 and (M[0, 0] * M[1, 1] - M[0, 1] * M[1, 0]) >= -1e-12
+
+
+def forward_filter_30m_adaptive(indicator_30m, window=30, Q_max_factor=10.0):
+    """Kalman forward filter with adaptive Q (Myers-Tapley, clipped)."""
+    n = len(indicator_30m)
+    first_valid_val = indicator_30m[~np.isnan(indicator_30m)][0]
+
+    x_filt = np.zeros((n, 2))
+    P_filt = np.zeros((n, 2, 2))
+    x_pred = np.zeros((n, 2))
+    P_pred = np.zeros((n, 2, 2))
+
+    Q_current = Q.copy()
+    innovation_buffer = []
+    Q_FLOOR = Q * 0.1
+    Q_CEIL = Q * Q_max_factor
+
+    for t in range(n):
+        if t == 0:
+            x_p = np.array([first_valid_val, 0.0])
+            P_p = np.eye(2)
+        else:
+            x_p = A @ x_filt[t - 1]
+            P_p = A @ P_filt[t - 1] @ A.T + Q_current
+
+        x_pred[t] = x_p
+        P_pred[t] = P_p
+
+        if np.isnan(indicator_30m[t]):
+            x_filt[t] = x_p
+            P_filt[t] = P_p
+            continue
+
+        S_t = (H @ P_p @ H.T + R)[0, 0]
+        x_filt[t], P_filt[t] = kf_update(x_p, P_p, indicator_30m[t])
+
+        v_t = indicator_30m[t] - (H @ x_p)[0]
+        innovation_buffer.append(v_t)
+        if len(innovation_buffer) > window:
+            innovation_buffer.pop(0)
+
+        if len(innovation_buffer) >= window and t > 0:
+            C_vv = np.mean(np.array(innovation_buffer) ** 2)
+            delta = C_vv - S_t
+            if delta > 0:
+                P_pred_next = A @ P_filt[t] @ A.T + Q_current
+                C_rts = P_filt[t] @ A.T @ _inv2x2(P_pred_next)
+                Q_candidate = delta * (C_rts @ C_rts.T)
+                if _is_pos_semidef(Q_candidate):
+                    Q_current = np.clip(Q_candidate, Q_FLOOR, Q_CEIL)
+
+    C_gains = np.zeros((n, 2, 2))
+    for t in range(n - 1):
+        C_gains[t] = P_filt[t] @ A.T @ _inv2x2(P_pred[t + 1])
+
+    return x_filt, P_filt, x_pred, P_pred, C_gains
+
+
+# ============================================================================
 # SLOPE COMPUTATIONS
 # ============================================================================
 
@@ -638,8 +710,26 @@ def main():
         print(f"  Slopes computed (oracle + T1 + k=1..6)")
 
     # ==================================================================
+    print("[7/11] Computing AQ-KF slopes (MACD only) ...")
+    macd_30m = indicators['MACD']['std']
+    macd_live_pc = indicators['MACD']['live_pc']
+
+    print("  AQ-KF forward filter ...", end=" ", flush=True)
+    aq_x_filt, aq_P_filt, aq_x_pred, aq_P_pred, aq_C = forward_filter_30m_adaptive(
+        macd_30m, window=30, Q_max_factor=10.0)
+    print("done.")
+
+    aq_slopes = {}
+    aq_slopes['aq_t1'] = compute_slopes_test1(aq_x_filt, aq_x_pred, aq_C)
+    for k in range(1, 7):
+        aq_slopes[f'aq_k{k}'] = compute_slopes_test2(
+            aq_x_filt, aq_P_filt, aq_x_pred, aq_C, macd_live_pc, k)
+    all_slopes['MACD'].update(aq_slopes)
+    print(f"  AQ-KF slopes computed (T1 + k=1..6)")
+
+    # ==================================================================
     # Compute threshold percentiles from MACD T1 slopes
-    print("\n[7/10] Calibrating thresholds ...")
+    print("\n[8/11] Calibrating thresholds ...")
     s_ref = all_slopes['MACD']['t1'][args.eval_start:n30]
     s_ref = s_ref[~np.isnan(s_ref)]
     abs_s = np.abs(s_ref)
@@ -650,20 +740,25 @@ def main():
 
     holding_values = [0, 4, 6, 8, 10, 15]
     threshold_values = [0.0, thr_p50, thr_p75, thr_p90]
-    # Focus on T1 and best k candidates (k=1, k=2, k=6)
-    methods_to_test = ['t1', 'k1', 'k2', 'k6']
-    method_labels = {'t1': 'T1:30m', 'k1': 'T2:k=1', 'k2': 'T2:k=2', 'k6': 'T2:k=6'}
+    # Methods: standard + AQ-KF for MACD
+    methods_std = ['t1', 'k1', 'k2', 'k6']
+    methods_aq = ['aq_t1', 'aq_k1', 'aq_k2', 'aq_k6']
+    method_labels = {
+        't1': 'T1:30m', 'k1': 'T2:k=1', 'k2': 'T2:k=2', 'k6': 'T2:k=6',
+        'aq_t1': 'AQ:T1', 'aq_k1': 'AQ:k=1', 'aq_k2': 'AQ:k=2', 'aq_k6': 'AQ:k=6',
+    }
 
-    n_combos = len(holding_values) * len(threshold_values) * len(methods_to_test) * 3
     print(f"       Grid: {len(holding_values)} hold × {len(threshold_values)} thr "
-          f"× {len(methods_to_test)} methods × 3 indicators = {n_combos} combos")
+          f"× standard + AQ-KF (MACD only)")
 
     # ==================================================================
-    print(f"\n[8/10] Running 2D grid search ...")
+    print(f"\n[9/11] Running 2D grid search ...")
 
     all_results = {}
     for name in ['MACD', 'RSI', 'CCI']:
         slopes = all_slopes[name]
+        # For MACD, test both standard + AQ methods
+        methods = methods_std + (methods_aq if name == 'MACD' else [])
         grid = {}
 
         for hold in holding_values:
@@ -677,23 +772,24 @@ def main():
                                  args.eval_start, n30 - 1, fees, "Oracle")
                 results['oracle'] = r
 
-                # T1
-                r = backtest_30m(slopes['t1'], closes_30m,
-                                 args.eval_start, n30 - 1, fees, "T1",
-                                 threshold=thr, holding_min=hold)
-                results['t1'] = r
-
-                # T2 k=1, k=2, k=6
-                for k_key in ['k1', 'k2', 'k6']:
-                    k = int(k_key[1])
-                    r = backtest_5m(slopes[k_key], closes_5m_per_candle, k,
-                                    args.eval_start, n30 - 1, fees,
-                                    method_labels[k_key],
-                                    threshold=thr, holding_min=hold)
-                    results[k_key] = r
+                for m_key in methods:
+                    if m_key in ('t1', 'aq_t1'):
+                        # 30m backtest
+                        r = backtest_30m(slopes[m_key], closes_30m,
+                                         args.eval_start, n30 - 1, fees,
+                                         method_labels[m_key],
+                                         threshold=thr, holding_min=hold)
+                    else:
+                        # 5m backtest — extract k from key
+                        k = int(m_key[-1])
+                        r = backtest_5m(slopes[m_key], closes_5m_per_candle, k,
+                                        args.eval_start, n30 - 1, fees,
+                                        method_labels[m_key],
+                                        threshold=thr, holding_min=hold)
+                    results[m_key] = r
 
                 grid[key] = results
-                best_m = max(methods_to_test, key=lambda m: results[m]['pnl_pct'])
+                best_m = max(methods, key=lambda m: results[m]['pnl_pct'])
                 best_r = results[best_m]
                 print(f"{method_labels[best_m]} PnL={best_r['pnl_pct']:+.1f}% "
                       f"tr={best_r['trades']} WR={best_r['win_rate']:.1f}%")
@@ -701,16 +797,17 @@ def main():
         all_results[name] = grid
 
     # ==================================================================
-    print(f"\n[9/10] Tableaux comparatifs")
+    print(f"\n[10/11] Tableaux comparatifs")
 
     for name in ['MACD', 'RSI', 'CCI']:
+        methods_for_name = methods_std + (methods_aq if name == 'MACD' else [])
         print(f"\n{'=' * 100}")
         print(f"  {name} — Grid Search (Hold × Threshold) — Fees {fees*100:.1f}%/trade")
         print(f"  Buy & Hold: {bh:+.2f}%  |  Oracle: "
               f"{all_results[name][(0, 0.0)]['oracle']['pnl_pct']:+.1f}%")
         print(f"{'=' * 100}")
 
-        for m_key in methods_to_test:
+        for m_key in methods_for_name:
             print(f"\n  {method_labels[m_key]}:")
             col_name = 'Hold/Thr'
             header = f"  {col_name:<10}"
@@ -735,7 +832,9 @@ def main():
         best_pnl = -1e9
         best_cfg = ""
         for (hold, thr), results in all_results[name].items():
-            for m_key in methods_to_test:
+            for m_key in methods_for_name:
+                if m_key not in results:
+                    continue
                 r = results[m_key]
                 if r['pnl_pct'] > best_pnl:
                     best_pnl = r['pnl_pct']
@@ -748,7 +847,7 @@ def main():
     print(f"\n  Buy & Hold: {bh:+.2f}%")
 
     # ==================================================================
-    print(f"\n[10/10] Plot ...")
+    print(f"\n[11/11] Plot ...")
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 7), sharey=True)
     cmap = plt.cm.RdYlGn
@@ -756,11 +855,12 @@ def main():
     for idx, name in enumerate(['MACD', 'RSI', 'CCI']):
         ax = axes[idx]
         # Heatmap: best PnL across methods for each (hold, thr)
+        plot_methods = methods_std + (methods_aq if name == 'MACD' else [])
         pnl_grid = np.zeros((len(holding_values), len(threshold_values)))
         for hi, hold in enumerate(holding_values):
             for ti, thr in enumerate(threshold_values):
                 best = max(all_results[name][(hold, thr)][m]['pnl_pct']
-                           for m in methods_to_test)
+                           for m in plot_methods if m in all_results[name][(hold, thr)])
                 pnl_grid[hi, ti] = best
 
         im = ax.imshow(pnl_grid, aspect='auto', cmap=cmap,
