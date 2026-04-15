@@ -108,56 +108,79 @@ Les sous-pas donnent une fraction de l'information de la bougie suivante, ce qui
 
 ---
 
-## Résultats
+## Résultats — 3 indicateurs comparés
 
-### Statistiques oracle
+### Vérification cohérence MACD live / RSI live / CCI live
 
-| Métrique | Valeur |
-|----------|--------|
-| Transitions (changement signe pente) | 398 (10.0% des samples) |
-| Persistence (sign[t] == sign[t-1]) | 90.0% |
+| Indicateur | Max err (last 5min live vs standard 30min) | Candles vérifiées |
+|------------|-------------------------------------------|-------------------|
+| MACD | 0.00e+00 | 5,000 |
+| RSI | 0.00e+00 | 4,997 |
+| CCI | 5.01e-11 | 4,981 |
 
-La persistence de 90% signifie que n'importe quel estimateur qui copie le signe précédent obtient ~90% de concordance "All". Seule la métrique "Transitions" est discriminante.
+Les indicateurs live frozen/provisional coïncident exactement avec les standards aux clôtures 30min.
 
-### Tableau principal
+### Statistiques oracle par indicateur
 
-| Méthode | All | Delta/T1 | **Transitions** | **Delta/T1** |
-|---------|-----|----------|-----------------|--------------|
-| **Test 1: FLKS 30min pur** | 90.90% | baseline | **30.40%** | baseline |
-| Test 2: k=1 (5min) | 93.95% | +3.05pp | **60.55%** | **+30.15pp** |
-| Test 2: k=2 (10min) | 94.52% | +3.62pp | **73.37%** | **+42.96pp** |
-| Test 2: k=3 (15min) | 94.42% | +3.52pp | **78.89%** | **+48.49pp** |
-| Test 2: k=4 (20min) | 94.72% | +3.82pp | **82.91%** | **+52.51pp** |
-| Test 2: k=5 (25min) | 94.92% | +4.02pp | **86.43%** | **+56.03pp** |
-| Test 2: k=6 (30min) | 94.92% | +4.02pp | **87.69%** | **+57.29pp** |
+| Indicateur | Transitions | % des samples | Persistence |
+|------------|-------------|---------------|-------------|
+| MACD | 398 | 10.0% | 90.0% |
+| RSI | 580 | 14.5% | 85.5% |
+| CCI | 484 | 12.1% | 87.9% |
 
-### Lecture des résultats
+RSI est le plus "nerveux" (580 transitions, 14.5%), MACD le plus stable (398, 10%).
 
-1. **Test 1 sans info future : Trans = 30.40%**. Sans aucune observation de la bougie suivante, le FLKS est quasi-aveugle aux transitions. Le 90.90% "All" est entièrement de la persistence.
+### Tableau comparatif principal
 
-2. **k=1 (5min) : Trans 30% → 61%**. Le premier sous-pas 5min de la bougie suivante apporte la moitié du gain total (30pp sur 57pp).
+| Méthode | MACD All | **MACD Trans** | RSI All | **RSI Trans** | CCI All | **CCI Trans** |
+|---------|----------|----------------|---------|---------------|---------|---------------|
+| **Test 1: 30m pur** | 90.90% | **30.40%** | 86.67% | **45.34%** | 88.12% | **38.64%** |
+| k=1 (5min) | 93.95% | **60.55%** | 88.35% | **62.00%** | 90.92% | **62.11%** |
+| k=2 (10min) | 94.52% | **73.37%** | 89.02% | **70.64%** | 92.05% | **73.50%** |
+| k=3 (15min) | 94.42% | **78.89%** | 89.25% | **75.13%** | 91.67% | **78.47%** |
+| k=4 (20min) | 94.72% | **82.91%** | 89.47% | **78.24%** | 91.40% | **80.75%** |
+| k=5 (25min) | 94.90% | **86.43%** | 90.25% | **82.21%** | 91.55% | **82.19%** |
+| k=6 (30min) | 94.92% | **87.69%** | 90.15% | **82.56%** | 91.30% | **83.85%** |
+| **Gain k=6 vs T1** | +4.02pp | **+57.29pp** | +3.47pp | **+37.21pp** | +3.17pp | **+45.21pp** |
 
-3. **k=2 (10min) : Trans = 73%**. Après 10 minutes dans la bougie suivante, on a 75% du gain final.
+### Analyse
 
-4. **k=3..6 : rendements décroissants**. De k=3 à k=6, on gagne seulement 9pp supplémentaires (79% → 88%).
+**1. Le pattern est universel sur les 3 indicateurs.** La courbe de convergence a la même forme pour MACD, RSI et CCI : gain massif à k=1, rendements décroissants ensuite.
 
-5. **k=6 (bougie t+1 complète) : Trans = 87.69%**. Même avec la bougie complète, on n'atteint pas 100% car l'oracle voit toute la série (y compris t+2, t+3, ...).
+**2. À k=1 (5min), les 3 indicateurs convergent vers ~60-62% Trans.** Le premier sous-pas de la bougie suivante apporte un gain similaire quel que soit l'indicateur :
+- MACD : 30% → 61% (+30pp)
+- RSI : 45% → 62% (+17pp)
+- CCI : 39% → 62% (+23pp)
 
-### Courbe de convergence
+**3. RSI part de plus haut en Test 1 (45% vs 30-39%).** Le RSI, plus nerveux (580 transitions), capture mieux les changements de signe avec le filtre seul. Mais le gain relatif des sous-pas est plus faible (+37pp vs +57pp MACD).
+
+**4. MACD bénéficie le plus des micro-updates (+57pp).** Le MACD étant le plus lisse (moins de transitions), il a le plus à gagner de l'information future partielle.
+
+**5. Plafond à k=6 : 83-88% selon l'indicateur.** Même avec la bougie t+1 complète, on ne dépasse pas 88%. L'oracle voit t+2, t+3, ... au-delà.
+
+**6. La métrique "All" est trompeuse.** La persistence (85-90%) domine : les gains "All" sont de +3-4pp seulement, alors que les gains "Trans" sont de +37-57pp. Seule la colonne Trans a du sens pour le trading.
+
+### Courbe de convergence (Transitions)
 
 ```
 Trans%  |
-   90   |                                          ●(k=6: 87.7%)
-   80   |                              ●(k=4)  ●(k=5)
-   70   |                  ●(k=3)
-   60   |      ●(k=1)  ●(k=2)
-   50   |
-   40   |
-   30   |  ●(T1)
+   90   |                                      M(88)
+   85   |                          M       M  C(84) R(83)
+   80   |                  M   C       C R
+   75   |              C R
+   70   |          M R
+   65   |
+   60   |  M=C=R (~62% pour les 3)
+        |
+   45   |  R(45)
+   40   |  C(39)
+   30   |  M(30)
         +--+------+------+------+------+------+------→
-           0     5min   10min  15min  20min  25min  30min
-              Info disponible de la bougie t+1
+        T1  k=1    k=2    k=3    k=4    k=5    k=6
+            5min   10min  15min  20min  25min  30min
 ```
+
+M=MACD, R=RSI, C=CCI
 
 ---
 
@@ -212,14 +235,27 @@ python src/signal_processing/flks_substep_convergence.py --csv data_trad/BTCUSD_
 
 ## Conclusion
 
-**Le FLKS avec micro-updates 5min fonctionne.** L'injection progressive des observations MACD live de la bougie suivante améliore massivement la détection des transitions de pente :
+**Le FLKS avec micro-updates 5min fonctionne, et le pattern est universel sur les 3 indicateurs.**
 
-- **Sans info future** : 30% de concordance aux transitions (quasi-aléatoire)
-- **Avec 5min de la bougie suivante** : 61% (+30pp)
-- **Avec 10min** : 73% (+43pp)
-- **Avec la bougie complète** : 88% (+57pp)
+### Résumé par indicateur
 
-**Implication pour le trading** : en temps réel, dès qu'une nouvelle bougie 5min arrive, le FLKS peut recalculer la pente lissée et potentiellement détecter une transition 5-10 minutes avant la clôture de la bougie 30min.
+| Indicateur | Trans T1 | Trans k=1 | Trans k=6 | Gain total |
+|------------|----------|-----------|-----------|------------|
+| **MACD** | 30.40% | 60.55% | 87.69% | **+57.29pp** |
+| **CCI** | 38.64% | 62.11% | 83.85% | **+45.21pp** |
+| **RSI** | 45.34% | 62.00% | 82.56% | **+37.21pp** |
+
+### Points clés
+
+1. **Les 3 indicateurs convergent vers ~62% Trans dès k=1 (5min).** Le premier sous-pas de la bougie suivante est le plus informatif, quel que soit l'indicateur.
+
+2. **MACD bénéficie le plus des micro-updates** (+57pp). Étant le plus lisse, il a le plus grand gap entre le filtre seul (30%) et l'oracle. Les sous-pas comblent ce gap efficacement.
+
+3. **RSI part de plus haut mais plafonne plus bas** (45% → 83%). Plus nerveux, il capture déjà une partie des transitions avec le filtre seul, mais converge vers un plafond plus bas.
+
+4. **Le gain marginal décroît fortement après k=2 (10min).** Pour les 3 indicateurs, k=1-2 apportent 70-80% du gain total. Les sous-pas k=3-6 n'ajoutent que 10-15pp.
+
+5. **Implication trading** : en temps réel, dès qu'une nouvelle bougie 5min arrive (k=1), le FLKS peut recalculer la pente lissée et potentiellement détecter une transition ~25 minutes avant la clôture de la bougie 30min, avec une concordance de ~62% aux transitions.
 
 ---
 
@@ -227,6 +263,6 @@ python src/signal_processing/flks_substep_convergence.py --csv data_trad/BTCUSD_
 
 1. **Backtest avec signal FLKS** : utiliser la pente FLKS (avec k=1-2 sous-pas) comme signal d'entrée/sortie. Comparer le PnL vs signal 30min pur.
 2. **Calibration Q/R** : les paramètres actuels viennent du pipeline existant. Optimiser Q_sub et R pour les micro-updates 5min pourrait améliorer.
-3. **Autres indicateurs** : tester RSI et CCI (mêmes scripts, `--indicator rsi`).
-4. **Lag N=3** : tester si un lag plus grand améliore encore.
-5. **Multi-asset** : vérifier que les résultats tiennent sur ETH, BNB, ADA, LTC.
+3. **Lag N=3** : tester si un lag plus grand améliore encore.
+4. **Multi-asset** : vérifier que les résultats tiennent sur ETH, BNB, ADA, LTC.
+5. **Combiner les 3 indicateurs** : les transitions détectées par MACD vs RSI vs CCI sont-elles les mêmes ou complémentaires ?
