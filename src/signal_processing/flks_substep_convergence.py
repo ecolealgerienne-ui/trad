@@ -320,7 +320,7 @@ def main():
     for ts_30m in df_30m.index:
         bucket_end = ts_30m + pd.Timedelta(minutes=29, seconds=59)
         mask = (df_5m.index >= ts_30m) & (df_5m.index <= bucket_end)
-        macd_live_per_candle.append(macd_live_5m[mask.values])
+        macd_live_per_candle.append(macd_live_5m[mask])
 
     print(f"       MACD 30m range: [{np.nanmin(macd_30m):.1f}, {np.nanmax(macd_30m):.1f}]")
 
