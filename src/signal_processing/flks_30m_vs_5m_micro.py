@@ -93,6 +93,58 @@ def calculate_macd(df: pd.DataFrame) -> pd.Series:
     return line - sig
 
 
+def compute_macd_live(close_5min, is_close):
+    """
+    MACD histogram with frozen/provisional EMA. Freeze at bucket closure.
+    Copied from pipeline (prepare_multitf_csv.py:compute_macd_live).
+
+    Between closures, the EMA state is frozen and the current close is used
+    as a provisional update. At closure, the EMA state advances.
+
+    Returns MACD value at each 5min step (same scale as MACD 30min at closures).
+    """
+    n = len(close_5min)
+    alpha_f = 2.0 / (MACD_FAST + 1)
+    alpha_s = 2.0 / (MACD_SLOW + 1)
+    alpha_sig = 2.0 / (MACD_SIGNAL + 1)
+
+    out = np.full(n, np.nan)
+    ema_f_cl = np.nan
+    ema_s_cl = np.nan
+    ema_sig_cl = np.nan
+    init = False
+
+    for i in range(n):
+        c = close_5min[i]
+        if np.isnan(c):
+            continue
+        if not init:
+            if is_close[i]:
+                ema_f_cl = c
+                ema_s_cl = c
+                ema_sig_cl = 0.0
+                out[i] = 0.0
+                init = True
+            continue
+        ef = alpha_f * c + (1.0 - alpha_f) * ema_f_cl
+        es = alpha_s * c + (1.0 - alpha_s) * ema_s_cl
+        ml = ef - es
+        esg = alpha_sig * ml + (1.0 - alpha_sig) * ema_sig_cl
+        out[i] = ml - esg
+        if is_close[i]:
+            ema_f_cl = ef
+            ema_s_cl = es
+            ema_sig_cl = esg
+    return out
+
+
+def compute_bucket_close_mask(index_5min, tf_minutes):
+    """Detect last bar of each tf bucket (from pipeline)."""
+    bucket = index_5min.floor(f'{tf_minutes}min').values
+    next_bucket = np.append(bucket[1:], np.datetime64('NaT'))
+    return (bucket != next_bucket) | pd.isna(next_bucket)
+
+
 # ============================================================================
 # ORACLE: pykalman.smooth() on 30min candles (from pipeline)
 # ============================================================================
@@ -222,20 +274,20 @@ def run_flks_30m(indicator_30m: np.ndarray, lag: int = 2):
 # ============================================================================
 
 def run_flks_30m_with_5m_micro(indicator_30m: np.ndarray,
-                                closes_5m_per_candle: list,
+                                macd_live_per_candle: list,
                                 lag: int = 2):
     """
-    FLKS(N=2) with 5min micro-injections between 30min candles.
+    FLKS(N=2) with MACD live 5min micro-injections between 30min candles.
 
     For each 30min candle t:
-      1. Start from previous state (x, P) at candle t-1
-      2. For each of the 6 closes 5min within candle t:
-         - predict + update with close_5m[k]
-      3. Fix the state at candle t = state after 6th close
+      1. Predict from state at candle t-1
+      2. For each of the 6 MACD live values (provisional) within candle t:
+         - update with macd_live[k], then predict to next sub-step
+      3. Fix the state at candle t = state after last valid update
       4. Store for FLKS backward smoothing
 
-    The state at each 30min candle has "seen" the 6 intra-candle 5min closes,
-    so it has a better estimate than pure 30min-only.
+    The observations injected are MACD live values (frozen/provisional EMA),
+    which are on the same scale as MACD 30min — no space mismatch.
 
     Returns:
         positions: (N,) smoothed position at each 30min candle
@@ -263,21 +315,21 @@ def run_flks_30m_with_5m_micro(indicator_30m: np.ndarray,
             x_pred[t] = x_p
             P_pred[t] = P_p
 
-            # Inject 6 closes 5min incrementally
-            closes_5m = closes_5m_per_candle[t]
+            # Inject MACD live 5min values incrementally
+            macd_vals = macd_live_per_candle[t]
             x_cur = x_p
             P_cur = P_p
 
-            if closes_5m is not None and len(closes_5m) > 0:
-                for k, c5 in enumerate(closes_5m):
-                    if np.isnan(c5):
-                        continue
-                    x_cur, P_cur = kf_update(x_cur, P_cur, c5)
-                    if k < len(closes_5m) - 1:
-                        # Predict between 5min sub-steps (same transition)
+            # Filter valid (non-NaN) MACD live values
+            valid_vals = [v for v in macd_vals if not np.isnan(v)]
+
+            if len(valid_vals) > 0:
+                for k, m5 in enumerate(valid_vals):
+                    x_cur, P_cur = kf_update(x_cur, P_cur, m5)
+                    if k < len(valid_vals) - 1:
                         x_cur, P_cur = kf_predict(x_cur, P_cur)
             else:
-                # Fallback: just update with 30min close
+                # Fallback: just update with 30min MACD
                 x_cur, P_cur = kf_update(x_cur, P_cur, indicator_30m[t])
 
             # Fix state at candle t
@@ -453,23 +505,32 @@ def main():
     print(f"       MACD range: [{np.nanmin(macd_30m):.2f}, {np.nanmax(macd_30m):.2f}]")
 
     # ------------------------------------------------------------------
-    # 4. Build 5min closes per 30min candle (for Test 2)
+    # 4. Compute MACD live at 5min resolution (for Test 2)
     # ------------------------------------------------------------------
-    print("[4/7] Mapping 5min closes to 30min candles ...")
-    closes_5m_per_candle = []
+    print("[4/7] Computing MACD live (frozen/provisional) at 5min resolution ...")
+    is_close_30m = compute_bucket_close_mask(df_5m.index, 30)
+    macd_live_5m = compute_macd_live(
+        df_5m['close'].values.astype(np.float64),
+        is_close_30m
+    )
+    n_valid_live = np.sum(~np.isnan(macd_live_5m))
+    print(f"       {n_valid_live:,} valid MACD live values out of {len(macd_live_5m):,} 5min steps")
+
+    # Group MACD live values per 30min candle
+    macd_live_per_candle = []
     for i, ts_30m in enumerate(df_30m.index):
-        # 5min candles within this 30min bucket
         bucket_start = ts_30m
         bucket_end = ts_30m + pd.Timedelta(minutes=29, seconds=59)
         mask = (df_5m.index >= bucket_start) & (df_5m.index <= bucket_end)
-        closes = df_5m.loc[mask, 'close'].values.astype(np.float64)
-        closes_5m_per_candle.append(closes)
+        vals = macd_live_5m[mask.values] if hasattr(mask, 'values') else macd_live_5m[mask]
+        macd_live_per_candle.append(vals)
 
     # Stats
-    lengths = [len(c) for c in closes_5m_per_candle]
+    lengths = [len(c) for c in macd_live_per_candle]
+    n_with_data = sum(1 for c in macd_live_per_candle if np.any(~np.isnan(c)))
     print(f"       5min per 30min candle: min={min(lengths)}, "
           f"max={max(lengths)}, median={int(np.median(lengths))}, "
-          f"mode_6={sum(1 for l in lengths if l == 6)}/{len(lengths)}")
+          f"candles with valid MACD live: {n_with_data}/{len(lengths)}")
 
     # ------------------------------------------------------------------
     # 5. Oracle: pykalman.smooth() on 30min
@@ -492,9 +553,9 @@ def main():
     # ------------------------------------------------------------------
     # 7. Test 2: FLKS 30min + 5min micro
     # ------------------------------------------------------------------
-    print(f"[7/7] Test 2: FLKS(N={args.flks_lag}) with 5min micro-updates ...")
+    print(f"[7/7] Test 2: FLKS(N={args.flks_lag}) with MACD live 5min micro-updates ...")
     pos_t2, slopes_t2 = run_flks_30m_with_5m_micro(
-        macd_30m, closes_5m_per_candle, lag=args.flks_lag)
+        macd_30m, macd_live_per_candle, lag=args.flks_lag)
 
     conc_t2, n_t2 = sign_concordance(slopes_t2, slopes_oracle,
                                       args.eval_start, n30)
