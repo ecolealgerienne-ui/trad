@@ -339,6 +339,110 @@ def forward_filter_30m(indicator_30m):
 
 
 # ============================================================================
+# FORWARD FILTER 30min — ADAPTIVE Q (Myers-Tapley)
+# ============================================================================
+
+def _inv2x2(M):
+    """Fast 2x2 matrix inverse."""
+    det = M[0, 0] * M[1, 1] - M[0, 1] * M[1, 0]
+    if abs(det) > 1e-15:
+        return np.array([[M[1, 1], -M[0, 1]],
+                         [-M[1, 0], M[0, 0]]]) / det
+    return np.linalg.pinv(M)
+
+
+def _is_pos_semidef(M):
+    """Check if 2x2 matrix is positive semi-definite."""
+    return M[0, 0] >= 0 and M[1, 1] >= 0 and (M[0, 0] * M[1, 1] - M[0, 1] * M[1, 0]) >= -1e-12
+
+
+def forward_filter_30m_adaptive(indicator_30m, window=30, Q_min=1e-6):
+    """
+    Kalman forward filter with adaptive Q (Myers-Tapley).
+
+    At each step t:
+      1. Predict with Q_current
+      2. Update
+      3. Compute innovation v[t]
+      4. Over sliding window W: C_vv = mean(v[k]^2)
+      5. C_rts = P_filt[t] @ A.T @ inv(A @ P_filt[t] @ A.T + Q_current)
+      6. Q_new = max(0, C_vv - S[t]) * C_rts @ C_rts.T
+      7. If Q_new positive semi-definite and > Q_min → adopt, else keep Q_current
+
+    Returns same format as forward_filter_30m: (x_filt, P_filt, x_pred, P_pred, C)
+    """
+    n = len(indicator_30m)
+    first_valid_val = indicator_30m[~np.isnan(indicator_30m)][0]
+
+    x_filt = np.zeros((n, 2))
+    P_filt = np.zeros((n, 2, 2))
+    x_pred = np.zeros((n, 2))
+    P_pred = np.zeros((n, 2, 2))
+
+    Q_current = Q.copy()
+    innovation_buffer = []
+    Q_min_mat = np.eye(2) * Q_min
+
+    for t in range(n):
+        # 1. Predict
+        if t == 0:
+            x_p = np.array([first_valid_val, 0.0])
+            P_p = np.eye(2)
+        else:
+            x_p = A @ x_filt[t - 1]
+            P_p = A @ P_filt[t - 1] @ A.T + Q_current
+
+        x_pred[t] = x_p
+        P_pred[t] = P_p
+
+        # 2. Update
+        if np.isnan(indicator_30m[t]):
+            x_filt[t] = x_p
+            P_filt[t] = P_p
+            continue
+
+        x_filt[t], P_filt[t] = kf_update(x_p, P_p, indicator_30m[t])
+
+        # 3. Innovation
+        v_t = indicator_30m[t] - (H @ x_p)[0]
+        innovation_buffer.append(v_t)
+        if len(innovation_buffer) > window:
+            innovation_buffer.pop(0)
+
+        # 4-6. Adaptive Q update (only when window full and t > 0)
+        if len(innovation_buffer) >= window and t > 0:
+            # Empirical innovation variance (scalar)
+            C_vv = np.mean(np.array(innovation_buffer) ** 2)
+
+            # Theoretical innovation variance (scalar)
+            S_t = (H @ P_p @ H.T + R)[0, 0]
+
+            # Excess variance
+            delta = C_vv - S_t
+
+            if delta > 0:
+                # C_rts = P_filt[t] @ A.T @ inv(P_pred[t+1])
+                # where P_pred[t+1] = A @ P_filt[t] @ A.T + Q_current
+                P_pred_next = A @ P_filt[t] @ A.T + Q_current
+                C_rts = P_filt[t] @ A.T @ _inv2x2(P_pred_next)
+
+                # Myers-Tapley: Q_new = delta * C_rts @ C_rts.T
+                Q_candidate = delta * (C_rts @ C_rts.T)
+
+                # Validate and clip
+                if _is_pos_semidef(Q_candidate):
+                    Q_current = np.maximum(Q_candidate, Q_min_mat)
+                # else: keep Q_current
+
+    # Precompute RTS gains (same as standard filter)
+    C_gains = np.zeros((n, 2, 2))
+    for t in range(n - 1):
+        C_gains[t] = P_filt[t] @ A.T @ _inv2x2(P_pred[t + 1])
+
+    return x_filt, P_filt, x_pred, P_pred, C_gains
+
+
+# ============================================================================
 # TEST 1: FLKS 30min pur
 # ============================================================================
 
@@ -440,6 +544,43 @@ def sign_concordance_at_transitions(slopes_test, slopes_oracle, start, end, tran
 # ============================================================================
 # RUN ONE INDICATOR
 # ============================================================================
+
+def run_indicator_adaptive(name, indicator_30m, live_per_candle, eval_start, n30,
+                           slopes_oracle, trans_mask, window=30):
+    """Run AQ-KF Test 1 + Test 2 for one indicator with adaptive Q."""
+    print(f"\n  --- AQ-KF {name} (window={window}) ---")
+
+    # Adaptive forward filter
+    print(f"  Forward filter adaptive ...", end=" ", flush=True)
+    x_filt, P_filt, x_pred, P_pred, C = forward_filter_30m_adaptive(
+        indicator_30m, window=window)
+    print("done.")
+
+    # AQ-KF Test 1
+    slopes_t1 = compute_slopes_test1(x_filt, x_pred, C)
+    c_t1_all, _ = sign_concordance(slopes_t1, slopes_oracle, eval_start, n30)
+    c_t1_tr, _ = sign_concordance_at_transitions(
+        slopes_t1, slopes_oracle, eval_start, n30, trans_mask)
+    print(f"  AQ T1 (30m pur): all={c_t1_all:.2f}%  trans={c_t1_tr:.2f}%")
+
+    # AQ-KF Test 2 k=1..6
+    results_k = []
+    for k in range(1, 7):
+        slopes_k = compute_slopes_test2(
+            x_filt, P_filt, x_pred, C, live_per_candle, k)
+        ck_all, _ = sign_concordance(slopes_k, slopes_oracle, eval_start, n30)
+        ck_tr, _ = sign_concordance_at_transitions(
+            slopes_k, slopes_oracle, eval_start, n30, trans_mask)
+        results_k.append((k, ck_all, ck_tr))
+        print(f"  AQ T2 k={k} ({k*5}min): all={ck_all:.2f}%  trans={ck_tr:.2f}%")
+
+    return {
+        'name': f'AQ-{name}',
+        't1_all': c_t1_all,
+        't1_tr': c_t1_tr,
+        'results_k': results_k,
+    }
+
 
 def run_indicator(name, indicator_30m, live_per_candle, eval_start, n30):
     """Run Test 1 + Test 2 for one indicator. Returns dict of results."""
@@ -568,17 +709,31 @@ def main():
         print(f"       {name}: coherence max err = {max_err:.2e} ({n_checked} candles)")
 
     # ------------------------------------------------------------------
-    print("[4/5] Running FLKS for each indicator ...")
+    print("[4/6] Running FLKS for each indicator ...")
 
     all_results = []
+    oracle_data = {}  # store oracle slopes + trans_mask for adaptive reuse
+
     for name, ind_30m, live_pc in [('MACD', macd_30m, macd_live_pc),
                                     ('RSI', rsi_30m, rsi_live_pc),
                                     ('CCI', cci_30m, cci_live_pc)]:
         res = run_indicator(name, ind_30m, live_pc, args.eval_start, n30)
         all_results.append(res)
+        # Store oracle data for adaptive reuse
+        _, slopes_oracle = compute_oracle(ind_30m)
+        trans_mask = find_oracle_transitions(slopes_oracle, args.eval_start, n30)
+        oracle_data[name] = (slopes_oracle, trans_mask)
 
     # ------------------------------------------------------------------
-    print(f"\n[5/5] Résultats comparatifs")
+    print("\n[5/6] Running AQ-KF (adaptive Q) for MACD only ...")
+
+    slopes_oracle_macd, trans_mask_macd = oracle_data['MACD']
+    aq_result = run_indicator_adaptive(
+        'MACD', macd_30m, macd_live_pc, args.eval_start, n30,
+        slopes_oracle_macd, trans_mask_macd, window=30)
+
+    # ------------------------------------------------------------------
+    print(f"\n[6/6] Résultats comparatifs")
     print(f"{'=' * 90}")
     print(f"  Concordance de signe vs Oracle (pykalman.smooth 30min)")
     print(f"  Éval: [{args.eval_start}:{n30}]  |  Pente: smoothed[t-1] - smoothed[t-2]")
@@ -629,6 +784,32 @@ def main():
         d_tr = r['results_k'][5][2] - r['t1_tr']
         row += f" │ {d_all:>+6.2f}p {d_tr:>+7.2f}p"
     print(row)
+
+    print(f"  {'-' * (22 + 20 * len(all_results))}")
+
+    # AQ-KF section (MACD only, first column)
+    print(f"\n  --- Adaptive Q (MACD only) ---")
+    macd_std = all_results[0]  # MACD standard results
+    print(f"  {'Method':<22} │ {'All':>7}  {'Trans':>7}  │ {'d/Std All':>9} {'d/Std Tr':>9}")
+    print(f"  {'-' * 70}")
+    # AQ T1
+    d_a = aq_result['t1_all'] - macd_std['t1_all']
+    d_t = aq_result['t1_tr'] - macd_std['t1_tr']
+    print(f"  {'AQ T1: 30m pur':<22} │ {aq_result['t1_all']:>6.2f}% {aq_result['t1_tr']:>7.2f}%"
+          f"  │ {d_a:>+8.2f}p {d_t:>+8.2f}p")
+    # AQ T2 k=1..6
+    for ki in range(6):
+        k = ki + 1
+        aq_all = aq_result['results_k'][ki][1]
+        aq_tr = aq_result['results_k'][ki][2]
+        std_all = macd_std['results_k'][ki][1]
+        std_tr = macd_std['results_k'][ki][2]
+        d_a = aq_all - std_all
+        d_t = aq_tr - std_tr
+        label = f"AQ T2: k={k} ({k*5}min)"
+        print(f"  {label:<22} │ {aq_all:>6.2f}% {aq_tr:>7.2f}%"
+              f"  │ {d_a:>+8.2f}p {d_t:>+8.2f}p")
+    print(f"  {'-' * 70}")
 
     print(f"{'=' * 90}")
 
