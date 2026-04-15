@@ -473,24 +473,41 @@ Buy & Hold sur la même période : **-19.7%**.
 
 L'AQ-KF produit un signal de meilleure qualité en concordance (+1.5pp) ET en PnL (+5.2pp). Le standard fait moins de trades mais avec un WR plus élevé — deux philosophies différentes.
 
+### Validation Out-of-Sample (OOS)
+
+**Test des 2 configs gagnantes avec paramètres FIXÉS sur 3 périodes :**
+
+| Période | Durée | Config Std | Config AQ | Oracle | B&H |
+|---------|-------|-----------|-----------|--------|-----|
+| **In-sample [1000:5000]** | 83j | **-15.9%** (35t, 34%) | **-49.0%** (159t, 39%) | +22.8% | +8.0% |
+| OOS-early [0:1000] | 21j | +1.6% (12t, 50%) | -8.9% (38t, 42%) | +20.3% | +1.8% |
+| **OOS-next [5000:10000]** | 83j | **+41.1%** (81t, 62%) | **+49.8%** (225t, 52%) | +133.9% | -22.8% |
+
+**⚠️ SUROPTIMISATION CONFIRMÉE :**
+
+1. **In-sample échoue** : les seuils optimisés sur [5000:10000] ne fonctionnent pas sur [1000:5000]. Les deux configs perdent.
+2. **OOS-next = la période d'optimisation** : les +41/+49% sont sur la même période où les seuils ont été calibrés (les 5000 dernières bougies du CSV).
+3. **L'Oracle varie de +22.8% à +133.9%** selon la période. La période récente (marché baissier, B&H -22.8%) est structurellement plus favorable au signal MACD.
+
+**Conclusion OOS** : les seuils fixes (P75=22.0, P90=36.8) ne généralisent pas. Le signal MACD existe mais son amplitude varie avec le régime de marché. Des seuils adaptatifs (calibrés sur fenêtre glissante) seraient nécessaires.
+
 ### Ce que cette session a prouvé
 
-1. Le signal de pente **existe** (Oracle +123% à +168%)
+1. Le signal de pente **existe** (Oracle +22% à +134% selon la période)
 2. Le FLKS **détecte** les transitions mieux que le LSTM (59% vs 49% avec 5min de délai)
 3. Le FLKS **ne suffit pas seul** — les micro-reversals détruisent le PnL
-4. **Seuil + holding minimum** rendent le signal profitable
+4. **Seuil + holding minimum** rendent le signal profitable sur la période d'optimisation
 5. **L'AQ-KF améliore le T1 de +44pp** — l'adaptation de Q vaut ~2 sous-pas d'avance
 6. **AQ-KF T2 k=3 = 82.4%** — meilleur concordance de la session
-7. **AQ-KF k=6 hold=8 thr=P75 = +59.5%** — meilleur PnL de la session
-8. **Risque de suroptimisation** — seuils et Q_max calibrés sur les données de test
+7. **⚠️ Suroptimisation confirmée** — seuils fixes ne généralisent pas hors échantillon
+8. **Le régime de marché domine** — Oracle +134% en bear vs +23% en bull/range
 
 ---
 
 ## Pistes suite
 
-1. **Validation out-of-sample** : tester les meilleurs configs sur une période différente (split train/test)
-2. **Seuils adaptatifs par indicateur** : RSI inutilisable avec seuils MACD, calibrer séparément
-3. **Multi-asset** : vérifier sur ETH, BNB, ADA, LTC
+1. **Seuils adaptatifs** : calibrer les seuils sur fenêtre glissante (ex: P75 des 200 dernières pentes) au lieu de fixes
+2. **Détection de régime** : le signal MACD fonctionne mieux en marché baissier — conditionner la stratégie au régime
+3. **Multi-asset** : vérifier si la suroptimisation est spécifique à BTC
 4. **R adaptatif** : adapter R en plus de Q (double adaptation)
-6. **Lag N=3** : tester si un lag plus grand améliore la concordance
-7. **R adaptatif** : adapter R en plus de Q (double adaptation)
+5. **Lag N=3** : tester si un lag plus grand améliore la concordance
