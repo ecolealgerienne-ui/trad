@@ -373,7 +373,9 @@ def forward_filter_30m_adaptive(indicator_30m, window=30, Q_min=1e-6):
 
     Q_current = Q.copy()
     innovation_buffer = []
-    Q_min_mat = np.eye(2) * Q_min
+    # Clipping symétrique : Q reste dans [Q*0.1, Q*10]
+    Q_FLOOR = Q * 0.1    # 0.001 * I
+    Q_CEIL = Q * 10.0    # 0.1 * I
 
     # Diagnostics
     Q_history = np.full((n, 2, 2), np.nan)
@@ -424,7 +426,7 @@ def forward_filter_30m_adaptive(indicator_30m, window=30, Q_min=1e-6):
                 Q_candidate = delta * (C_rts @ C_rts.T)
 
                 if _is_pos_semidef(Q_candidate):
-                    Q_current = np.maximum(Q_candidate, Q_min_mat)
+                    Q_current = np.clip(Q_candidate, Q_FLOOR, Q_CEIL)
 
     # Precompute RTS gains
     C_gains = np.zeros((n, 2, 2))
