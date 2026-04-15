@@ -233,64 +233,39 @@ def kalman_flks(z: np.ndarray, lag: int = 2):
     At time t, produces a smoothed estimate of x[t] using z[0..t+lag].
     This is CAUSAL with a fixed delay of N steps (no future beyond t+N).
 
-    For t >= 0:
-        x_flks[t] = E[x_t | z_0, ..., z_{t+N}]
+    x_flks[t] = E[x_t | z_0, ..., z_{t+N}]
 
-    Implementation: Recursive FLKS (Anderson & Moore 1979, ch. 9).
-    Instead of re-running RTS backward at every step, we propagate the
-    smoother gain matrix L forward. For a lag-N smoother:
-
-        At each new observation z[t+N]:
-          1. Forward filter step: x_filt[t+N], P_filt[t+N]
-          2. Propagate the chain of smoother gains from t+N back to t:
-             L[t+N-1] = P_filt[t+N-1] A^T P_pred[t+N]^{-1}
-             L[t+N-2] = P_filt[t+N-2] A^T P_pred[t+N-1]^{-1}
-             ...down to L[t]
-          3. Compound gain: G = L[t] @ L[t+1] @ ... @ L[t+N-1]
-          4. x_flks[t] = x_filt[t] + G @ (x_filt[t+N] - x_pred_from_t[t+N])
-
-    For small N (2-3), the chain multiplication is cheap. The forward filter
-    states are computed once upfront.
+    Implementation: for each t, run a local RTS backward pass of N steps
+    over the pre-computed forward filter states. O(T * N), acceptable for
+    small N.
 
     Returns:
         x_flks: (T, 2) smoothed state estimates.
-                x_flks[t] uses z[0..t+lag]. For t > T-1-lag, falls back to
-                partial smoothing (fewer than N future observations).
+                x_flks[t] uses z[0..t+lag]. For t > T-1-lag, partial smoothing.
     """
     x_filt, P_filt, x_pred, P_pred = kalman_filter_forward(z)
     T = len(z)
-    dim = 2
 
     x_flks = np.copy(x_filt)
 
-    # Precompute all smoother gains C[t] = P_filt[t] @ A.T @ inv(P_pred[t+1])
-    # C[t] is the RTS gain used to smooth x[t] given x_smooth[t+1]
-    C_all = np.zeros((T, dim, dim))
-    for t in range(T - 1):
-        P_pred_t1 = P_pred[t + 1]
-        det = P_pred_t1[0, 0] * P_pred_t1[1, 1] - P_pred_t1[0, 1] * P_pred_t1[1, 0]
-        if abs(det) > 1e-15:
-            inv_P = np.array([[P_pred_t1[1, 1], -P_pred_t1[0, 1]],
-                              [-P_pred_t1[1, 0], P_pred_t1[0, 0]]]) / det
-        else:
-            inv_P = np.linalg.pinv(P_pred_t1)
-        C_all[t] = P_filt[t] @ A.T @ inv_P
-
-    # For each target index t, smooth using observations up to min(t+lag, T-1)
     for t in range(T):
         end = min(t + lag, T - 1)
-        actual_lag = end - t
-        if actual_lag <= 0:
+        if end <= t:
             continue
 
-        # Compound the smoother gain chain: G = C[t] @ C[t+1] @ ... @ C[end-1]
-        # Then: x_flks[t] = x_filt[t] + G @ (x_filt[end] - A @ x_filt[end-1])
-        #   ... but more precisely, apply the RTS correction step by step.
+        # Local backward RTS from end to t
+        x_s = np.copy(x_filt[end])
+        P_s = np.copy(P_filt[end])
 
-        # Backward RTS pass from end to t (only `actual_lag` steps, max N=2-3)
-        x_s = x_filt[end]
         for k in range(end - 1, t - 1, -1):
-            x_s = x_filt[k] + C_all[k] @ (x_s - x_pred[k + 1])
+            P_pred_k1 = P_pred[k + 1]
+            try:
+                C = P_filt[k] @ A.T @ np.linalg.inv(P_pred_k1)
+            except np.linalg.LinAlgError:
+                C = P_filt[k] @ A.T @ np.linalg.pinv(P_pred_k1)
+
+            x_s = x_filt[k] + C @ (x_s - x_pred[k + 1])
+            P_s = P_filt[k] + C @ (P_s - P_pred_k1) @ C.T
 
         x_flks[t] = x_s
 
@@ -567,14 +542,15 @@ def main():
     # 7. Bonus: transition-only metrics
     # ------------------------------------------------------------------
     print("\n--- Transition-Only Analysis ---")
-    # Transition = oracle slope changes sign (strictly positive <-> strictly negative)
-    # We use >0 / <=0 binarization to avoid np.sign(0)=0 creating spurious transitions
+    # Transition = oracle slope changes sign (positive <-> negative)
+    # Slopes near zero (|slope| < EPSILON) are ignored to avoid noise transitions
+    EPSILON = 1e-8
     mask_valid = ~np.isnan(pente_oracle)
-    oracle_up = pente_oracle > 0  # True = UP, False = DOWN or zero
+    sign_oracle = np.where(np.abs(pente_oracle) < EPSILON, 0, np.sign(pente_oracle))
     transitions = np.zeros(T, dtype=bool)
     for t in range(3, T):
         if mask_valid[t] and mask_valid[t - 1]:
-            if oracle_up[t] != oracle_up[t - 1]:
+            if sign_oracle[t] != 0 and sign_oracle[t - 1] != 0 and sign_oracle[t] != sign_oracle[t - 1]:
                 transitions[t] = True
 
     n_trans = transitions.sum()
