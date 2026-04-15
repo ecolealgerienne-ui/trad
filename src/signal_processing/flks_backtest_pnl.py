@@ -382,70 +382,128 @@ def compute_slopes_test2(x_filt, P_filt, x_pred, C,
 # BACKTEST
 # ============================================================================
 
-def backtest(slopes, closes_30m, start, end, fees, label=""):
-    """
-    Backtest simple: signal = signe de la pente → LONG(+1) ou SHORT(-1).
-    Exécution au open de la bougie suivante = close de la bougie courante.
-    Reversal = 1 trade (frais appliqués).
+def _exec_trade(position, entry_price, exec_price, fees):
+    """Close existing position at exec_price, return trade PnL."""
+    if position == 1:
+        pnl = (exec_price - entry_price) / entry_price
+    else:
+        pnl = (entry_price - exec_price) / entry_price
+    return pnl - fees
 
-    Returns dict with PnL, trades, win rate.
-    """
-    s = slopes[start:end]
-    c = closes_30m[start:end + 1]  # +1 pour avoir le close de sortie
-    n = len(s)
 
-    position = 0  # 0=flat, +1=LONG, -1=SHORT
+def backtest_30m(slopes, closes_30m, start, end, fees, label=""):
+    """
+    Backtest pour Oracle et Test 1.
+    Signal slope[t] disponible à close de t.
+    Exécution au close[t] ≈ open[t+1].
+    """
     pnl_total = 0.0
     n_trades = 0
     n_wins = 0
+    position = 0
     entry_price = 0.0
 
-    for i in range(n):
-        if np.isnan(s[i]):
+    for t in range(start, end):
+        if np.isnan(slopes[t]):
+            continue
+        target = 1 if slopes[t] > 0 else -1
+        if position == target:
             continue
 
-        target = 1 if s[i] > 0 else -1
+        # Prix d'exécution = close[t] ≈ open[t+1]
+        if t + 1 >= len(closes_30m):
+            continue
+        exec_price = closes_30m[t]
+        if np.isnan(exec_price):
+            continue
 
-        if position != target:
-            # Clôturer la position existante
-            if position != 0 and i < len(c) - 1:
-                exit_price = c[i]
-                if position == 1:
-                    trade_pnl = (exit_price - entry_price) / entry_price
-                else:
-                    trade_pnl = (entry_price - exit_price) / entry_price
-                trade_pnl -= fees  # frais de sortie
-                pnl_total += trade_pnl
-                if trade_pnl > 0:
-                    n_wins += 1
+        # Clôturer position existante
+        if position != 0:
+            trade_pnl = _exec_trade(position, entry_price, exec_price, fees)
+            pnl_total += trade_pnl
+            if trade_pnl > 0:
+                n_wins += 1
 
-            # Ouvrir nouvelle position
-            if i < len(c) - 1:
-                entry_price = c[i]
-                position = target
-                n_trades += 1
-                pnl_total -= fees  # frais d'entrée
+        # Ouvrir nouvelle position
+        entry_price = exec_price
+        position = target
+        n_trades += 1
+        pnl_total -= fees
 
-    # Clôturer la dernière position
-    if position != 0:
-        exit_price = c[min(n, len(c) - 1)]
-        if position == 1:
-            trade_pnl = (exit_price - entry_price) / entry_price
-        else:
-            trade_pnl = (entry_price - exit_price) / entry_price
-        trade_pnl -= fees
-        pnl_total += trade_pnl
-        if trade_pnl > 0:
-            n_wins += 1
+    # Clôturer dernière position
+    if position != 0 and end < len(closes_30m):
+        exec_price = closes_30m[min(end, len(closes_30m) - 1)]
+        if not np.isnan(exec_price):
+            trade_pnl = _exec_trade(position, entry_price, exec_price, fees)
+            pnl_total += trade_pnl
+            if trade_pnl > 0:
+                n_wins += 1
 
     wr = (n_wins / n_trades * 100.0) if n_trades > 0 else 0.0
+    return {'label': label, 'pnl_pct': pnl_total * 100,
+            'trades': n_trades, 'win_rate': wr}
 
-    return {
-        'label': label,
-        'pnl_pct': pnl_total * 100,
-        'trades': n_trades,
-        'win_rate': wr,
-    }
+
+def backtest_5m(slopes, closes_5m_per_candle, k_substep, start, end, fees, label=""):
+    """
+    Backtest pour Test 2 k=1..6.
+    Signal slope[t] disponible au step k de la bougie t+1.
+    Exécution au close du step k de la bougie t+1.
+
+    k=1: signal à 5min dans t+1 → exécution close step 1 (= close 5min)
+    k=6: signal à 30min dans t+1 → exécution close step 6 (= close 30min de t+1)
+    """
+    pnl_total = 0.0
+    n_trades = 0
+    n_wins = 0
+    position = 0
+    entry_price = 0.0
+
+    for t in range(start, end):
+        if np.isnan(slopes[t]):
+            continue
+        target = 1 if slopes[t] > 0 else -1
+        if position == target:
+            continue
+
+        # Prix d'exécution = close du step k dans la bougie t+1
+        candle_idx = t + 1
+        if candle_idx >= len(closes_5m_per_candle):
+            continue
+        closes_5m = closes_5m_per_candle[candle_idx]
+        step_idx = k_substep - 1  # k=1 → index 0, k=6 → index 5
+        if step_idx >= len(closes_5m):
+            continue
+        exec_price = closes_5m[step_idx]
+        if np.isnan(exec_price):
+            continue
+
+        # Clôturer position existante
+        if position != 0:
+            trade_pnl = _exec_trade(position, entry_price, exec_price, fees)
+            pnl_total += trade_pnl
+            if trade_pnl > 0:
+                n_wins += 1
+
+        # Ouvrir nouvelle position
+        entry_price = exec_price
+        position = target
+        n_trades += 1
+        pnl_total -= fees
+
+    # Clôturer dernière position
+    if position != 0:
+        last_candle = min(end, len(closes_5m_per_candle) - 1)
+        closes_last = closes_5m_per_candle[last_candle]
+        if len(closes_last) > 0 and not np.isnan(closes_last[-1]):
+            trade_pnl = _exec_trade(position, entry_price, closes_last[-1], fees)
+            pnl_total += trade_pnl
+            if trade_pnl > 0:
+                n_wins += 1
+
+    wr = (n_wins / n_trades * 100.0) if n_trades > 0 else 0.0
+    return {'label': label, 'pnl_pct': pnl_total * 100,
+            'trades': n_trades, 'win_rate': wr}
 
 
 def buy_and_hold(closes_30m, start, end):
@@ -521,7 +579,12 @@ def main():
     print("       MACD, RSI, CCI computed.")
 
     # ==================================================================
-    print("[4/8] Grouping live values per 30min candle ...")
+    print("[4/8] Grouping live values + closes 5min per 30min candle ...")
+    closes_5m_per_candle = []
+    for ts_30m in df_30m.index:
+        bucket_end = ts_30m + pd.Timedelta(minutes=29, seconds=59)
+        mask = (df_5m.index >= ts_30m) & (df_5m.index <= bucket_end)
+        closes_5m_per_candle.append(close_5m[mask])
     for name in indicators:
         live_arr = indicators[name]['live']
         per_candle = []
@@ -530,7 +593,7 @@ def main():
             mask = (df_5m.index >= ts_30m) & (df_5m.index <= bucket_end)
             per_candle.append(live_arr[mask])
         indicators[name]['live_pc'] = per_candle
-    print("       Done.")
+    print(f"       Done. Closes 5min per candle: {len(closes_5m_per_candle)}")
 
     # ==================================================================
     print("[5/8] Buy & Hold ...")
@@ -557,14 +620,14 @@ def main():
         # Oracle
         print(f"  Oracle ...", end=" ", flush=True)
         slopes_oracle = compute_oracle(ind_30m)
-        r = backtest(slopes_oracle, closes_30m, args.eval_start, n30 - 1, fees, "Oracle")
+        r = backtest_30m(slopes_oracle, closes_30m, args.eval_start, n30 - 1, fees, "Oracle")
         results.append(r)
         print(f"PnL={r['pnl_pct']:+.1f}%  trades={r['trades']}  WR={r['win_rate']:.1f}%")
 
         # Test 1
         print(f"  Test 1 (30m pur) ...", end=" ", flush=True)
         slopes_t1 = compute_slopes_test1(x_filt, x_pred, C)
-        r = backtest(slopes_t1, closes_30m, args.eval_start, n30 - 1, fees, "T1: 30m pur")
+        r = backtest_30m(slopes_t1, closes_30m, args.eval_start, n30 - 1, fees, "T1: 30m pur")
         results.append(r)
         print(f"PnL={r['pnl_pct']:+.1f}%  trades={r['trades']}  WR={r['win_rate']:.1f}%")
 
@@ -572,8 +635,8 @@ def main():
         for k in range(1, 7):
             print(f"  Test 2 k={k} ({k*5}min) ...", end=" ", flush=True)
             slopes_k = compute_slopes_test2(x_filt, P_filt, x_pred, C, live_pc, k)
-            r = backtest(slopes_k, closes_30m, args.eval_start, n30 - 1, fees,
-                         f"T2: k={k} ({k*5}min)")
+            r = backtest_5m(slopes_k, closes_5m_per_candle, k,
+                            args.eval_start, n30 - 1, fees, f"T2: k={k} ({k*5}min)")
             results.append(r)
             print(f"PnL={r['pnl_pct']:+.1f}%  trades={r['trades']}  WR={r['win_rate']:.1f}%")
 
