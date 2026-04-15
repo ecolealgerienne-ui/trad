@@ -662,7 +662,7 @@ def main():
     parser = argparse.ArgumentParser(description='Train multi-timeframe pilot model')
     parser.add_argument('--indicator', default='macd', choices=['macd', 'rsi', 'cci'])
     parser.add_argument('--timeframe', default='30m', choices=['30m', '1h'])
-    parser.add_argument('--assets', nargs='+', default=['BTC', 'ETH', 'BNB', 'ADA', 'LTC'])
+    parser.add_argument('--assets', nargs='+', default=['BTC'])
     parser.add_argument('--epochs', type=int, default=EPOCHS)
     parser.add_argument('--batch-size', type=int, default=BATCH_SIZE)
     parser.add_argument('--lr', type=float, default=LR)

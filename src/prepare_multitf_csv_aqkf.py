@@ -722,7 +722,7 @@ def generate_multitf_csv(asset_name, output_dir, indicators=None):
 
 def main():
     parser = argparse.ArgumentParser(description='Prepare multi-timeframe CSV (live-style)')
-    parser.add_argument('--assets', nargs='+', default=['BTC', 'ETH', 'BNB', 'ADA', 'LTC'])
+    parser.add_argument('--assets', nargs='+', default=['BTC'])
     parser.add_argument('--indicators', nargs='+', default=['macd', 'rsi', 'cci'],
                         choices=['macd', 'rsi', 'cci'],
                         help='Indicators to compute (default: all)')
