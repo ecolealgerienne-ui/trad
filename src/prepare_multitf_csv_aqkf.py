@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-Multi-Timeframe CSV Preparation — AQ-KF CAUSAL LABELS
-======================================================
+Multi-Timeframe CSV Preparation — AQ-KF ADAPTIVE LIVE FEATURES
+===============================================================
 
-FORK of prepare_multitf_csv.py. Identical pipeline EXCEPT:
-- Labels use AQ-KF (adaptive Q, Myers-Tapley) + causal FLKS backward
-  instead of pykalman.smooth() (non-causal oracle).
-- compute_oracle_label() → compute_aqkf_label()
-
-Everything else is unchanged: features, normalization, windows, assets.
+FORK of prepare_multitf_csv.py. ONLY CHANGE: compute_kalman_live()
+uses AQ-KF (adaptive Q, Myers-Tapley) instead of fixed-Q pykalman.
+Labels UNCHANGED (oracle pykalman.smooth). Everything else identical.
 
 PURPOSE:
     Generate one enriched CSV per asset reproducing what Binance API returns
@@ -152,52 +149,21 @@ def kalman_filter_standard(data):
 
 
 # =============================================================================
-# AQ-KF CAUSAL LABEL (replaces oracle non-causal smooth)
+# ORACLE LABEL (non-causal smooth — ML training target)
 # =============================================================================
 
-# Kalman matrices (module-level for AQ-KF)
-_A = np.array([[1.0, 1.0], [0.0, 1.0]])
-_H = np.array([[1.0, 0.0]])
-_Q = np.eye(2) * KALMAN_LABEL_PROCESS_VAR
-_R = np.array([[KALMAN_LABEL_MEASURE_VAR]])
-
-
-def _inv2x2(M):
-    det = M[0, 0] * M[1, 1] - M[0, 1] * M[1, 0]
-    if abs(det) > 1e-15:
-        return np.array([[M[1, 1], -M[0, 1]],
-                         [-M[1, 0], M[0, 0]]]) / det
-    return np.linalg.pinv(M)
-
-
-def _is_pos_semidef(M):
-    return M[0, 0] >= 0 and M[1, 1] >= 0 and (M[0, 0] * M[1, 1] - M[0, 1] * M[1, 0]) >= -1e-12
-
-
-def _kf_update(x_p, P_p, z_obs):
-    y = z_obs - _H @ x_p
-    S = _H @ P_p @ _H.T + _R
-    K = P_p @ _H.T / S[0, 0]
-    return x_p + (K @ y).ravel(), (np.eye(2) - K @ _H) @ P_p
-
-
-def compute_aqkf_label(indicator_tf: np.ndarray, window=30, Q_max_factor=10.0):
+def compute_oracle_label(indicator_tf: np.ndarray):
     """
-    Compute CAUSAL labels using AQ-KF (adaptive Q, Myers-Tapley) + FLKS backward.
+    Compute non-causal oracle labels AND continuous slope from a resampled indicator series.
 
-    Replaces compute_oracle_label(). Same interface:
+    Uses kf.smooth() — NON-CAUSAL by design (RTS smoother, uses future data).
+
     Returns:
         labels_binary: int array (0 or 1), label[t] = 1 if smoothed[t-1] > smoothed[t-2]
         slope_continuous: float32 array, slope[t] = smoothed[t-1] - smoothed[t-2]
-
-    Method:
-        1. Forward filter with adaptive Q (Myers-Tapley, clipped [Q*0.1, Q*10])
-        2. Precompute RTS gains C[t]
-        3. For each t >= 2: backward 2 steps from x_filt[t] (causal, Test 1)
-           smoothed[t-1] = x_filt[t-1] + C[t-1] @ (x_filt[t] - x_pred[t])
-           smoothed[t-2] = x_filt[t-2] + C[t-2] @ (smoothed[t-1] - x_pred[t-1])
-        4. slope[t] = smoothed[t-1] - smoothed[t-2]
     """
+    from pykalman import KalmanFilter as KF
+
     n = len(indicator_tf)
     labels_binary = np.zeros(n, dtype=int)
     slope_continuous = np.full(n, np.nan, dtype=np.float32)
@@ -206,66 +172,27 @@ def compute_aqkf_label(indicator_tf: np.ndarray, window=30, Q_max_factor=10.0):
     if valid.sum() < 3:
         return labels_binary, slope_continuous
 
-    # --- Forward filter with adaptive Q ---
-    x_filt = np.zeros((n, 2))
-    P_filt = np.zeros((n, 2, 2))
-    x_pred = np.zeros((n, 2))
-    P_pred = np.zeros((n, 2, 2))
+    vd = indicator_tf[valid]
 
-    first_valid_idx = np.argmax(valid)
-    Q_current = _Q.copy()
-    innovation_buffer = []
-    Q_FLOOR = _Q * 0.1
-    Q_CEIL = _Q * Q_max_factor
+    kf = KF(
+        transition_matrices=[[1, 1], [0, 1]],
+        observation_matrices=[[1, 0]],
+        initial_state_mean=[vd[0], 0.0],
+        initial_state_covariance=np.eye(2),
+        observation_covariance=KALMAN_LABEL_MEASURE_VAR,
+        transition_covariance=np.eye(2) * KALMAN_LABEL_PROCESS_VAR,
+    )
 
-    for t in range(n):
-        if t == 0:
-            x_p = np.array([indicator_tf[first_valid_idx], 0.0])
-            P_p = np.eye(2)
-        else:
-            x_p = _A @ x_filt[t - 1]
-            P_p = _A @ P_filt[t - 1] @ _A.T + Q_current
+    # SMOOTH (non-causal, RTS smoother) — INTENTIONAL for labels
+    smoothed_means, _ = kf.smooth(vd)
+    smoothed = np.full(n, np.nan)
+    smoothed[valid] = smoothed_means[:, 0]
 
-        x_pred[t] = x_p
-        P_pred[t] = P_p
-
-        if not valid[t]:
-            x_filt[t] = x_p
-            P_filt[t] = P_p
-            continue
-
-        S_t = (_H @ P_p @ _H.T + _R)[0, 0]
-        x_filt[t], P_filt[t] = _kf_update(x_p, P_p, indicator_tf[t])
-
-        # Innovation
-        v_t = indicator_tf[t] - (_H @ x_p)[0]
-        innovation_buffer.append(v_t)
-        if len(innovation_buffer) > window:
-            innovation_buffer.pop(0)
-
-        # Adaptive Q update
-        if len(innovation_buffer) >= window and t > 0:
-            C_vv = np.mean(np.array(innovation_buffer) ** 2)
-            delta = C_vv - S_t
-            if delta > 0:
-                P_pred_next = _A @ P_filt[t] @ _A.T + Q_current
-                C_rts = P_filt[t] @ _A.T @ _inv2x2(P_pred_next)
-                Q_candidate = delta * (C_rts @ C_rts.T)
-                if _is_pos_semidef(Q_candidate):
-                    Q_current = np.clip(Q_candidate, Q_FLOOR, Q_CEIL)
-
-    # --- Precompute RTS gains ---
-    C = np.zeros((n, 2, 2))
-    for t in range(n - 1):
-        C[t] = P_filt[t] @ _A.T @ _inv2x2(P_pred[t + 1])
-
-    # --- Backward 2 steps from x_filt[t] (causal FLKS Test 1) ---
     for t in range(2, n):
-        sm_t1 = x_filt[t - 1] + C[t - 1] @ (x_filt[t] - x_pred[t])
-        sm_t2 = x_filt[t - 2] + C[t - 2] @ (sm_t1 - x_pred[t - 1])
-        delta = sm_t1[0] - sm_t2[0]
-        slope_continuous[t] = delta
-        labels_binary[t] = 1 if delta > 0 else 0
+        if not np.isnan(smoothed[t - 1]) and not np.isnan(smoothed[t - 2]):
+            delta = smoothed[t - 1] - smoothed[t - 2]
+            slope_continuous[t] = delta
+            labels_binary[t] = 1 if delta > 0 else 0
 
     return labels_binary, slope_continuous
 
@@ -466,21 +393,27 @@ def compute_cci_live(high_live, low_live, close_5min, is_close):
 # LIVE KALMAN
 # =============================================================================
 
-def compute_kalman_live(indicator_live, is_close):
+def compute_kalman_live(indicator_live, is_close, aq_window=30, Q_max_factor=10.0):
     """
-    Kalman filter_update with frozen/provisional state. Freeze at closure.
-    Same logic as indicators: state advances only at bucket closure.
+    AQ-KF (adaptive Q, Myers-Tapley) with frozen/provisional state.
+    Freeze at closure. Same interface as original compute_kalman_live.
+
+    DIFFERENCE vs original: Q adapts online via innovation statistics
+    instead of fixed Q. Clipped to [Q*0.1, Q*10].
 
     Returns (n, 2) array: [position, velocity] at each 5min step.
-    Position = smoothed indicator value (state[0])
-    Velocity = estimated slope/rate of change (state[1])
     """
-    from pykalman import KalmanFilter as KF
+    _A = np.array([[1.0, 1.0], [0.0, 1.0]])
+    _H = np.array([[1.0, 0.0]])
+    _Q_fixed = np.eye(2) * KALMAN_PROCESS_VAR
+    _R = np.array([[KALMAN_MEASURE_VAR]])
+    Q_FLOOR = _Q_fixed * 0.1
+    Q_CEIL = _Q_fixed * Q_max_factor
 
     n = len(indicator_live)
-    out = np.full((n, 2), np.nan)  # (n, 2) = [position, velocity]
+    out = np.full((n, 2), np.nan)
 
-    # Collect closure values to run standard kf.filter for exact state sequence
+    # --- Step 1: AQ-KF forward on closure values ---
     closure_indices = []
     closure_values = []
     for i in range(n):
@@ -491,50 +424,82 @@ def compute_kalman_live(indicator_live, is_close):
     if len(closure_values) < 2:
         return out
 
-    # Run standard kf.filter on closure values to get exact state sequence
     cv = np.array(closure_values)
-    kf = KF(transition_matrices=np.array([[1,1],[0,1]]),
-            observation_matrices=np.array([[1,0]]),
-            initial_state_mean=np.array([cv[0], 0.0]),
-            initial_state_covariance=np.eye(2),
-            observation_covariance=KALMAN_MEASURE_VAR,
-            transition_covariance=np.eye(2) * KALMAN_PROCESS_VAR)
+    nc = len(cv)
 
-    state_means, state_covs = kf.filter(cv)
+    # Forward filter with adaptive Q on closures
+    x_filt_cl = np.zeros((nc, 2))
+    P_filt_cl = np.zeros((nc, 2, 2))
+    Q_current = _Q_fixed.copy()
+    innovation_buffer = []
 
-    # Build lookup: closure_states[k] = (state_mean, state_cov) after processing closure k
-    closure_states = [(state_means[k], state_covs[k]) for k in range(len(closure_values))]
+    for k in range(nc):
+        if k == 0:
+            x_p = np.array([cv[0], 0.0])
+            P_p = np.eye(2)
+        else:
+            x_p = _A @ x_filt_cl[k - 1]
+            P_p = _A @ P_filt_cl[k - 1] @ _A.T + Q_current
 
-    init_mean = np.array([cv[0], 0.0])
-    init_cov = np.eye(2)
+        # Update
+        y = cv[k] - _H @ x_p
+        S = (_H @ P_p @ _H.T + _R)[0, 0]
+        K = P_p @ _H.T / S
+        x_filt_cl[k] = x_p + (K @ y).ravel()
+        P_filt_cl[k] = (np.eye(2) - K @ _H) @ P_p
 
-    # Assign output at closure points — both position and velocity
+        # Innovation for adaptive Q
+        v_t = cv[k] - (_H @ x_p)[0]
+        innovation_buffer.append(v_t)
+        if len(innovation_buffer) > aq_window:
+            innovation_buffer.pop(0)
+
+        if len(innovation_buffer) >= aq_window and k > 0:
+            C_vv = np.mean(np.array(innovation_buffer) ** 2)
+            delta = C_vv - S
+            if delta > 0:
+                P_pred_next = _A @ P_filt_cl[k] @ _A.T + Q_current
+                det = P_pred_next[0, 0] * P_pred_next[1, 1] - P_pred_next[0, 1] * P_pred_next[1, 0]
+                if abs(det) > 1e-15:
+                    inv_P = np.array([[P_pred_next[1, 1], -P_pred_next[0, 1]],
+                                      [-P_pred_next[1, 0], P_pred_next[0, 0]]]) / det
+                else:
+                    inv_P = np.linalg.pinv(P_pred_next)
+                C_rts = P_filt_cl[k] @ _A.T @ inv_P
+                Q_candidate = delta * (C_rts @ C_rts.T)
+                if Q_candidate[0, 0] >= 0 and Q_candidate[1, 1] >= 0:
+                    Q_current = np.clip(Q_candidate, Q_FLOOR, Q_CEIL)
+
+    # --- Step 2: Assign output at closure points ---
     for k, ci in enumerate(closure_indices):
-        out[ci, 0] = state_means[k, 0]  # position
-        out[ci, 1] = state_means[k, 1]  # velocity
+        out[ci, 0] = x_filt_cl[k, 0]
+        out[ci, 1] = x_filt_cl[k, 1]
 
-    # For provisional (non-closure) points, compute from frozen state
+    # --- Step 3: Provisional (non-closure) from frozen AQ-KF state ---
     closure_set = set(closure_indices)
-    current_closure_k = -1
-    sm_cl = init_mean
-    sc_cl = init_cov
+    current_k = -1
+    sm_cl = np.array([cv[0], 0.0])
+    sc_cl = np.eye(2)
 
     for i in range(n):
         obs = indicator_live[i]
         if np.isnan(obs):
             continue
-
         if i in closure_set:
-            current_closure_k += 1
-            sm_cl = closure_states[current_closure_k][0]
-            sc_cl = closure_states[current_closure_k][1]
+            current_k += 1
+            sm_cl = x_filt_cl[current_k]
+            sc_cl = P_filt_cl[current_k]
             continue
-
-        # Non-closure: provisional from frozen state
-        if current_closure_k >= 0:
-            sm_p, _ = kf.filter_update(sm_cl, sc_cl, observation=obs)
-            out[i, 0] = sm_p[0]  # position
-            out[i, 1] = sm_p[1]  # velocity
+        # Provisional: predict + update from frozen state
+        if current_k >= 0:
+            x_p = _A @ sm_cl
+            P_p = _A @ sc_cl @ _A.T + Q_current
+            y = obs - (_H @ x_p)[0]
+            S = (_H @ P_p @ _H.T + _R)[0, 0]
+            K = P_p @ _H.T / S
+            sm_p = x_p + (K * y).ravel()
+            out[i, 0] = sm_p[0]
+            out[i, 1] = sm_p[1]
 
     return out
 
@@ -730,24 +695,24 @@ def generate_multitf_csv(asset_name, output_dir, indicators=None):
             else:
                 continue
 
-            # Compute labels + slope at tf resolution (AQ-KF causal)
-            labels_tf, slope_tf = compute_aqkf_label(ind_tf_values)
+            # Compute labels + slope at tf resolution (non-causal)
+            labels_tf, slope_tf = compute_oracle_label(ind_tf_values)
 
             # Forward-fill to 5min resolution
-            # Label is causal (AQ-KF forward filter + backward 2 steps)
+            # No shift — label is non-causal by construction
             labels_series = pd.Series(labels_tf, index=df_tf.index)
             labels_5min = labels_series.reindex(df_5min.index, method='ffill').fillna(0).astype(int)
-            result[f'aqkf_label_{ind_name}_{suffix}'] = labels_5min.values
+            result[f'oracle_label_{ind_name}_{suffix}'] = labels_5min.values
 
             # Forward-fill slope to 5min resolution
             slope_series = pd.Series(slope_tf, index=df_tf.index)
             slope_5min = slope_series.reindex(df_5min.index, method='ffill')
-            result[f'aqkf_slope_{ind_name}_{suffix}'] = slope_5min.values
+            result[f'oracle_slope_{ind_name}_{suffix}'] = slope_5min.values
 
             n_up = (labels_5min == 1).sum()
             n_down = (labels_5min == 0).sum()
             n_changes = (labels_5min.diff().abs() > 0).sum()
-            logger.info(f"      aqkf_label_{ind_name}_{suffix}: {n_up:,} UP, {n_down:,} DOWN "
+            logger.info(f"      oracle_label_{ind_name}_{suffix}: {n_up:,} UP, {n_down:,} DOWN "
                         f"({n_up/(n_up+n_down)*100:.1f}% UP), {n_changes:,} direction changes")
 
     # Save

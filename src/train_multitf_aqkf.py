@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Training script for multi-timeframe model — AQ-KF CAUSAL LABELS.
+Training script for multi-timeframe pilot model Net_macd_30m.
 
-FORK of train_multitf.py. Identical architecture, reads CSVs from
-prepare_multitf_csv_aqkf.py (causal AQ-KF labels instead of oracle).
+Reads CSV files from prepare_multitf_csv.py pipeline.
+Trains a CNN-LSTM binary classifier to predict oracle_label_{ind}_{tf}
+from causal live features.
 
 Pilot: Net_macd_30m
   Features: macd_30m_live, macd_30m_filtered (2 columns)
-  Target:   aqkf_label_macd_30m (binary 0/1, causal)
+  Target:   oracle_label_macd_30m (binary 0/1)
 
 Pipeline:
   1. Load 5 asset CSVs
@@ -115,9 +116,9 @@ def load_asset_data(asset_name, indicator, timeframe, crossfeat=False, target_ty
             feature_cols.append(vel_col)
 
     if target_type == 'continuous':
-        label_col = f'aqkf_slope_{indicator}_{timeframe}'
+        label_col = f'oracle_slope_{indicator}_{timeframe}'
     else:
-        label_col = f'aqkf_label_{indicator}_{timeframe}'
+        label_col = f'oracle_label_{indicator}_{timeframe}'
 
     missing = [c for c in feature_cols + [label_col] if c not in df.columns]
     if missing:
@@ -307,7 +308,7 @@ def prepare_all_assets(assets, indicator, timeframe, crossfeat=False, target_typ
         'indicator': indicator,
         'timeframe': timeframe,
         'feature_names': feature_cols if feature_cols else [f'{indicator}_{timeframe}_live', f'{indicator}_{timeframe}_filtered'],
-        'target_name': f'aqkf_slope_{indicator}_{timeframe}' if target_type == 'continuous' else f'aqkf_label_{indicator}_{timeframe}',
+        'target_name': f'oracle_slope_{indicator}_{timeframe}' if target_type == 'continuous' else f'oracle_label_{indicator}_{timeframe}',
         'target_type': target_type,
         'crossfeat': crossfeat,
         'assets': assets,
@@ -716,8 +717,8 @@ def main():
         logger.info(f"Features: {feat_desc}")
     else:
         logger.info(f"Features: {args.indicator}_{args.timeframe}_live, _filtered [+velocity if available]")
-    target_col = f'aqkf_slope_{args.indicator}_{args.timeframe}' if args.target_type == 'continuous' \
-                 else f'aqkf_label_{args.indicator}_{args.timeframe}'
+    target_col = f'oracle_slope_{args.indicator}_{args.timeframe}' if args.target_type == 'continuous' \
+                 else f'oracle_label_{args.indicator}_{args.timeframe}'
     logger.info(f"Target:   {target_col} ({args.target_type})")
     logger.info(f"Assets:   {args.assets}")
     logger.info(f"Device:   {device}")
