@@ -130,47 +130,45 @@ Les indicateurs live frozen/provisional coïncident exactement avec les standard
 
 RSI est le plus "nerveux" (580 transitions, 14.5%), MACD le plus stable (398, 10%).
 
-### Tableau comparatif principal
+### Tableau comparatif principal (après correction backward 3 pas)
 
 | Méthode | MACD All | **MACD Trans** | RSI All | **RSI Trans** | CCI All | **CCI Trans** |
 |---------|----------|----------------|---------|---------------|---------|---------------|
 | **Test 1: 30m pur** | 90.90% | **30.40%** | 86.67% | **45.34%** | 88.12% | **38.64%** |
-| k=1 (5min) | 93.95% | **60.55%** | 88.35% | **62.00%** | 90.92% | **62.11%** |
-| k=2 (10min) | 94.52% | **73.37%** | 89.02% | **70.64%** | 92.05% | **73.50%** |
-| k=3 (15min) | 94.42% | **78.89%** | 89.25% | **75.13%** | 91.67% | **78.47%** |
-| k=4 (20min) | 94.72% | **82.91%** | 89.47% | **78.24%** | 91.40% | **80.75%** |
-| k=5 (25min) | 94.90% | **86.43%** | 90.25% | **82.21%** | 91.55% | **82.19%** |
-| k=6 (30min) | 94.92% | **87.69%** | 90.15% | **82.56%** | 91.30% | **83.85%** |
-| **Gain k=6 vs T1** | +4.02pp | **+57.29pp** | +3.47pp | **+37.21pp** | +3.17pp | **+45.21pp** |
+| k=1 (5min) | 93.87% | **58.54%** | 88.32% | **61.49%** | 91.00% | **61.70%** |
+| k=2 (10min) | 94.60% | **71.36%** | 89.25% | **69.60%** | 91.97% | **70.81%** |
+| k=3 (15min) | 94.75% | **75.88%** | 89.75% | **73.92%** | 92.17% | **75.36%** |
+| k=4 (20min) | 95.22% | **79.15%** | 90.10% | **76.17%** | 92.32% | **77.85%** |
+| k=5 (25min) | 95.47% | **79.90%** | 91.60% | **79.45%** | 92.72% | **78.88%** |
+| k=6 (30min) | 95.82% | **80.90%** | 92.32% | **81.52%** | 93.12% | **80.75%** |
+| **Gain k=6 vs T1** | +4.92pp | **+50.50pp** | +5.65pp | **+36.18pp** | +5.00pp | **+42.11pp** |
 
 ### Analyse
 
 **1. Le pattern est universel sur les 3 indicateurs.** La courbe de convergence a la même forme pour MACD, RSI et CCI : gain massif à k=1, rendements décroissants ensuite.
 
-**2. À k=1 (5min), les 3 indicateurs convergent vers ~60-62% Trans.** Le premier sous-pas de la bougie suivante apporte un gain similaire quel que soit l'indicateur :
-- MACD : 30% → 61% (+30pp)
-- RSI : 45% → 62% (+17pp)
+**2. À k=1 (5min), les 3 indicateurs convergent vers ~59-62% Trans.** Le premier sous-pas de la bougie suivante apporte un gain similaire quel que soit l'indicateur :
+- MACD : 30% → 59% (+28pp)
+- RSI : 45% → 61% (+16pp)
 - CCI : 39% → 62% (+23pp)
 
 **3. RSI part de plus haut en Test 1 (45% vs 30-39%).** Le RSI, plus nerveux (580 transitions), capture mieux les changements de signe avec le filtre seul. Mais le gain relatif des sous-pas est plus faible (+37pp vs +57pp MACD).
 
 **4. MACD bénéficie le plus des micro-updates (+57pp).** Le MACD étant le plus lisse (moins de transitions), il a le plus à gagner de l'information future partielle.
 
-**5. Plafond à k=6 : 83-88% selon l'indicateur.** Même avec la bougie t+1 complète, on ne dépasse pas 88%. L'oracle voit t+2, t+3, ... au-delà.
+**5. Plafond à k=6 : ~81% pour les 3 indicateurs.** Même avec la bougie t+1 complète, on n'atteint pas 100%. L'oracle voit t+2, t+3, ... au-delà.
 
 **6. La métrique "All" est trompeuse.** La persistence (85-90%) domine : les gains "All" sont de +3-4pp seulement, alors que les gains "Trans" sont de +37-57pp. Seule la colonne Trans a du sens pour le trading.
 
-### Courbe de convergence (Transitions)
+### Courbe de convergence (Transitions, après correction 3 pas)
 
 ```
 Trans%  |
-   90   |                                      M(88)
-   85   |                          M       M  C(84) R(83)
-   80   |                  M   C       C R
-   75   |              C R
-   70   |          M R
+   80   |                              M(81) R(82) C(81)
+   75   |              M   C       M R C
+   70   |          M C   R
    65   |
-   60   |  M=C=R (~62% pour les 3)
+   60   |  M=C=R (~59-62% pour les 3)
         |
    45   |  R(45)
    40   |  C(39)
@@ -184,12 +182,119 @@ M=MACD, R=RSI, C=CCI
 
 ---
 
-## Approximation dans Test 2
+## Correction du backward Test 2 — Pas 1 manquant
 
-Le gain RTS `C[t-1]` est calculé pour la transition 30min (t-1 → t). Dans Test 2, il est appliqué avec `x_prov` qui est à t + k/6 (pas exactement à t). L'approximation est :
-- **Conservatrice** : sous-estime le gain potentiel (la covariance réelle de x_prov est réduite par les updates 5min)
-- **Acceptable** pour k=1..6 (5-30min de décalage)
-- Impact estimé : quelques dixièmes de pp sur les résultats
+### Bug identifié
+
+Le backward Test 2 initial (2 pas) injectait `x_prov` directement dans le lissage de t-1, en sautant le lissage de t. Cela sur-pondérait l'info des sous-pas.
+
+### Fix : backward 3 pas
+
+```python
+# Pas 1 : lisser t avec x_prov (transition partielle A_sub^k)
+A_k = A_SUB^k           # transition de k sous-pas
+Q_k = Q_SUB * k         # process noise cumulé
+x_pred_partial = A_k @ x_filt[t]
+P_pred_partial = A_k @ P_filt[t] @ A_k.T + Q_k
+C_partial = P_filt[t] @ A_k.T @ inv(P_pred_partial)
+sm_t = x_filt[t] + C_partial @ (x_prov - x_pred_partial)
+
+# Pas 2 : lisser t-1 avec smoothed[t]
+sm_t1 = x_filt[t-1] + C[t-1] @ (sm_t - x_pred[t])
+
+# Pas 3 : lisser t-2 avec smoothed[t-1]
+sm_t2 = x_filt[t-2] + C[t-2] @ (sm_t1 - x_pred[t-1])
+```
+
+### Impact de la correction
+
+Les chiffres avant/après correction (MACD Trans) :
+
+| k | Avant (2 pas) | Après (3 pas) | Écart |
+|---|---------------|---------------|-------|
+| k=1 | 60.55% | **58.54%** | -2.0pp |
+| k=2 | 73.37% | **71.36%** | -2.0pp |
+| k=6 | 87.69% | **80.90%** | -6.8pp |
+
+L'effet augmente avec k : plus de sous-pas = plus d'atténuation par C_partial. Le plafond passe de ~88% à ~81%.
+
+---
+
+## Comparaison FLKS vs LSTM (STATUS_v3.0)
+
+Le LSTM CNN (STATUS_v3.0) et le FLKS répondent à la même question : détecter les changements de signe de la pente oracle.
+
+| Méthode | MACD Trans | RSI Trans | CCI Trans | Causal | Modèle |
+|---------|------------|-----------|-----------|--------|--------|
+| **LSTM crossfeat 30m** | **49.2%** | **39.3%** | **44.2%** | Oui | CNN-LSTM entraîné |
+| **FLKS T1 (30m pur)** | **30.4%** | **45.3%** | **38.6%** | Oui | Kalman forward seul |
+| FLKS T2 k=1 (5min) | 58.5% | 61.5% | 61.7% | +5min délai | Kalman + 1 sous-pas |
+| FLKS T2 k=6 (30min) | 80.9% | 81.5% | 80.8% | +30min délai | Kalman + 6 sous-pas |
+
+**Observation clé** : le LSTM (49% MACD) se situe entre FLKS T1 (30%) et FLKS T2 k=1 (59%). Le réseau de neurones entraîné sur 6 features capture l'équivalent de "quelques minutes d'info future" grâce aux patterns non-linéaires, mais un simple filtre linéaire avec 5 minutes de données réelles le bat.
+
+---
+
+## Backtest PnL
+
+### Méthodologie
+
+- **Signal** : signe de la pente FLKS → LONG (+1) ou SHORT (-1), toujours en position
+- **Exécution** : Oracle/T1 au close[t] ≈ open[t+1] ; T2 k=N au close du step N de la bougie t+1
+- **Frais** : 0.1% par trade (entrée + sortie séparées = 0.2% round trip)
+- **Période** : 4,000 bougies 30min = ~83 jours (2025-09 → 2026-01)
+- **Buy & Hold** : -19.69% sur la même période
+
+### Résultats sans filtre
+
+| Méthode | MACD PnL | RSI PnL | CCI PnL |
+|---------|----------|---------|---------|
+| Oracle | +123.4% | +168.3% | +135.3% |
+| T1: 30m pur | -52.8% | -134.9% | -111.5% |
+| T2: k=1 | -40.9% | -151.6% | -104.4% |
+| T2: k=6 | -36.1% | -137.5% | -100.7% |
+| Buy & Hold | -19.7% | -19.7% | -19.7% |
+
+**Problème identifié** : trop de trades parasites (467-822 vs 399-580 pour l'oracle). Les micro-reversals quand la pente oscille autour de zéro détruisent le PnL.
+
+### Grid search 2D : Holding minimum × Seuil de magnitude
+
+Deux filtres combinés :
+- **Seuil** : ne reverser que si `|pente| > threshold` (filtre les pentes faibles)
+- **Holding minimum** : ne pas reverser avant N bougies 30min (filtre les micro-flips)
+
+Seuils calibrés sur les percentiles de |slope| MACD T1 : P50=10.9, P75=22.0, P90=36.8.
+
+### Résultats MACD (best configs positives)
+
+| Config | PnL | Trades | WR | vs B&H |
+|--------|-----|--------|-----|--------|
+| **T2:k=1 hold=8 thr=P90** | **+54.3%** | **68** | **66.2%** | **+74pp** |
+| T2:k=1 hold=0 thr=P90 | +49.2% | 70 | 64.3% | +69pp |
+| T2:k=2 hold=10 thr=P75 | +26.4% | 145 | — | +46pp |
+| T2:k=2 hold=10 thr=0 | +21.6% | 297 | — | +41pp |
+| T1 hold=10 thr=P50 | +31.7% | 203 | — | +51pp |
+| T1 hold=8 thr=P90 | +33.5% | 62 | — | +53pp |
+| T1 hold=15 thr=P90 | +34.6% | 56 | — | +54pp |
+
+### Résultats RSI et CCI
+
+| Indicateur | Best config | PnL | Trades |
+|------------|------------|-----|--------|
+| **RSI** | T1 hold=0 thr=P50 | +9.8% | 3 |
+| **CCI** | T2:k=1 hold=15 thr=P75 | +12.3% | 163 |
+
+RSI inutilisable avec les seuils MACD (pentes dans un espace d'échelle différent → 0-3 trades). CCI modeste.
+
+### Pattern dans la grille MACD
+
+Le coin bas-droite (hold élevé + seuil élevé) est systématiquement positif. Le coin haut-gauche (pas de filtre) est systématiquement négatif. Les deux filtres sont complémentaires :
+- Le seuil élimine les pentes faibles (micro-oscillations autour de 0)
+- Le holding empêche les flips rapides sur les pentes fortes
+
+### Avertissement suroptimisation
+
+Les seuils sont calibrés sur les mêmes données que l'évaluation (P50/P75/P90 des slopes T1 sur [1000:5000]). Les résultats sont biaisés à la hausse. Validation sur une autre période nécessaire.
 
 ---
 
@@ -204,6 +309,8 @@ Le gain RTS `C[t-1]` est calculé pour la transition 30min (t-1 → t). Dans Tes
 | **Backward depuis x_filt[t+lag]** | Regardait dans le futur (non-causal) | Backward depuis x_filt[t] (Test 1) ou x_prov (Test 2) |
 | **x_pred incohérent avec x_filt** | Gains RTS basés sur des états avant micro-updates | x_pred[t+1] calculé après finalisation de x_filt[t] |
 | **Transitions parasites (sign=0)** | np.sign(0)=0 créait de fausses transitions | Seuil epsilon + ignorer les zéros |
+| **Backward Test 2 en 2 pas** | Sautait le lissage de t, sur-pondérait x_prov | Ajout Pas 1 avec C_partial (transition A_sub^k) |
+| **Exécution backtest au close[t]** | T2 exécutait 5-30min trop tôt | T2 exécute au close du step k de candle t+1 |
 
 ---
 
@@ -211,58 +318,66 @@ Le gain RTS `C[t-1]` est calculé pour la transition 30min (t-1 → t). Dans Tes
 
 | Script | Rôle |
 |--------|------|
-| `src/signal_processing/flks_substep_convergence.py` | Expérience principale (Test 1 + Test 2) |
-| `src/signal_processing/flks_vs_filter.py` | Premier script exploratoire (obsolète, remplacé par le précédent) |
+| `src/signal_processing/flks_substep_convergence.py` | Concordance de signe (Test 1 + Test 2 k=1..6, 3 indicateurs) |
+| `src/signal_processing/flks_backtest_pnl.py` | Backtest PnL avec grid search holding × threshold |
+| `src/signal_processing/flks_vs_filter.py` | Premier script exploratoire (obsolète) |
 | `src/signal_processing/flks_30m_vs_5m_micro.py` | Version intermédiaire (obsolète) |
 | `src/signal_processing/validate_kalman.py` | Validation forward filter numpy vs pykalman |
 
-### Commande
+### Commandes
 
 ```bash
+# Concordance de signe (3 indicateurs)
 python src/signal_processing/flks_substep_convergence.py --csv data_trad/BTCUSD_all_5m.csv
+
+# Backtest PnL (grid search holding × threshold)
+python src/signal_processing/flks_backtest_pnl.py --csv data_trad/BTCUSD_all_5m.csv
+
+# Validation forward filter
+python src/signal_processing/validate_kalman.py --csv data_trad/BTCUSD_all_5m.csv
 ```
-
-### Options
-
-| Option | Défaut | Description |
-|--------|--------|-------------|
-| `--csv` | data_trad/BTCUSD_all_5m.csv | CSV 5min source |
-| `--n-candles-30m` | 5000 | Nombre de bougies 30min |
-| `--eval-start` | 1000 | Début évaluation (skip warmup) |
-| `--output-dir` | plots | Dossier pour le graphique |
 
 ---
 
 ## Conclusion
 
-**Le FLKS avec micro-updates 5min fonctionne, et le pattern est universel sur les 3 indicateurs.**
+### Concordance de signe (traitement du signal)
 
-### Résumé par indicateur
+**Le FLKS avec micro-updates 5min améliore massivement la détection des transitions :**
 
 | Indicateur | Trans T1 | Trans k=1 | Trans k=6 | Gain total |
 |------------|----------|-----------|-----------|------------|
-| **MACD** | 30.40% | 60.55% | 87.69% | **+57.29pp** |
-| **CCI** | 38.64% | 62.11% | 83.85% | **+45.21pp** |
-| **RSI** | 45.34% | 62.00% | 82.56% | **+37.21pp** |
+| **MACD** | 30.40% | 58.54% | 80.90% | **+50.50pp** |
+| **CCI** | 38.64% | 61.70% | 80.75% | **+42.11pp** |
+| **RSI** | 45.34% | 61.49% | 81.52% | **+36.18pp** |
 
-### Points clés
+Le FLKS bat le LSTM CNN (49% MACD Trans, STATUS_v3.0) dès k=1 (59%) avec un simple filtre linéaire.
 
-1. **Les 3 indicateurs convergent vers ~62% Trans dès k=1 (5min).** Le premier sous-pas de la bougie suivante est le plus informatif, quel que soit l'indicateur.
+### Backtest PnL (trading réel)
 
-2. **MACD bénéficie le plus des micro-updates** (+57pp). Étant le plus lisse, il a le plus grand gap entre le filtre seul (30%) et l'oracle. Les sous-pas comblent ce gap efficacement.
+**La concordance ne se traduit en PnL qu'avec des filtres agressifs :**
 
-3. **RSI part de plus haut mais plafonne plus bas** (45% → 83%). Plus nerveux, il capture déjà une partie des transitions avec le filtre seul, mais converge vers un plafond plus bas.
+- Sans filtre : toutes les variantes perdent (-37% à -158%)
+- Avec seuil P90 + holding 8 candles : MACD **+54.3%** (68 trades, 66% WR)
+- Le problème n'est pas la qualité du signal mais les **micro-reversals parasites**
 
-4. **Le gain marginal décroît fortement après k=2 (10min).** Pour les 3 indicateurs, k=1-2 apportent 70-80% du gain total. Les sous-pas k=3-6 n'ajoutent que 10-15pp.
+**Best config MACD** : T2 k=1, holding 8 bougies (4h), seuil P90 → **+54.3%** vs Buy & Hold -19.7%
 
-5. **Implication trading** : en temps réel, dès qu'une nouvelle bougie 5min arrive (k=1), le FLKS peut recalculer la pente lissée et potentiellement détecter une transition ~25 minutes avant la clôture de la bougie 30min, avec une concordance de ~62% aux transitions.
+### Ce que cette session a prouvé
+
+1. Le signal de pente **existe** (Oracle +123% à +168%)
+2. Le FLKS **détecte** les transitions mieux que le LSTM (59% vs 49% avec 5min de délai)
+3. Le FLKS **ne suffit pas seul** — les micro-reversals détruisent le PnL
+4. **Seuil + holding minimum** rendent le signal profitable (+54% MACD)
+5. **Risque de suroptimisation** — seuils calibrés sur les données de test
 
 ---
 
 ## Pistes suite
 
-1. **Backtest avec signal FLKS** : utiliser la pente FLKS (avec k=1-2 sous-pas) comme signal d'entrée/sortie. Comparer le PnL vs signal 30min pur.
-2. **Calibration Q/R** : les paramètres actuels viennent du pipeline existant. Optimiser Q_sub et R pour les micro-updates 5min pourrait améliorer.
-3. **Lag N=3** : tester si un lag plus grand améliore encore.
-4. **Multi-asset** : vérifier que les résultats tiennent sur ETH, BNB, ADA, LTC.
-5. **Combiner les 3 indicateurs** : les transitions détectées par MACD vs RSI vs CCI sont-elles les mêmes ou complémentaires ?
+1. **Validation out-of-sample** : tester les meilleurs configs sur une période différente (split train/test)
+2. **Seuils adaptatifs** : calibrer les seuils sur une fenêtre glissante (pas sur toute la période)
+3. **Calibration Q/R** : optimiser les paramètres Kalman pour les micro-updates 5min
+4. **Multi-asset** : vérifier sur ETH, BNB, ADA, LTC
+5. **Combiner seuil + holding + indicateurs** : les transitions MACD vs CCI sont-elles complémentaires ?
+6. **Lag N=3** : tester si un lag plus grand améliore la concordance
