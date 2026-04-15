@@ -357,8 +357,13 @@ def main():
         return
 
     data = np.load(npz_path, allow_pickle=True)
-    y_test = data['y_test']
-    y_test_pred = data['y_test_pred']
+    # Support both NPZ key conventions (CNN-LSTM vs XGBoost)
+    if 'y_test' in data:
+        y_test = data['y_test']
+        y_test_pred = data['y_test_pred']
+    else:
+        y_test = data['test_labels']
+        y_test_pred = data['test_preds']
     y_pred_binary = (y_test_pred > args.threshold).astype(int)
 
     print(f"\n{'='*60}")
