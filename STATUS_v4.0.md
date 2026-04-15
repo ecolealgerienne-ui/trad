@@ -353,9 +353,38 @@ Sans Q_max, Q[1,1] explose à 14,300 (×1.4M vs fixe) → K=1.0 → `x_filt = z`
 ### Conclusion AQ-KF
 
 1. **AQ-KF T1 seul (74%) surpasse le Standard T2 k=2 (71%).** L'adaptation de Q vaut ~2 sous-pas d'avance.
-2. **AQ-KF T2 k=3 = 82.4% = meilleur résultat global.** Combine adaptive Q + 3 sous-pas.
+2. **AQ-KF T2 k=3 = 82.4% = meilleur résultat global en concordance.** Combine adaptive Q + 3 sous-pas.
 3. **Si on a les sous-pas 5min, le standard est presque aussi bon** (80.9% à k=6 vs 82.4%).
 4. **Le vrai avantage de l'AQ-KF est le T1 pur** : 74% vs 30% — utile si on n'a pas accès aux données 5min.
+
+### Backtest PnL AQ-KF vs Standard (MACD)
+
+Grid search 2D (holding × threshold) sur 8 méthodes (4 standard + 4 AQ-KF).
+
+**Top 5 configs MACD (toutes méthodes confondues) :**
+
+| Rang | Config | PnL | Trades | WR |
+|------|--------|-----|--------|-----|
+| 1 | **AQ:k=6 hold=8 thr=P75** | **+59.5%** | 184 | 55.4% |
+| 2 | AQ:k=2 hold=10 thr=P75 | +58.3% | 176 | — |
+| 3 | Std T2:k=1 hold=8 thr=P90 | +54.3% | 68 | 66.2% |
+| 4 | Std T2:k=1 hold=10 thr=P90 | +51.0% | 68 | — |
+| 5 | AQ:k=6 hold=6 thr=P75 | +49.2% | 194 | — |
+
+**Observations :**
+
+1. **L'AQ-KF produit le meilleur PnL absolu (+59.5%)**, battant le standard (+54.3%) de +5pp.
+2. **Le seuil optimal AQ-KF est P75 (22.0)**, pas P90 (36.8). Le filtre adaptatif change l'échelle des pentes.
+3. **L'AQ-KF fait plus de trades** (184 vs 68) car les pentes adaptatives sont plus stables et déclenchent plus de reversals qui tiennent.
+4. **Le standard T2:k=1 thr=P90 reste excellent** : 68 trades, 66% WR, signal plus propre mais PnL légèrement inférieur.
+5. **Toutes les configs positives battent Buy & Hold (-19.7%)** de +70pp à +79pp.
+
+**Zone chaude par méthode :**
+
+| Méthode | Zone optimale | PnL max |
+|---------|---------------|---------|
+| Standard | hold=8, thr=P90 | +54.3% |
+| **AQ-KF** | **hold=8-10, thr=P75** | **+59.5%** |
 
 ---
 
@@ -419,42 +448,49 @@ Le FLKS bat le LSTM CNN (49% MACD Trans, STATUS_v3.0) dès k=1 (59%) avec un sim
 **La concordance ne se traduit en PnL qu'avec des filtres agressifs :**
 
 - Sans filtre : toutes les variantes perdent (-37% à -158%)
-- Avec seuil P90 + holding 8 candles : MACD **+54.3%** (68 trades, 66% WR)
 - Le problème n'est pas la qualité du signal mais les **micro-reversals parasites**
 
-**Best config MACD** : T2 k=1, holding 8 bougies (4h), seuil P90 → **+54.3%** vs Buy & Hold -19.7%
+**Best configs MACD :**
+
+| Rang | Config | PnL | Trades | WR |
+|------|--------|-----|--------|-----|
+| 1 | **AQ:k=6 hold=8 thr=P75** | **+59.5%** | 184 | 55.4% |
+| 2 | AQ:k=2 hold=10 thr=P75 | +58.3% | 176 | — |
+| 3 | Std T2:k=1 hold=8 thr=P90 | +54.3% | 68 | 66.2% |
+
+Buy & Hold sur la même période : **-19.7%**.
 
 ### Filtre adaptatif AQ-KF
 
-**L'AQ-KF (Myers-Tapley) améliore massivement le T1 pur (+44pp) :**
+**L'AQ-KF améliore à la fois la concordance ET le PnL :**
 
-| Config | Trans |
-|--------|-------|
-| Standard T1 | 30.40% |
-| **AQ-KF T1** | **74.37%** |
-| AQ-KF T2 k=3 | **82.41%** (meilleur absolu) |
-| Standard T2 k=6 | 80.90% |
+| Métrique | Standard (meilleur) | AQ-KF (meilleur) |
+|----------|--------------------|--------------------|
+| Concordance Trans | 80.90% (T2 k=6) | **82.41%** (T2 k=3) |
+| PnL | +54.3% (T2 k=1 hold=8 thr=P90) | **+59.5%** (k=6 hold=8 thr=P75) |
+| Trades | 68 | 184 |
+| WR | 66.2% | 55.4% |
 
-Le Q adaptatif compense l'absence de sous-pas. Mais si les sous-pas sont disponibles, le standard est presque aussi bon.
+L'AQ-KF produit un signal de meilleure qualité en concordance (+1.5pp) ET en PnL (+5.2pp). Le standard fait moins de trades mais avec un WR plus élevé — deux philosophies différentes.
 
 ### Ce que cette session a prouvé
 
 1. Le signal de pente **existe** (Oracle +123% à +168%)
 2. Le FLKS **détecte** les transitions mieux que le LSTM (59% vs 49% avec 5min de délai)
 3. Le FLKS **ne suffit pas seul** — les micro-reversals détruisent le PnL
-4. **Seuil + holding minimum** rendent le signal profitable (+54% MACD)
+4. **Seuil + holding minimum** rendent le signal profitable
 5. **L'AQ-KF améliore le T1 de +44pp** — l'adaptation de Q vaut ~2 sous-pas d'avance
-6. **AQ-KF T2 k=3 = 82.4%** — meilleur résultat absolu de toute la session
-7. **Risque de suroptimisation** — seuils et Q_max calibrés sur les données de test
+6. **AQ-KF T2 k=3 = 82.4%** — meilleur concordance de la session
+7. **AQ-KF k=6 hold=8 thr=P75 = +59.5%** — meilleur PnL de la session
+8. **Risque de suroptimisation** — seuils et Q_max calibrés sur les données de test
 
 ---
 
 ## Pistes suite
 
 1. **Validation out-of-sample** : tester les meilleurs configs sur une période différente (split train/test)
-2. **Seuils adaptatifs** : calibrer les seuils sur une fenêtre glissante (pas sur toute la période)
-3. **AQ-KF + backtest PnL** : tester si l'AQ-KF réduit les micro-reversals et améliore le PnL
-4. **Multi-asset** : vérifier sur ETH, BNB, ADA, LTC
-5. **Combiner seuil + holding + AQ-KF** : grid search 3D
+2. **Seuils adaptatifs par indicateur** : RSI inutilisable avec seuils MACD, calibrer séparément
+3. **Multi-asset** : vérifier sur ETH, BNB, ADA, LTC
+4. **R adaptatif** : adapter R en plus de Q (double adaptation)
 6. **Lag N=3** : tester si un lag plus grand améliore la concordance
 7. **R adaptatif** : adapter R en plus de Q (double adaptation)
