@@ -213,6 +213,13 @@ def run_flks_with_substeps(indicator_30m, macd_live_per_candle,
     x_pred = np.zeros((n, 2))
     P_pred = np.zeros((n, 2, 2))
 
+    # Forward pass
+    # x_pred[t] / P_pred[t] must satisfy the RTS invariant:
+    #   x_pred[t] = A @ x_filt[t-1]
+    #   P_pred[t] = A @ P_filt[t-1] @ A.T + Q
+    # For sub-step variants, x_filt[t] comes from micro-updates,
+    # so x_pred[t+1] must be recomputed AFTER x_filt[t] is finalized.
+
     for t in range(n):
         if t == 0:
             x_p = np.array([indicator_30m[0], 0.0])
@@ -221,17 +228,16 @@ def run_flks_with_substeps(indicator_30m, macd_live_per_candle,
             P_pred[0] = P_p
             x_filt[0], P_filt[0] = kf_update(x_p, P_p, indicator_30m[0])
         else:
-            x_p, P_p = kf_predict(x_filt[t - 1], P_filt[t - 1])
-            x_pred[t] = x_p
-            P_pred[t] = P_p
+            # x_pred[t] / P_pred[t] already set at end of previous iteration
+            x_p = x_pred[t]
+            P_p = P_pred[t]
 
             if n_substeps == 0:
                 # Pure 30min: single update
                 x_filt[t], P_filt[t] = kf_update(x_p, P_p, indicator_30m[t])
             else:
-                # Sub-step forward: replace the 30min predict+update
-                # with n_substeps cycles of (predict_5min + update_5min).
-                # Start from previous candle state, NOT from x_pred[t].
+                # Sub-step forward: n_substeps cycles of (predict_5min + update)
+                # Start from previous candle state
                 macd_vals = macd_live_per_candle[t]
                 valid_vals = [v for v in macd_vals if not np.isnan(v)]
                 use = valid_vals[:n_substeps]
@@ -248,6 +254,10 @@ def run_flks_with_substeps(indicator_30m, macd_live_per_candle,
 
                 x_filt[t] = x_cur
                 P_filt[t] = P_cur
+
+        # Compute x_pred[t+1] from finalized x_filt[t] — ensures RTS consistency
+        if t < n - 1:
+            x_pred[t + 1], P_pred[t + 1] = kf_predict(x_filt[t], P_filt[t])
 
     # FLKS backward
     positions = np.copy(x_filt[:, 0])
