@@ -638,124 +638,154 @@ def main():
         print(f"  Slopes computed (oracle + T1 + k=1..6)")
 
     # ==================================================================
-    holding_values = [0, 2, 4, 6, 8, 10, 15, 20]
-    print(f"\n[7/9] Backtest grid: holding_min × methods × indicators ...")
-    print(f"       Holding values (bougies 30min): {holding_values}")
-    print(f"       En temps: {[f'{h*30}min' for h in holding_values]}")
+    # Compute threshold percentiles from MACD T1 slopes
+    print("\n[7/10] Calibrating thresholds ...")
+    s_ref = all_slopes['MACD']['t1'][args.eval_start:n30]
+    s_ref = s_ref[~np.isnan(s_ref)]
+    abs_s = np.abs(s_ref)
+    thr_p50 = round(np.percentile(abs_s, 50), 2)
+    thr_p75 = round(np.percentile(abs_s, 75), 2)
+    thr_p90 = round(np.percentile(abs_s, 90), 2)
+    print(f"       MACD T1 |slope| P50={thr_p50} P75={thr_p75} P90={thr_p90}")
+
+    holding_values = [0, 4, 6, 8, 10, 15]
+    threshold_values = [0.0, thr_p50, thr_p75, thr_p90]
+    # Focus on T1 and best k candidates (k=1, k=2, k=6)
+    methods_to_test = ['t1', 'k1', 'k2', 'k6']
+    method_labels = {'t1': 'T1:30m', 'k1': 'T2:k=1', 'k2': 'T2:k=2', 'k6': 'T2:k=6'}
+
+    n_combos = len(holding_values) * len(threshold_values) * len(methods_to_test) * 3
+    print(f"       Grid: {len(holding_values)} hold × {len(threshold_values)} thr "
+          f"× {len(methods_to_test)} methods × 3 indicators = {n_combos} combos")
+
+    # ==================================================================
+    print(f"\n[8/10] Running 2D grid search ...")
 
     all_results = {}
     for name in ['MACD', 'RSI', 'CCI']:
         slopes = all_slopes[name]
-        results_by_hold = {}
+        grid = {}
 
         for hold in holding_values:
-            print(f"  {name} hold={hold} ({hold*30}min) ...", end=" ", flush=True)
-            results = []
+            for thr in threshold_values:
+                key = (hold, thr)
+                print(f"  {name} hold={hold} thr={thr:.1f} ...", end=" ", flush=True)
+                results = {}
 
-            # Oracle (no holding — reference)
-            r = backtest_30m(slopes['oracle'], closes_30m,
-                             args.eval_start, n30 - 1, fees, "Oracle")
-            results.append(r)
+                # Oracle (no filters)
+                r = backtest_30m(slopes['oracle'], closes_30m,
+                                 args.eval_start, n30 - 1, fees, "Oracle")
+                results['oracle'] = r
 
-            # T1
-            r = backtest_30m(slopes['t1'], closes_30m,
-                             args.eval_start, n30 - 1, fees, "T1: 30m",
-                             holding_min=hold)
-            results.append(r)
+                # T1
+                r = backtest_30m(slopes['t1'], closes_30m,
+                                 args.eval_start, n30 - 1, fees, "T1",
+                                 threshold=thr, holding_min=hold)
+                results['t1'] = r
 
-            # T2 k=1..6
-            for k in range(1, 7):
-                r = backtest_5m(slopes[f'k{k}'], closes_5m_per_candle, k,
-                                args.eval_start, n30 - 1, fees,
-                                f"T2:k={k}", holding_min=hold)
-                results.append(r)
+                # T2 k=1, k=2, k=6
+                for k_key in ['k1', 'k2', 'k6']:
+                    k = int(k_key[1])
+                    r = backtest_5m(slopes[k_key], closes_5m_per_candle, k,
+                                    args.eval_start, n30 - 1, fees,
+                                    method_labels[k_key],
+                                    threshold=thr, holding_min=hold)
+                    results[k_key] = r
 
-            results_by_hold[hold] = results
-            best = max(results[1:], key=lambda x: x['pnl_pct'])
-            print(f"best={best['label']} PnL={best['pnl_pct']:+.1f}% "
-                  f"trades={best['trades']} WR={best['win_rate']:.1f}%")
+                grid[key] = results
+                best_m = max(methods_to_test, key=lambda m: results[m]['pnl_pct'])
+                best_r = results[best_m]
+                print(f"{method_labels[best_m]} PnL={best_r['pnl_pct']:+.1f}% "
+                      f"tr={best_r['trades']} WR={best_r['win_rate']:.1f}%")
 
-        all_results[name] = results_by_hold
+        all_results[name] = grid
 
     # ==================================================================
-    print(f"\n[8/9] Tableaux comparatifs")
+    print(f"\n[9/10] Tableaux comparatifs")
 
     for name in ['MACD', 'RSI', 'CCI']:
-        print(f"\n{'=' * 95}")
-        print(f"  {name} — FLKS Backtest PnL — BTC 30min — Fees {fees*100:.1f}%/trade")
-        print(f"  Buy & Hold: {bh:+.2f}%  |  Eval: [{args.eval_start}:{n30}]")
-        print(f"{'=' * 95}")
-        print(f"  {'Hold(30m)':<12} {'Oracle':>9} │"
-              f" {'T1':>9} {'T2k1':>9} {'T2k2':>9} {'T2k3':>9}"
-              f" {'T2k4':>9} {'T2k5':>9} {'T2k6':>9}")
-        print(f"  {'-' * 92}")
+        print(f"\n{'=' * 100}")
+        print(f"  {name} — Grid Search (Hold × Threshold) — Fees {fees*100:.1f}%/trade")
+        print(f"  Buy & Hold: {bh:+.2f}%  |  Oracle: "
+              f"{all_results[name][(0, 0.0)]['oracle']['pnl_pct']:+.1f}%")
+        print(f"{'=' * 100}")
 
-        for hold in holding_values:
-            results = all_results[name][hold]
-            row = f"  {hold:<4} ({hold*30:>3}m) "
-            for r in results:
-                row += f" {r['pnl_pct']:>+8.1f}%"
-                if r == results[0]:
-                    row += " │"
-            print(row)
+        for m_key in methods_to_test:
+            print(f"\n  {method_labels[m_key]}:")
+            col_name = 'Hold/Thr'
+            header = f"  {col_name:<10}"
+            for thr in threshold_values:
+                header += f" │ {'thr=' + str(round(thr,1)):>14}"
+            print(header)
+            print(f"  {'-' * (12 + 17 * len(threshold_values))}")
 
-        print(f"  {'-' * 92}")
+            for hold in holding_values:
+                row = f"  {hold:<3}({hold*30:>3}m)  "
+                for thr in threshold_values:
+                    r = all_results[name][(hold, thr)][m_key]
+                    pnl = r['pnl_pct']
+                    tr = r['trades']
+                    marker = "***" if pnl > 0 else "   "
+                    row += f" │ {pnl:>+6.1f}%/{tr:>3}t{marker}"
+                print(row)
 
-        # Trades count per holding
-        print(f"  {'Trades:':<12}")
-        for hold in holding_values:
-            results = all_results[name][hold]
-            row = f"  {hold:<4} ({hold*30:>3}m) "
-            for r in results:
-                row += f" {r['trades']:>9}"
-                if r == results[0]:
-                    row += " │"
-            print(row)
+        print(f"  {'-' * (12 + 17 * len(threshold_values))}")
 
-        print(f"  {'-' * 92}")
-
-        # Best config
+        # Find global best
         best_pnl = -1e9
         best_cfg = ""
-        for hold in holding_values:
-            for r in all_results[name][hold][1:]:
+        for (hold, thr), results in all_results[name].items():
+            for m_key in methods_to_test:
+                r = results[m_key]
                 if r['pnl_pct'] > best_pnl:
                     best_pnl = r['pnl_pct']
-                    best_cfg = f"{r['label']} hold={hold} ({hold*30}min)"
-        print(f"\n  Best: {best_cfg} → PnL={best_pnl:+.1f}%")
-        print(f"{'=' * 95}")
+                    best_cfg = (f"{method_labels[m_key]} hold={hold}({hold*30}m) "
+                                f"thr={thr:.1f} trades={r['trades']} "
+                                f"WR={r['win_rate']:.1f}%")
+        print(f"\n  BEST: {best_cfg} → PnL={best_pnl:+.1f}%")
+        print(f"{'=' * 100}")
 
     print(f"\n  Buy & Hold: {bh:+.2f}%")
 
     # ==================================================================
-    print(f"\n[9/9] Plot ...")
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6), sharey=True)
-    methods = ['T1'] + [f'T2:k={k}' for k in range(1, 7)]
-    colors = plt.cm.viridis(np.linspace(0.2, 0.9, len(methods)))
+    print(f"\n[10/10] Plot ...")
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 7), sharey=True)
+    cmap = plt.cm.RdYlGn
 
     for idx, name in enumerate(['MACD', 'RSI', 'CCI']):
         ax = axes[idx]
-        for mi, method_label in enumerate(methods):
-            pnls = []
-            for hold in holding_values:
-                results = all_results[name][hold]
-                r = results[mi + 1]
-                pnls.append(r['pnl_pct'])
-            ax.plot(holding_values, pnls, 'o-', color=colors[mi],
-                    label=method_label, markersize=4, linewidth=1)
+        # Heatmap: best PnL across methods for each (hold, thr)
+        pnl_grid = np.zeros((len(holding_values), len(threshold_values)))
+        for hi, hold in enumerate(holding_values):
+            for ti, thr in enumerate(threshold_values):
+                best = max(all_results[name][(hold, thr)][m]['pnl_pct']
+                           for m in methods_to_test)
+                pnl_grid[hi, ti] = best
 
-        ax.axhline(y=bh, color='green', linestyle='--', linewidth=1,
-                   label=f'B&H {bh:+.1f}%')
-        ax.axhline(y=0, color='black', linestyle='-', linewidth=0.5)
-        ax.set_xlabel('Holding minimum (bougies 30min)')
+        im = ax.imshow(pnl_grid, aspect='auto', cmap=cmap,
+                       vmin=-100, vmax=max(60, pnl_grid.max()))
+        ax.set_xticks(range(len(threshold_values)))
+        ax.set_xticklabels([f'{t:.0f}' for t in threshold_values], fontsize=8)
+        ax.set_yticks(range(len(holding_values)))
+        ax.set_yticklabels([f'{h}({h*30}m)' for h in holding_values], fontsize=8)
+        ax.set_xlabel('Threshold')
         ax.set_title(name, fontsize=11)
-        ax.grid(True, alpha=0.3)
         if idx == 0:
-            ax.set_ylabel('PnL net (%)')
-            ax.legend(fontsize=7, ncol=2)
+            ax.set_ylabel('Holding min (bougies 30m)')
 
-    plt.suptitle(f'FLKS PnL vs Holding Minimum — BTC 30min — Fees {fees*100:.1f}%/trade',
-                 fontsize=12)
+        # Annotate cells
+        for hi in range(len(holding_values)):
+            for ti in range(len(threshold_values)):
+                val = pnl_grid[hi, ti]
+                color = 'white' if abs(val) > 40 else 'black'
+                ax.text(ti, hi, f'{val:+.0f}%', ha='center', va='center',
+                        fontsize=7, color=color)
+
+        plt.colorbar(im, ax=ax, shrink=0.8)
+
+    plt.suptitle(f'Best PnL (Hold × Threshold) — BTC 30min — Fees {fees*100:.1f}%/trade\n'
+                 f'B&H={bh:+.1f}%', fontsize=12)
     plt.tight_layout()
     out_path = output_dir / 'flks_backtest_pnl.png'
     plt.savefig(out_path, dpi=150, bbox_inches='tight')
