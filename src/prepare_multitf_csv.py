@@ -50,9 +50,13 @@ MACD_FAST = 12
 MACD_SLOW = 26
 MACD_SIGNAL = 9
 
-# Kalman parameters (project-wide defaults)
+# Kalman parameters for LIVE features (causal filter_update)
 KALMAN_PROCESS_VAR = 0.01
 KALMAN_MEASURE_VAR = 0.1
+
+# Kalman parameters for ORACLE LABELS (non-causal smooth, tunable separately)
+KALMAN_LABEL_PROCESS_VAR = 0.01
+KALMAN_LABEL_MEASURE_VAR = 0.1
 
 
 # =============================================================================
@@ -121,20 +125,71 @@ def calculate_cci_standard(df):
     return (tp - sma) / (0.015 * mad)
 
 def kalman_filter_standard(data):
-    """Forward-only Kalman on 1D series. For validation."""
+    """Forward-only Kalman on 1D series. Returns (position, velocity) arrays."""
     from pykalman import KalmanFilter as KF
     valid = ~np.isnan(data)
     if valid.sum() < 2:
-        return np.full(len(data), np.nan)
+        return np.full(len(data), np.nan), np.full(len(data), np.nan)
     vd = data[valid]
     kf = KF(transition_matrices=[[1,1],[0,1]], observation_matrices=[[1,0]],
             initial_state_mean=[vd[0], 0.0], initial_state_covariance=np.eye(2),
             observation_covariance=KALMAN_MEASURE_VAR,
             transition_covariance=np.eye(2) * KALMAN_PROCESS_VAR)
     sm, _ = kf.filter(vd)
-    out = np.full(len(data), np.nan)
-    out[valid] = sm[:, 0]
-    return out
+    pos = np.full(len(data), np.nan)
+    vel = np.full(len(data), np.nan)
+    pos[valid] = sm[:, 0]
+    vel[valid] = sm[:, 1]
+    return pos, vel
+
+
+# =============================================================================
+# ORACLE LABEL (non-causal smooth — ML training target)
+# =============================================================================
+
+def compute_oracle_label(indicator_tf: np.ndarray):
+    """
+    Compute non-causal oracle labels AND continuous slope from a resampled indicator series.
+
+    Uses kf.smooth() — NON-CAUSAL by design (RTS smoother, uses future data).
+
+    Returns:
+        labels_binary: int array (0 or 1), label[t] = 1 if smoothed[t-1] > smoothed[t-2]
+        slope_continuous: float32 array, slope[t] = smoothed[t-1] - smoothed[t-2]
+    """
+    from pykalman import KalmanFilter as KF
+
+    n = len(indicator_tf)
+    labels_binary = np.zeros(n, dtype=int)
+    slope_continuous = np.full(n, np.nan, dtype=np.float32)
+
+    valid = ~np.isnan(indicator_tf)
+    if valid.sum() < 3:
+        return labels_binary, slope_continuous
+
+    vd = indicator_tf[valid]
+
+    kf = KF(
+        transition_matrices=[[1, 1], [0, 1]],
+        observation_matrices=[[1, 0]],
+        initial_state_mean=[vd[0], 0.0],
+        initial_state_covariance=np.eye(2),
+        observation_covariance=KALMAN_LABEL_MEASURE_VAR,
+        transition_covariance=np.eye(2) * KALMAN_LABEL_PROCESS_VAR,
+    )
+
+    # SMOOTH (non-causal, RTS smoother) — INTENTIONAL for labels
+    smoothed_means, _ = kf.smooth(vd)
+    smoothed = np.full(n, np.nan)
+    smoothed[valid] = smoothed_means[:, 0]
+
+    for t in range(2, n):
+        if not np.isnan(smoothed[t - 1]) and not np.isnan(smoothed[t - 2]):
+            delta = smoothed[t - 1] - smoothed[t - 2]
+            slope_continuous[t] = delta
+            labels_binary[t] = 1 if delta > 0 else 0
+
+    return labels_binary, slope_continuous
 
 
 # =============================================================================
@@ -215,41 +270,92 @@ def compute_macd_live(close_5min, is_close):
 # =============================================================================
 
 def compute_rsi_live(close_5min, is_close):
-    """RSI with frozen/provisional EWM avg_gain/avg_loss. Freeze at closure."""
+    """
+    RSI with frozen/provisional EWM avg_gain/avg_loss. Freeze at closure.
+
+    Same approach as Kalman: compute exact state on ALL closures first,
+    then replay for provisional (inter-closure) points.
+    This guarantees exact match with standard RSI at closures (atol=1e-10).
+    """
     n = len(close_5min)
     alpha = 2.0 / (RSI_PERIOD + 1)
 
     out = np.full(n, np.nan)
-    ag_cl = np.nan; al_cl = np.nan; prev_cl = np.nan
-    candle_closes = []; warmed = False
+
+    # Step 1: Collect ALL closure closes
+    closure_indices = []
+    closure_closes = []
+    for i in range(n):
+        if not np.isnan(close_5min[i]) and is_close[i]:
+            closure_indices.append(i)
+            closure_closes.append(close_5min[i])
+
+    if len(closure_closes) < 2:
+        return out
+
+    # Step 2: Compute standard RSI states on closure closes
+    # This matches ewm(span=RSI_PERIOD, adjust=False) exactly
+    closes_arr = np.array(closure_closes)
+    deltas = np.diff(closes_arr)
+    gains = np.where(deltas > 0, deltas, 0.0)
+    losses = np.where(deltas < 0, -deltas, 0.0)
+
+    # ewm(adjust=False) starts: EMA[0] = x[0]
+    # But delta[0] = close[1]-close[0], gain[0] is for candle 1 (not 0)
+    # Standard RSI: gain = delta.where(delta>0, 0), first delta is NaN → gain[0]=0
+    # Then ewm starts with EMA[0] = 0 (the NaN-derived zero)
+    # Our gains start from the first real diff. Prepend 0 to match.
+    gains_padded = np.concatenate([[0.0], gains])
+    losses_padded = np.concatenate([[0.0], losses])
+
+    # Run EWM to get avg_gain/avg_loss at each closure
+    # closure_states[k] = (avg_gain, avg_loss, close) after processing closure k
+    ag = gains_padded[0]  # = 0, matches ewm init
+    al = losses_padded[0]  # = 0
+    closure_states = [(ag, al, closure_closes[0])]  # state after first closure
+
+    for k in range(1, len(gains_padded)):
+        ag = alpha * gains_padded[k] + (1.0 - alpha) * ag
+        al = alpha * losses_padded[k] + (1.0 - alpha) * al
+        closure_states.append((ag, al, closure_closes[k]))
+
+    # Step 3: Assign RSI at closure points
+    # Match standard behavior: when avg_loss=0, RSI=NaN (not 100.0)
+    # Standard: rs = avg_gain / avg_loss.replace(0, np.nan) → NaN when avg_loss=0
+    for k, ci in enumerate(closure_indices):
+        ag_k, al_k, _ = closure_states[k]
+        if al_k > 1e-15:
+            out[ci] = 100.0 - 100.0 / (1.0 + ag_k / al_k)
+        # else: stay NaN (matches standard RSI behavior)
+
+    # Step 4: Replay for provisional (inter-closure) points
+    closure_set = set(closure_indices)
+    current_k = -1
+    ag_cl = 0.0
+    al_cl = 0.0
+    prev_cl = np.nan
 
     for i in range(n):
         c = close_5min[i]
         if np.isnan(c):
             continue
-        if not warmed:
-            if is_close[i]:
-                candle_closes.append(c)
-                if len(candle_closes) >= RSI_PERIOD + 1:
-                    arr = np.array(candle_closes)
-                    d = np.diff(arr)
-                    g = np.where(d > 0, d, 0.0)
-                    l = np.where(d < 0, -d, 0.0)
-                    ag = g[0]; al = l[0]
-                    for k in range(1, len(g)):
-                        ag = alpha * g[k] + (1.0 - alpha) * ag
-                        al = alpha * l[k] + (1.0 - alpha) * al
-                    ag_cl = ag; al_cl = al; prev_cl = c
-                    out[i] = 100.0 - 100.0 / (1.0 + ag / al) if al > 1e-15 else 100.0
-                    warmed = True
+
+        if i in closure_set:
+            current_k += 1
+            ag_cl, al_cl, prev_cl = closure_states[current_k]
             continue
-        delta = c - prev_cl
-        gn = max(delta, 0.0); ls = max(-delta, 0.0)
-        ag_p = alpha * gn + (1.0 - alpha) * ag_cl
-        al_p = alpha * ls + (1.0 - alpha) * al_cl
-        out[i] = 100.0 - 100.0 / (1.0 + ag_p / al_p) if al_p > 1e-15 else 100.0
-        if is_close[i]:
-            ag_cl = ag_p; al_cl = al_p; prev_cl = c
+
+        # Provisional from frozen state
+        if current_k >= 0 and not np.isnan(prev_cl):
+            delta = c - prev_cl
+            gn = max(delta, 0.0)
+            ls = max(-delta, 0.0)
+            ag_p = alpha * gn + (1.0 - alpha) * ag_cl
+            al_p = alpha * ls + (1.0 - alpha) * al_cl
+            if al_p > 1e-15:
+                out[i] = 100.0 - 100.0 / (1.0 + ag_p / al_p)
+            # else: stay NaN (matches standard RSI behavior)
+
     return out
 
 
@@ -287,14 +393,14 @@ def compute_kalman_live(indicator_live, is_close):
     Kalman filter_update with frozen/provisional state. Freeze at closure.
     Same logic as indicators: state advances only at bucket closure.
 
-    Initialization matches kf.filter() behavior: first observation sets the
-    initial state via a single filter_update from the prior (initial_state_mean,
-    initial_state_covariance). Subsequent closures advance the state normally.
+    Returns (n, 2) array: [position, velocity] at each 5min step.
+    Position = smoothed indicator value (state[0])
+    Velocity = estimated slope/rate of change (state[1])
     """
     from pykalman import KalmanFilter as KF
 
     n = len(indicator_live)
-    out = np.full(n, np.nan)
+    out = np.full((n, 2), np.nan)  # (n, 2) = [position, velocity]
 
     # Collect closure values to run standard kf.filter for exact state sequence
     closure_indices = []
@@ -318,28 +424,20 @@ def compute_kalman_live(indicator_live, is_close):
 
     state_means, state_covs = kf.filter(cv)
 
-    # Now replay: at each 5min step, compute provisional from the frozen state
-    # of the previous closure. At closures, advance to next frozen state.
-    #
-    # frozen_state[k] = state after processing closure k
-    # Between closure k and k+1, provisional = filter_update(frozen_state[k], obs)
-
-    # Build lookup: for each closure index, the state AFTER processing it
-    # closure_states[k] = (state_mean, state_cov) after kf processed closure k
+    # Build lookup: closure_states[k] = (state_mean, state_cov) after processing closure k
     closure_states = [(state_means[k], state_covs[k]) for k in range(len(closure_values))]
 
-    # Also need the state BEFORE the first closure (initial state)
     init_mean = np.array([cv[0], 0.0])
     init_cov = np.eye(2)
 
-    # Assign output at closure points (these are exact by construction)
+    # Assign output at closure points — both position and velocity
     for k, ci in enumerate(closure_indices):
-        out[ci] = state_means[k, 0]
+        out[ci, 0] = state_means[k, 0]  # position
+        out[ci, 1] = state_means[k, 1]  # velocity
 
-    # For provisional (non-closure) points, find which closure they follow
-    # and compute filter_update from that closure's state
+    # For provisional (non-closure) points, compute from frozen state
     closure_set = set(closure_indices)
-    current_closure_k = -1  # index into closure_states
+    current_closure_k = -1
     sm_cl = init_mean
     sc_cl = init_cov
 
@@ -349,7 +447,6 @@ def compute_kalman_live(indicator_live, is_close):
             continue
 
         if i in closure_set:
-            # This is a closure point — output already set, advance frozen state
             current_closure_k += 1
             sm_cl = closure_states[current_closure_k][0]
             sc_cl = closure_states[current_closure_k][1]
@@ -358,7 +455,8 @@ def compute_kalman_live(indicator_live, is_close):
         # Non-closure: provisional from frozen state
         if current_closure_k >= 0:
             sm_p, _ = kf.filter_update(sm_cl, sc_cl, observation=obs)
-            out[i] = sm_p[0]
+            out[i, 0] = sm_p[0]  # position
+            out[i, 1] = sm_p[1]  # velocity
 
     return out
 
@@ -424,14 +522,26 @@ def run_validation(result, df_5min, tf_minutes, suffix, indicators):
 
     ok = True
     if 'macd' in indicators:
-        ms = calculate_macd_standard(df_tf)
+        ms_raw = calculate_macd_standard(df_tf)
+        # Normalize by price (same as live pipeline)
+        ms = ms_raw / df_tf['close'] * 10000
         ok &= compare("MACD", f'macd_{suffix}_live', ms)
-        ks = pd.Series(kalman_filter_standard(ms.values), index=df_tf.index)
-        ok &= compare("Kalman_MACD", f'macd_{suffix}_filtered', ks)
+        # Kalman position and velocity validation
+        k_pos, k_vel = kalman_filter_standard(ms.values)
+        ok &= compare("Kalman_MACD_pos", f'macd_{suffix}_filtered',
+                      pd.Series(k_pos, index=df_tf.index))
+        ok &= compare("Kalman_MACD_vel", f'macd_{suffix}_velocity',
+                      pd.Series(k_vel, index=df_tf.index))
     if 'rsi' in indicators:
         ok &= compare("RSI", f'rsi_{suffix}_live', calculate_rsi_standard(df_tf))
+        r_pos, r_vel = kalman_filter_standard(calculate_rsi_standard(df_tf).values)
+        ok &= compare("Kalman_RSI_vel", f'rsi_{suffix}_velocity',
+                      pd.Series(r_vel, index=df_tf.index))
     if 'cci' in indicators:
         ok &= compare("CCI", f'cci_{suffix}_live', calculate_cci_standard(df_tf))
+        c_pos, c_vel = kalman_filter_standard(calculate_cci_standard(df_tf).values)
+        ok &= compare("Kalman_CCI_vel", f'cci_{suffix}_velocity',
+                      pd.Series(c_vel, index=df_tf.index))
 
     if ok:
         logger.info(f"  ALL {suffix} VALIDATIONS PASSED")
@@ -484,7 +594,12 @@ def generate_multitf_csv(asset_name, output_dir, indicators=None):
 
         if 'macd' in indicators:
             logger.info(f"    Computing MACD live...")
-            ind_results['macd'] = compute_macd_live(close_5min, is_close)
+            macd_raw = compute_macd_live(close_5min, is_close)
+            # Normalize MACD by price (MACD is in price units, scales with BTC price)
+            # Convert to basis points (stable across price regimes)
+            macd_norm = macd_raw / close_5min * 10000
+            ind_results['macd'] = macd_norm
+            logger.info(f"      MACD normalized by price (×10000/close)")
         if 'rsi' in indicators:
             logger.info(f"    Computing RSI live...")
             ind_results['rsi'] = compute_rsi_live(close_5min, is_close)
@@ -495,13 +610,16 @@ def generate_multitf_csv(asset_name, output_dir, indicators=None):
         for ind, vals in ind_results.items():
             result[f'{ind}_{suffix}_live'] = vals
 
-        # Kalman on each indicator
+        # Kalman on each indicator — extract both position and velocity
         for ind, vals in ind_results.items():
             logger.info(f"    Computing Kalman on {ind}_{suffix}...")
-            filt = compute_kalman_live(vals, is_close)
+            kalman_out = compute_kalman_live(vals, is_close)  # (n, 2) = [position, velocity]
+            filt = kalman_out[:, 0]  # position
+            vel = kalman_out[:, 1]   # velocity (slope estimate)
             result[f'{ind}_{suffix}_filtered'] = filt
+            result[f'{ind}_{suffix}_velocity'] = vel
 
-            # Direction label
+            # Direction label (from position)
             fs = pd.Series(filt, index=df_5min.index)
             lab = (fs > fs.shift(1)).astype(float)
             lab.iloc[0] = 0
@@ -512,8 +630,47 @@ def generate_multitf_csv(asset_name, output_dir, indicators=None):
             nc = (result[f'{ind}_{suffix}_label'].diff().abs() > 0).sum()
             logger.info(f"    {ind.upper()} label changes: {nc:,}")
 
-        # Validation
+        # Validation (live features only)
         run_validation(result, df_5min, tf_minutes, suffix, indicators)
+
+        # =================================================================
+        # ORACLE LABELS (non-causal smooth — ML training targets)
+        # =================================================================
+        logger.info(f"    Computing oracle labels ({suffix}, Kalman SMOOTH)...")
+        df_tf = resample_ohlcv(df_5min, tf_minutes)
+
+        for ind_name in indicators:
+            if ind_name == 'macd':
+                macd_std = calculate_macd_standard(df_tf).values
+                # Normalize by price (same as live MACD normalization)
+                close_tf = df_tf['close'].values
+                ind_tf_values = macd_std / close_tf * 10000
+            elif ind_name == 'rsi':
+                ind_tf_values = calculate_rsi_standard(df_tf).values
+            elif ind_name == 'cci':
+                ind_tf_values = calculate_cci_standard(df_tf).values
+            else:
+                continue
+
+            # Compute labels + slope at tf resolution (non-causal)
+            labels_tf, slope_tf = compute_oracle_label(ind_tf_values)
+
+            # Forward-fill to 5min resolution
+            # No shift — label is non-causal by construction
+            labels_series = pd.Series(labels_tf, index=df_tf.index)
+            labels_5min = labels_series.reindex(df_5min.index, method='ffill').fillna(0).astype(int)
+            result[f'oracle_label_{ind_name}_{suffix}'] = labels_5min.values
+
+            # Forward-fill slope to 5min resolution
+            slope_series = pd.Series(slope_tf, index=df_tf.index)
+            slope_5min = slope_series.reindex(df_5min.index, method='ffill')
+            result[f'oracle_slope_{ind_name}_{suffix}'] = slope_5min.values
+
+            n_up = (labels_5min == 1).sum()
+            n_down = (labels_5min == 0).sum()
+            n_changes = (labels_5min.diff().abs() > 0).sum()
+            logger.info(f"      oracle_label_{ind_name}_{suffix}: {n_up:,} UP, {n_down:,} DOWN "
+                        f"({n_up/(n_up+n_down)*100:.1f}% UP), {n_changes:,} direction changes")
 
     # Save
     os.makedirs(output_dir, exist_ok=True)
