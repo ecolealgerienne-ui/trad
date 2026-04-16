@@ -33,31 +33,61 @@ FEES = 0.001
 
 def backtest_consensus(y_pred_binary, y_oracle, closes, fees):
     """
-    Trade only when model and oracle agree on direction.
-    FLAT when they disagree.
+    Follow oracle direction, but only act on transitions detected by the model.
+
+    At each oracle transition:
+      - If the model also switches (within ±6 steps) in the same direction → trade
+      - If the model doesn't switch → skip this transition, keep previous position
+
+    Number of trades ≤ oracle transitions.
     """
     n = len(y_pred_binary)
+    NEAR = 6
+
+    # Find oracle transitions
+    oracle_transitions = []
+    for i in range(1, n):
+        if y_oracle[i] != y_oracle[i - 1]:
+            oracle_transitions.append(i)
+
+    # Find model transitions
+    model_transitions = set()
+    for i in range(1, n):
+        if y_pred_binary[i] != y_pred_binary[i - 1]:
+            model_transitions.add(i)
+
     pnl_total = 0.0
     n_trades = 0
     n_wins = 0
-    n_flat_periods = 0
+    n_confirmed = 0
+    n_skipped = 0
     position = 0  # 0=flat, +1=long, -1=short
     entry_price = 0.0
 
-    for i in range(n):
-        model_dir = 1 if y_pred_binary[i] == 1 else -1
-        oracle_dir = 1 if y_oracle[i] == 1 else -1
+    for o_idx in oracle_transitions:
+        oracle_dir = 1 if y_oracle[o_idx] == 1 else -1
 
-        if model_dir == oracle_dir:
-            target = model_dir  # consensus → trade
-        else:
-            target = 0  # disagreement → flat
-            n_flat_periods += 1
+        # Check if model also switches nearby in the same direction
+        model_confirms = False
+        for delta in range(-NEAR, NEAR + 1):
+            m_idx = o_idx + delta
+            if m_idx in model_transitions:
+                model_dir = 1 if y_pred_binary[m_idx] == 1 else -1
+                if model_dir == oracle_dir:
+                    model_confirms = True
+                    break
+
+        if not model_confirms:
+            n_skipped += 1
+            continue
+
+        n_confirmed += 1
+        target = oracle_dir
 
         if position == target:
             continue
 
-        exec_price = closes[i]
+        exec_price = closes[min(o_idx, n - 1)]
         if np.isnan(exec_price):
             continue
 
@@ -71,15 +101,12 @@ def backtest_consensus(y_pred_binary, y_oracle, closes, fees):
             pnl_total += trade_pnl
             if trade_pnl > 0:
                 n_wins += 1
-            n_trades += 1
 
-        # Open new position (or go flat)
-        if target != 0:
-            entry_price = exec_price
-            position = target
-            pnl_total -= fees
-        else:
-            position = 0
+        # Open new position
+        entry_price = exec_price
+        position = target
+        n_trades += 1
+        pnl_total -= fees
 
     # Close last position
     if position != 0 and not np.isnan(closes[-1]):
@@ -91,17 +118,15 @@ def backtest_consensus(y_pred_binary, y_oracle, closes, fees):
         pnl_total += trade_pnl
         if trade_pnl > 0:
             n_wins += 1
-        n_trades += 1
 
     wr = (n_wins / n_trades * 100.0) if n_trades > 0 else 0.0
-    agree_pct = (1 - n_flat_periods / n) * 100
 
     return {
         'pnl': pnl_total * 100,
         'trades': n_trades,
         'wr': wr,
-        'agree_pct': agree_pct,
-        'flat_periods': n_flat_periods,
+        'confirmed': n_confirmed,
+        'skipped': n_skipped,
     }
 
 
@@ -208,17 +233,18 @@ def main():
     # Consensus
     r_consensus = backtest_consensus(y_pred, y_test, closes_test, fees)
 
-    print(f"\n  {'Method':<40} {'PnL':>8} {'Trades':>7} {'WR':>6}")
-    print(f"  {'-' * 63}")
-    print(f"  {'Oracle (toujours en position)':<40} {r_oracle['pnl']:>+7.1f}% {r_oracle['trades']:>7} {r_oracle['wr']:>5.1f}%")
-    print(f"  {'Modèle (toujours en position)':<40} {r_model['pnl']:>+7.1f}% {r_model['trades']:>7} {r_model['wr']:>5.1f}%")
-    print(f"  {'Consensus (accord = trade, sinon FLAT)':<40} {r_consensus['pnl']:>+7.1f}% {r_consensus['trades']:>7} {r_consensus['wr']:>5.1f}%")
-    print(f"  {'Buy & Hold':<40} {bh:>+7.1f}%")
-    print(f"  {'-' * 63}")
+    print(f"\n  {'Method':<45} {'PnL':>8} {'Trades':>7} {'WR':>6}")
+    print(f"  {'-' * 68}")
+    print(f"  {'Oracle (toutes transitions)':<45} {r_oracle['pnl']:>+7.1f}% {r_oracle['trades']:>7} {r_oracle['wr']:>5.1f}%")
+    print(f"  {'Modèle seul (tous switches)':<45} {r_model['pnl']:>+7.1f}% {r_model['trades']:>7} {r_model['wr']:>5.1f}%")
+    print(f"  {'Consensus (oracle + modèle confirme)':<45} {r_consensus['pnl']:>+7.1f}% {r_consensus['trades']:>7} {r_consensus['wr']:>5.1f}%")
+    print(f"  {'Buy & Hold':<45} {bh:>+7.1f}%")
+    print(f"  {'-' * 68}")
     print(f"\n  Consensus details:")
-    print(f"    En position: {r_consensus['agree_pct']:.1f}% du temps")
-    print(f"    FLAT (désaccord): {r_consensus['flat_periods']:,} périodes "
-          f"({100-r_consensus['agree_pct']:.1f}%)")
+    print(f"    Oracle transitions: {len(find_switches(y_test)):,}")
+    print(f"    Modèle confirme (±6 steps, même dir): {r_consensus['confirmed']:,}")
+    print(f"    Modèle ne confirme pas (skipped): {r_consensus['skipped']:,}")
+    print(f"    Trades effectifs: {r_consensus['trades']:,} (≤ oracle)")
     print(f"{'=' * 70}")
 
 
