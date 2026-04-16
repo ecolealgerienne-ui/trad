@@ -29,105 +29,15 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from core import (
     load_csv, resample_ohlcv, compute_bucket_close_mask,
     calculate_macd, compute_macd_live,
+    compute_kalman_live_standard, compute_kalman_live_aqkf,
     forward_filter_30m, forward_filter_30m_adaptive,
     compute_slopes_test1, compute_slopes_test2,
     compute_oracle, sign_concordance, find_oracle_transitions,
     sign_concordance_at_transitions, group_per_candle,
-    kf_update, inv2x2, is_pos_semidef,
-    A, H, Q, R, KALMAN_PROCESS_VAR, KALMAN_MEASURE_VAR,
+    A,
 )
 
 TRIM = 100
-
-
-def compute_kalman_live_aqkf(indicator_live, is_close, aq_window=30, Q_max_factor=10.0):
-    """
-    AQ-KF live Kalman: forward filter with adaptive Q on closure values,
-    provisional updates between closures. Returns (n, 2) = [position, velocity].
-    Same as prepare_multitf_csv_aqkf.py.
-    """
-    _Q_fixed = np.eye(2) * KALMAN_PROCESS_VAR
-    _R = np.array([[KALMAN_MEASURE_VAR]])
-    Q_FLOOR = _Q_fixed * 0.1
-    Q_CEIL = _Q_fixed * Q_max_factor
-
-    n = len(indicator_live)
-    out = np.full((n, 2), np.nan)
-
-    closure_indices = []
-    closure_values = []
-    for i in range(n):
-        if not np.isnan(indicator_live[i]) and is_close[i]:
-            closure_indices.append(i)
-            closure_values.append(indicator_live[i])
-    if len(closure_values) < 2:
-        return out
-
-    cv = np.array(closure_values)
-    nc = len(cv)
-
-    x_filt_cl = np.zeros((nc, 2))
-    P_filt_cl = np.zeros((nc, 2, 2))
-    Q_current = _Q_fixed.copy()
-    innovation_buffer = []
-
-    for k in range(nc):
-        if k == 0:
-            x_p = np.array([cv[0], 0.0])
-            P_p = np.eye(2)
-        else:
-            x_p = A @ x_filt_cl[k - 1]
-            P_p = A @ P_filt_cl[k - 1] @ A.T + Q_current
-
-        y = cv[k] - H @ x_p
-        S = (H @ P_p @ H.T + _R)[0, 0]
-        K = P_p @ H.T / S
-        x_filt_cl[k] = x_p + (K @ y).ravel()
-        P_filt_cl[k] = (np.eye(2) - K @ H) @ P_p
-
-        v_t = cv[k] - (H @ x_p)[0]
-        innovation_buffer.append(v_t)
-        if len(innovation_buffer) > aq_window:
-            innovation_buffer.pop(0)
-
-        if len(innovation_buffer) >= aq_window and k > 0:
-            C_vv = np.mean(np.array(innovation_buffer) ** 2)
-            delta = C_vv - S
-            if delta > 0:
-                P_pred_next = A @ P_filt_cl[k] @ A.T + Q_current
-                C_rts = P_filt_cl[k] @ A.T @ inv2x2(P_pred_next)
-                Q_candidate = delta * (C_rts @ C_rts.T)
-                if is_pos_semidef(Q_candidate):
-                    Q_current = np.clip(Q_candidate, Q_FLOOR, Q_CEIL)
-
-    for k, ci in enumerate(closure_indices):
-        out[ci, 0] = x_filt_cl[k, 0]
-        out[ci, 1] = x_filt_cl[k, 1]
-
-    closure_set = set(closure_indices)
-    current_k = -1
-    sm_cl = np.array([cv[0], 0.0])
-    sc_cl = np.eye(2)
-    for i in range(n):
-        obs = indicator_live[i]
-        if np.isnan(obs):
-            continue
-        if i in closure_set:
-            current_k += 1
-            sm_cl = x_filt_cl[current_k]
-            sc_cl = P_filt_cl[current_k]
-            continue
-        if current_k >= 0:
-            x_p = A @ sm_cl
-            P_p = A @ sc_cl @ A.T + Q_current
-            y_val = obs - (H @ x_p)[0]
-            S_val = (H @ P_p @ H.T + _R)[0, 0]
-            K_val = P_p @ H.T / S_val
-            sm_p = x_p + (K_val * y_val).ravel()
-            out[i, 0] = sm_p[0]
-            out[i, 1] = sm_p[1]
-
-    return out
 
 
 def main():
@@ -166,52 +76,16 @@ def main():
 
     # ==================================================================
     print("[4/9] Standard Kalman live features (5min resolution) ...")
-    from core import KALMAN_PROCESS_VAR as KPV, KALMAN_MEASURE_VAR as KMV
-    from pykalman import KalmanFilter as KF
-
-    # Standard Kalman on closure values
-    closure_indices = []
-    closure_values = []
-    for i in range(len(macd_live)):
-        if not np.isnan(macd_live[i]) and is_close[i]:
-            closure_indices.append(i)
-            closure_values.append(macd_live[i])
-    cv = np.array(closure_values)
-    kf_std = KF(transition_matrices=A, observation_matrices=np.array([[1, 0]]),
-                initial_state_mean=[cv[0], 0.0], initial_state_covariance=np.eye(2),
-                observation_covariance=KMV, transition_covariance=np.eye(2) * KPV)
-    state_means_std, state_covs_std = kf_std.filter(cv)
-
-    std_filtered = np.full(len(macd_live), np.nan)
-    std_velocity = np.full(len(macd_live), np.nan)
-    for k, ci in enumerate(closure_indices):
-        std_filtered[ci] = state_means_std[k, 0]
-        std_velocity[ci] = state_means_std[k, 1]
-    # Provisional between closures
-    closure_set = set(closure_indices)
-    current_k = -1
-    sm_cl = np.array([cv[0], 0.0])
-    sc_cl = np.eye(2)
-    for i in range(len(macd_live)):
-        obs = macd_live[i]
-        if np.isnan(obs):
-            continue
-        if i in closure_set:
-            current_k += 1
-            sm_cl = state_means_std[current_k]
-            sc_cl = state_covs_std[current_k]
-            continue
-        if current_k >= 0:
-            sm_p, _ = kf_std.filter_update(sm_cl, sc_cl, observation=obs)
-            std_filtered[i] = sm_p[0]
-            std_velocity[i] = sm_p[1]
+    std_out = compute_kalman_live_standard(macd_live, is_close)
+    std_filtered = std_out[:, 0]
+    std_velocity = std_out[:, 1]
     print(f"       {np.sum(~np.isnan(std_filtered)):,} valid Standard values")
 
     # ==================================================================
     print("[5/9] AQ-KF live features (5min resolution) ...")
-    kalman_out = compute_kalman_live_aqkf(macd_live, is_close)
-    aq_filtered = kalman_out[:, 0]
-    aq_velocity = kalman_out[:, 1]
+    aq_out = compute_kalman_live_aqkf(macd_live, is_close)
+    aq_filtered = aq_out[:, 0]
+    aq_velocity = aq_out[:, 1]
     print(f"       {np.sum(~np.isnan(aq_filtered)):,} valid AQ-KF values")
 
     # ==================================================================
