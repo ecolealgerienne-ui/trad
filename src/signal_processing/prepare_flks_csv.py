@@ -228,7 +228,8 @@ def main():
     n_check = len(df_check)
 
     # Compare at 30min closures only (where slopes are computed)
-    df_closures = df_check.loc[df_30m.index].dropna()
+    common_idx = df_check.index.intersection(df_30m.index)
+    df_closures = df_check.loc[common_idx].dropna()
     n_cl = len(df_closures)
 
     eval_start = TRIM
