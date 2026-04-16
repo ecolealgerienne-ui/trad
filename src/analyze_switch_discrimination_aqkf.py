@@ -168,7 +168,6 @@ def main():
         y_pred_proba = data['test_preds']
 
     # Also load raw features from CSV for window extraction
-    from constants import PREPARED_DATA_DIR
     import pandas as pd
 
     ASSET_CSV_MAP = {'BTC': 'BTCUSD'}
