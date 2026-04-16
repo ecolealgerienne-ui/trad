@@ -165,15 +165,57 @@ def main():
     print(f"       MACD range: [{np.nanmin(macd_30m):.1f}, {np.nanmax(macd_30m):.1f}]")
 
     # ==================================================================
-    print("[4/8] AQ-KF live features (5min resolution) ...")
+    print("[4/9] Standard Kalman live features (5min resolution) ...")
+    from core import KALMAN_PROCESS_VAR as KPV, KALMAN_MEASURE_VAR as KMV
+    from pykalman import KalmanFilter as KF
+
+    # Standard Kalman on closure values
+    closure_indices = []
+    closure_values = []
+    for i in range(len(macd_live)):
+        if not np.isnan(macd_live[i]) and is_close[i]:
+            closure_indices.append(i)
+            closure_values.append(macd_live[i])
+    cv = np.array(closure_values)
+    kf_std = KF(transition_matrices=A, observation_matrices=np.array([[1, 0]]),
+                initial_state_mean=[cv[0], 0.0], initial_state_covariance=np.eye(2),
+                observation_covariance=KMV, transition_covariance=np.eye(2) * KPV)
+    state_means_std, state_covs_std = kf_std.filter(cv)
+
+    std_filtered = np.full(len(macd_live), np.nan)
+    std_velocity = np.full(len(macd_live), np.nan)
+    for k, ci in enumerate(closure_indices):
+        std_filtered[ci] = state_means_std[k, 0]
+        std_velocity[ci] = state_means_std[k, 1]
+    # Provisional between closures
+    closure_set = set(closure_indices)
+    current_k = -1
+    sm_cl = np.array([cv[0], 0.0])
+    sc_cl = np.eye(2)
+    for i in range(len(macd_live)):
+        obs = macd_live[i]
+        if np.isnan(obs):
+            continue
+        if i in closure_set:
+            current_k += 1
+            sm_cl = state_means_std[current_k]
+            sc_cl = state_covs_std[current_k]
+            continue
+        if current_k >= 0:
+            sm_p, _ = kf_std.filter_update(sm_cl, sc_cl, observation=obs)
+            std_filtered[i] = sm_p[0]
+            std_velocity[i] = sm_p[1]
+    print(f"       {np.sum(~np.isnan(std_filtered)):,} valid Standard values")
+
+    # ==================================================================
+    print("[5/9] AQ-KF live features (5min resolution) ...")
     kalman_out = compute_kalman_live_aqkf(macd_live, is_close)
     aq_filtered = kalman_out[:, 0]
     aq_velocity = kalman_out[:, 1]
-    n_valid = np.sum(~np.isnan(aq_filtered))
-    print(f"       {n_valid:,} valid AQ-KF values")
+    print(f"       {np.sum(~np.isnan(aq_filtered)):,} valid AQ-KF values")
 
     # ==================================================================
-    print("[5/8] Oracle labels (pykalman.smooth on 30min) ...")
+    print("[6/9] Oracle labels (pykalman.smooth on 30min) ...")
     _, slopes_oracle = compute_oracle(macd_30m)
     oracle_labels = np.where(slopes_oracle > 0, 1, 0)
     oracle_labels_30m = pd.Series(oracle_labels, index=df_30m.index)
@@ -183,34 +225,53 @@ def main():
     print(f"       Labels: {(oracle_labels_5m == 1).sum():,} UP, {(oracle_labels_5m == 0).sum():,} DOWN")
 
     # ==================================================================
-    print("[6/8] FLKS backward slopes (AQ-KF, T1 + k=1..6) ...")
+    print("[7/9] FLKS backward slopes (Standard + AQ-KF, T1 + k=1..6) ...")
+
+    # Standard forward filter on 30min
+    x_std, P_std, xp_std, Pp_std, C_std = forward_filter_30m(macd_30m)
+    # AQ-KF forward filter on 30min
     x_aq, P_aq, xp_aq, Pp_aq, C_aq = forward_filter_30m_adaptive(
         macd_30m, window=30, Q_max_factor=10.0)
 
-    # T1 slope
-    slopes_t1 = compute_slopes_test1(x_aq, xp_aq, C_aq)
-    t1_30m = pd.Series(slopes_t1, index=df_30m.index)
-    t1_5m = t1_30m.reindex(df_5m.index, method='ffill')
+    def compute_and_ffill(slopes_30m):
+        s = pd.Series(slopes_30m, index=df_30m.index)
+        return s.reindex(df_5m.index, method='ffill').values
 
-    # k=1..6 slopes
-    slopes_k = {}
+    # Standard slopes
+    std_slopes = {}
+    std_slopes['t1'] = compute_and_ffill(compute_slopes_test1(x_std, xp_std, C_std))
     for k in range(1, 7):
-        sk = compute_slopes_test2(x_aq, P_aq, xp_aq, C_aq, macd_live_pc, k)
-        sk_30m = pd.Series(sk, index=df_30m.index)
-        slopes_k[k] = sk_30m.reindex(df_5m.index, method='ffill')
+        std_slopes[f'k{k}'] = compute_and_ffill(
+            compute_slopes_test2(x_std, P_std, xp_std, C_std, macd_live_pc, k))
+
+    # AQ-KF slopes
+    aq_slopes = {}
+    aq_slopes['t1'] = compute_and_ffill(compute_slopes_test1(x_aq, xp_aq, C_aq))
+    for k in range(1, 7):
+        aq_slopes[f'k{k}'] = compute_and_ffill(
+            compute_slopes_test2(x_aq, P_aq, xp_aq, C_aq, macd_live_pc, k))
 
     print("       Done.")
 
     # ==================================================================
-    print("[7/8] Building CSV ...")
+    print("[8/9] Building CSV ...")
     result = pd.DataFrame(index=df_5m.index)
     result['close'] = df_5m['close'].values
+    # MACD live
     result['macd_30m_live'] = macd_live
-    result['macd_30m_filtered'] = aq_filtered
-    result['macd_30m_velocity'] = aq_velocity
-    result['aq_t1_slope'] = t1_5m.values
+    # Standard Kalman
+    result['std_filtered'] = std_filtered
+    result['std_velocity'] = std_velocity
+    result['std_t1_slope'] = std_slopes['t1']
     for k in range(1, 7):
-        result[f'aq_k{k}_slope'] = slopes_k[k].values
+        result[f'std_k{k}_slope'] = std_slopes[f'k{k}']
+    # AQ-KF
+    result['aq_filtered'] = aq_filtered
+    result['aq_velocity'] = aq_velocity
+    result['aq_t1_slope'] = aq_slopes['t1']
+    for k in range(1, 7):
+        result[f'aq_k{k}_slope'] = aq_slopes[f'k{k}']
+    # Oracle
     result['oracle_label_macd_30m'] = oracle_labels_5m.values
     result['oracle_slope_macd_30m'] = oracle_slopes_5m.values
 
@@ -221,15 +282,11 @@ def main():
     print(f"       Saved: {out_path} ({n_rows:,} rows × {n_cols} columns)")
 
     # ==================================================================
-    print(f"\n[8/8] Concordance verification from CSV ...")
+    print(f"\n[9/9] Concordance verification from CSV ...")
 
-    # Read back and verify
-    df_check = result.dropna()
-    n_check = len(df_check)
-
-    # Compare at 30min closures only (where slopes are computed)
-    common_idx = df_check.index.intersection(df_30m.index)
-    df_closures = df_check.loc[common_idx].dropna()
+    # Compare at 30min closures only
+    common_idx = result.dropna().index.intersection(df_30m.index)
+    df_closures = result.loc[common_idx].dropna()
     n_cl = len(df_closures)
 
     eval_start = TRIM
@@ -245,30 +302,38 @@ def main():
     valid_signs = sign_o[sign_o != 0]
     persistence = np.mean(valid_signs[1:] == valid_signs[:-1]) * 100.0
 
-    print(f"\n{'=' * 70}")
+    print(f"\n{'=' * 80}")
     print(f"  CONCORDANCE VERIFICATION (from saved CSV, closures only)")
     print(f"  Closures: {n_cl:,} | Eval [{eval_start}:{eval_end}] = {n_eval:,}")
     print(f"  Transitions: {n_trans:,} | Persistence: {persistence:.1f}%")
-    print(f"{'=' * 70}")
+    print(f"{'=' * 80}")
 
-    print(f"\n  {'Méthode':<20} {'All':>9} {'Trans':>10}")
-    print(f"  {'-' * 41}")
+    print(f"\n  {'Méthode':<20} {'Std All':>9} {'Std Trans':>10} "
+          f"{'AQ All':>9} {'AQ Trans':>10}")
+    print(f"  {'-' * 60}")
 
-    for col_name, label in [('aq_t1_slope', 'AQ T1 (0 pas)'),
-                             ('aq_k1_slope', 'AQ k=1 (5min)'),
-                             ('aq_k2_slope', 'AQ k=2 (10min)'),
-                             ('aq_k3_slope', 'AQ k=3 (15min)'),
-                             ('aq_k4_slope', 'AQ k=4 (20min)'),
-                             ('aq_k5_slope', 'AQ k=5 (25min)'),
-                             ('aq_k6_slope', 'AQ k=6 (30min)')]:
-        slopes_test = df_closures[col_name].values
-        c_all, _ = sign_concordance(slopes_test, oracle_sl, eval_start, eval_end)
-        c_tr, _ = sign_concordance_at_transitions(
-            slopes_test, oracle_sl, eval_start, eval_end, trans_mask)
-        print(f"  {label:<20} {c_all:>8.2f}% {c_tr:>9.2f}%")
+    methods = [('t1', 'T1 (0 pas)')]
+    for k in range(1, 7):
+        methods.append((f'k{k}', f'k={k} ({k*5}min)'))
 
-    print(f"  {'-' * 41}")
-    print(f"{'=' * 70}")
+    for key, label in methods:
+        std_col = f'std_{key}_slope'
+        aq_col = f'aq_{key}_slope'
+        std_sl = df_closures[std_col].values
+        aq_sl = df_closures[aq_col].values
+
+        std_all, _ = sign_concordance(std_sl, oracle_sl, eval_start, eval_end)
+        std_tr, _ = sign_concordance_at_transitions(
+            std_sl, oracle_sl, eval_start, eval_end, trans_mask)
+        aq_all, _ = sign_concordance(aq_sl, oracle_sl, eval_start, eval_end)
+        aq_tr, _ = sign_concordance_at_transitions(
+            aq_sl, oracle_sl, eval_start, eval_end, trans_mask)
+
+        print(f"  {label:<20} {std_all:>8.2f}% {std_tr:>9.2f}% "
+              f"{aq_all:>8.2f}% {aq_tr:>9.2f}%")
+
+    print(f"  {'-' * 60}")
+    print(f"{'=' * 80}")
     print("Done.")
 
 
