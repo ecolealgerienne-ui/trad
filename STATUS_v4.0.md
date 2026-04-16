@@ -504,10 +504,116 @@ L'AQ-KF produit un signal de meilleure qualité en concordance (+1.5pp) ET en Pn
 
 ---
 
-## Pistes suite
+## ML Pipeline avec features AQ-KF
 
-1. **Seuils adaptatifs** : calibrer les seuils sur fenêtre glissante (ex: P75 des 200 dernières pentes) au lieu de fixes
-2. **Détection de régime** : le signal MACD fonctionne mieux en marché baissier — conditionner la stratégie au régime
-3. **Multi-asset** : vérifier si la suroptimisation est spécifique à BTC
-4. **R adaptatif** : adapter R en plus de Q (double adaptation)
-5. **Lag N=3** : tester si un lag plus grand améliore la concordance
+### LSTM vs XGBoost sur features AQ-KF (BTC, MACD 30m)
+
+Features identiques : macd_30m_live (brut), macd_30m_filtered (AQ-KF position), macd_30m_velocity (AQ-KF vélocité).
+Labels identiques : oracle pykalman.smooth() (non-causal).
+
+| Métrique | LSTM Original | LSTM AQ-KF | XGBoost AQ-KF |
+|----------|---------------|------------|---------------|
+| Val Accuracy | 89.8% | 91.1% | 91.0% |
+| Ratio switchs | 2.5× | 2.8× | 2.9× |
+| Justified (±6) | 57.4% | 59.4% | 59.6% |
+| Spurious (>20) | 18.0% | 20.0% | 19.9% |
+| Within 6 steps | 90.8% | 93.0% | 93.2% |
+| Prob before trans | 0.50 | 0.50 | 0.50 |
+
+Les 3 modèles convergent vers le même plafond (~91% acc, ~60% justified, ~20% spurious).
+
+### Feature importance XGBoost
+
+```
+f2_step24 (velocity au dernier step) : 31.0%
+f2_step23 (velocity à l'avant-dernier) : 14.1%
+f2_step18 : 8.4%
+→ velocity = 85% de l'importance totale
+→ Le modèle détecte les transitions APRÈS qu'elles commencent, pas avant
+```
+
+### Discriminabilité des switches (faux vs vrai)
+
+Test XGBoost faux_up vs vrai_up / faux_down vs vrai_down :
+
+| Direction | Faux samples | Vrai samples | Test accuracy | Verdict |
+|-----------|-------------|-------------|---------------|---------|
+| **UP** | 652 | 1,447 | **87.8%** | DISTINGUABLE |
+| **DOWN** | 653 | 1,485 | **89.6%** | DISTINGUABLE |
+
+**Les patterns sont distinguables.** Les vrais switches ont :
+- Velocity plus forte (7.1 vs 2.7 pour UP)
+- MACD live plus loin de zéro (-64 vs +1.8 pour UP)
+
+Les faux switches se produisent quand le MACD oscille autour de 0 avec peu de momentum.
+
+### Filtre simple : velocity + macd_live
+
+Grid search de seuils sur les prédictions XGBoost :
+
+| Config | Switches | Ratio | Justified | Spurious | Détection |
+|--------|----------|-------|-----------|----------|-----------|
+| Baseline | 6,574 | 2.9× | 59.6% | 19.9% | 94.0% |
+| vel=5.2 | 3,233 | 1.4× | 61.8% | 15.8% | 76.8% |
+| vel=10.4, macd=23.7 | 1,967 | 0.9× | 40.9% | — | 42.3% |
+
+Le filtre réduit le ratio mais la détection chute proportionnellement.
+
+### Backtest PnL avec filtre
+
+| Config | PnL | Trades | WR |
+|--------|-----|--------|-----|
+| Baseline (no filter) | -1,299% | 6,575 | 20.8% |
+| vel=5.2, hold=8 | -591% | 2,944 | 34.6% |
+| vel=10.4, macd=23.7, hold=8 | **-313%** | 1,939 | 41.7% |
+| **Buy & Hold** | **+42.4%** | 1 | — |
+
+**Aucune configuration n'est rentable.** Le meilleur (-313%) est encore loin du B&H (+42%).
+
+### Conclusion ML Pipeline
+
+Le plafond est dans les **données**, pas dans le modèle :
+- LSTM, XGBoost → même résultat (~91% acc, ratio 2.9×)
+- Feature importance → velocity au dernier step = 31% (détection post-hoc)
+- Prob avant transition = prob mid-plateau (0.50 = 0.50)
+- Backtest : toutes configs négatives
+
+Les features (MACD live + Kalman filtered + velocity) ne contiennent pas assez d'information pour prédire les transitions **avant** qu'elles arrivent.
+
+---
+
+## Synthèse finale de la session
+
+### Ce qui fonctionne (traitement du signal)
+
+| Résultat | Valeur |
+|----------|--------|
+| FLKS concordance Trans (AQ T2 k=3) | **82.4%** |
+| AQ-KF T1 seul (sans sous-pas) | **74.4%** |
+| FLKS bat LSTM aux transitions | 59% vs 49% |
+
+### Ce qui ne fonctionne pas (trading)
+
+| Résultat | Valeur |
+|----------|--------|
+| FLKS PnL (in-sample, seuil+holding optimisé) | +54% à +59% |
+| FLKS PnL (OOS) | **-16% à -49%** (suroptimisation) |
+| ML PnL (LSTM/XGBoost, toutes configs) | **-313% à -1,299%** |
+| Buy & Hold | +42% |
+
+### Le diagnostic final
+
+1. Le **signal de pente MACD existe** (Oracle +22% à +134%)
+2. Le **FLKS l'approche** en concordance (82% aux transitions)
+3. Mais la **monétisation échoue** : les seuils ne généralisent pas, et le ML ne peut pas prédire les transitions avant qu'elles arrivent
+4. Le **plafond est structurel** : les indicateurs techniques dérivés du prix ne contiennent pas d'information prédictive au-delà de la persistence
+
+---
+
+## Pistes pour une prochaine session
+
+1. **Features non-prix** : volume, funding rate, order book, liquidations — information orthogonale au prix
+2. **Hysteresis dans les labels** : réduire les transitions oracle (de ~2,284 à ~500) pour que le modèle apprenne des signaux plus propres
+3. **Régime de marché** : le signal fonctionne mieux en bear market — conditionner la stratégie
+4. **Multi-asset** : vérifier si le plafond est spécifique à BTC
+5. **Timeframe plus long** (4h, daily) : transitions plus stables, moins de bruit
