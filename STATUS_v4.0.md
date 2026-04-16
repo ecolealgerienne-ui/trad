@@ -601,14 +601,14 @@ Décomposition du PnL modèle seul :
 
 **Le signal de direction est excellent quand il est correct** (64% WR, +614%). Le problème est exclusivement les **4,567 faux switches** qui détruisent +1,913% de PnL.
 
-### Discriminabilité des faux switches
+### Discriminabilité des faux switches — POST-HOC (⚠️ biais)
 
 Test XGBoost : les faux switches sont-ils distinguables des vrais dans les features ?
 
 | Direction | Test accuracy | Verdict |
 |-----------|--------------|---------|
-| UP (faux_up vs vrai_up) | **87.8%** | Distinguable |
-| DOWN (faux_down vs vrai_down) | **89.6%** | Distinguable |
+| UP (faux_up vs vrai_up) | **87.8%** | Distinguable post-hoc |
+| DOWN (faux_down vs vrai_down) | **89.6%** | Distinguable post-hoc |
 
 **Caractéristiques discriminantes au moment du switch :**
 
@@ -617,44 +617,53 @@ Test XGBoost : les faux switches sont-ils distinguables des vrais dans les featu
 | macd_live | ~0 (neutre) | ±64 (loin de 0) | **Amplitude** |
 | velocity | ±2.7 (faible) | ±7.1 (forte) | **Momentum** |
 
-Les faux switches se produisent quand le MACD oscille autour de 0 avec peu de momentum. Les vrais switches ont un mouvement net.
+**⚠️ BIAIS IMPORTANT** : cette discriminabilité est **post-hoc**. Le test utilise les labels oracle pour séparer faux/vrai APRÈS coup. En production, on n'a pas l'oracle.
+
+Le modèle principal a **déjà** ces features (macd_live, velocity) dans ses inputs. S'il ne les utilise pas pour éviter les faux switches, c'est parce que :
+- Sa tâche est de prédire la **direction** à chaque step, pas de prédire si son prochain switch sera vrai ou faux
+- Le filtre simple (velocity > 5.2) qui utilise cette info → PnL = -591% (toujours négatif)
+- Les 88% de discriminabilité post-hoc ne se traduisent pas en filtre temps réel rentable
 
 ### Conclusion ML Pipeline
 
-Le **signal est bon** (+614% consensus), le **problème est le filtre** (4,567 faux switches à -1,913%). Les patterns faux vs vrai sont distinguables à 88-90%. L'étape suivante logique est le **hard negative mining** : réentraîner le modèle en sur-pondérant les patterns de faux switches pour qu'il apprenne à ne pas les faire.
+Le **consensus (+614%) est un upper bound inaccessible** en production (nécessite l'oracle).
+
+Le modèle confirme 93.6% des transitions oracle → le signal direction est bon quand il est correct. Mais les 4,567 faux switches (-1,913% PnL) ne peuvent pas être filtrés en temps réel avec les features actuelles.
+
+Le plafond est **structurel** : les features prix-dérivées (MACD, Kalman, velocity) ne permettent pas de distinguer en temps réel un vrai retournement d'une oscillation autour de zéro.
 
 ---
 
 ## Synthèse finale de la session
 
-### Ce qui fonctionne
+### Ce qui fonctionne (traitement du signal)
 
 | Résultat | Valeur |
 |----------|--------|
 | FLKS concordance Trans (AQ T2 k=3) | **82.4%** |
 | AQ-KF T1 seul (sans sous-pas) | **74.4%** |
 | FLKS bat LSTM aux transitions | 59% vs 49% |
-| **Consensus PnL (modèle confirme oracle)** | **+614%** |
-| **Modèle détecte 93.6% des transitions oracle** | 2,138/2,284 |
-| **Faux vs vrai discriminable** | 88-90% accuracy |
+| Consensus PnL (upper bound, nécessite oracle) | +614% |
+| Modèle détecte 93.6% des transitions oracle | 2,138/2,284 |
 
-### Ce qui ne fonctionne pas
+### Ce qui ne fonctionne pas (trading réel)
 
 | Résultat | Valeur |
 |----------|--------|
 | FLKS PnL (OOS, seuils fixes) | -16% à -49% (suroptimisation) |
 | ML PnL modèle seul (toutes configs) | -313% à -1,299% |
-| Filtre simple velocity+macd_live | -313% (meilleur) |
+| Filtre velocity+macd_live | -591% à -313% |
+| Discriminabilité post-hoc (88%) | ne se traduit pas en filtre rentable |
 | Buy & Hold | +42% |
 
 ### Le diagnostic final
 
-1. Le **signal de pente MACD est excellent** : Oracle +889%, Consensus +614%
-2. Le modèle **confirme 93.6% des transitions** dans la bonne direction
-3. Le **problème = 4,567 faux switches** qui coûtent ~1,913% de PnL
-4. Les faux switches sont **distinguables** des vrais (88-90% accuracy)
-5. Le **hard negative mining** est la piste la plus prometteuse pour filtrer ces faux switches
-6. Le plafond n'est **pas dans le signal** mais dans la **discrimination faux/vrai switches**
+1. Le **signal de pente MACD existe** : Oracle +889%, modèle confirme 93.6% des transitions
+2. Le **consensus est un upper bound** (+614%) — inaccessible sans oracle
+3. Les **4,567 faux switches** détruisent le PnL (-1,913%)
+4. Les faux switches sont distinguables **post-hoc** (88%) mais **pas en temps réel** avec les features actuelles
+5. Le **plafond est structurel** : features prix-dérivées insuffisantes pour filtrer le bruit en temps réel
+6. Le modèle sait **QUOI** (direction correcte 91%) mais pas **QUAND switcher** (faux switches indistinguables en temps réel)
 
 ---
 
