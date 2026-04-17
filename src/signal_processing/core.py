@@ -1191,13 +1191,38 @@ def cusum_filter(probs, threshold=2.0):
 # ============================================================================
 
 def group_per_candle(df_5m, df_30m, array_5m):
-    """Group 5min values by 30min candle."""
-    per_candle = []
-    for ts_30m in df_30m.index:
-        bucket_end = ts_30m + pd.Timedelta(minutes=29, seconds=59)
-        mask = (df_5m.index >= ts_30m) & (df_5m.index <= bucket_end)
-        per_candle.append(array_5m[mask])
-    return per_candle
+    """
+    Groupe les valeurs 5min par bougie TF (30m, 1h, etc.).
+
+    Vectorisé via pandas.groupby(floor) — O(n log n) au lieu de O(n×m)
+    de l'ancienne version à boucle.
+
+    Retourne une liste de length = len(df_30m), où per_candle[t] est un
+    np.ndarray des valeurs 5min tombant dans la bougie df_30m.index[t].
+
+    Args:
+        df_5m: DataFrame 5min (index = timestamps).
+        df_30m: DataFrame au timeframe supérieur (tf détecté automatiquement).
+        array_5m: np.ndarray de longueur len(df_5m).
+    """
+    # Détecter tf_minutes depuis df_30m (plus robuste : mode des diffs)
+    if len(df_30m) >= 2:
+        tf_seconds = (df_30m.index[1] - df_30m.index[0]).total_seconds()
+        tf_minutes = int(round(tf_seconds / 60))
+    else:
+        tf_minutes = 30  # fallback arbitraire (cas dégénéré)
+
+    # Groupby vectorisé : chaque 5m est assigné à son bucket (floor)
+    bucket = df_5m.index.floor(f'{tf_minutes}min')
+    series = pd.Series(array_5m, index=df_5m.index)
+    grouped = series.groupby(bucket)
+
+    # Dict pour lookup O(1) par timestamp
+    grouped_dict = {ts: vals.values for ts, vals in grouped}
+
+    # Aligner sur df_30m.index (bougies absentes du groupby → array vide)
+    empty = np.array([], dtype=array_5m.dtype)
+    return [grouped_dict.get(ts, empty) for ts in df_30m.index]
 
 
 # ============================================================================

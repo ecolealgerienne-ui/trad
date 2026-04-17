@@ -108,6 +108,14 @@ def main():
                                          args.tf, trim=args.trim)
     print(f"  Shape: {data.shape}  |  colonnes: {list(data.columns)}")
 
+    # Oracle slopes + label au TF complet (non-trimé)
+    # Utile pour le backtest qui s'aligne sur df_tf.index
+    from src.signal_processing.core import compute_oracle_labels
+    print(f"  Computing oracle_labels (full tf, pour backtest) ...")
+    oracle_full = compute_oracle_labels(df_tf, args.indicator)
+    oracle_slopes_full = oracle_full['slope'].values.astype(np.float64)
+    print(f"  oracle_slopes_full shape: {oracle_slopes_full.shape}")
+
     # ========== [5] split ==========
     print(f"\n[5/8] split_train_val_test (gap={args.window}) ...")
     df_train, df_val, df_test = split_train_val_test(
@@ -187,6 +195,11 @@ def main():
         # Stats pour dé-normalisation en prod
         norm_means=np.array([stats[c][0] for c in FEATURE_COLS]),
         norm_stds=np.array([stats[c][1] for c in FEATURE_COLS]),
+        # Oracle slopes au TF complet (pour backtest, évite recalcul)
+        oracle_slopes_full=oracle_slopes_full,
+        # Dates TF complètes (pour alignement backtest, évite reload df_tf)
+        df_tf_dates=df_tf.index.values,
+        df_tf_closes=df_tf['close'].values.astype(np.float64),
     )
     print(f"  ✅ {npz_path.stat().st_size / 1024 / 1024:.1f} MB sauvé")
     print(f"\nPour entraîner:")

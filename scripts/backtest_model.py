@@ -33,7 +33,6 @@ sys.path.insert(0, str(ROOT))
 
 from src.signal_processing.core import (
     load_csv, group_per_candle,
-    compute_oracle_labels,
     buy_and_hold,
 )
 
@@ -158,27 +157,26 @@ def main():
           f"holding_min={args.holding_min})")
     print("=" * 80)
 
-    # [1] Charger NPZ + CSV
-    npz_path = PREP_DIR / f'preds_{args.indicator}_{tf_label}_{args.source}.npz'
-    if not npz_path.exists():
-        print(f"❌ NPZ non trouvé: {npz_path}")
+    # [1] Charger NPZ preds + dataset (contient slopes_oracle précalculées)
+    preds_path = PREP_DIR / f'preds_{args.indicator}_{tf_label}_{args.source}.npz'
+    dataset_path = PREP_DIR / f'dataset_{args.indicator}_{tf_label}_{args.source}.npz'
+    if not preds_path.exists():
+        print(f"❌ NPZ predictions non trouvé: {preds_path}")
         print(f"   Lance d'abord: python scripts/train_model.py "
               f"--indicator {args.indicator} --tf {args.tf} --source {args.source}")
         return
-    npz = np.load(npz_path, allow_pickle=True)
-    test_preds_proba = npz['test_preds_proba']
-    test_y_true = npz['test_y_true']
-    test_indices = npz['test_indices']
-    print(f"\n✅ NPZ chargé: {npz_path}")
-    print(f"   {len(test_preds_proba):,} predictions sur test set")
+    if not dataset_path.exists():
+        print(f"❌ NPZ dataset non trouvé: {dataset_path}")
+        return
 
-    paths = SOURCE_PATHS[args.source]
-    path_5m = paths[5]
-    path_tf = paths[args.tf]
-    df_5m = load_csv(path_5m)
-    df_tf = load_csv(path_tf)
-    df_tf, _ = drop_incomplete_last(df_tf, df_5m, args.tf)
-    print(f"   5m: {len(df_5m):,}  |  {tf_label}: {len(df_tf):,}")
+    preds = np.load(preds_path, allow_pickle=True)
+    ds = np.load(dataset_path, allow_pickle=True)
+    test_preds_proba = preds['test_preds_proba']
+    test_y_true = preds['test_y_true']
+    test_indices = preds['test_indices']
+    print(f"\n✅ NPZ preds:   {preds_path}")
+    print(f"✅ NPZ dataset: {dataset_path}")
+    print(f"   {len(test_preds_proba):,} predictions sur test set")
 
     # Classification metrics pour info
     from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
@@ -189,27 +187,34 @@ def main():
     print(f"\nClassification test: acc={acc:.4f}  F1={f1:.4f}  AUC={auc:.4f}  "
           f"(threshold={args.threshold})")
 
-    # [2] Reconstruire slopes_from_preds aligné sur df_tf.index
-    n_tf = len(df_tf)
+    # [2] slopes_oracle + df_tf_closes : directement depuis le dataset NPZ
+    slopes_oracle = ds['oracle_slopes_full']
+    df_tf_dates = pd.to_datetime(ds['df_tf_dates'])
+    df_tf_closes = ds['df_tf_closes']
+    n_tf = len(df_tf_dates)
+    print(f"\n✅ Oracle slopes + df_tf chargés depuis dataset  ({n_tf:,} bougies)")
+
+    # Reconstruire df_tf DataFrame minimal pour group_per_candle
+    df_tf = pd.DataFrame({'close': df_tf_closes}, index=pd.DatetimeIndex(df_tf_dates))
+
+    # [3] Reconstruire slopes_from_preds aligné sur df_tf.index
     slopes_model = np.zeros(n_tf)
     for i, idx_tf in enumerate(test_indices):
         if idx_tf < n_tf:
             slopes_model[idx_tf] = 1.0 if test_preds_proba[i] > args.threshold else -1.0
 
-    # Range du backtest = [min(test_indices), max(test_indices)+1]
     start = int(test_indices.min())
     end = int(test_indices.max()) + 1
     n_backtest = end - start
     print(f"\nBacktest range: [{start}, {end}) = {n_backtest:,} bougies TF "
-          f"({test_dates_min_max(npz)})")
+          f"({test_dates_min_max(preds)})")
 
-    # [3] Reconstruire slopes_oracle
-    print(f"\nComputing oracle slopes ...")
-    oracle_df = compute_oracle_labels(df_tf, args.indicator)
-    slopes_oracle = oracle_df['slope'].values
-
-    # [4] closes_5m_per_candle
+    # [4] closes_5m_per_candle (group_per_candle vectorisé maintenant)
+    print(f"\nLoad 5m + group_per_candle ...")
+    paths = SOURCE_PATHS[args.source]
+    df_5m = load_csv(paths[5])
     closes_5m_per_candle = group_per_candle(df_5m, df_tf, df_5m['close'].values)
+    print(f"   5m: {len(df_5m):,}  |  closes_5m_per_candle: {len(closes_5m_per_candle):,}")
 
     # [5] Backtests
     res_model = compute_stats(slopes_model, closes_5m_per_candle, args.k,
