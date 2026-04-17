@@ -281,6 +281,68 @@ def compute_forward_filter(df, indicator, adaptive=False):
     }
 
 
+def compute_flks_slopes(df_tf, df_5m, indicator, tf_minutes, k_range=(1, 6)):
+    """
+    Dispatcher FLKS-2 : calcule les backward slopes (Fixed-Lag Kalman Smoother)
+    pour un indicateur, au timeframe TF, avec sous-pas 5min.
+
+    Pipeline interne:
+      1. compute_forward_filter(df_tf, indicator)
+         → x_filt, P_filt, x_pred, C (états Kalman standard)
+      2. compute_indicator_live(df_5m, is_close, indicator, tf_minutes)
+         → indicateur live 5min (frozen + provisional)
+      3. group_per_candle(df_5m, df_tf, live_5m)
+         → live_per_candle[t] = values 5min durant la bougie t
+      4. compute_slopes_test1(x_filt, x_pred, C)
+         → slope_t1 (backward 2 pas, pas de sous-pas 5min)
+      5. compute_slopes_test2(x_filt, P_filt, x_pred, C, live_per_candle, k)
+         pour k ∈ [k_range[0]..k_range[1]]
+         → slope_k1..k6 (backward 3 pas avec k updates Kalman supplémentaires)
+
+    Args:
+        df_tf: DataFrame OHLC au timeframe TF.
+        df_5m: DataFrame OHLC au 5min (source des sous-pas).
+        indicator: 'macd' | 'rsi' | 'cci'.
+        tf_minutes: taille du bucket TF (30 ou 60).
+        k_range: (k_min, k_max) inclus. Default (1, 6) → slope_k1 à slope_k6.
+
+    Returns:
+        pd.DataFrame indexée par df_tf.index, colonnes:
+          [slope_t1, slope_k1, slope_k2, ..., slope_k<k_max>]
+        NaN remplacés par 0 (cohérent avec le reste du pipeline).
+    """
+    # Étape 1: forward filter sur df_tf
+    fwd = compute_forward_filter(df_tf, indicator, adaptive=False)
+    x_filt_pos = fwd['state'][['position', 'velocity']].values  # (n, 2)
+    x_pred_pos = fwd['state'][['pred_position', 'pred_velocity']].values  # (n, 2)
+    P_filt = fwd['P_filt']
+    C = fwd['C']
+
+    # Étape 2: indicateur live 5min
+    is_close = compute_bucket_close_mask(df_5m.index, tf_minutes)
+    live_series = compute_indicator_live(df_5m, is_close, indicator, tf_minutes)
+
+    # Étape 3: grouper les live 5min par bougie TF
+    # group_per_candle retourne une liste de length = len(df_tf)
+    live_per_candle = group_per_candle(df_5m, df_tf, live_series.values)
+
+    # Étape 4: slope_t1 (pas de sous-pas)
+    slopes_t1 = compute_slopes_test1(x_filt_pos, x_pred_pos, C)
+
+    # Étape 5: slope_k1..k_max (avec sous-pas 5min)
+    result = {'slope_t1': slopes_t1}
+    k_min, k_max = k_range
+    for k in range(k_min, k_max + 1):
+        result[f'slope_k{k}'] = compute_slopes_test2(
+            x_filt_pos, P_filt, x_pred_pos, C, live_per_candle, k
+        )
+
+    # fillna(0) cohérent avec le reste du pipeline
+    df_slopes = pd.DataFrame(result, index=df_tf.index)
+    df_slopes = df_slopes.fillna(0.0)
+    return df_slopes
+
+
 # ============================================================================
 # INDICATORS — Live frozen/provisional
 # ============================================================================
