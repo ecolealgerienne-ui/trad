@@ -72,5 +72,75 @@
     "slope_k3_pct": 94.93,
     "slope_k4_pct": 95.40,
     "slope_k5_pct": 95.59
+  },
+  "xgboost_progressive_full": {
+    "hyperparameters": {
+      "n_estimators": 500,
+      "max_depth": 6,
+      "learning_rate": 0.1,
+      "objective": "binary:logistic",
+      "early_stopping_rounds": 20,
+      "best_iteration": 41
+    },
+    "features": ["slope_progressive", "step_k"],
+    "feature_importance": {
+      "slope_progressive": 0.9903,
+      "step_k": 0.0097
+    },
+    "classification_metrics": {
+      "train": {"auc": 0.9762, "accuracy": 0.9369, "f1": 0.9367, "up_ratio_pct": 49.94},
+      "val":   {"auc": 0.9788, "accuracy": 0.9352, "f1": 0.9356, "up_ratio_pct": 50.46},
+      "test":  {"auc": 0.9836, "accuracy": 0.9375, "f1": 0.9373, "up_ratio_pct": 49.86}
+    },
+    "backtest_threshold_0_5": {
+      "note": "Signal = sign(proba - 0.5), exec close_5m[i+1], fees 0.001",
+      "train": {"trades": 14559, "win_rate_pct": 29.9, "profit_factor": 0.65,
+                "sharpe": -0.132, "pnl_gross_pct": 61.58, "fees_pct": 2911.80,
+                "pnl_net_pct": -2850.22, "capture_vs_oracle_pct": -73.9},
+      "val":   {"trades": 3171, "win_rate_pct": 26.3, "profit_factor": 0.51,
+                "sharpe": -0.214, "pnl_gross_pct": -1.56, "fees_pct": 634.20,
+                "pnl_net_pct": -635.76, "capture_vs_oracle_pct": -171.5},
+      "test":  {"trades": 3107, "win_rate_pct": 27.5, "profit_factor": 0.54,
+                "sharpe": -0.207, "pnl_gross_pct": 31.56, "fees_pct": 621.40,
+                "pnl_net_pct": -589.84, "capture_vs_oracle_pct": -168.1}
+    },
+    "proba_distribution_test": {
+      "note": "89% des probas aux extrêmes, modèle sur-confiant",
+      "bins": [
+        {"range": "[0.00, 0.05)", "count": 59171, "pct": 44.90},
+        {"range": "[0.05, 0.10)", "count": 4863,  "pct":  3.69},
+        {"range": "[0.10, 0.20)", "count": 1259,  "pct":  0.96},
+        {"range": "[0.20, 0.30)", "count": 427,   "pct":  0.32},
+        {"range": "[0.30, 0.40)", "count": 216,   "pct":  0.16},
+        {"range": "[0.40, 0.50)", "count": 200,   "pct":  0.15},
+        {"range": "[0.50, 0.60)", "count": 122,   "pct":  0.09},
+        {"range": "[0.60, 0.70)", "count": 196,   "pct":  0.15},
+        {"range": "[0.70, 0.80)", "count": 368,   "pct":  0.28},
+        {"range": "[0.80, 0.90)", "count": 1340,  "pct":  1.02},
+        {"range": "[0.90, 0.95)", "count": 5113,  "pct":  3.88},
+        {"range": "[0.95, 1.00)", "count": 58502, "pct": 44.39}
+      ],
+      "in_0_30_to_0_70_pct": 0.56,
+      "in_0_10_to_0_90_pct": 3.13,
+      "in_0_05_to_0_95_pct": 10.70
+    },
+    "grid_hysteresis_test_best": {
+      "note": "ÉCHEC — dead zone <1% car probas bimodales",
+      "low": 0.30, "high": 0.70, "dead_zone_pct": 0.6,
+      "trades": 2975, "win_rate_pct": 28.6, "profit_factor": 0.55,
+      "pnl_net_pct": -566.80, "capture_pct": -161.5,
+      "improvement_vs_baseline_pct": 23.04
+    },
+    "grid_persistence_test_best": {
+      "note": "ÉCHEC PARTIEL — aide marginalement mais toujours catastrophique",
+      "min_hold": 12, "confirm": 6,
+      "min_hold_minutes": 60, "confirm_minutes": 30,
+      "trades": 2535, "win_rate_pct": 30.8, "profit_factor": 0.60,
+      "sharpe": -0.175, "pnl_gross_pct": 62.56, "fees_pct": 507.00,
+      "pnl_net_pct": -444.44, "capture_pct": -126.6,
+      "improvement_vs_baseline_pct": 145.40,
+      "trades_reduction_pct": 18.4,
+      "wr_improvement_abs_pct": 3.3
+    }
   }
 }
