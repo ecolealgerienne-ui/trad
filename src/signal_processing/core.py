@@ -344,6 +344,169 @@ def compute_flks_slopes(df_tf, df_5m, indicator, tf_minutes, k_range=(1, 6)):
 
 
 # ============================================================================
+# ML DATA PREPARATION
+# ============================================================================
+
+def prepare_features_and_labels(df_tf, df_5m, indicator, tf_minutes, trim=100):
+    """
+    Prépare un DataFrame features + labels prêt pour split/normalize/sequences.
+
+    Chaîne interne :
+        df_tf, df_5m → compute_flks_slopes   → 7 slopes features
+        df_tf        → compute_oracle_labels → label binary + continu (oracle slope)
+        df_tf        → close (pour backtest downstream)
+
+    Args:
+        df_tf: DataFrame OHLC au TF.
+        df_5m: DataFrame OHLC au 5min.
+        indicator: 'macd' | 'rsi' | 'cci'.
+        tf_minutes: 30 ou 60.
+        trim: nombre de bougies à retirer au début ET à la fin pour écarter
+              les warm-up Kalman/oracle et les bords incomplets. Default 100.
+
+    Returns:
+        pd.DataFrame indexée, colonnes:
+          - slope_t1, slope_k1..k6           (7 features FLKS)
+          - label_binary                     (int : 1 si oracle slope > 0 sinon 0)
+          - label_continuous                 (float : oracle slope brute)
+          - close                            (float : prix close pour backtest)
+    """
+    # 1. Features FLKS (7 slopes)
+    slopes = compute_flks_slopes(df_tf, df_5m, indicator, tf_minutes)
+
+    # 2. Labels oracle (position, slope, label=binary)
+    oracle = compute_oracle_labels(df_tf, indicator)
+
+    # 3. Assembler
+    result = slopes.copy()
+    result['label_binary'] = oracle['label'].astype(int)
+    result['label_continuous'] = oracle['slope'].astype(np.float64)
+    result['close'] = df_tf['close'].astype(np.float64)
+
+    # 4. TRIM début et fin pour écarter warm-up et bords incomplets
+    if trim > 0 and len(result) > 2 * trim:
+        result = result.iloc[trim:-trim]
+    return result
+
+
+def split_train_val_test(df, train_ratio=0.70, val_ratio=0.15, gap=0):
+    """
+    Split chronologique d'un DataFrame temporel en 3 splits disjoints.
+
+    Args:
+        df: DataFrame indexé par timestamps (déjà trimé).
+        train_ratio: fraction pour train. Default 0.70.
+        val_ratio: fraction pour val. Default 0.15. Test = 1 - train_ratio - val_ratio.
+        gap: nombre de lignes exclues entre train et val, ET entre val et test.
+             Utile pour éviter le leakage de séquences (gap = window - 1).
+
+    Returns:
+        (df_train, df_val, df_test) : 3 DataFrames chronologiquement disjoints.
+    """
+    n = len(df)
+    train_end = int(n * train_ratio)
+    val_end = int(n * (train_ratio + val_ratio))
+
+    df_train = df.iloc[:train_end - gap] if gap > 0 else df.iloc[:train_end]
+    df_val = df.iloc[train_end:val_end - gap] if gap > 0 else df.iloc[train_end:val_end]
+    df_test = df.iloc[val_end:]
+    return df_train, df_val, df_test
+
+
+def normalize_features(df_train, df_val, df_test, feature_cols):
+    """
+    Z-score normalization. Stats fittées SUR TRAIN UNIQUEMENT.
+
+    Args:
+        df_train, df_val, df_test: 3 DataFrames issus de split_train_val_test.
+        feature_cols: liste des colonnes à normaliser.
+
+    Returns:
+        (df_train_norm, df_val_norm, df_test_norm, stats) où stats est un dict
+        {col: (mean, std)} utile pour inférence en production.
+    """
+    df_train = df_train.copy()
+    df_val = df_val.copy()
+    df_test = df_test.copy()
+    stats = {}
+    for col in feature_cols:
+        mean = df_train[col].mean()
+        std = df_train[col].std()
+        if std < 1e-10:
+            std = 1.0  # évite division par zéro pour features constantes
+        stats[col] = (float(mean), float(std))
+        df_train[col] = (df_train[col] - mean) / std
+        df_val[col] = (df_val[col] - mean) / std
+        df_test[col] = (df_test[col] - mean) / std
+    return df_train, df_val, df_test, stats
+
+
+def make_sequences(df, feature_cols, label_cols, window=25):
+    """
+    Crée les séquences temporelles pour entraînement LSTM/XGBoost.
+
+    Pour chaque i dans [0, n - window]:
+      X[i] = features[i : i + window]
+      y[i] = labels[i + window - 1]         (label à la DERNIÈRE timestep)
+      close[i], date[i] idem
+
+    Args:
+        df: DataFrame (issu de split/normalize).
+        feature_cols: liste des colonnes features.
+        label_cols: liste de 1 ou N colonnes labels. Si 1 string, renvoie y 1D.
+                   Si liste, renvoie dict {col: array}.
+        window: taille de la séquence. Default 25.
+
+    Returns:
+        dict avec clés:
+          'X'      : np.ndarray float32 shape (n_seq, window, n_features)
+          'y'      : np.ndarray int64 (si 1 label) OU dict (si plusieurs)
+          'closes' : np.ndarray float64 shape (n_seq,)
+          'dates'  : np.ndarray datetime64 shape (n_seq,)
+    """
+    n = len(df)
+    n_feat = len(feature_cols)
+    if n < window:
+        raise ValueError(f"DataFrame too short ({n}) for window={window}")
+
+    features = df[feature_cols].values.astype(np.float32)
+    closes = df['close'].values.astype(np.float64) if 'close' in df.columns \
+             else np.full(n, np.nan)
+    dates = df.index.values
+
+    # Indices 2D pour construire X d'un coup (fancy indexing)
+    indices = np.arange(window)[None, :] + np.arange(n - window + 1)[:, None]
+    X = features[indices]  # (n_seq, window, n_feat)
+    closes_out = closes[window - 1:]
+    dates_out = dates[window - 1:]
+
+    # Labels : simple string ou liste
+    if isinstance(label_cols, str):
+        y = df[label_cols].values[window - 1:]
+        # Cast : int64 si dtype int, sinon garder float
+        if np.issubdtype(y.dtype, np.integer):
+            y = y.astype(np.int64)
+        else:
+            y = y.astype(np.float64)
+    else:
+        y = {}
+        for col in label_cols:
+            vals = df[col].values[window - 1:]
+            if np.issubdtype(vals.dtype, np.integer):
+                vals = vals.astype(np.int64)
+            else:
+                vals = vals.astype(np.float64)
+            y[col] = vals
+
+    return {
+        'X': X,
+        'y': y,
+        'closes': closes_out,
+        'dates': dates_out,
+    }
+
+
+# ============================================================================
 # INDICATORS — Live frozen/provisional
 # ============================================================================
 
