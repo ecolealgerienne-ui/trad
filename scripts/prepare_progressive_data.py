@@ -21,8 +21,9 @@ Sortie :
   data/prepared/dataset_{indicator}_{tf}_full_progressive.npz
 
 Usage :
-  python scripts/prepare_progressive_data.py
-  python scripts/prepare_progressive_data.py --indicator macd --tf 30
+  python scripts/prepare_progressive_data.py                     # tout l'historique
+  python scripts/prepare_progressive_data.py --days 180          # 6 derniers mois
+  python scripts/prepare_progressive_data.py --indicator macd --tf 30 --days 180
 """
 
 import argparse
@@ -72,6 +73,8 @@ def main():
     parser.add_argument('--indicator', default='macd',
                         choices=['macd', 'rsi', 'cci'])
     parser.add_argument('--tf', type=int, default=30, choices=[30, 60])
+    parser.add_argument('--days', type=int, default=0,
+                        help='Derniers N jours à utiliser (0 = tout, default 0)')
     parser.add_argument('--trim', type=int, default=100,
                         help='Bougies TF à retirer début ET fin (warm-up Kalman)')
     parser.add_argument('--train-ratio', type=float, default=0.70)
@@ -96,10 +99,20 @@ def main():
 
     # ========== [1] Load 5m ==========
     print(f"\n[1/7] Load 5m ({SRC_5M}) ...")
-    df_5m = load_csv(SRC_5M)
-    print(f"  {len(df_5m):,} rows  |  {df_5m.index[0]} → {df_5m.index[-1]}")
-    years = (df_5m.index[-1] - df_5m.index[0]).total_seconds() / (365.25 * 24 * 3600)
-    print(f"  ≈ {years:.1f} années")
+    df_5m_full = load_csv(SRC_5M)
+    print(f"  Full: {len(df_5m_full):,} rows  |  "
+          f"{df_5m_full.index[0]} → {df_5m_full.index[-1]}")
+
+    if args.days > 0:
+        end_date = df_5m_full.index[-1]
+        start_date = end_date - pd.Timedelta(days=args.days)
+        df_5m = df_5m_full.loc[df_5m_full.index >= start_date].copy()
+        print(f"  Filter last {args.days} days: {len(df_5m):,} rows  |  "
+              f"{df_5m.index[0]} → {df_5m.index[-1]}")
+    else:
+        df_5m = df_5m_full
+        years = (df_5m.index[-1] - df_5m.index[0]).total_seconds() / (365.25 * 24 * 3600)
+        print(f"  ≈ {years:.1f} années")
 
     # ========== [2] Resample 5m → TF ==========
     print(f"\n[2/7] Resample 5m → {tf_label} ...")
@@ -164,7 +177,9 @@ def main():
     def to_dates(df_split):
         return df_split.index.values
 
-    npz_path = PREP_DIR / f'dataset_{args.indicator}_{tf_label}_full_progressive.npz'
+    # Nom du NPZ : si --days > 0, on tag avec _<N>d, sinon _full
+    period_tag = f'{args.days}d' if args.days > 0 else 'full'
+    npz_path = PREP_DIR / f'dataset_{args.indicator}_{tf_label}_{period_tag}_progressive.npz'
     print(f"  Sauvegarde NPZ: {npz_path}")
     np.savez(
         npz_path,
@@ -195,7 +210,7 @@ def main():
         feature_cols_raw=np.array(FEATURE_COLS_RAW),
         tf_minutes=args.tf,
         indicator=args.indicator,
-        source='full_progressive',
+        source=f'{period_tag}_progressive',
         train_ratio=args.train_ratio,
         val_ratio=args.val_ratio,
         gap_5m=args.gap_5m,
