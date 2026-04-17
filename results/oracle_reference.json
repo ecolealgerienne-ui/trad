@@ -205,6 +205,77 @@
       "trades_ratio_vs_oracle": 1.842
     }
   },
+  "cnn_lstm_progressive_test": {
+    "note": "CNN-LSTM en remplacement drop-in de XGBoost, même pipeline",
+    "architecture": {
+      "window": 24,
+      "n_features": 2,
+      "conv_filters": 32,
+      "lstm_hidden": 32,
+      "lstm_layers": 2,
+      "dense_hidden": 32,
+      "dropout": 0.3,
+      "total_params": 18273,
+      "loss": "BCEWithLogitsLoss",
+      "optimizer": "Adam",
+      "learning_rate": 0.001,
+      "batch_size": 512,
+      "early_stop_patience": 3
+    },
+    "classification_metrics": {
+      "macd": {"train_auc": 0.9871, "train_acc": 0.9418,
+                "val_auc": 0.9871, "val_acc": 0.9423,
+                "test_auc": 0.9882, "test_acc": 0.9442, "test_f1": 0.9439,
+                "best_val_loss": 0.1467, "epochs_trained": 10},
+      "cci":  {"train_auc": 0.9783, "train_acc": 0.9215,
+                "val_auc": 0.9780, "val_acc": 0.9206,
+                "test_auc": 0.9798, "test_acc": 0.9249, "test_f1": 0.9254,
+                "best_val_loss": 0.1910, "epochs_trained": 14},
+      "rsi":  {"train_auc": 0.9671, "train_acc": 0.8987,
+                "val_auc": 0.9669, "val_acc": 0.8977,
+                "test_auc": 0.9676, "test_acc": 0.8989, "test_f1": 0.9005,
+                "best_val_loss": 0.2329, "epochs_trained": 14}
+    },
+    "backtest_test_threshold_0_5": {
+      "macd": {"trades": 4653, "wr_pct": 20.8, "pf": 0.44, "sharpe": -0.257,
+                "pnl_gross_pct": 19.94, "fees_pct": 930.60,
+                "pnl_net_pct": -910.66, "alpha_vs_bh_pct": -946.93,
+                "capture_vs_oracle_pct": -259.5,
+                "trades_excess_vs_oracle": 2372},
+      "cci":  {"trades": 5615, "wr_pct": 20.1, "pf": 0.41, "sharpe": -0.281,
+                "pnl_gross_pct": 44.05, "fees_pct": 1123.00,
+                "pnl_net_pct": -1078.95, "alpha_vs_bh_pct": -1115.22,
+                "capture_vs_oracle_pct": -248.8,
+                "trades_excess_vs_oracle": 2852},
+      "rsi":  {"trades": 7787, "wr_pct": 17.2, "pf": 0.35, "sharpe": -0.342,
+                "pnl_gross_pct": 38.54, "fees_pct": 1557.40,
+                "pnl_net_pct": -1518.86, "alpha_vs_bh_pct": -1555.13,
+                "capture_vs_oracle_pct": -252.6,
+                "trades_excess_vs_oracle": 4526}
+    },
+    "vs_xgboost_comparison": {
+      "note": "CNN-LSTM meilleure classification mais PIRE backtest",
+      "delta_acc_pct":      {"macd": 0.67, "cci": 0.85, "rsi": 0.63},
+      "delta_trades_pct":   {"macd": 49.8, "cci": 35.0, "rsi": 29.6},
+      "delta_pnl_net_pct":  {"macd": -320.82, "cci": -298.57, "rsi": -342.60},
+      "delta_wr_pct":       {"macd": -6.7,  "cci": -4.7,  "rsi": -2.4}
+    },
+    "structural_law_discovered": {
+      "statement": "Gagner +0.7% acc classification = +40% trades = -320% PnL Net",
+      "cause": "Meilleure détection pointwise → plus de micro-oscillations capturées → plus de flips parasites",
+      "implication": "Le problème n'est pas le modèle, c'est la cible binaire à chaque row 5min",
+      "confirmed_across": ["MACD", "CCI", "RSI"],
+      "pattern_universal": true
+    },
+    "recommended_pivots": [
+      "1. Pivot 4 (faible effort) : cadence de décision 30min au lieu de 5min",
+      "2. Pivot 2 (moyen effort) : 3 classes UP/NEUTRE/DOWN",
+      "3. Pivot 1 (moyen effort) : régression rendement futur",
+      "4. Pivot 3 (gros effort) : loss PnL-aware custom",
+      "5. Pivot 5 (moyen effort) : multi-horizon labels + convergence",
+      "6. Pivot 6 (moyen effort) : features volume/microstructure"
+    ]
+  },
   "cross_validation_test": {
     "note": "scripts/cross_validation_indicators.py — test set, 458 jours",
     "pearson_correlation_probas": {

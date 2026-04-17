@@ -271,6 +271,125 @@ python scripts/grid_persistence.py --split test
 python scripts/validate_flks_improvement.py --indicator macd --tf 30 --days 180
 ```
 
+## 10. Extension — CNN-LSTM en remplacement de XGBoost
+
+Script : `scripts/train_cnn_lstm_progressive.py` — drop-in replacement
+du XGBoost. Pipeline strictement identique :
+- Même NPZ d'entrée
+- Même format preds NPZ (suffixe `_cnnlstm`)
+- Compatible `backtest_progressive.py` et `cross_validation_indicators.py`
+- Ne touche à aucun script existant
+
+### 10.1 Architecture
+
+```
+Input (batch, window=24, n_features=2)
+  → Conv1D(32 filters, kernel=3, padding=same)
+  → LayerNorm + ReLU + Dropout(0.3)
+  → LSTM(32 hidden × 2 layers)
+  → Dense(32 → 1) + BCEWithLogitsLoss
+```
+
+Séquences construites via rolling window avec padding début (répète
+1ère ligne) pour garder l'alignement avec `dates/closes/y` — pas de
+perte de rows.
+
+18,273 paramètres total (vs ~100-400 arbres XGBoost).
+
+### 10.2 Résultats classification CNN-LSTM vs XGBoost
+
+| Indicateur | XGBoost Test | CNN-LSTM Test | Δ Acc |
+|------------|--------------|---------------|-------|
+| MACD | AUC 0.9836 / Acc 93.75% | **AUC 0.9882 / Acc 94.42%** | **+0.67%** |
+| CCI  | AUC 0.9737 / Acc 91.64% | **AUC 0.9798 / Acc 92.49%** | **+0.85%** |
+| RSI  | AUC 0.9637 / Acc 89.26% | **AUC 0.9676 / Acc 89.89%** | **+0.63%** |
+
+**CNN-LSTM bat XGBoost en classification sur les 3 indicateurs**
+(+0.63 à +0.85% accuracy). Convergence propre, pas d'overfit
+(train ≈ val ≈ test).
+
+### 10.3 Résultats backtest CNN-LSTM vs XGBoost
+
+| Indic | XGBoost Trades | CNN-LSTM Trades | Δ Trades | XGBoost PnL Net | CNN-LSTM PnL Net | **Δ PnL** |
+|-------|----------------|-----------------|----------|-----------------|------------------|-----------|
+| MACD | 3,107 | 4,653 | **+50%** | -590% | **-911%** | **-321%** |
+| CCI  | 4,159 | 5,615 | +35% | -780% | **-1,079%** | -299% |
+| RSI  | 6,007 | 7,787 | +30% | -1,176% | **-1,519%** | -343% |
+
+| Indic | XGBoost WR | CNN-LSTM WR | Δ WR |
+|-------|------------|-------------|------|
+| MACD | 27.5% | 20.8% | **-6.7%** |
+| CCI  | 24.8% | 20.1% | -4.7% |
+| RSI  | 19.6% | 17.2% | -2.4% |
+
+### 10.4 Loi structurelle découverte
+
+**Pattern universel** (3 indicateurs × 2 modèles) :
+
+> Gagner +0.7% d'accuracy classification = +40% de trades = -320% de PnL Net.
+
+**Cause profonde** : la capacité plus fine du CNN-LSTM lui permet de
+détecter **correctement** des micro-oscillations du signal qui étaient
+"ignorées" par XGBoost. Mais chaque micro-détection → flip de position
+→ trade parasite × fees.
+
+**Plus précis ponctuellement = plus bruité décisionnellement**.
+
+Ce n'est **pas un overfit** (val ≈ test sur les 3 modèles). C'est une
+**tension intrinsèque** entre :
+- Métrique ML pointwise : récompense la justesse sample par sample
+- Métrique trading : pénalise l'instabilité décisionnelle temporelle
+
+### 10.5 Conclusion : le problème n'est pas le modèle
+
+Après XGBoost + CNN-LSTM × MACD/CCI/RSI × 3 filtres (threshold, hysteresis,
+persistence) × cross-validation 3 modèles, **aucune configuration n'arrive
+à capturer une fraction positive du PnL Oracle**.
+
+**Le problème n'est PAS** :
+- ❌ le modèle (XGBoost ≈ CNN-LSTM, pattern identique)
+- ❌ l'indicateur (MACD ≈ CCI ≈ RSI, échecs proportionnels)
+- ❌ les features (slope_progressive + step_k suffisamment riches,
+    AUC 0.97+)
+- ❌ le filtrage (aucune combinaison hysteresis/persistence ne rend
+    le PnL positif)
+
+**Le problème EST** :
+- ⚠️ la cible binaire `sign(oracle.slope[t_ref])` à chaque row 5min
+- ⚠️ la structure "décision à chaque tick" qui force un flip au moindre
+    bruit
+- ⚠️ l'alignement "ML-classification → trading binaire" qui crée un
+    paradoxe inversé entre les 2 métriques
+
+### 10.6 Pivots stratégiques proposés
+
+| # | Pivot | Mécanisme | Effort |
+|---|-------|-----------|--------|
+| 1 | **Régression du rendement futur** | Prédire `close[t+N] - close[t]` au lieu de `sign(slope)` → valeur continue, seuil de trade calibrable | Moyen |
+| 2 | **3 classes UP / NEUTRE / DOWN** | Labels `tanh(slope/σ)` seuillés → modèle peut dire "je ne sais pas" | Moyen |
+| 3 | **Loss PnL-aware** | Loss custom qui pénalise chaque flip (proportionnel aux fees) → modèle optimise PnL directement | Élevé |
+| 4 | **Cadence de décision** | Décider toutes les 30min au lieu de chaque 5min → moins de micro-flips par construction | Faible |
+| 5 | **Multi-horizon labels** | Prédire direction à 30min, 1h, 2h → trade uniquement si les 3 convergent | Moyen |
+| 6 | **Features volume/microstructure** | Ajouter signal VRAIMENT indépendant des slopes Kalman/FLKS | Moyen |
+
+**Recommandation** : **pivot 4 en premier** (effort faible, attaque
+directement la cause : cadence trop fine). Puis pivot 2 (3-classes)
+pour rendre l'inaction apprenable par le modèle.
+
+### 10.7 Commandes CNN-LSTM reproductibles
+
+```bash
+# Train CNN-LSTM pour chaque indicateur
+python scripts/train_cnn_lstm_progressive.py --npz data/prepared/dataset_macd_30m_full_progressive.npz
+python scripts/train_cnn_lstm_progressive.py --npz data/prepared/dataset_rsi_30m_full_progressive.npz
+python scripts/train_cnn_lstm_progressive.py --npz data/prepared/dataset_cci_30m_full_progressive.npz
+
+# Backtest (même script que XGBoost, juste --preds différent)
+python scripts/backtest_progressive.py --npz data/prepared/dataset_<ind>_30m_full_progressive.npz --preds data/prepared/preds_<ind>_30m_full_progressive_cnnlstm.npz --split test
+```
+
+---
+
 ## Fichiers de référence
 
 - `results/oracle_reference.json` : PnL Oracle + Model (3 indicateurs) JSON
