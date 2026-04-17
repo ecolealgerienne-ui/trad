@@ -1073,8 +1073,45 @@ def backtest_30m(slopes, closes_30m, start, end, fees,
     return {'pnl_pct': pnl_total * 100, 'trades': n_trades, 'win_rate': wr}
 
 
+def _find_exec_price(closes_5m_per_candle, t, step_idx_offset):
+    """
+    Helper pour backtest_5m : trouve le prix à step_idx sous-pas 5min après
+    la fin de la bougie 30min t (soit au début de la bougie t+1).
+
+    step_idx_offset = 0  → premier sous-pas 5min de la bougie t+1 (= prix à t+30min+5min)
+    step_idx_offset = 5  → dernier sous-pas 5min de la bougie t+1 (= prix à t+30min+30min)
+    step_idx_offset = 6  → premier sous-pas 5min de la bougie t+2 (= prix à t+60min+5min)
+    ...
+
+    Gère le débordement automatique vers les bougies 30m suivantes.
+    Retourne (exec_price, bool_found).
+    """
+    target_t = t + 1
+    remaining = step_idx_offset
+    while target_t < len(closes_5m_per_candle):
+        closes_5m = closes_5m_per_candle[target_t]
+        if remaining < len(closes_5m):
+            return closes_5m[remaining], True
+        remaining -= len(closes_5m)
+        target_t += 1
+    return np.nan, False
+
+
 def backtest_5m(slopes, closes_5m_per_candle, k_substep, start, end, fees,
-                threshold=0.0, holding_min=0):
+                threshold=0.0, holding_min=0, lag_5min=1):
+    """
+    Backtest direction-based avec exécution au sous-pas 5min.
+
+    Args:
+        lag_5min: décalage d'exécution en ticks 5min (default 1 = réaliste).
+                  0 → exec au tick où le signal devient dispo (instantané, legacy)
+                  1 → exec au prochain tick 5min (ta convention : exec au close
+                      de la bougie 5min qui suit la disponibilité du signal)
+
+        Avec lag_5min=1 et k_substep=6 : signal slope_k6[t] dispo à t+60min,
+        exec à t+65min (prix à t+30min+30min+5min = fin de 1ère 5min de la
+        bougie 30m t+2).
+    """
     pnl_total = 0.0
     n_trades = 0
     n_wins = 0
@@ -1089,15 +1126,11 @@ def backtest_5m(slopes, closes_5m_per_candle, k_substep, start, end, fees,
             continue
         if position != 0 and (t - entry_t) < holding_min:
             continue
-        candle_idx = t + 1
-        if candle_idx >= len(closes_5m_per_candle):
-            continue
-        closes_5m = closes_5m_per_candle[candle_idx]
-        step_idx = k_substep - 1
-        if step_idx >= len(closes_5m):
-            continue
-        exec_price = closes_5m[step_idx]
-        if np.isnan(exec_price):
+
+        # Nouveau : step_idx = k_substep - 1 + lag_5min (default lag=1)
+        step_idx = k_substep - 1 + lag_5min
+        exec_price, found = _find_exec_price(closes_5m_per_candle, t, step_idx)
+        if not found or np.isnan(exec_price):
             continue
         if position != 0:
             trade_pnl = _exec_trade(position, entry_price, exec_price, fees)

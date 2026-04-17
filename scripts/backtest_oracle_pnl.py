@@ -102,19 +102,39 @@ def main():
     print(f"  {len(closes_5m_per_candle):,} buckets")
 
     # ========== [6] Backtests ==========
-    print(f"\n[6/6] Backtests (fees={args.fees*100:.2f}%, holding_min={args.holding_min})")
+    print(f"\n[6/6] Backtests (fees={args.fees*100:.2f}%, holding_min={args.holding_min}, "
+          f"lag=+1 tick 5min)")
 
     closes_30m = df_tf['close'].values
 
-    # Backtest 30m (exec close 30m, sans lag)
-    res_30m = backtest_30m(slopes_oracle, closes_30m, start, end,
-                             args.fees, threshold=0.0,
-                             holding_min=args.holding_min)
+    # Mode "30m honnête" : signal à close bougie t, exec à xx:05 ou xx:35
+    # (équivalent à backtest_5m avec k_substep=0 + lag_5min=1)
+    # Signal slope_oracle[t] dispo à t+30min, exec au close de la 1ère 5min de la
+    # bougie t+1 (prix à t+35min). Évite xx:00 et xx:30.
+    res_30m_honest = backtest_5m(slopes_oracle, closes_5m_per_candle, 0,
+                                   start, end, args.fees,
+                                   threshold=0.0,
+                                   holding_min=args.holding_min,
+                                   lag_5min=1)
 
-    # Backtest 5m avec k=6 (exec close 5m[k-1] = fin de bougie t+1)
-    res_5m = backtest_5m(slopes_oracle, closes_5m_per_candle, args.k,
-                           start, end, args.fees, threshold=0.0,
-                           holding_min=args.holding_min)
+    # Mode "30m instantané" (legacy) : exec à close 30m exact (= xx:00 / xx:30)
+    res_30m_instant = backtest_30m(slopes_oracle, closes_30m, start, end,
+                                     args.fees, threshold=0.0,
+                                     holding_min=args.holding_min)
+
+    # Mode "5m k=6 honnête" : signal à t+30min (fin 6ème sous-pas), exec à xx:35 ou xx:05
+    res_5m_k6_honest = backtest_5m(slopes_oracle, closes_5m_per_candle, args.k,
+                                     start, end, args.fees,
+                                     threshold=0.0,
+                                     holding_min=args.holding_min,
+                                     lag_5min=1)
+
+    # Mode "5m k=6 instantané" (legacy) : exec au dernier sous-pas (xx:30 / xx:00)
+    res_5m_k6_instant = backtest_5m(slopes_oracle, closes_5m_per_candle, args.k,
+                                      start, end, args.fees,
+                                      threshold=0.0,
+                                      holding_min=args.holding_min,
+                                      lag_5min=0)
 
     # Buy & Hold
     bh_pnl = buy_and_hold(closes_30m, start, end)
@@ -128,34 +148,31 @@ def main():
     print("\n" + "=" * 95)
     print(f"RÉSULTATS  ({period_start} → {period_end}, {period_days:.0f} jours)")
     print("=" * 95)
-    print(f"{'Stratégie':<30} {'PnL %':>12} {'Trades':>8} {'WR %':>8}")
-    print("-" * 60)
-    print(f"{'Oracle (exec close 30m)':<30} "
-          f"{res_30m['pnl_pct']:>+12.2f} {res_30m['trades']:>8} "
-          f"{res_30m['win_rate']:>7.1f}%")
-    print(f"{'Oracle (exec close 5m[k=6])':<30} "
-          f"{res_5m['pnl_pct']:>+12.2f} {res_5m['trades']:>8} "
-          f"{res_5m['win_rate']:>7.1f}%")
-    print(f"{'Buy & Hold':<30} {bh_pnl:>+12.2f}")
-    print("-" * 60)
+    print(f"{'Stratégie':<40} {'PnL %':>12} {'Trades':>8} {'WR %':>8}")
+    print("-" * 70)
+    print(f"{'Oracle 30m instantané (legacy, xx:00/30)':<40} "
+          f"{res_30m_instant['pnl_pct']:>+12.2f} {res_30m_instant['trades']:>8} "
+          f"{res_30m_instant['win_rate']:>7.1f}%")
+    print(f"{'Oracle 30m honnête (exec xx:05/35)':<40} "
+          f"{res_30m_honest['pnl_pct']:>+12.2f} {res_30m_honest['trades']:>8} "
+          f"{res_30m_honest['win_rate']:>7.1f}%")
+    print(f"{'Oracle 5m k=6 instantané (legacy)':<40} "
+          f"{res_5m_k6_instant['pnl_pct']:>+12.2f} {res_5m_k6_instant['trades']:>8} "
+          f"{res_5m_k6_instant['win_rate']:>7.1f}%")
+    print(f"{'Oracle 5m k=6 honnête (exec xx:35/05)':<40} "
+          f"{res_5m_k6_honest['pnl_pct']:>+12.2f} {res_5m_k6_honest['trades']:>8} "
+          f"{res_5m_k6_honest['win_rate']:>7.1f}%")
+    print(f"{'Buy & Hold':<40} {bh_pnl:>+12.2f}")
+    print("-" * 70)
 
-    # Fees détaillé
-    print(f"\nFees 30m : {res_30m['trades']} trades × 2 × {args.fees*100:.2f}% = "
-          f"{res_30m['trades'] * 2 * args.fees * 100:.2f}%")
-    print(f"Fees 5m  : {res_5m['trades']} trades × 2 × {args.fees*100:.2f}% = "
-          f"{res_5m['trades'] * 2 * args.fees * 100:.2f}%")
-
-    # PnL brut (sans fees)
-    pnl_brut_30m = res_30m['pnl_pct'] + res_30m['trades'] * 2 * args.fees * 100
-    pnl_brut_5m = res_5m['pnl_pct'] + res_5m['trades'] * 2 * args.fees * 100
-    print(f"\nPnL BRUT (signal pur, sans fees) :")
-    print(f"  Oracle (30m)     : {pnl_brut_30m:+.2f}%  ← edge du signal")
-    print(f"  Oracle (5m k=6)  : {pnl_brut_5m:+.2f}%")
-
-    # Diff entre les 2 exécutions
-    diff_exec = res_30m['pnl_pct'] - res_5m['pnl_pct']
-    print(f"\nÉcart exec 30m vs 5m k=6 : {diff_exec:+.2f}%  "
-          f"(30m exécute 30 min plus tôt)")
+    # Fees et PnL brut
+    n_tr = res_30m_honest['trades']
+    fees_tot = n_tr * 2 * args.fees * 100
+    print(f"\nFees 30m honnête : {n_tr} trades × 2 × {args.fees*100:.2f}% = "
+          f"{fees_tot:.2f}%")
+    print(f"  PnL brut  : {res_30m_honest['pnl_pct'] + fees_tot:+.2f}%")
+    print(f"  PnL net   : {res_30m_honest['pnl_pct']:+.2f}%")
+    print(f"  vs B&H    : alpha = {res_30m_honest['pnl_pct'] - bh_pnl:+.2f}%")
 
 
 if __name__ == '__main__':
