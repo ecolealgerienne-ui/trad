@@ -197,21 +197,18 @@ class TestSplit:
 
     def test_gap_between_train_and_val(self, pipeline_df):
         """
-        Gap = window. df_train.iloc[:train_end - gap], df_val.iloc[train_end:...]
-        Donc il y a `window` lignes entre la fin de train et le début de val.
+        Gap = WINDOW lignes entre fin de train et début de val.
+        df_train.iloc[:train_end - gap] inclut positions [0, train_end - gap - 1]
+        df_val.iloc[train_end:...] inclut positions [train_end, ...]
+        → positions manquantes: [train_end - gap, ..., train_end - 1] = gap lignes
         """
         result, _ = pipeline_df
         feat_cols = [f'std_k{k}_slope' for k in range(1, 7)]
         df_clean = result[feat_cols + ['oracle_label_macd_30m', 'close']].dropna().iloc[TRIM:-TRIM]
         n = len(df_clean)
-        train_end_idx = int(n * 0.70)
         df_train, df_val, _ = chronological_split(df_clean)
-        # df_train se termine à train_end - window
-        # df_val commence à train_end
-        # Index entre les deux : train_end - window + 1, ..., train_end - 1 (exclu)
-        # Donc `window - 1` lignes sont "oubliées" (ni train ni val)
         len_gap = df_clean.index.get_loc(df_val.index[0]) - df_clean.index.get_loc(df_train.index[-1]) - 1
-        assert len_gap == WINDOW - 1, f"Gap should be {WINDOW-1}, got {len_gap}"
+        assert len_gap == WINDOW, f"Gap should be {WINDOW}, got {len_gap}"
 
     def test_no_overlap(self, pipeline_df):
         result, _ = pipeline_df
