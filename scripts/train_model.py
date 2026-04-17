@@ -44,6 +44,21 @@ MODELS_DIR = Path('models')
 FEATURE_COLS = [f'slope_k{k}' for k in range(1, 7)]
 
 
+# Mapping source → chemins CSV (5m, 30m, 1h)
+SOURCE_PATHS = {
+    '3months': {
+        5: DATA_DIR / 'BTCUSD_3months_5m.csv',
+        30: DATA_DIR / 'BTCUSD_3months_30m.csv',
+        60: DATA_DIR / 'BTCUSD_3months_1h.csv',
+    },
+    'full': {
+        5: Path('data_trad/BTCUSD_all_5m.csv'),  # historique 5m (8.5 ans)
+        30: DATA_DIR / 'BTCUSD_full_30m.csv',
+        # 1h n'est pas supporté en 'full' (prepare_full_data.py ne le génère pas)
+    },
+}
+
+
 def drop_incomplete_last(df_tf, df_5m, tf_minutes):
     expected = tf_minutes // 5
     drop_count = 0
@@ -64,6 +79,10 @@ def main():
     parser.add_argument('--indicator', default='macd',
                         choices=['macd', 'rsi', 'cci'])
     parser.add_argument('--tf', type=int, default=30, choices=[30, 60])
+    parser.add_argument('--source', default='3months',
+                        choices=['3months', 'full'],
+                        help='3months = fichiers téléchargés récents, '
+                             'full = data_trad/BTCUSD_all_5m.csv (8.5 ans)')
     parser.add_argument('--window', type=int, default=25)
     parser.add_argument('--trim', type=int, default=100)
     parser.add_argument('--train-ratio', type=float, default=0.70)
@@ -77,13 +96,30 @@ def main():
     tf_label = f'{args.tf}m' if args.tf < 60 else '1h'
     print("=" * 80)
     print(f"TRAIN XGBoost — {args.indicator.upper()} × {tf_label}  "
-          f"(window={args.window}, trim={args.trim})")
+          f"source={args.source}  (window={args.window}, trim={args.trim})")
     print("=" * 80)
 
     # [1] Load
-    print("\n[1/6] Load data ...")
-    df_5m = load_csv(DATA_DIR / 'BTCUSD_3months_5m.csv')
-    df_tf = load_csv(DATA_DIR / f'BTCUSD_3months_{tf_label}.csv')
+    paths = SOURCE_PATHS[args.source]
+    if args.tf not in paths:
+        print(f"❌ TF {args.tf} non supporté pour source '{args.source}'")
+        return
+    path_5m = paths[5]
+    path_tf = paths[args.tf]
+    if not path_5m.exists():
+        print(f"❌ Fichier 5m introuvable: {path_5m}")
+        return
+    if not path_tf.exists():
+        print(f"❌ Fichier {tf_label} introuvable: {path_tf}")
+        if args.source == 'full':
+            print(f"   Lance d'abord: python scripts/prepare_full_data.py")
+        return
+
+    print(f"\n[1/6] Load data (source={args.source}) ...")
+    print(f"  5m:  {path_5m}")
+    print(f"  {tf_label}: {path_tf}")
+    df_5m = load_csv(path_5m)
+    df_tf = load_csv(path_tf)
     df_tf, _ = drop_incomplete_last(df_tf, df_5m, args.tf)
     print(f"  5m: {len(df_5m):,}  |  {tf_label}: {len(df_tf):,}")
 
@@ -172,7 +208,7 @@ def main():
         print(f"  {flat_names[i]:<25} {importances[i]:.4f}")
 
     # Save model
-    model_path = MODELS_DIR / f'xgb_{args.indicator}_{tf_label}.json'
+    model_path = MODELS_DIR / f'xgb_{args.indicator}_{tf_label}_{args.source}.json'
     model.save_model(model_path)
     print(f"\n✅ Modèle sauvé: {model_path}")
 
@@ -185,7 +221,7 @@ def main():
     # Reconstruction des indices dans df_tf
     test_indices = np.array([df_tf.index.get_loc(pd.Timestamp(d)) for d in test_dates])
 
-    npz_path = OUT_DIR / f'preds_{args.indicator}_{tf_label}.npz'
+    npz_path = OUT_DIR / f'preds_{args.indicator}_{tf_label}_{args.source}.npz'
     np.savez(npz_path,
              test_preds_proba=test_preds_proba.astype(np.float64),
              test_y_true=y_te.astype(np.int64),

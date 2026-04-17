@@ -41,6 +41,19 @@ DATA_DIR = Path('data/raw')
 PREP_DIR = Path('data/prepared')
 
 
+SOURCE_PATHS = {
+    '3months': {
+        5: DATA_DIR / 'BTCUSD_3months_5m.csv',
+        30: DATA_DIR / 'BTCUSD_3months_30m.csv',
+        60: DATA_DIR / 'BTCUSD_3months_1h.csv',
+    },
+    'full': {
+        5: Path('data_trad/BTCUSD_all_5m.csv'),
+        30: DATA_DIR / 'BTCUSD_full_30m.csv',
+    },
+}
+
+
 def drop_incomplete_last(df_tf, df_5m, tf_minutes):
     expected = tf_minutes // 5
     drop_count = 0
@@ -126,6 +139,8 @@ def main():
     parser.add_argument('--indicator', default='macd',
                         choices=['macd', 'rsi', 'cci'])
     parser.add_argument('--tf', type=int, default=30, choices=[30, 60])
+    parser.add_argument('--source', default='3months',
+                        choices=['3months', 'full'])
     parser.add_argument('--threshold', type=float, default=0.5,
                         help='Threshold pour binariser pred_proba (default 0.5)')
     parser.add_argument('--k', type=int, default=6,
@@ -138,16 +153,17 @@ def main():
     tf_label = f'{args.tf}m' if args.tf < 60 else '1h'
     print("=" * 80)
     print(f"BACKTEST modèle — {args.indicator.upper()} × {tf_label}  "
+          f"source={args.source}  "
           f"(threshold={args.threshold}, fees={args.fees*100:.2f}%, "
           f"holding_min={args.holding_min})")
     print("=" * 80)
 
     # [1] Charger NPZ + CSV
-    npz_path = PREP_DIR / f'preds_{args.indicator}_{tf_label}.npz'
+    npz_path = PREP_DIR / f'preds_{args.indicator}_{tf_label}_{args.source}.npz'
     if not npz_path.exists():
         print(f"❌ NPZ non trouvé: {npz_path}")
         print(f"   Lance d'abord: python scripts/train_model.py "
-              f"--indicator {args.indicator} --tf {args.tf}")
+              f"--indicator {args.indicator} --tf {args.tf} --source {args.source}")
         return
     npz = np.load(npz_path, allow_pickle=True)
     test_preds_proba = npz['test_preds_proba']
@@ -156,8 +172,11 @@ def main():
     print(f"\n✅ NPZ chargé: {npz_path}")
     print(f"   {len(test_preds_proba):,} predictions sur test set")
 
-    df_5m = load_csv(DATA_DIR / 'BTCUSD_3months_5m.csv')
-    df_tf = load_csv(DATA_DIR / f'BTCUSD_3months_{tf_label}.csv')
+    paths = SOURCE_PATHS[args.source]
+    path_5m = paths[5]
+    path_tf = paths[args.tf]
+    df_5m = load_csv(path_5m)
+    df_tf = load_csv(path_tf)
     df_tf, _ = drop_incomplete_last(df_tf, df_5m, args.tf)
     print(f"   5m: {len(df_5m):,}  |  {tf_label}: {len(df_tf):,}")
 
