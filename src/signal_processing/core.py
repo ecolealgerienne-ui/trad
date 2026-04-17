@@ -124,8 +124,8 @@ def compute_indicator(df, indicator):
         indicator: 'macd' | 'rsi' | 'cci'.
 
     Returns:
-        np.ndarray (float64) de longueur len(df) avec la valeur de l'indicateur
-        à chaque bougie. NaN au warm-up et aux NaN d'input.
+        pd.Series (float64) indexée par les timestamps de df, de même longueur.
+        name = indicator. NaN au warm-up et aux NaN d'input.
     """
     dispatch = {
         'macd': calculate_macd,
@@ -137,7 +137,48 @@ def compute_indicator(df, indicator):
         raise ValueError(
             f"Unknown indicator '{indicator}'. Expected one of: {list(dispatch)}"
         )
-    return dispatch[key](df)
+    values = dispatch[key](df)
+    return pd.Series(values, index=df.index, name=key)
+
+
+def compute_indicator_live(df_5m, is_close, indicator, tf_minutes):
+    """
+    Dispatcher live (frozen/provisional EMAs) pour calculer un indicateur
+    en résolution 5min, figé à la close de chaque bougie TF.
+
+    Args:
+        df_5m: DataFrame OHLCV 5min (index = timestamps 5min).
+        is_close: np.ndarray[bool] de longueur len(df_5m), True à la dernière
+                  5min de chaque bucket TF (voir compute_bucket_close_mask).
+        indicator: 'macd' | 'rsi' | 'cci'.
+        tf_minutes: taille du bucket (30 ou 60). Utilisé par CCI pour calculer
+                    high_live/low_live (cummax/cummin dans le bucket).
+
+    Returns:
+        pd.Series (float64) indexée par les timestamps 5min de df_5m.
+        name = f'{indicator}_live'. NaN avant le premier close et aux NaN d'input.
+    """
+    key = indicator.lower()
+    close_5m = df_5m['close'].values.astype(np.float64)
+
+    if key == 'macd':
+        values = compute_macd_live(close_5m, is_close)
+    elif key == 'rsi':
+        values = compute_rsi_live(close_5m, is_close)
+    elif key == 'cci':
+        # CCI a besoin de high_live et low_live (cummax/cummin dans le bucket)
+        live_ohlcv = compute_live_ohlcv(df_5m, tf_minutes)
+        values = compute_cci_live(
+            live_ohlcv['high'].values,
+            live_ohlcv['low'].values,
+            close_5m,
+            is_close,
+        )
+    else:
+        raise ValueError(
+            f"Unknown indicator '{indicator}'. Expected: ['macd', 'rsi', 'cci']"
+        )
+    return pd.Series(values, index=df_5m.index, name=f'{key}_live')
 
 
 # ============================================================================

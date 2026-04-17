@@ -51,7 +51,15 @@ TOL_REL = 1e-10    # tolérance relative sur la valeur
 
 
 def compare_indicator(arr_A, arr_B, tf_minutes, indicator, tol_abs=TOL_ABS, tol_rel=TOL_REL):
-    """Compare deux séries d'indicateurs (aligned index). Retourne (ok, stats)."""
+    """Compare deux séries d'indicateurs (aligned index). Retourne (ok, stats).
+
+    Accepte np.ndarray ou pd.Series en entrée — convertit en ndarray.
+    """
+    # Convertir en ndarray pour robustesse (compute_indicator retourne Series)
+    if isinstance(arr_A, pd.Series):
+        arr_A = arr_A.values
+    if isinstance(arr_B, pd.Series):
+        arr_B = arr_B.values
     # Masque : ne compare que les positions où LES DEUX valeurs sont finies
     mask = np.isfinite(arr_A) & np.isfinite(arr_B)
     n_valid = mask.sum()
@@ -224,15 +232,18 @@ def main():
               f"{stats['n_mismatch']:>12} {status:<8}")
         if not ok:
             all_ok = False
-            mask = np.isfinite(ind_A) & np.isfinite(ind_B)
-            abs_diff = np.abs(ind_A - ind_B)
-            denom = np.maximum(np.maximum(np.abs(ind_A), np.abs(ind_B)), TOL_ABS)
+            # Extraire les valeurs numpy pour l'indexation positionnelle
+            vals_A = ind_A.values if isinstance(ind_A, pd.Series) else ind_A
+            vals_B = ind_B.values if isinstance(ind_B, pd.Series) else ind_B
+            mask = np.isfinite(vals_A) & np.isfinite(vals_B)
+            abs_diff = np.abs(vals_A - vals_B)
+            denom = np.maximum(np.maximum(np.abs(vals_A), np.abs(vals_B)), TOL_ABS)
             rel_diff = np.where(mask, abs_diff / denom, 0)
             bad_idx = np.where(rel_diff > TOL_REL)[0]
             print(f"  → Premières 3 divergences :")
             for i in bad_idx[:3]:
                 ts = df_R.index[i]
-                print(f"    {ts}  A={ind_A[i]:.8f}  B={ind_B[i]:.8f}  "
+                print(f"    {ts}  A={vals_A[i]:.8f}  B={vals_B[i]:.8f}  "
                       f"|diff|={abs_diff[i]:.2e}  rel={rel_diff[i]:.2e}")
 
     print("-" * 80)
