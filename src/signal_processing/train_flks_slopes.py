@@ -92,17 +92,26 @@ def main():
     def make_sequences(df_split):
         features = df_split[feature_cols].values.astype(np.float32)
         labels = df_split[label_col].values.astype(np.int64)
+        closes = df_split['close'].values.astype(np.float64) if 'close' in df_split.columns else None
+        dates = df_split.index.values  # DatetimeIndex → numpy datetime64
         n_s = len(df_split)
         if n_s < args.window:
-            return np.empty((0, args.window, n_feat)), np.empty((0,))
+            empty_X = np.empty((0, args.window, n_feat), dtype=np.float32)
+            empty_y = np.empty((0,), dtype=np.int64)
+            empty_c = np.empty((0,), dtype=np.float64)
+            empty_d = np.empty((0,), dtype='datetime64[ns]')
+            return empty_X, empty_y, empty_c, empty_d
         indices = np.arange(args.window)[None, :] + np.arange(n_s - args.window + 1)[:, None]
         X = features[indices]
         y = labels[args.window - 1:]
-        return X, y
+        c = closes[args.window - 1:] if closes is not None else np.full(len(y), np.nan)
+        d = dates[args.window - 1:]
+        return X, y, c, d
 
-    X_train, y_train = make_sequences(df_train)
-    X_val, y_val = make_sequences(df_val)
-    X_test, y_test = make_sequences(df_test)
+    X_train, y_train, c_train, d_train = make_sequences(df_train)
+    X_val, y_val, c_val, d_val = make_sequences(df_val)
+    X_test, y_test, c_test, d_test = make_sequences(df_test)
+    print(f"       Test dates: {d_test[0]} → {d_test[-1]}")
     print(f"       Train: {X_train.shape} | Val: {X_val.shape} | Test: {X_test.shape}")
 
     # Train
@@ -247,7 +256,9 @@ def main():
     npz_path = f'{PREPARED_DATA_DIR}/macd_30m_dataset.npz'
     np.savez(npz_path,
              test_preds=test_probs,
-             test_labels=y_test)
+             test_labels=y_test,
+             test_closes=c_test,
+             test_dates=d_test)
     print(f"  NPZ saved: {npz_path}")
 
 
