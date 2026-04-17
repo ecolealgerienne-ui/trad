@@ -142,8 +142,63 @@ def main():
         df_tf[tf_minutes], n_dropped_D = drop_incomplete_last(df_tf[tf_minutes], tf_minutes)
         print(f"  {tf_label}: droppé {n_dropped_R} (resample) / {n_dropped_D} (téléchargé)")
 
-    # Table de résultats
-    print(f"\n{'TF':<5} {'Indic':<6} {'N valid':>10} {'Max |diff|':>15} {'Max rel':>15} {'N mismatch':>12} {'Status':<8}")
+    # -----------------------------------------------------------------------
+    # Diagnostic CRITIQUE : vérifier que les closes sont bit-à-bit identiques
+    # -----------------------------------------------------------------------
+    import hashlib
+    print("\n" + "=" * 80)
+    print("DIAGNOSTIC — closes 5m-resamplé vs téléchargé (bit-à-bit)")
+    print("=" * 80)
+    for tf_minutes in (30, 60):
+        tf_label = f'{tf_minutes}m' if tf_minutes < 60 else '1h'
+        common = df_tf_R[tf_minutes].index.intersection(df_tf[tf_minutes].index)
+        df_R = df_tf_R[tf_minutes].loc[common]
+        df_D = df_tf[tf_minutes].loc[common]
+
+        for col in ['open', 'high', 'low', 'close']:
+            arr_R = df_R[col].values
+            arr_D = df_D[col].values
+            bit_eq = np.array_equal(arr_R, arr_D)  # strict, pas de tolérance
+            max_abs = np.max(np.abs(arr_R - arr_D))
+            hash_R = hashlib.md5(arr_R.tobytes()).hexdigest()[:16]
+            hash_D = hashlib.md5(arr_D.tobytes()).hexdigest()[:16]
+            status = '✅ identiques' if bit_eq else '❌ différents'
+            print(f"  {tf_label:<5} {col:<6} bit-eq={bit_eq}  max|diff|={max_abs:.6g}  "
+                  f"md5_R={hash_R}  md5_D={hash_D}  {status}")
+
+    # -----------------------------------------------------------------------
+    # Contrôle positif : perturber 1 close et vérifier qu'on détecte un diff
+    # (pour prouver que le comparator n'est pas cassé)
+    # -----------------------------------------------------------------------
+    print("\n" + "=" * 80)
+    print("CONTRÔLE POSITIF — perturbation volontaire pour valider le test")
+    print("=" * 80)
+    common_30 = df_tf_R[30].index.intersection(df_tf[30].index)
+    df_R_30 = df_tf_R[30].loc[common_30].copy()
+    df_D_30 = df_tf[30].loc[common_30].copy()
+    # Perturbation de 1e-6 (bien plus grand que float64 epsilon) sur le MILIEU
+    mid = len(df_R_30) // 2
+    close_orig = df_R_30['close'].iloc[mid]
+    df_R_30.iloc[mid, df_R_30.columns.get_loc('close')] = close_orig + 1e-6
+    ind_A_pert = compute_indicator(df_R_30, 'macd')
+    ind_B_pert = compute_indicator(df_D_30, 'macd')
+    ok_pert, stats_pert = compare_indicator(ind_A_pert, ind_B_pert, 30, 'macd')
+    print(f"  Perturbation close[{mid}] += 1e-6")
+    print(f"  Max |diff| MACD: {stats_pert['max_abs']:.6e}")
+    print(f"  Max rel:         {stats_pert['max_rel']:.6e}")
+    print(f"  N mismatch:      {stats_pert['n_mismatch']} / {stats_pert['n_valid']}")
+    if stats_pert['n_mismatch'] > 0:
+        print("  ✅ Comparator détecte bien les perturbations.")
+    else:
+        print("  ❌ ALARM: comparator ne détecte pas la perturbation !")
+
+    # -----------------------------------------------------------------------
+    # Table de résultats principale
+    # -----------------------------------------------------------------------
+    print("\n" + "=" * 80)
+    print("RÉSULTATS PRINCIPAUX")
+    print("=" * 80)
+    print(f"{'TF':<5} {'Indic':<6} {'N valid':>10} {'Max |diff|':>15} {'Max rel':>15} {'N mismatch':>12} {'Status':<8}")
     print("-" * 80)
 
     all_ok = True
@@ -169,7 +224,6 @@ def main():
               f"{stats['n_mismatch']:>12} {status:<8}")
         if not ok:
             all_ok = False
-            # Afficher les 3 premières divergences
             mask = np.isfinite(ind_A) & np.isfinite(ind_B)
             abs_diff = np.abs(ind_A - ind_B)
             denom = np.maximum(np.maximum(np.abs(ind_A), np.abs(ind_B)), TOL_ABS)
