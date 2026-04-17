@@ -372,28 +372,138 @@ vérifie bit-exactement :
 - **CCI** = "milieu" (ratio équilibré)
 - **RSI** = "edge maximal mais ingérable" (le plus rentable, le plus nerveux)
 
-### 9.5 Pistes post-3-indicateurs
+### 9.5 Cross-validation 3 indicateurs — RÉSULTATS
 
-**Question critique** : les 3 modèles se trompent-ils **aux mêmes moments**
-ou à **des moments différents** ?
+Script : `scripts/cross_validation_indicators.py`, test set 458 jours.
 
-- Si erreurs **corrélées** → consensus inutile, besoin d'autre approche
-  (régularisation, feature engineering, LSTM, 3-classes, meta-model)
-- Si erreurs **décorrélées** → piste **consensus/ensemble prometteuse**
-  (voter, stacking, meta-model pondéré)
+#### Matrice de corrélation Pearson (probas)
 
-**Script d'analyse** : `scripts/cross_validation_indicators.py` mesure :
-1. Corrélation Pearson des probas (matrice 3×3)
-2. Accord binaire entre paires (sign match)
-3. Diversité des erreurs (P(err[b] | err[a]))
-4. Accuracy du vote majoritaire
-5. Backtest 8 stratégies (3 Oracles + 3 Models + Consensus Majorité 2/3
-   + Consensus Unanimité 3/3)
+|      | MACD | CCI | RSI |
+|------|------|-----|-----|
+| MACD | 1.0000 | 0.7184 | 0.6634 |
+| CCI  | 0.7184 | 1.0000 | **0.8496** |
+| RSI  | 0.6634 | 0.8496 | 1.0000 |
 
-**Seuils de décision** :
-- Corr moyenne > 0.8 **ET** erreurs simultanées > 50% → consensus inutile
-- Corr moyenne < 0.5 **OU** erreurs simultanées < 20% → consensus prometteur
-- Entre les deux → tester meta-model pondéré
+**Moyenne hors diagonale : 0.7438** → modèles **assez similaires**. CCI et
+RSI sont le plus proches (0.85) — cohérent : tous deux oscillateurs.
+MACD plus indépendant (moyenne 0.69 avec les 2 autres).
+
+#### Accord binaire (sign match)
+
+| Paire | Accord | N |
+|-------|--------|---|
+| MACD == CCI | 82.94% | 109,294 / 131,777 |
+| MACD == RSI | 79.45% | 104,696 / 131,777 |
+| CCI == RSI | 86.82% | 114,411 / 131,777 |
+| **Unanimité 3/3** | **74.60%** | 98,312 / 131,777 |
+
+#### Taux d'erreur individuel (vs propre oracle)
+
+| Indicateur | Taux erreur | Count |
+|------------|-------------|-------|
+| MACD | 6.25% | 8,231 |
+| CCI | 8.36% | 11,020 |
+| RSI | 10.74% | 14,158 |
+
+#### Erreurs conditionnelles : `P(err[b] | err[a])` vs baseline
+
+| Condition | P(err[b] | err[a]) | Baseline P(err[b]) | **Ratio** |
+|-----------|---------------------|--------------------|-----------|
+| err[cci] \| err[macd] | 24.94% | 8.36% | **2.98×** |
+| err[rsi] \| err[macd] | 25.25% | 10.74% | 2.35× |
+| err[macd] \| err[cci] | 18.63% | 6.25% | 2.98× |
+| err[rsi] \| err[cci] | 39.52% | 10.74% | **3.68×** |
+| err[macd] \| err[rsi] | 14.68% | 6.25% | 2.35× |
+| err[cci] \| err[rsi] | 30.76% | 8.36% | 3.68× |
+
+**Erreur simultanée des 3 modèles : 0.77%** (1,016 rows)
+
+**Interprétation critique** :
+- Ratios 2.35-3.68× → **erreurs corrélées** (quand un modèle se trompe,
+  les autres ont 2-4× plus de risque de se tromper aussi)
+- Mais erreur 3/3 rare (0.77%) → les 3 se trompent rarement TOUS en même temps
+- Donc : erreurs partagées sur **certaines** zones critiques (transitions)
+  mais avec des timings légèrement différents
+
+#### Accuracy vs oracle-consensus (majorité des 3 oracles)
+
+| Stratégie | Accuracy |
+|-----------|----------|
+| MACD | 84.62% |
+| CCI | 89.19% |
+| RSI | 86.58% |
+| **CONSENSUS-MAJ (vote 2/3)** | **91.10%** 🎯 |
+
+**Consensus améliore l'accuracy de +1.91%** vs meilleur individuel (CCI).
+
+#### Backtest comparatif — test set (458 jours)
+
+| Stratégie | Trades | WR | PF | Sharpe | PnL Brut | Fees | **PnL Net** | Capt |
+|-----------|--------|-----|-----|--------|----------|------|-------------|------|
+| Oracle MACD | 2,281 | 45.6% | 1.58 | 0.146 | +807% | 456% | **+351%** | +76% |
+| Oracle CCI | 2,763 | 45.7% | 1.69 | 0.164 | +986% | 553% | **+434%** | +94% |
+| Oracle RSI | 3,261 | 47.0% | 1.96 | 0.199 | +1253% | 652% | **+601%** | +130% |
+| Model MACD | 3,107 | 27.5% | 0.54 | -0.207 | +32% | 621% | -590% | -128% |
+| Model CCI | 4,159 | 24.8% | 0.49 | -0.238 | +51% | 832% | -780% | -169% |
+| Model RSI | 6,007 | 19.6% | 0.40 | -0.305 | +25% | 1201% | -1176% | -255% |
+| **Consensus Majorité 2/3** | 4,599 | 22.3% | 0.46 | -0.260 | +28% | 920% | **-891%** | -193% |
+| **Consensus Unanimité 3/3** | 2,707 | **30.2%** | **0.57** | -0.192 | +38% | 541% | **-503%** | -109% |
+
+Référence "Capt" = moyenne des 3 Oracles PnL Net (+462%).
+
+Unanimité 3/3 : action sur 98,312 / 131,777 rows = **74.60%** du temps.
+
+#### Paradoxe : meilleure accuracy ≠ meilleur PnL
+
+**Consensus Majorité 2/3** :
+- ✅ Accuracy +1.91% vs CCI (91.10% > 89.19%)
+- ❌ PnL Net -891% (vs -590% MACD seul) → **PIRE de -302%**
+- Raison : 4,599 trades (entre CCI 4,159 et RSI 6,007), les erreurs
+  mieux réparties créent plus de flips parasites en moyenne
+
+**Consensus Unanimité 3/3** :
+- ✅ PnL Net -503% vs MACD -590% → **+87% vs best individuel**
+- ✅ Trades réduits à 2,707 (proche Oracle MACD 2,281)
+- ✅ WR remonte à 30.2% (vs MACD 27.5%)
+- ❌ Toujours très négatif (capture -109% de Oracle moyen)
+- Raison : filtre les flips parasites mais **rate les transitions**
+  où un modèle a raison avant les autres (25.40% des rows)
+
+### 9.6 Conclusion cross-validation
+
+**Les 3 indicateurs ne sont PAS suffisamment diversifiés** :
+- Corrélation probas 0.66-0.85
+- Erreurs partagées (ratio 2-4× baseline conditionnelle)
+- Les 3 échouent aux **mêmes moments critiques** (transitions de marché)
+
+**Le consensus simple ne sauve pas** :
+- Majorité 2/3 : **détruit** (-302% vs best individuel)
+- Unanimité 3/3 : **améliore marginalement** (+87%) mais toujours très négatif
+
+**Implications** :
+- ❌ Voter classique (majorité) **inadapté** au trading
+- ⚠️ Filtrage par unanimité aide mais insuffisant seul
+- ❌ Les 3 indicateurs dérivés de prix (closes) ont trop d'information
+  commune pour former un ensemble efficace
+- ✅ Il faut du **signal VRAIMENT indépendant** (volume, microstructure,
+  order flow, données exogènes)
+
+### 9.7 Pistes post-cross-validation
+
+| # | Piste | Principe | Espoir |
+|---|-------|----------|--------|
+| 1 | **Régularisation XGBoost forte** | `max_depth=3, reg_λ=10, min_child=20` | Probas moins bimodales → hysteresis redevient utile |
+| 2 | **Filter step_k ≥ 3** | Trader uniquement quand concordance FLKS ≥ 94.93% | Réduction trades ~50% |
+| 3 | **Unanimité 3/3 + persistence** | Combiner filtres (gains additifs ?) | Réduction trades >50% |
+| 4 | **Meta-model pondéré (stacking)** | XGBoost level-2 sur probas + step_k | Apprend quand faire confiance à qui |
+| 5 | **Features volume/volatilité** | Signal VRAIMENT indépendant | Casser la corrélation des erreurs |
+| 6 | **3-classes UP/DOWN/INCERTAIN** | Label ternaire → probas moins bimodales par design | Hysteresis devient faisable |
+| 7 | **LSTM/TCN sur séquences 5min** | Capturer dynamique temporelle (25-50 rows) | Mieux détecter les transitions |
+| 8 | **Loss PnL-aware** | Pénaliser les flips parasites dans la loss | Attaque direct la cause |
+
+**Recommandation** : **piste 1 + 2** en combo (effort faible, attaques
+directes : sur-confiance + instabilité début de bougie) puis, si échec,
+pivot vers **piste 5** (volume) ou **piste 7** (LSTM).
 
 ### 9.6 Commandes reproductibles
 

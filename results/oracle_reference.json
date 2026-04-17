@@ -205,6 +205,69 @@
       "trades_ratio_vs_oracle": 1.842
     }
   },
+  "cross_validation_test": {
+    "note": "scripts/cross_validation_indicators.py — test set, 458 jours",
+    "pearson_correlation_probas": {
+      "macd_cci": 0.7184,
+      "macd_rsi": 0.6634,
+      "cci_rsi": 0.8496,
+      "mean_off_diagonal": 0.7438
+    },
+    "binary_agreement_pct": {
+      "macd_eq_cci": 82.94,
+      "macd_eq_rsi": 79.45,
+      "cci_eq_rsi": 86.82,
+      "unanimity_3_of_3": 74.60,
+      "unanimity_up": 37.27,
+      "unanimity_down": 37.34
+    },
+    "error_rate_vs_own_oracle_pct": {
+      "macd": 6.25,
+      "cci": 8.36,
+      "rsi": 10.74
+    },
+    "conditional_error_ratios": {
+      "note": "P(err[b] | err[a]) / P(err[b]) — ratio vs baseline",
+      "cci_given_macd_error": 2.98,
+      "rsi_given_macd_error": 2.35,
+      "macd_given_cci_error": 2.98,
+      "rsi_given_cci_error": 3.68,
+      "macd_given_rsi_error": 2.35,
+      "cci_given_rsi_error": 3.68,
+      "all_three_error_simultaneous_pct": 0.77
+    },
+    "accuracy_vs_oracle_consensus_pct": {
+      "macd": 84.62,
+      "cci": 89.19,
+      "rsi": 86.58,
+      "consensus_majority_2_of_3": 91.10
+    },
+    "backtest_results_test": {
+      "oracle_macd":  {"trades": 2281, "wr": 45.6, "pf": 1.58, "pnl_net_pct":  350.94},
+      "oracle_cci":   {"trades": 2763, "wr": 45.7, "pf": 1.69, "pnl_net_pct":  433.73},
+      "oracle_rsi":   {"trades": 3261, "wr": 47.0, "pf": 1.96, "pnl_net_pct":  601.19},
+      "model_macd":   {"trades": 3107, "wr": 27.5, "pf": 0.54, "pnl_net_pct": -589.84},
+      "model_cci":    {"trades": 4159, "wr": 24.8, "pf": 0.49, "pnl_net_pct": -780.38},
+      "model_rsi":    {"trades": 6007, "wr": 19.6, "pf": 0.40, "pnl_net_pct": -1176.26},
+      "consensus_majority_2_3":  {"trades": 4599, "wr": 22.3, "pf": 0.46, "pnl_net_pct": -891.48},
+      "consensus_unanimity_3_3": {"trades": 2707, "wr": 30.2, "pf": 0.57, "pnl_net_pct": -502.97,
+                                    "rows_with_action_pct": 74.60}
+    },
+    "conclusions": [
+      "Les 3 indicateurs sont trop similaires (corr 0.66-0.85, tous dérivés du close)",
+      "Les erreurs sont CORRÉLÉES (ratios conditionnels 2.35-3.68× baseline)",
+      "Consensus Majorité 2/3 améliore accuracy (+1.91% vs CCI) mais DÉTRUIT le PnL (-302% vs MACD)",
+      "Consensus Unanimité 3/3 améliore le PnL de +87% vs MACD mais reste très négatif (-503%)",
+      "Le voting classique est inadapté au trading (paradoxe accuracy ≠ PnL)",
+      "Il faut du signal VRAIMENT indépendant (volume, microstructure, order flow)"
+    ],
+    "recommended_next_steps": [
+      "1+2: Régularisation XGBoost forte (max_depth=3, reg_lambda=10) + filter step_k >= 3",
+      "5: Features volume/volatility (signal décorrélé)",
+      "7: LSTM/TCN sur séquences 5min (dynamique temporelle)",
+      "6: Classification 3 classes UP/DOWN/INCERTAIN (probas par design moins bimodales)"
+    ]
+  },
   "indicator_comparison_summary_test": {
     "note": "Synthèse 3 indicateurs, test set (458 jours, 2024-09 → 2025-12)",
     "observations": [
