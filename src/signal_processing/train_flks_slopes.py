@@ -52,7 +52,10 @@ def main():
         print(f"ERROR: missing columns: {missing}")
         return
 
-    df_clean = df[feature_cols + [label_col]].dropna()
+    cols_needed = feature_cols + [label_col]
+    if 'close' in df.columns:
+        cols_needed.append('close')
+    df_clean = df[cols_needed].dropna()
     # Trim 100 at start and end
     df_clean = df_clean.iloc[TRIM:-TRIM]
     n = len(df_clean)
