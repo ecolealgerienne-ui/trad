@@ -125,7 +125,7 @@ def compute_indicator(df, indicator):
 
     Returns:
         pd.Series (float64) indexée par les timestamps de df, de même longueur.
-        name = indicator. NaN au warm-up et aux NaN d'input.
+        name = indicator. Les NaN (warm-up ou input NaN) sont remplacés par 0.
     """
     dispatch = {
         'macd': calculate_macd,
@@ -138,6 +138,9 @@ def compute_indicator(df, indicator):
             f"Unknown indicator '{indicator}'. Expected one of: {list(dispatch)}"
         )
     values = dispatch[key](df)
+    # Remplacer les NaN par 0 (warm-up et bords). Tous les indicateurs ont
+    # le même N valide = len(df) après cette étape.
+    values = np.where(np.isnan(values), 0.0, values)
     return pd.Series(values, index=df.index, name=key)
 
 
@@ -156,7 +159,7 @@ def compute_indicator_live(df_5m, is_close, indicator, tf_minutes):
 
     Returns:
         pd.Series (float64) indexée par les timestamps 5min de df_5m.
-        name = f'{indicator}_live'. NaN avant le premier close et aux NaN d'input.
+        name = f'{indicator}_live'. Les NaN sont remplacés par 0.
     """
     key = indicator.lower()
     close_5m = df_5m['close'].values.astype(np.float64)
@@ -178,6 +181,8 @@ def compute_indicator_live(df_5m, is_close, indicator, tf_minutes):
         raise ValueError(
             f"Unknown indicator '{indicator}'. Expected: ['macd', 'rsi', 'cci']"
         )
+    # Remplacer les NaN par 0 (cohérent avec compute_indicator standard)
+    values = np.where(np.isnan(values), 0.0, values)
     return pd.Series(values, index=df_5m.index, name=f'{key}_live')
 
 
