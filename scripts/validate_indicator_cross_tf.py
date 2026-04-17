@@ -115,6 +115,33 @@ def main():
     print(f"  Resample 30m: {len(df_tf_R[30]):,} rows")
     print(f"  Resample 1h:  {len(df_tf_R[60]):,} rows")
 
+    # Exclure les bougies incomplètes (la dernière typiquement, car 5m s'arrête
+    # avant la fin de la bougie TF). Sinon OHLC diffère → MACD/RSI/CCI diffèrent.
+    # Les indicateurs (EWM) sont CUMULATIFS donc on doit tronquer AVANT le calcul,
+    # pas juste au moment de la comparaison.
+    def drop_incomplete_last(df_tf, tf_minutes):
+        expected = tf_minutes // 5
+        # On itère en arrière pour retirer les bougies incomplètes à la fin
+        # (typiquement la toute dernière).
+        drop_count = 0
+        for ts in reversed(df_tf.index):
+            end = ts + pd.Timedelta(minutes=tf_minutes)
+            mask = (df_5m.index >= ts) & (df_5m.index < end)
+            if mask.sum() < expected:
+                drop_count += 1
+            else:
+                break
+        if drop_count > 0:
+            df_tf = df_tf.iloc[:-drop_count]
+        return df_tf, drop_count
+
+    print("\nExclusion des bougies de bord incomplètes (5m insuffisantes) :")
+    for tf_minutes in (30, 60):
+        tf_label = f'{tf_minutes}m' if tf_minutes < 60 else '1h'
+        df_tf_R[tf_minutes], n_dropped_R = drop_incomplete_last(df_tf_R[tf_minutes], tf_minutes)
+        df_tf[tf_minutes], n_dropped_D = drop_incomplete_last(df_tf[tf_minutes], tf_minutes)
+        print(f"  {tf_label}: droppé {n_dropped_R} (resample) / {n_dropped_D} (téléchargé)")
+
     # Table de résultats
     print(f"\n{'TF':<5} {'Indic':<6} {'N valid':>10} {'Max |diff|':>15} {'Max rel':>15} {'N mismatch':>12} {'Status':<8}")
     print("-" * 80)
