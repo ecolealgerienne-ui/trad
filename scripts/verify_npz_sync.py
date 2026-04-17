@@ -91,10 +91,10 @@ def main():
     print(f"\n✅ NPZ chargé: {npz_path}")
     ds = np.load(npz_path, allow_pickle=True)
 
-    # Extraire les arrays
+    # Extraire les arrays (noms tels que sauvés par prepare_full_data.py)
     y_test_binary = ds['y_test_binary']
     y_test_continuous = ds['y_test_continuous']
-    test_indices = ds['test_indices']
+    test_indices = ds['indices_test']
     test_dates = pd.to_datetime(ds['dates_test'])
     closes_test = ds['closes_test']
     X_test = ds['X_test']
