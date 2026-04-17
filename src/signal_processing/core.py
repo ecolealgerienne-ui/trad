@@ -88,40 +88,456 @@ def compute_live_ohlcv(df_5min, tf_minutes):
 # INDICATORS — Standard 30min
 # ============================================================================
 
-def calculate_macd(df):
-    ema_f = df['close'].ewm(span=MACD_FAST, adjust=False).mean()
-    ema_s = df['close'].ewm(span=MACD_SLOW, adjust=False).mean()
+def calculate_macd(df, fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL):
+    """MACD histogram. Périodes paramétrables (défauts = constantes globales)."""
+    ema_f = df['close'].ewm(span=fast, adjust=False).mean()
+    ema_s = df['close'].ewm(span=slow, adjust=False).mean()
     line = ema_f - ema_s
-    sig = line.ewm(span=MACD_SIGNAL, adjust=False).mean()
+    sig = line.ewm(span=signal, adjust=False).mean()
     return (line - sig).values.astype(np.float64)
 
 
-def calculate_rsi(df):
+def calculate_rsi(df, period=RSI_PERIOD):
+    """RSI. Période paramétrable (défaut = constante globale)."""
     delta = df['close'].diff()
     gain = delta.where(delta > 0, 0)
     loss = (-delta).where(delta < 0, 0)
-    ag = gain.ewm(span=RSI_PERIOD, adjust=False).mean()
-    al = loss.ewm(span=RSI_PERIOD, adjust=False).mean()
+    ag = gain.ewm(span=period, adjust=False).mean()
+    al = loss.ewm(span=period, adjust=False).mean()
     rs = ag / al.replace(0, np.nan)
     return (100 - (100 / (1 + rs))).values.astype(np.float64)
 
 
-def calculate_cci(df):
+def calculate_cci(df, period=CCI_PERIOD):
+    """CCI. Période paramétrable (défaut = constante globale)."""
     tp = (df['high'] + df['low'] + df['close']) / 3
-    sma = tp.rolling(CCI_PERIOD).mean()
-    mad = tp.rolling(CCI_PERIOD).apply(lambda x: np.abs(x - x.mean()).mean())
+    sma = tp.rolling(period).mean()
+    mad = tp.rolling(period).apply(lambda x: np.abs(x - x.mean()).mean())
     return ((tp - sma) / (0.015 * mad)).values.astype(np.float64)
+
+
+def compute_indicator(df, indicator, **kwargs):
+    """
+    Point d'entrée unique pour calculer un indicateur standard sur n'importe
+    quel df OHLC (tout timeframe).
+
+    Args:
+        df: DataFrame avec colonnes 'open', 'high', 'low', 'close'
+            (index = timestamps).
+        indicator: 'macd' | 'rsi' | 'cci'.
+        **kwargs: params optionnels passés à calculate_<indicator> :
+          - MACD: fast, slow, signal
+          - RSI:  period
+          - CCI:  period
+
+    Returns:
+        pd.Series (float64) indexée par les timestamps de df, de même longueur.
+        name = indicator. Les NaN (warm-up ou input NaN) sont remplacés par 0.
+    """
+    dispatch = {
+        'macd': calculate_macd,
+        'rsi': calculate_rsi,
+        'cci': calculate_cci,
+    }
+    key = indicator.lower()
+    if key not in dispatch:
+        raise ValueError(
+            f"Unknown indicator '{indicator}'. Expected one of: {list(dispatch)}"
+        )
+    values = dispatch[key](df, **kwargs)
+    # Remplacer les NaN par 0 (warm-up et bords). Tous les indicateurs ont
+    # le même N valide = len(df) après cette étape.
+    values = np.where(np.isnan(values), 0.0, values)
+    return pd.Series(values, index=df.index, name=key)
+
+
+def compute_indicator_live(df_5m, is_close, indicator, tf_minutes, **kwargs):
+    """
+    Dispatcher live (frozen/provisional EMAs) pour calculer un indicateur
+    en résolution 5min, figé à la close de chaque bougie TF.
+
+    Args:
+        df_5m: DataFrame OHLCV 5min (index = timestamps 5min).
+        is_close: np.ndarray[bool] de longueur len(df_5m), True à la dernière
+                  5min de chaque bucket TF (voir compute_bucket_close_mask).
+        indicator: 'macd' | 'rsi' | 'cci'.
+        tf_minutes: taille du bucket (30 ou 60). Utilisé par CCI pour calculer
+                    high_live/low_live (cummax/cummin dans le bucket).
+        **kwargs: params de l'indicateur (ex: fast/slow/signal pour MACD, period pour RSI/CCI).
+
+    Returns:
+        pd.Series (float64) indexée par les timestamps 5min de df_5m.
+        name = f'{indicator}_live'. Les NaN sont remplacés par 0.
+    """
+    key = indicator.lower()
+    close_5m = df_5m['close'].values.astype(np.float64)
+
+    if key == 'macd':
+        values = compute_macd_live(close_5m, is_close, **kwargs)
+    elif key == 'rsi':
+        values = compute_rsi_live(close_5m, is_close, **kwargs)
+    elif key == 'cci':
+        # CCI a besoin de high_live et low_live (cummax/cummin dans le bucket)
+        live_ohlcv = compute_live_ohlcv(df_5m, tf_minutes)
+        values = compute_cci_live(
+            live_ohlcv['high'].values,
+            live_ohlcv['low'].values,
+            close_5m,
+            is_close,
+            **kwargs,
+        )
+    else:
+        raise ValueError(
+            f"Unknown indicator '{indicator}'. Expected: ['macd', 'rsi', 'cci']"
+        )
+    # Remplacer les NaN par 0 (cohérent avec compute_indicator standard)
+    values = np.where(np.isnan(values), 0.0, values)
+    return pd.Series(values, index=df_5m.index, name=f'{key}_live')
+
+
+def compute_oracle_labels(df, indicator,
+                           Q_var=KALMAN_PROCESS_VAR, R_var=KALMAN_MEASURE_VAR,
+                           indicator_params=None):
+    """
+    Dispatcher oracle : calcule les labels non-causaux (smoother RTS).
+
+    ATTENTION: SMOOTHER NON-CAUSAL. Labels de training uniquement.
+
+    Args:
+        df: DataFrame OHLC.
+        indicator: 'macd' | 'rsi' | 'cci'.
+        Q_var, R_var: covariances Kalman smoother (défauts = globales).
+        indicator_params: dict optionnel de params pour l'indicateur
+                          (ex: {'fast': 8, 'slow': 17, 'signal': 9}).
+
+    Returns:
+        pd.DataFrame (position, slope, label), NaN remplacés par 0.
+    """
+    ind_kwargs = indicator_params or {}
+    ind_series = compute_indicator(df, indicator, **ind_kwargs)
+    ind_array = ind_series.values.astype(np.float64)
+    positions, slopes = compute_oracle(ind_array, Q_var=Q_var, R_var=R_var)
+    positions = np.where(np.isnan(positions), 0.0, positions)
+    slopes = np.where(np.isnan(slopes), 0.0, slopes)
+    labels = (slopes > 0).astype(int)
+    return pd.DataFrame({
+        'position': positions,
+        'slope': slopes,
+        'label': labels,
+    }, index=df.index)
+
+
+def compute_forward_filter(df, indicator, adaptive=False,
+                            Q_var=KALMAN_PROCESS_VAR, R_var=KALMAN_MEASURE_VAR,
+                            indicator_params=None):
+    """
+    Dispatcher forward filter Kalman.
+
+    Args:
+        df: DataFrame OHLC.
+        indicator: 'macd' | 'rsi' | 'cci'.
+        adaptive: False = Standard Kalman (Q fixe), True = AQ-KF adaptatif.
+        Q_var, R_var: covariances Kalman (défauts = globales).
+        indicator_params: dict optionnel de params pour l'indicateur.
+
+    Returns:
+        dict avec 'state' (DataFrame), 'P_filt', 'P_pred', 'C' (ndarrays),
+        'indicator' (Series).
+    """
+    ind_kwargs = indicator_params or {}
+    ind_series = compute_indicator(df, indicator, **ind_kwargs)
+    ind_array = ind_series.values.astype(np.float64)
+
+    if adaptive:
+        x_filt, P_filt, x_pred, P_pred, C = forward_filter_30m_adaptive(
+            ind_array, Q_var=Q_var, R_var=R_var)
+    else:
+        x_filt, P_filt, x_pred, P_pred, C = forward_filter_30m(
+            ind_array, Q_var=Q_var, R_var=R_var)
+
+    state = pd.DataFrame({
+        'position': x_filt[:, 0],
+        'velocity': x_filt[:, 1],
+        'pred_position': x_pred[:, 0],
+        'pred_velocity': x_pred[:, 1],
+    }, index=df.index)
+
+    return {
+        'state': state,
+        'P_filt': P_filt,
+        'P_pred': P_pred,
+        'C': C,
+        'indicator': ind_series,
+    }
+
+
+def compute_flks_slopes(df_tf, df_5m, indicator, tf_minutes, k_range=(1, 6),
+                         Q_var=KALMAN_PROCESS_VAR, R_var=KALMAN_MEASURE_VAR,
+                         indicator_params=None):
+    """
+    Dispatcher FLKS-2 : calcule les backward slopes (Fixed-Lag Kalman Smoother)
+    pour un indicateur, au timeframe TF, avec sous-pas 5min.
+
+    Pipeline interne:
+      1. compute_forward_filter(df_tf, indicator)
+         → x_filt, P_filt, x_pred, C (états Kalman standard)
+      2. compute_indicator_live(df_5m, is_close, indicator, tf_minutes)
+         → indicateur live 5min (frozen + provisional)
+      3. group_per_candle(df_5m, df_tf, live_5m)
+         → live_per_candle[t] = values 5min durant la bougie t
+      4. compute_slopes_test1(x_filt, x_pred, C)
+         → slope_t1 (backward 2 pas, pas de sous-pas 5min)
+      5. compute_slopes_test2(x_filt, P_filt, x_pred, C, live_per_candle, k)
+         pour k ∈ [k_range[0]..k_range[1]]
+         → slope_k1..k6 (backward 3 pas avec k updates Kalman supplémentaires)
+
+    Args:
+        df_tf: DataFrame OHLC au timeframe TF.
+        df_5m: DataFrame OHLC au 5min (source des sous-pas).
+        indicator: 'macd' | 'rsi' | 'cci'.
+        tf_minutes: taille du bucket TF (30 ou 60).
+        k_range: (k_min, k_max) inclus. Default (1, 6) → slope_k1 à slope_k6.
+
+    Returns:
+        pd.DataFrame indexée par df_tf.index, colonnes:
+          [slope_t1, slope_k1, slope_k2, ..., slope_k<k_max>]
+        NaN remplacés par 0 (cohérent avec le reste du pipeline).
+    """
+    ind_kwargs = indicator_params or {}
+
+    # Étape 1: forward filter sur df_tf (avec Q/R et params indicateur)
+    fwd = compute_forward_filter(df_tf, indicator, adaptive=False,
+                                   Q_var=Q_var, R_var=R_var,
+                                   indicator_params=ind_kwargs)
+    x_filt_pos = fwd['state'][['position', 'velocity']].values
+    x_pred_pos = fwd['state'][['pred_position', 'pred_velocity']].values
+    P_filt = fwd['P_filt']
+    C = fwd['C']
+
+    # Étape 2: indicateur live 5min (avec params indicateur)
+    is_close = compute_bucket_close_mask(df_5m.index, tf_minutes)
+    live_series = compute_indicator_live(
+        df_5m, is_close, indicator, tf_minutes, **ind_kwargs)
+
+    # Étape 3: grouper les live 5min par bougie TF
+    live_per_candle = group_per_candle(df_5m, df_tf, live_series.values)
+
+    # Étape 4: slope_t1 (pas de sous-pas, pas de dt_sub)
+    slopes_t1 = compute_slopes_test1(x_filt_pos, x_pred_pos, C)
+
+    # Étape 5: slope_k1..k_max (avec sous-pas 5min et dt_sub dynamique)
+    result = {'slope_t1': slopes_t1}
+    k_min, k_max = k_range
+    for k in range(k_min, k_max + 1):
+        result[f'slope_k{k}'] = compute_slopes_test2(
+            x_filt_pos, P_filt, x_pred_pos, C, live_per_candle, k,
+            tf_minutes=tf_minutes,  # ← dt_sub dynamique dérivé de tf_minutes
+            Q_var=Q_var, R_var=R_var,
+        )
+
+    # fillna(0) cohérent avec le reste du pipeline
+    df_slopes = pd.DataFrame(result, index=df_tf.index)
+    df_slopes = df_slopes.fillna(0.0)
+    return df_slopes
+
+
+# ============================================================================
+# ML DATA PREPARATION
+# ============================================================================
+
+def prepare_features_and_labels(df_tf, df_5m, indicator, tf_minutes, trim=100,
+                                  Q_var=KALMAN_PROCESS_VAR, R_var=KALMAN_MEASURE_VAR,
+                                  indicator_params=None):
+    """
+    Prépare un DataFrame features + labels prêt pour split/normalize/sequences.
+
+    Scope V1 (actuel — reproduit exactement le script train_flks_slopes.py):
+        Features = [slope_k1, slope_k2, slope_k3, slope_k4, slope_k5, slope_k6]
+        Soit 6 slopes FLKS avec sous-pas 5min (k=1..6).
+
+    Chaîne interne :
+        df_tf, df_5m → compute_flks_slopes   → slopes_k1..k6 (+ slope_t1 calculée
+                                                 mais NON exposée en V1)
+        df_tf        → compute_oracle_labels → label binary + continu
+        df_tf        → close (pour backtest downstream)
+
+    Args:
+        df_tf: DataFrame OHLC au TF.
+        df_5m: DataFrame OHLC au 5min.
+        indicator: 'macd' | 'rsi' | 'cci'.
+        tf_minutes: 30 ou 60.
+        trim: nombre de bougies à retirer au début ET à la fin pour écarter
+              les warm-up Kalman/oracle et les bords incomplets. Default 100.
+
+    Returns:
+        pd.DataFrame indexée, 9 colonnes:
+          - slope_k1..slope_k6              (6 features FLKS)
+          - label_binary                    (int : 1 si oracle slope > 0 sinon 0)
+          - label_continuous                (float : oracle slope brute)
+          - close                           (float : prix close pour backtest)
+
+    Améliorations futures documentées (V2, V3):
+        V2: ajouter slope_t1 (backward 2 pas, sans sous-pas) → 7 features
+            Motivation: slope_t1 est une estimation sans injection 5min live.
+            Peut servir à comparer l'apport des sous-pas vs un filtre plus pur.
+        V3: ajouter position + velocity (x_filt du forward filter Kalman) → 9 features
+            Motivation: capturer l'état Kalman en plus de ses différences.
+            ATTENTION: position a un ordre de grandeur BEAUCOUP plus grand
+            que les slopes (plusieurs dizaines vs ~1) → normalisation spécifique
+            nécessaire (z-score OK si appliqué par colonne).
+        Implémentation suggérée: paramètre `feature_set='v1'|'v2'|'v3'`.
+    """
+    # 1. Features FLKS : on garde uniquement slope_k1..k6 (V1)
+    slopes = compute_flks_slopes(df_tf, df_5m, indicator, tf_minutes,
+                                  Q_var=Q_var, R_var=R_var,
+                                  indicator_params=indicator_params)
+    v1_cols = [f'slope_k{k}' for k in range(1, 7)]
+    slopes = slopes[v1_cols]  # drop slope_t1 (calculée mais non exposée en V1)
+
+    # 2. Labels oracle (position, slope, label=binary)
+    oracle = compute_oracle_labels(df_tf, indicator,
+                                     Q_var=Q_var, R_var=R_var,
+                                     indicator_params=indicator_params)
+
+    # 3. Assembler
+    result = slopes.copy()
+    result['label_binary'] = oracle['label'].astype(int)
+    result['label_continuous'] = oracle['slope'].astype(np.float64)
+    result['close'] = df_tf['close'].astype(np.float64)
+
+    # 4. TRIM début et fin pour écarter warm-up et bords incomplets
+    if trim > 0 and len(result) > 2 * trim:
+        result = result.iloc[trim:-trim]
+    return result
+
+
+def split_train_val_test(df, train_ratio=0.70, val_ratio=0.15, gap=0):
+    """
+    Split chronologique d'un DataFrame temporel en 3 splits disjoints.
+
+    Args:
+        df: DataFrame indexé par timestamps (déjà trimé).
+        train_ratio: fraction pour train. Default 0.70.
+        val_ratio: fraction pour val. Default 0.15. Test = 1 - train_ratio - val_ratio.
+        gap: nombre de lignes exclues entre train et val, ET entre val et test.
+             Utile pour éviter le leakage de séquences (gap = window - 1).
+
+    Returns:
+        (df_train, df_val, df_test) : 3 DataFrames chronologiquement disjoints.
+    """
+    n = len(df)
+    train_end = int(n * train_ratio)
+    val_end = int(n * (train_ratio + val_ratio))
+
+    df_train = df.iloc[:train_end - gap] if gap > 0 else df.iloc[:train_end]
+    df_val = df.iloc[train_end:val_end - gap] if gap > 0 else df.iloc[train_end:val_end]
+    df_test = df.iloc[val_end:]
+    return df_train, df_val, df_test
+
+
+def normalize_features(df_train, df_val, df_test, feature_cols):
+    """
+    Z-score normalization. Stats fittées SUR TRAIN UNIQUEMENT.
+
+    Args:
+        df_train, df_val, df_test: 3 DataFrames issus de split_train_val_test.
+        feature_cols: liste des colonnes à normaliser.
+
+    Returns:
+        (df_train_norm, df_val_norm, df_test_norm, stats) où stats est un dict
+        {col: (mean, std)} utile pour inférence en production.
+    """
+    df_train = df_train.copy()
+    df_val = df_val.copy()
+    df_test = df_test.copy()
+    stats = {}
+    for col in feature_cols:
+        mean = df_train[col].mean()
+        std = df_train[col].std()
+        if std < 1e-10:
+            std = 1.0  # évite division par zéro pour features constantes
+        stats[col] = (float(mean), float(std))
+        df_train[col] = (df_train[col] - mean) / std
+        df_val[col] = (df_val[col] - mean) / std
+        df_test[col] = (df_test[col] - mean) / std
+    return df_train, df_val, df_test, stats
+
+
+def make_sequences(df, feature_cols, label_cols, window=25):
+    """
+    Crée les séquences temporelles pour entraînement LSTM/XGBoost.
+
+    Pour chaque i dans [0, n - window]:
+      X[i] = features[i : i + window]
+      y[i] = labels[i + window - 1]         (label à la DERNIÈRE timestep)
+      close[i], date[i] idem
+
+    Args:
+        df: DataFrame (issu de split/normalize).
+        feature_cols: liste des colonnes features.
+        label_cols: liste de 1 ou N colonnes labels. Si 1 string, renvoie y 1D.
+                   Si liste, renvoie dict {col: array}.
+        window: taille de la séquence. Default 25.
+
+    Returns:
+        dict avec clés:
+          'X'      : np.ndarray float32 shape (n_seq, window, n_features)
+          'y'      : np.ndarray int64 (si 1 label) OU dict (si plusieurs)
+          'closes' : np.ndarray float64 shape (n_seq,)
+          'dates'  : np.ndarray datetime64 shape (n_seq,)
+    """
+    n = len(df)
+    n_feat = len(feature_cols)
+    if n < window:
+        raise ValueError(f"DataFrame too short ({n}) for window={window}")
+
+    features = df[feature_cols].values.astype(np.float32)
+    closes = df['close'].values.astype(np.float64) if 'close' in df.columns \
+             else np.full(n, np.nan)
+    dates = df.index.values
+
+    # Indices 2D pour construire X d'un coup (fancy indexing)
+    indices = np.arange(window)[None, :] + np.arange(n - window + 1)[:, None]
+    X = features[indices]  # (n_seq, window, n_feat)
+    closes_out = closes[window - 1:]
+    dates_out = dates[window - 1:]
+
+    # Labels : simple string ou liste
+    if isinstance(label_cols, str):
+        y = df[label_cols].values[window - 1:]
+        # Cast : int64 si dtype int, sinon garder float
+        if np.issubdtype(y.dtype, np.integer):
+            y = y.astype(np.int64)
+        else:
+            y = y.astype(np.float64)
+    else:
+        y = {}
+        for col in label_cols:
+            vals = df[col].values[window - 1:]
+            if np.issubdtype(vals.dtype, np.integer):
+                vals = vals.astype(np.int64)
+            else:
+                vals = vals.astype(np.float64)
+            y[col] = vals
+
+    return {
+        'X': X,
+        'y': y,
+        'closes': closes_out,
+        'dates': dates_out,
+    }
 
 
 # ============================================================================
 # INDICATORS — Live frozen/provisional
 # ============================================================================
 
-def compute_macd_live(close_5min, is_close):
+def compute_macd_live(close_5min, is_close, fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL):
+    """MACD live 5min avec frozen + provisional EMAs. Périodes paramétrables."""
     n = len(close_5min)
-    alpha_f = 2.0 / (MACD_FAST + 1)
-    alpha_s = 2.0 / (MACD_SLOW + 1)
-    alpha_sig = 2.0 / (MACD_SIGNAL + 1)
+    alpha_f = 2.0 / (fast + 1)
+    alpha_s = 2.0 / (slow + 1)
+    alpha_sig = 2.0 / (signal + 1)
     out = np.full(n, np.nan)
     ema_f_cl = ema_s_cl = ema_sig_cl = np.nan
     init = False
@@ -149,9 +565,10 @@ def compute_macd_live(close_5min, is_close):
     return out
 
 
-def compute_rsi_live(close_5min, is_close):
+def compute_rsi_live(close_5min, is_close, period=RSI_PERIOD):
+    """RSI live 5min avec frozen + provisional EMAs. Période paramétrable."""
     n = len(close_5min)
-    alpha = 2.0 / (RSI_PERIOD + 1)
+    alpha = 2.0 / (period + 1)
     out = np.full(n, np.nan)
     closure_indices = []
     closure_closes = []
@@ -202,10 +619,11 @@ def compute_rsi_live(close_5min, is_close):
     return out
 
 
-def compute_cci_live(high_live, low_live, close_5min, is_close):
+def compute_cci_live(high_live, low_live, close_5min, is_close, period=CCI_PERIOD):
+    """CCI live 5min. Période paramétrable."""
     n = len(close_5min)
     out = np.full(n, np.nan)
-    tp_buf = deque(maxlen=CCI_PERIOD - 1)
+    tp_buf = deque(maxlen=period - 1)
     for i in range(n):
         c = close_5min[i]
         h = high_live[i]
@@ -213,7 +631,7 @@ def compute_cci_live(high_live, low_live, close_5min, is_close):
         if np.isnan(c) or np.isnan(h) or np.isnan(lo):
             continue
         tp = (h + lo + c) / 3.0
-        if len(tp_buf) >= CCI_PERIOD - 1:
+        if len(tp_buf) >= period - 1:
             all_tp = np.array(list(tp_buf) + [tp])
             sma = all_tp.mean()
             mad = np.abs(all_tp - sma).mean()
@@ -227,7 +645,10 @@ def compute_cci_live(high_live, low_live, close_5min, is_close):
 # ORACLE
 # ============================================================================
 
-def compute_oracle(indicator_30m):
+def compute_oracle(indicator_30m, Q_var=KALMAN_PROCESS_VAR, R_var=KALMAN_MEASURE_VAR):
+    """
+    Smoother RTS (non-causal). Q_var et R_var paramétrables.
+    """
     from pykalman import KalmanFilter as KF
     n = len(indicator_30m)
     valid = ~np.isnan(indicator_30m)
@@ -239,8 +660,8 @@ def compute_oracle(indicator_30m):
         observation_matrices=[[1, 0]],
         initial_state_mean=[vd[0], 0.0],
         initial_state_covariance=np.eye(2),
-        observation_covariance=KALMAN_MEASURE_VAR,
-        transition_covariance=np.eye(2) * KALMAN_PROCESS_VAR,
+        observation_covariance=R_var,
+        transition_covariance=np.eye(2) * Q_var,
     )
     smooth_means, _ = kf.smooth(vd)
     positions = np.full(n, np.nan)
@@ -377,15 +798,25 @@ def compute_kalman_live_aqkf(indicator_live, is_close, aq_window=30, Q_max_facto
 # KALMAN PRIMITIVES
 # ============================================================================
 
-def kf_update(x_p, P_p, z_obs):
+def kf_update(x_p, P_p, z_obs, R_mat=None):
+    """
+    Kalman measurement update. R_mat peut être override (défaut = R global).
+    """
+    R_use = R if R_mat is None else R_mat
     y = z_obs - H @ x_p
-    S = H @ P_p @ H.T + R
+    S = H @ P_p @ H.T + R_use
     K = P_p @ H.T / S[0, 0]
     return x_p + (K @ y).ravel(), (np.eye(2) - K @ H) @ P_p
 
 
-def kf_predict_sub(x, P):
-    return A_SUB @ x, A_SUB @ P @ A_SUB.T + Q_SUB
+def kf_predict_sub(x, P, A_mat=None, Q_mat=None):
+    """
+    Kalman prediction sub-step. A_mat et Q_mat overridables (défaut = A_SUB, Q_SUB).
+    Utilisé avec dt_sub dynamique selon tf_minutes.
+    """
+    A_use = A_SUB if A_mat is None else A_mat
+    Q_use = Q_SUB if Q_mat is None else Q_mat
+    return A_use @ x, A_use @ P @ A_use.T + Q_use
 
 
 def inv2x2(M):
@@ -404,8 +835,13 @@ def is_pos_semidef(M):
 # FORWARD FILTERS
 # ============================================================================
 
-def forward_filter_30m(indicator_30m):
-    """Standard Kalman forward filter. Returns (x_filt, P_filt, x_pred, P_pred, C)."""
+def forward_filter_30m(indicator_30m, Q_var=KALMAN_PROCESS_VAR, R_var=KALMAN_MEASURE_VAR):
+    """
+    Standard Kalman forward filter. Returns (x_filt, P_filt, x_pred, P_pred, C).
+    Q_var et R_var paramétrables (défauts = constantes globales).
+    """
+    Q_local = np.eye(2) * Q_var
+    R_local = np.array([[R_var]])
     n = len(indicator_30m)
     first_valid_val = indicator_30m[~np.isnan(indicator_30m)][0]
     x_filt = np.zeros((n, 2))
@@ -418,14 +854,14 @@ def forward_filter_30m(indicator_30m):
             P_p = np.eye(2)
         else:
             x_p = A @ x_filt[t - 1]
-            P_p = A @ P_filt[t - 1] @ A.T + Q
+            P_p = A @ P_filt[t - 1] @ A.T + Q_local
         x_pred[t] = x_p
         P_pred[t] = P_p
         if np.isnan(indicator_30m[t]):
             x_filt[t] = x_p
             P_filt[t] = P_p
         else:
-            x_filt[t], P_filt[t] = kf_update(x_p, P_p, indicator_30m[t])
+            x_filt[t], P_filt[t] = kf_update(x_p, P_p, indicator_30m[t], R_mat=R_local)
     C = np.zeros((n, 2, 2))
     for t in range(n - 1):
         C[t] = P_filt[t] @ A.T @ inv2x2(P_pred[t + 1])
@@ -433,18 +869,23 @@ def forward_filter_30m(indicator_30m):
 
 
 def forward_filter_30m_adaptive(indicator_30m, window=30, Q_max_factor=10.0,
-                                  Q_min_factor=0.1):
-    """AQ-KF forward filter (Myers-Tapley). Same output format as forward_filter_30m."""
+                                  Q_min_factor=0.1,
+                                  Q_var=KALMAN_PROCESS_VAR, R_var=KALMAN_MEASURE_VAR):
+    """
+    AQ-KF forward filter (Myers-Tapley). Q_var et R_var paramétrables.
+    """
+    Q_local = np.eye(2) * Q_var
+    R_local = np.array([[R_var]])
     n = len(indicator_30m)
     first_valid_val = indicator_30m[~np.isnan(indicator_30m)][0]
     x_filt = np.zeros((n, 2))
     P_filt = np.zeros((n, 2, 2))
     x_pred = np.zeros((n, 2))
     P_pred = np.zeros((n, 2, 2))
-    Q_current = Q.copy()
+    Q_current = Q_local.copy()
     innovation_buffer = []
-    Q_FLOOR = Q * Q_min_factor
-    Q_CEIL = Q * Q_max_factor
+    Q_FLOOR = Q_local * Q_min_factor
+    Q_CEIL = Q_local * Q_max_factor
 
     for t in range(n):
         if t == 0:
@@ -459,8 +900,8 @@ def forward_filter_30m_adaptive(indicator_30m, window=30, Q_max_factor=10.0,
             x_filt[t] = x_p
             P_filt[t] = P_p
             continue
-        S_t = (H @ P_p @ H.T + R)[0, 0]
-        x_filt[t], P_filt[t] = kf_update(x_p, P_p, indicator_30m[t])
+        S_t = (H @ P_p @ H.T + R_local)[0, 0]
+        x_filt[t], P_filt[t] = kf_update(x_p, P_p, indicator_30m[t], R_mat=R_local)
         v_t = indicator_30m[t] - (H @ x_p)[0]
         innovation_buffer.append(v_t)
         if len(innovation_buffer) > window:
@@ -496,8 +937,25 @@ def compute_slopes_test1(x_filt, x_pred, C):
     return slopes
 
 
-def compute_slopes_test2(x_filt, P_filt, x_pred, C, live_per_candle, n_substeps):
-    """Backward 3 steps: x_prov (from sub-steps of candle t+1) → t → t-1 → t-2."""
+def compute_slopes_test2(x_filt, P_filt, x_pred, C, live_per_candle, n_substeps,
+                          tf_minutes=30,
+                          Q_var=KALMAN_PROCESS_VAR, R_var=KALMAN_MEASURE_VAR):
+    """
+    Backward 3 steps: x_prov (from sub-steps of candle t+1) → t → t-1 → t-2.
+
+    Args:
+        tf_minutes: taille du bucket TF. Détermine dt_sub = 5 / tf_minutes
+                    pour les matrices A_sub et Q_sub dynamiques.
+                    30 → dt_sub=1/6 (défaut), 60 → dt_sub=1/12, etc.
+        Q_var, R_var: covariances Kalman process/measurement.
+    """
+    # Sub-step dynamique selon tf_minutes (5min est l'intervalle 5min par défaut)
+    dt_sub = 5.0 / tf_minutes
+    A_sub_local = np.array([[1.0, dt_sub], [0.0, 1.0]])
+    Q_local = np.eye(2) * Q_var
+    Q_sub_local = Q_local * dt_sub
+    R_local = np.array([[R_var]])
+
     n = len(x_filt)
     slopes = np.full(n, np.nan)
     for t in range(2, n - 1):
@@ -508,12 +966,13 @@ def compute_slopes_test2(x_filt, P_filt, x_pred, C, live_per_candle, n_substeps)
         use = valid_vals[:n_substeps]
         if len(use) > 0:
             for m5 in use:
-                x_cur, P_cur = kf_predict_sub(x_cur, P_cur)
-                x_cur, P_cur = kf_update(x_cur, P_cur, m5)
+                x_cur, P_cur = kf_predict_sub(
+                    x_cur, P_cur, A_mat=A_sub_local, Q_mat=Q_sub_local)
+                x_cur, P_cur = kf_update(x_cur, P_cur, m5, R_mat=R_local)
         x_prov = x_cur
         k_actual = len(use) if len(use) > 0 else 1
-        A_k = np.linalg.matrix_power(A_SUB, k_actual)
-        Q_k = Q_SUB * k_actual
+        A_k = np.linalg.matrix_power(A_sub_local, k_actual)
+        Q_k = Q_sub_local * k_actual
         x_pred_partial = A_k @ x_filt[t]
         P_pred_partial = A_k @ P_filt[t] @ A_k.T + Q_k
         C_partial = P_filt[t] @ A_k.T @ inv2x2(P_pred_partial)
