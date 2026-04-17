@@ -22,6 +22,7 @@ Usage:
     python scripts/validate_data_prep.py
 """
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -38,7 +39,6 @@ from src.signal_processing.core import (
 )
 
 DATA_DIR = Path('data/raw')
-INDICATOR = 'macd'
 TF = 30
 TRIM = 100
 WINDOW = 25
@@ -71,6 +71,12 @@ def drop_incomplete_last(df_tf, df_5m, tf_minutes):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--indicator', default='macd',
+                        choices=['macd', 'rsi', 'cci'])
+    args = parser.parse_args()
+    INDICATOR = args.indicator
+
     print("=" * 80)
     print(f"VALIDATION data preparation — {INDICATOR.upper()} × {TF}m")
     print("=" * 80)

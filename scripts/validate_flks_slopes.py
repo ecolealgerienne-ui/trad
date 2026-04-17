@@ -18,9 +18,12 @@ Tests:
 Scope: MACD × (30m, 1h) × (slope_t1 + slope_k1..k6) = 14 slopes.
 
 Usage:
-    python scripts/validate_flks_slopes.py
+    python scripts/validate_flks_slopes.py --indicator macd
+    python scripts/validate_flks_slopes.py --indicator rsi
+    python scripts/validate_flks_slopes.py --indicator cci
 """
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -36,7 +39,6 @@ from src.signal_processing.core import (
 )
 
 DATA_DIR = Path('data/raw')
-INDICATOR = 'macd'
 TFS = [30, 60]
 TRIM = 50
 TOL_ABS = 1e-10
@@ -64,6 +66,12 @@ def drop_incomplete_last(df_tf, df_5m, tf_minutes):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--indicator', default='macd',
+                        choices=['macd', 'rsi', 'cci'])
+    args = parser.parse_args()
+    INDICATOR = args.indicator
+
     print("=" * 80)
     print(f"VALIDATION compute_flks_slopes — {INDICATOR.upper()} × (30m, 1h)")
     print("=" * 80)
