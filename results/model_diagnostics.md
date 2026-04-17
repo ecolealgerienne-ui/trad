@@ -1,8 +1,8 @@
-# Diagnostics — XGBoost Progressive (MACD × 30m)
+# Diagnostics — XGBoost Progressive (MACD / RSI / CCI × 30m)
 
 Document de synthèse des mesures réalisées sur le pipeline progressif.
-Objectif : documenter toutes les mesures (oracle, modèle, filtres) pour
-référence future.
+Objectif : documenter toutes les mesures (oracle, modèle, filtres,
+comparaison inter-indicateurs) pour référence future.
 
 ---
 
@@ -273,7 +273,147 @@ python scripts/validate_flks_improvement.py --indicator macd --tf 30 --days 180
 
 ## Fichiers de référence
 
-- `results/oracle_reference.json` : PnL Oracle des 3 splits au format JSON
-- `data/prepared/dataset_macd_30m_full_progressive.npz` : dataset préparé
-- `data/prepared/preds_macd_30m_full_progressive.npz` : prédictions XGBoost
-- `models/xgb_progressive_macd_30m_full.pkl` : modèle XGBoost entraîné
+- `results/oracle_reference.json` : PnL Oracle + Model (3 indicateurs) JSON
+- `data/prepared/dataset_{macd,rsi,cci}_30m_full_progressive.npz` : datasets
+- `data/prepared/preds_{macd,rsi,cci}_30m_full_progressive.npz` : prédictions
+- `models/xgb_progressive_{macd,rsi,cci}_30m_full.pkl` : modèles entraînés
+
+---
+
+## 9. Extension — 3 indicateurs (MACD / RSI / CCI)
+
+Après le diagnostic sur MACD, génération et entraînement des 2 autres
+indicateurs (RSI, CCI) avec pipeline strictement identique (mêmes splits,
+mêmes dates, même trim 100, mêmes ratios 70/15/15).
+
+### 9.1 Alignement des datasets (prérequis cross-validation)
+
+**Vérification statique** (code) : les 3 datasets partagent nécessairement
+les mêmes index car :
+- Même `df_5m` source
+- Même resample `df_tf` (agnostique de l'indicateur)
+- Même `drop_incomplete_last` (agnostique)
+- Même trim (100 bougies TF = 600 rows 5min chaque côté)
+- Même split ratios (0.70/0.15/0.15)
+- `prepare_features_and_labels_progressive` retourne un DataFrame de
+  longueur `len(df_5m) - 2*trim_5m` indépendante de l'indicateur
+  (NaN de warmup remplacés par 0 via `fillna(0)`, pas droppés)
+
+**Validation empirique** : script `scripts/validate_indicator_alignment.py`
+vérifie bit-exactement :
+- Métadonnées (tf, ratios, gap, trim)
+- dates_train/val/test (ns precision)
+- indices_train/val/test (int64)
+- closes_train/val/test (float64 exact)
+- df_5m_* et df_tf_* (sources)
+- Sanity check inverse : X_test et y_test_binary DOIVENT différer
+
+### 9.2 Entraînement XGBoost (mêmes hyperparams que MACD)
+
+| Indicateur | AUC Train | AUC Val | AUC Test | Acc Test | F1 Test | best_iter | Imp. step_k |
+|------------|-----------|---------|----------|----------|---------|-----------|-------------|
+| **MACD** | 0.9762 | 0.9788 | **0.9836** | **93.75%** | 0.9373 | 41 | 0.97% |
+| **CCI** | 0.9715 | 0.9712 | 0.9737 | 91.64% | 0.9170 | 71 | 0.88% |
+| **RSI** | 0.9627 | 0.9623 | 0.9637 | 89.26% | 0.8930 | 116 | 0.83% |
+
+**Observations** :
+- **Ordre de difficulté** : MACD < CCI < RSI (MACD converge en 41 iter
+  contre 116 pour RSI → MACD "plus facile" pour XGBoost)
+- **Pas d'overfit** sur aucun : test ≈ val ≈ train pour les 3
+- **`step_k` quasi-ignoré partout** (<1%) — pattern commun aux 3
+- **Dataset équilibré** : UP ratio 50.27-50.51% sur les 3 splits × 3 indicateurs
+
+### 9.3 Backtest test set (458 jours, fees 0.1%)
+
+| Indicateur | Oracle Trades | Oracle PnL Net | Model Trades | Model PnL Net | Ratio trades | Capture |
+|------------|---------------|----------------|--------------|---------------|--------------|---------|
+| **MACD** | 2,281 | +351% | 3,107 | **-590%** | ×1.36 | -168% |
+| **CCI** | 2,763 | +434% | 4,159 | **-780%** | ×1.50 | -180% |
+| **RSI** | 3,261 | **+601%** | 6,007 | **-1,176%** | ×1.84 | -196% |
+
+**Détails Oracle (test set)** :
+
+| Indic | Trades | WR | PF | Sharpe | PnL Brut | Fees | PnL Net | Alpha B&H |
+|-------|--------|-----|-----|--------|----------|------|---------|-----------|
+| MACD | 2,281 | 45.6% | 1.58 | 0.146 | +807.14% | 456.20% | **+350.94%** | +314.67% |
+| CCI | 2,763 | 45.7% | 1.69 | 0.164 | +986.33% | 552.60% | **+433.73%** | +397.45% |
+| RSI | 3,261 | 47.0% | 1.96 | 0.199 | +1253.39% | 652.20% | **+601.19%** | +564.91% |
+
+**Détails Model t=0.5 (test set)** :
+
+| Indic | Trades | WR | PF | Sharpe | PnL Brut | Fees | PnL Net | Alpha B&H |
+|-------|--------|-----|-----|--------|----------|------|---------|-----------|
+| MACD | 3,107 | 27.5% | 0.54 | -0.207 | +31.56% | 621.40% | **-589.84%** | -626.11% |
+| CCI | 4,159 | 24.8% | 0.49 | -0.238 | +51.42% | 831.80% | **-780.38%** | -816.65% |
+| RSI | 6,007 | 19.6% | 0.40 | -0.305 | +25.14% | 1201.40% | **-1176.26%** | -1212.53% |
+
+### 9.4 Patterns inter-indicateurs
+
+**Paradoxe inversé accuracy ↔ PnL** :
+- RSI : Acc **la plus basse** (89.26%) mais Oracle PnL **le plus haut** (+601%)
+- MACD : Acc **la plus haute** (93.75%) mais Oracle PnL **le plus bas** (+351%)
+- Implication : la nervosité d'un indicateur = plus d'opportunités (meilleur
+  Oracle) mais plus difficile à prédire (accuracy plus faible)
+
+**Sur-trading proportionnel à la nervosité de l'oracle** :
+- MACD : Model fait ×1.36 les trades d'Oracle (826 trades parasites)
+- CCI : ×1.50 (1,396 trades parasites)
+- RSI : ×1.84 (**2,746 trades parasites**, catastrophique)
+- Plus l'indicateur est nerveux, plus les erreurs du modèle se transforment
+  en micro-flips destructeurs
+
+**Win Rate divisé par ~2** chez les 3 :
+- Oracle 45.6-47.0% (toujours > hasard)
+- Model 19.6-27.5% (toujours < hasard)
+- Pattern structurel identique → problème commun, pas spécifique à un indicateur
+
+**Aucun indicateur ne sort gagnant** isolément. Mais profils différents :
+- **MACD** = "stable mais peu d'edge" (le plus prévisible, le moins rentable)
+- **CCI** = "milieu" (ratio équilibré)
+- **RSI** = "edge maximal mais ingérable" (le plus rentable, le plus nerveux)
+
+### 9.5 Pistes post-3-indicateurs
+
+**Question critique** : les 3 modèles se trompent-ils **aux mêmes moments**
+ou à **des moments différents** ?
+
+- Si erreurs **corrélées** → consensus inutile, besoin d'autre approche
+  (régularisation, feature engineering, LSTM, 3-classes, meta-model)
+- Si erreurs **décorrélées** → piste **consensus/ensemble prometteuse**
+  (voter, stacking, meta-model pondéré)
+
+**Script d'analyse** : `scripts/cross_validation_indicators.py` mesure :
+1. Corrélation Pearson des probas (matrice 3×3)
+2. Accord binaire entre paires (sign match)
+3. Diversité des erreurs (P(err[b] | err[a]))
+4. Accuracy du vote majoritaire
+5. Backtest 8 stratégies (3 Oracles + 3 Models + Consensus Majorité 2/3
+   + Consensus Unanimité 3/3)
+
+**Seuils de décision** :
+- Corr moyenne > 0.8 **ET** erreurs simultanées > 50% → consensus inutile
+- Corr moyenne < 0.5 **OU** erreurs simultanées < 20% → consensus prometteur
+- Entre les deux → tester meta-model pondéré
+
+### 9.6 Commandes reproductibles
+
+```bash
+# Prépa 3 datasets
+python scripts/prepare_progressive_data.py --indicator macd --tf 30
+python scripts/prepare_progressive_data.py --indicator rsi --tf 30
+python scripts/prepare_progressive_data.py --indicator cci --tf 30
+
+# Validation alignement
+python scripts/validate_indicator_alignment.py --tf 30 --period full
+
+# Training
+python scripts/train_progressive.py --npz data/prepared/dataset_macd_30m_full_progressive.npz
+python scripts/train_progressive.py --npz data/prepared/dataset_rsi_30m_full_progressive.npz
+python scripts/train_progressive.py --npz data/prepared/dataset_cci_30m_full_progressive.npz
+
+# Backtest individuel (Oracle + Model côte à côte)
+python scripts/backtest_progressive.py --npz data/prepared/dataset_<ind>_30m_full_progressive.npz --preds data/prepared/preds_<ind>_30m_full_progressive.npz --split test
+
+# Cross-validation (prochaine étape)
+python scripts/cross_validation_indicators.py --split test
+```

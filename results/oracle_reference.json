@@ -142,5 +142,92 @@
       "trades_reduction_pct": 18.4,
       "wr_improvement_abs_pct": 3.3
     }
+  },
+  "xgboost_progressive_cci_full": {
+    "note": "CCI × 30m, même pipeline progressif que MACD",
+    "hyperparameters": {
+      "n_estimators": 500,
+      "max_depth": 6,
+      "learning_rate": 0.1,
+      "best_iteration": 71
+    },
+    "feature_importance": {
+      "slope_progressive": 0.9912,
+      "step_k": 0.0088
+    },
+    "classification_metrics": {
+      "train": {"auc": 0.9715, "accuracy": 0.9110, "f1": 0.9113, "up_ratio_pct": 50.29},
+      "val":   {"auc": 0.9712, "accuracy": 0.9119, "f1": 0.9122, "up_ratio_pct": 50.49},
+      "test":  {"auc": 0.9737, "accuracy": 0.9164, "f1": 0.9170, "up_ratio_pct": 50.51}
+    },
+    "oracle_test": {
+      "trades": 2763, "win_rate_pct": 45.7, "profit_factor": 1.69,
+      "sharpe": 0.164, "pnl_gross_pct": 986.33, "fees_pct": 552.60,
+      "pnl_net_pct": 433.73, "alpha_vs_bh_pct": 397.45
+    },
+    "model_test_threshold_0_5": {
+      "trades": 4159, "win_rate_pct": 24.8, "profit_factor": 0.49,
+      "sharpe": -0.238, "pnl_gross_pct": 51.42, "fees_pct": 831.80,
+      "pnl_net_pct": -780.38, "alpha_vs_bh_pct": -816.65,
+      "capture_vs_oracle_pct": -179.9,
+      "trades_excess_vs_oracle": 1396,
+      "trades_ratio_vs_oracle": 1.505
+    }
+  },
+  "xgboost_progressive_rsi_full": {
+    "note": "RSI × 30m, même pipeline progressif que MACD",
+    "hyperparameters": {
+      "n_estimators": 500,
+      "max_depth": 6,
+      "learning_rate": 0.1,
+      "best_iteration": 116
+    },
+    "feature_importance": {
+      "slope_progressive": 0.9917,
+      "step_k": 0.0083
+    },
+    "classification_metrics": {
+      "train": {"auc": 0.9627, "accuracy": 0.8916, "f1": 0.8919, "up_ratio_pct": 50.27},
+      "val":   {"auc": 0.9623, "accuracy": 0.8909, "f1": 0.8915, "up_ratio_pct": 50.46},
+      "test":  {"auc": 0.9637, "accuracy": 0.8926, "f1": 0.8930, "up_ratio_pct": 50.36}
+    },
+    "oracle_test": {
+      "trades": 3261, "win_rate_pct": 47.0, "profit_factor": 1.96,
+      "sharpe": 0.199, "pnl_gross_pct": 1253.39, "fees_pct": 652.20,
+      "pnl_net_pct": 601.19, "alpha_vs_bh_pct": 564.91
+    },
+    "model_test_threshold_0_5": {
+      "trades": 6007, "win_rate_pct": 19.6, "profit_factor": 0.40,
+      "sharpe": -0.305, "pnl_gross_pct": 25.14, "fees_pct": 1201.40,
+      "pnl_net_pct": -1176.26, "alpha_vs_bh_pct": -1212.53,
+      "capture_vs_oracle_pct": -195.7,
+      "trades_excess_vs_oracle": 2746,
+      "trades_ratio_vs_oracle": 1.842
+    }
+  },
+  "indicator_comparison_summary_test": {
+    "note": "Synthèse 3 indicateurs, test set (458 jours, 2024-09 → 2025-12)",
+    "observations": [
+      "Paradoxe inversé accuracy ↔ Oracle PnL : RSI pire acc mais meilleur Oracle",
+      "Sur-trading proportionnel à la nervosité : MACD ×1.36, CCI ×1.50, RSI ×1.84",
+      "Win Rate Oracle 45-47% → Model 20-28% (divisé par 2) → pattern structurel",
+      "step_k quasi-ignoré (<1%) par XGBoost sur les 3 indicateurs",
+      "Pas d'overfit : test ≈ val ≈ train pour les 3 modèles"
+    ],
+    "table": [
+      {"indicator": "MACD", "auc_test": 0.9836, "acc_test_pct": 93.75,
+       "oracle_trades": 2281, "oracle_pnl_net_pct": 350.94,
+       "model_trades": 3107, "model_pnl_net_pct": -589.84,
+       "trade_ratio": 1.362, "capture_pct": -168.1},
+      {"indicator": "CCI",  "auc_test": 0.9737, "acc_test_pct": 91.64,
+       "oracle_trades": 2763, "oracle_pnl_net_pct": 433.73,
+       "model_trades": 4159, "model_pnl_net_pct": -780.38,
+       "trade_ratio": 1.505, "capture_pct": -179.9},
+      {"indicator": "RSI",  "auc_test": 0.9637, "acc_test_pct": 89.26,
+       "oracle_trades": 3261, "oracle_pnl_net_pct": 601.19,
+       "model_trades": 6007, "model_pnl_net_pct": -1176.26,
+       "trade_ratio": 1.842, "capture_pct": -195.7}
+    ],
+    "next_step": "scripts/cross_validation_indicators.py — mesurer corrélation des erreurs entre les 3 modèles pour décider si consensus/meta-model est viable"
   }
 }
