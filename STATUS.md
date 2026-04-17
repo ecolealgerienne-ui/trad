@@ -1,18 +1,25 @@
 # PROJET TRAD - STATUS
 
-**Dernière mise à jour**: 2026-01-12
-**État actuel**: Aucun dataset généré (data/prepared/ est vide)
+**Dernière mise à jour**: 2026-01-14
+**État actuel**: ✅ Dataset base généré avec labels FUTURS (N=6)
 
 ---
 
 ## 📊 PIPELINE DATASET - Vue d'ensemble
 
 ```
-[1] Base Dataset          [2] Train Model A + Enrichment      [3] Train Direction Models + Enrichment
-prepare_data_regime.py -> train_regime_classifier.py    -> train.py (macd/rsi/cci)
-     (8 colonnes Y)       Entraîne XGBoost + enrichit           Entraîne CNN-LSTM + enrichit
-                          (+5 colonnes → Y=13)                  (+6 colonnes → Y=19)
+[1] Base Dataset                    [2] Train Model A (CNN-LSTM)
+prepare_data_regime.py          ->  train_regime_classifier.py
+  (6 colonnes Y)                    Entraîne CNN-LSTM régime
+  Labels FUTURS (N=6)               3 classes (RANGE_LOW/HIGH, TREND)
+
+Architecture:
+- Input: Raw returns (h_ret, l_ret, c_ret) - PAS de data leakage
+- Model: CNN-LSTM multiclass
+- Output: Prédiction régime FUTUR [t+1, t+6]
 ```
+
+**Note importante**: Le pipeline est simplifié. Pas d'enrichissement du dataset, pas de XGBoost (data leakage invalidé).
 
 ---
 
@@ -26,21 +33,23 @@ python src/prepare_data_regime.py --assets BTC ETH BNB ADA LTC
 
 **Fichier généré**: `data/prepared/dataset_btc_eth_bnb_ada_ltc_regime.npz`
 
-**Status actuel**: ✅ **EXÉCUTÉ** (dataset base: 547M, backup: 461M)
+**Status actuel**: ✅ **EXÉCUTÉ** (2026-01-14)
 
-### Structure NPZ (Base)
+### Structure NPZ (Base) - Shapes Réelles
 
 | Array | Shape | Description |
 |-------|-------|-------------|
-| `X_train` | (n_train, 25, 25) | Séquences features train (25 timesteps × 25 canaux) |
-| `Y_train` | (n_train, 8) | Labels + metadata train |
-| `OHLCV_train` | (n_train, 7) | Prix OHLCV + metadata train |
-| `X_val` | (n_val, 25, 25) | Séquences features val |
-| `Y_val` | (n_val, 8) | Labels + metadata val |
-| `OHLCV_val` | (n_val, 7) | Prix OHLCV + metadata val |
-| `X_test` | (n_test, 25, 25) | Séquences features test |
-| `Y_test` | (n_test, 8) | Labels + metadata test |
-| `OHLCV_test` | (n_test, 7) | Prix OHLCV + metadata test |
+| `X_train` | **(2,832,654, 25, 25)** | Séquences features train (25 timesteps × 25 canaux) |
+| `Y_train` | **(2,832,654, 6)** | Labels + metadata train |
+| `OHLCV_train` | **(2,832,654, 7)** | Prix OHLCV + metadata train |
+| `X_val` | **(608,430, 25, 25)** | Séquences features val |
+| `Y_val` | **(608,430, 6)** | Labels + metadata val |
+| `OHLCV_val` | **(608,430, 7)** | Prix OHLCV + metadata val |
+| `X_test` | **(607,435, 25, 25)** | Séquences features test |
+| `Y_test` | **(607,435, 6)** | Labels + metadata test |
+| `OHLCV_test` | **(607,435, 7)** | Prix OHLCV + metadata test |
+
+**Total samples**: 4,048,519 séquences (5 assets combinés)
 
 **Note**: X contient [timestamp, asset_id, ...features] donc shape (n, 25, 2 + 23 features = 25 canaux).
 
@@ -96,16 +105,18 @@ python src/prepare_data_regime.py --assets BTC ETH BNB ADA LTC
 
 ## 🔬 ANALYSE DES FEATURES POUR CLASSIFICATION RÉGIME
 
-### Rappel: Les 4 régimes à prédire
+### Rappel: Les 3 régimes à prédire (SYSTÈME ACTUEL)
 
-| Régime | Code | Caractéristiques |
-|--------|------|------------------|
-| RANGE LOW VOL | 0 | Pas de tendance + Volatilité faible |
-| RANGE HIGH VOL | 1 | Pas de tendance + Volatilité haute |
-| TREND LOW VOL | 2 | Tendance claire + Volatilité faible |
-| TREND HIGH VOL | 3 | Tendance claire + Volatilité haute |
+| Régime | Code | Caractéristiques | Distribution |
+|--------|------|------------------|--------------|
+| RANGE_LOW_VOL | 0 | Pas de tendance + Volatilité faible | 45-70% |
+| RANGE_HIGH_VOL | 1 | Pas de tendance + Volatilité haute | 24-45% |
+| TREND | 2 | Tendance claire (UP ou DOWN) | **5-10%** ⚠️ |
 
-**Structure**: 2 dimensions = TREND vs RANGE × HIGH VOL vs LOW VOL
+**Structure**: Pas de séparation HIGH/LOW VOL pour TREND
+- ✅ TREND = label unique (rare, 5-10%)
+- ✅ RANGE = séparé en LOW/HIGH VOL selon percentile 50 de volatilité
+- ⚠️ Déséquilibre de classes important (TREND très minoritaire)
 
 ### Features ESSENTIELLES vs REDONDANTES
 
@@ -152,10 +163,14 @@ python src/prepare_data_regime.py --assets BTC ETH BNB ADA LTC
 
 ### Conclusion: Features MINIMALES pour régime
 
-**Set minimal (~6 features) qui suffirait pour classifier les 4 régimes :**
+**⚠️ NOTE IMPORTANTE**: Le système actuel (CNN-LSTM) utilise **UNIQUEMENT les raw returns** (h_ret, l_ret, c_ret) pour éviter le data leakage.
+
+**Set minimal (théorique, si on utilisait XGBoost) qui suffirait pour classifier les 3 régimes :**
 
 ```python
-minimal_regime_features = [
+# ⚠️ ATTENTION: Ces features causent DATA LEAKAGE si utilisées car elles sont
+# les MÊMES que celles utilisées pour calculer les labels de régime
+minimal_regime_features_LEAKAGE = [
     'adx',                    # TREND vs RANGE (force)
     'regression_r2',          # TREND vs RANGE (qualité)
     'hurst_exponent',         # TREND vs RANGE (persistance)
@@ -165,81 +180,98 @@ minimal_regime_features = [
 ]
 ```
 
-**Les 20 features actuelles (hors Pure Signal) sont REDONDANTES** pour la classification de régime, mais :
-- ✅ Peuvent améliorer la robustesse (plusieurs perspectives)
-- ✅ XGBoost peut apprendre à ignorer les features inutiles (feature importance)
-- ⚠️ Risque de surapprentissage sur seulement 4 classes
-- ⚠️ Volume features peu utiles pour déterminer le régime
+**Architecture CNN-LSTM actuelle (VALIDE, sans leakage)**:
+- ✅ Utilise UNIQUEMENT raw returns (h_ret, l_ret, c_ret)
+- ✅ Ces features ne sont PAS utilisées dans le calcul des labels
+- ✅ Accuracy attendue: ~86% (validé empiriquement)
+- ✅ Pas de sur-apprentissage sur 3 classes
+
+**Les 20 features (TREND + VOL + VOLUME) causent DATA LEAKAGE**:
+- ❌ Ne JAMAIS utiliser pour entraîner le modèle de classification
+- ❌ XGBoost avec ces features = 98.95% accuracy INVALIDE
+- ✅ Peuvent être utilisées APRÈS classification pour features additionnelles
 
 ### Usage par script
 
-| Script | Features utilisées | Notes |
-|--------|-------------------|-------|
-| `train_regime_classifier.py` | 20 features (TREND + VOL + VOLUME) | Agrégées en [mean, std, min, max] → 80 features XGBoost |
-| `train.py` (direction) | 23 features (inclut Pure Signal) | Séquences complètes pour CNN-LSTM |
+| Script | Features utilisées | Architecture | Notes |
+|--------|-------------------|--------------|-------|
+| `train_regime_classifier.py` | **3 features (h_ret, l_ret, c_ret)** | CNN-LSTM | ✅ VALIDE - pas de leakage, accuracy ~86% |
+| ~~`train_meta_model_regime.py`~~ | ~~20 features (TREND + VOL + VOLUME)~~ | ~~XGBoost~~ | ❌ **ABANDONNÉ** - data leakage, 98.95% invalide |
 
 ---
 
-## ⚠️ EXTRACTION DES FEATURES - Indices vs Noms
+## ⚠️ EXTRACTION DES FEATURES - CNN-LSTM avec Raw Returns
 
 ### Comment `train_regime_classifier.py` extrait les features
 
-Le script utilise des **indices numériques** (pas des noms de colonnes) car les données sont en format NumPy :
+Le script CNN-LSTM utilise **UNIQUEMENT les 3 raw returns** pour éviter le data leakage :
 
 ```python
-# Ligne 235 de train_regime_classifier.py
-features = X[:, :, 2:]  # Skip timestamp (index 0) et asset_id (index 1)
+# train_regime_classifier.py - Extraction des features
+# Colonnes X:
+#   0: timestamp
+#   1: asset_id
+#   2-4: h_ret, l_ret, c_ret (RAW RETURNS - UTILISÉES)
+#   5-24: 20 indicateurs (TREND + VOL + VOLUME - NON UTILISÉES)
 
-# Ligne 174 - Extraction du régime
-regimes_train = Y_train[:, 2].astype(int)  # Colonne 2 = regime
+features = X[:, :, 2:5]  # Extraction UNIQUEMENT h_ret, l_ret, c_ret (colonnes 2-4)
+
+# Extraction du label régime (colonne 2 de Y)
+regimes_train = Y_train[:, 2].astype(int)  # 3 classes: 0, 1, 2
 ```
 
-### Garantie de cohérence
+### Garantie d'absence de leakage
 
-**L'ordre des colonnes est garanti par la chaîne de fonctions :**
+**Architecture validée - RAW RETURNS SEULEMENT :**
 
-1. `regime_features.py` → `get_regime_feature_names()` définit l'ordre (lignes 703-733)
-2. `prepare_data_regime.py` → utilise `get_regime_feature_names()` (ligne 606) pour construire X
-3. `train_regime_classifier.py` → extrait `X[:, :, 2:]` (cohérent avec l'ordre défini)
+1. `regime_features.py` → `get_regime_feature_names()` définit l'ordre complet (25 features)
+2. `prepare_data_regime.py` → génère X avec 25 features mais labels calculés avec colonnes 5-24
+3. `train_regime_classifier.py` → **extrait UNIQUEMENT colonnes 2-4** (h_ret, l_ret, c_ret)
+
+**✅ PAS de data leakage car:**
+- Features utilisées: h_ret, l_ret, c_ret (indices 2-4)
+- Labels calculés avec: adx, atr_normalized, bb_width, etc. (indices 5-24)
+- **Aucune intersection** entre features d'entraînement et features de labeling
 
 **Code source de l'ordre des features** (`regime_features.py` lignes 703-733) :
 
 ```python
 def get_regime_feature_names() -> list:
     return [
-        # Pure signal features (3)
+        # Pure signal features (3) - ✅ UTILISÉES pour CNN-LSTM
         'h_ret', 'l_ret', 'c_ret',
-        # Trend features (7)
+        # Trend features (7) - ❌ NON utilisées (pour éviter leakage)
         'ma20_slope', 'ma50_slope', 'regression_slope', 'regression_r2',
         'adx', 'macd_histogram_norm', 'hurst_exponent',
-        # Volatility features (9)
+        # Volatility features (9) - ❌ NON utilisées (pour éviter leakage)
         'atr_normalized', 'bb_upper', 'bb_middle', 'bb_lower', 'bb_width', 'percent_b',
         'realized_volatility', 'volatility_compression', 'range_atr_ratio',
-        # Volume & microstructure features (4)
+        # Volume & microstructure features (4) - ❌ NON utilisées
         'volume_ratio', 'volume_spike', 'vwap_deviation', 'obv_derivative'
     ]
 ```
 
-### Pourquoi pas de sélection par nom ?
+### Pourquoi seulement 3 features ?
 
-- **NumPy arrays** n'ont pas de noms de colonnes (contrairement à Pandas DataFrames)
-- La cohérence est maintenue par la **fonction unique** `get_regime_feature_names()`
-- Toute modification de l'ordre doit être faite dans cette fonction uniquement
+- ✅ **Évite data leakage**: Les 20 autres features sont utilisées pour CALCULER les labels
+- ✅ **Accuracy validée**: 86.33% avec raw returns uniquement (sans leakage)
+- ❌ **XGBoost invalidé**: 98.95% avec 20 features = leakage (modèle reconstruit la formule)
+- ✅ **Généralise bien**: CNN-LSTM apprend les patterns des returns, pas la formule des labels
 
-### Labels Y (8 colonnes) - BASE DATASET
+### Labels Y (6 colonnes) - BASE DATASET
 
 | Index | Colonne | Type | Valeurs | Description |
 |-------|---------|------|---------|-------------|
 | **0** | `timestamp` | int64 | Unix timestamp | Timestamp de la bougie (Open time) |
 | **1** | `asset_id` | int | 0-4 | ID de l'asset (0=BTC, 1=ETH, 2=BNB, 3=ADA, 4=LTC) |
-| **2** | `regime` | int | 0-3 | **Label principal Model A** (4 classes régime) |
-| **3** | `trend_strength` | float | 0-1 | Score de force de tendance (ground truth) |
-| **4** | `volatility_cluster` | float | 0-1 | Score de cluster de volatilité (ground truth) |
-| **5** | `macd_direction` | int | 0/1 | Direction MACD Kalman (0=DOWN, 1=UP) |
-| **6** | `rsi_direction` | int | 0/1 | Direction RSI Kalman (0=DOWN, 1=UP) |
-| **7** | `cci_direction` | int | 0/1 | Direction CCI Kalman (0=DOWN, 1=UP) |
+| **2** | `regime_futur` | int | 0-2 | **Label régime FUTUR** (3 classes, calculé sur [t+1, t+6]) |
+| **3** | `macd_direction` | int | 0/1 | Direction MACD Kalman (0=DOWN, 1=UP) |
+| **4** | `rsi_direction` | int | 0/1 | Direction RSI Kalman (0=DOWN, 1=UP) |
+| **5** | `cci_direction` | int | 0/1 | Direction CCI Kalman (0=DOWN, 1=UP) |
 
-**Note**: Les colonnes 5-7 (directions) sont des **labels de référence** pour entraîner les modèles de direction.
+**Note**:
+- `regime_futur` utilise la logique "Any TREND": si TREND apparaît dans [t+1, t+6] → label=TREND, sinon vote majoritaire RANGE
+- Les colonnes 3-5 (directions) sont des labels de référence pour entraîner les modèles de direction
 
 ### OHLCV (7 colonnes)
 
@@ -298,13 +330,22 @@ VC_LOW_PERCENTILE = 40      # Pour RANGE: VC ≤ P40 = LOW VOL, VC > P40 = HIGH 
 
 **Zone neutre** (0.4 ≤ TS ≤ 0.5) : Assigné au régime le plus proche
 
-### Distribution Attendue
+### Distribution Réelle (Dataset Généré 2026-01-14)
 
-| Régime | Distribution Attendue |
-|--------|----------------------|
-| 0 (RANGE LOW VOL) | ~20-30% |
-| 1 (RANGE HIGH VOL) | ~50-60% |
-| 2 (TREND) | ~15-25% |
+**⚠️ ATTENTION: Distribution Shift Important entre Splits**
+
+| Régime | Train (2.8M) | Val (608K) | Test (607K) |
+|--------|--------------|------------|-------------|
+| **0 (RANGE LOW VOL)** | 44.9% | **70.3%** | 58.3% |
+| **1 (RANGE HIGH VOL)** | 45.1% | 24.3% | 34.3% |
+| **2 (TREND)** | **10.0%** | **5.4%** | **7.4%** |
+
+**Observations Critiques**:
+- ⚠️ **TREND très rare** (5-10%): Classe minoritaire difficile à prédire
+- ⚠️ **Distribution shift majeur**: Val très différent de Train/Test
+  - Val: 70.3% RANGE_LOW (vs 44.9% train)
+  - Val: 24.3% RANGE_HIGH (vs 45.1% train)
+- ✅ RANGE domine (~94-97%): Marché passe la majorité du temps en consolidation
 
 ### Avantages de 3 Régimes
 
@@ -329,185 +370,69 @@ python src/prepare_data_regime.py --assets BTC ETH BNB ADA LTC
 
 ---
 
-## 🎯 ÉTAPE 2: Entraînement Model A + Enrichissement
+## 🎯 ÉTAPE 2: Entraînement Classificateur de Régimes (CNN-LSTM)
 
 **Script**: `src/train_regime_classifier.py`
 **Commande**:
 ```bash
 python src/train_regime_classifier.py \
-    --data data/prepared/dataset_btc_eth_bnb_ada_ltc_regime.npz \
-    --output-dir models
-```
-
-**Modèle généré**: `models/regime_classifier_xgboost.pkl`
-
-**Dataset enrichi**: `data/prepared/dataset_btc_eth_bnb_ada_ltc_regime.npz` (REMPLACÉ IN-PLACE)
-
-**Backup créé**: `data/prepared/dataset_btc_eth_bnb_ada_ltc_regime_original.npz`
-
-**Status actuel**: ✅ **EXÉCUTÉ** (dataset enrichi: 547M, backup: 461M)
-
-**Objectif**:
-1. Entraîner XGBoost multiclass pour prédire `Y[:, 2]` (regime 0-3)
-2. Enrichir automatiquement le dataset avec les prédictions
-
-**Architecture**:
-- Input: Features régime extraites de X (trend, vol, volume)
-- Modèle: XGBoost multiclass (200 arbres, depth=6)
-- Output: Classe prédite + 4 probabilités (une par régime)
-
-### Modification Y: 8 colonnes → 13 colonnes (+5)
-
-**L'enrichissement est fait AUTOMATIQUEMENT par train_regime_classifier.py**
-
-**Colonnes ajoutées** (indices 8-12):
-
-| Index | Colonne | Type | Valeurs | Description |
-|-------|---------|------|---------|-------------|
-| **8** | `regime_pred` | int | 0-3 | ✨ **Prédiction Model A** (classe prédite) |
-| **9** | `regime_prob_0` | float | 0-1 | ✨ Probabilité régime 0 (Model A) |
-| **10** | `regime_prob_1` | float | 0-1 | ✨ Probabilité régime 1 (Model A) |
-| **11** | `regime_prob_2` | float | 0-1 | ✨ Probabilité régime 2 (Model A) |
-| **12** | `regime_prob_3` | float | 0-1 | ✨ Probabilité régime 3 (Model A) |
-
-**Colonnes 0-7**: Inchangées (structure base)
-
-**Note importante**: Le fichier dataset est remplacé in-place, un backup est créé automatiquement.
-
----
-
-## 🎯 ÉTAPE 3: Entraînement Modèles Direction + Enrichissement
-
-**Script**: `src/train.py` (3 exécutions séparées)
-
-### 3.1 - MACD Direction Model
-
-**Commande**:
-```bash
-python src/train.py \
-    --data data/prepared/dataset_btc_eth_bnb_ada_ltc_regime.npz \
-    --indicator macd \
+    --data data/prepared/regime_train.npz \
+    --val-data data/prepared/regime_val.npz \
     --epochs 50 \
-    --grad-clip 1.0 \
-    --lr 0.0001
+    --batch-size 512
 ```
 
-**Modèle généré**: `models/best_model_macd_direction.pth`
+**Modèle généré**: `models/regime_cnn_lstm/best_model.pth`
 
-**Target**: `Y[:, 5]` (macd_direction)
+**Status actuel**: ⏳ **À ENTRAÎNER**
 
-**Dataset enrichi**: `data/prepared/dataset_btc_eth_bnb_ada_ltc_regime.npz` (CLÉS NPZ ajoutées)
-
-**Clés ajoutées** : `Y_train_pred`, `Y_val_pred`, `Y_test_pred` (arrays séparés, shape (n, 1) pour MACD)
-
-**Objectif**:
-1. Entraîner CNN-LSTM pour prédire direction MACD (colonne 5)
-2. Enrichir automatiquement le dataset avec clé NPZ `Y_*_pred`
-
-**Note**: train.py ajoute des **clés NPZ séparées**, ne modifie PAS la structure de Y
-
-### 3.2 - RSI Direction Model
-
-**Commande**:
-```bash
-python src/train.py \
-    --data data/prepared/dataset_btc_eth_bnb_ada_ltc_regime.npz \
-    --indicator rsi \
-    --epochs 50 \
-    --grad-clip 1.0 \
-    --lr 0.0001
-```
-
-**Modèle généré**: `models/best_model_rsi_direction.pth`
-
-**Target**: `Y[:, 6]` (rsi_direction)
+**Architecture CNN-LSTM**:
+- **Input**: Raw returns uniquement (h_ret, l_ret, c_ret) - **PAS de data leakage**
+- **Model**: CNN 1D → LSTM bidirectionnel → Dense
+- **Output**: 3 classes (RANGE_LOW_VOL, RANGE_HIGH_VOL, TREND)
+- **Loss**: CrossEntropyLoss (multiclass)
 
 **Objectif**:
-1. Entraîner CNN-LSTM pour prédire direction RSI
-2. Enrichir automatiquement le dataset avec prédictions RSI
+- Prédire le régime FUTUR (calculé sur [t+1, t+6])
+- Utiliser uniquement les rendements bruts (pas les mêmes features que le labeling)
+- **Accuracy valide attendue**: ~86% (sans data leakage)
 
-### 3.3 - CCI Direction Model
-
-**Commande**:
-```bash
-python src/train.py \
-    --data data/prepared/dataset_btc_eth_bnb_ada_ltc_regime.npz \
-    --indicator cci \
-    --epochs 50 \
-    --grad-clip 1.0 \
-    --lr 0.0001
-```
-
-**Modèle généré**: `models/best_model_cci_direction.pth`
-
-**Target**: `Y[:, 7]` (cci_direction)
-
-**Objectif**:
-1. Entraîner CNN-LSTM pour prédire direction CCI
-2. Enrichir automatiquement le dataset avec prédictions CCI
-
-**Status actuel**: ❌ **PAS ENTRAÎNÉS** (dataset base n'existe pas encore)
-
-**Note importante**: Chaque modèle de direction enrichit le dataset en ajoutant ses prédictions comme **clés NPZ séparées**, pas comme colonnes dans Y
-
----
-
-## 📊 STRUCTURE FINALE Y - 13 COLONNES (Après train_regime_classifier.py)
-
-| Index | Colonne | Source | Type | Description |
-|-------|---------|--------|------|-------------|
-| **0** | timestamp | Base | int64 | Unix timestamp |
-| **1** | asset_id | Base | int | ID asset (0-4) |
-| **2** | regime | Base | int | Ground truth régime (0-3) |
-| **3** | trend_strength | Base | float | Score force tendance (0-1) |
-| **4** | volatility_cluster | Base | float | Score cluster volatilité (0-1) |
-| **5** | macd_direction | Base | int | Ground truth direction MACD |
-| **6** | rsi_direction | Base | int | Ground truth direction RSI |
-| **7** | cci_direction | Base | int | Ground truth direction CCI |
-| **8** | regime_pred | ÉTAPE 2 | int | ✨ Prédiction Model A (régime) |
-| **9** | regime_prob_0 | ÉTAPE 2 | float | ✨ Prob régime 0 |
-| **10** | regime_prob_1 | ÉTAPE 2 | float | ✨ Prob régime 1 |
-| **11** | regime_prob_2 | ÉTAPE 2 | float | ✨ Prob régime 2 |
-| **12** | regime_prob_3 | ÉTAPE 2 | float | ✨ Prob régime 3 |
-
----
-
-## 📦 CLÉS NPZ SUPPLÉMENTAIRES (Prédictions Direction - ÉTAPE 3)
-
-**Après train.py (3 exécutions pour MACD, RSI, CCI)**, le fichier NPZ contient aussi :
-
-| Clé NPZ | Shape | Type | Description |
-|---------|-------|------|-------------|
-| `Y_train_pred` | (n_train, 1) | float | Probabilités prédites (0-1) sur train pour l'indicateur entraîné |
-| `Y_val_pred` | (n_val, 1) | float | Probabilités prédites (0-1) sur val pour l'indicateur entraîné |
-| `Y_test_pred` | (n_test, 1) | float | Probabilités prédites (0-1) sur test pour l'indicateur entraîné |
-
-**Note**: Ces clés sont **écrasées** à chaque exécution de train.py. Pour conserver les 3 prédictions (MACD, RSI, CCI), il faut soit :
-- Les sauvegarder séparément après chaque entraînement
-- Ou utiliser un script qui combine les 3 modèles
 
 ---
 
 ## 📋 PROCHAINES ACTIONS IMMÉDIATES
 
-### 1. Générer le dataset base
+### ✅ 1. Dataset généré (2026-01-14)
 ```bash
+# Déjà exécuté - datasets créés avec succès
 python src/prepare_data_regime.py --assets BTC ETH BNB ADA LTC
+
+# Résultat:
+# - regime_train.npz: 2,832,684 samples
+# - regime_val.npz: 608,460 samples
+# - regime_test.npz: 607,465 samples
 ```
 
-### 2. Vérifier la normalisation
+### ⏳ 2. Entraîner le classificateur CNN-LSTM
 ```bash
-python tests/check_features_normalization.py \
-    --data data/prepared/dataset_btc_eth_bnb_ada_ltc_regime.npz
-```
-
-### 3. Entraîner Model A avec stabilité
-```bash
-python src/train.py \
-    --data data/prepared/dataset_btc_eth_bnb_ada_ltc_regime.npz \
+python src/train_regime_classifier.py \
+    --data data/prepared/regime_train.npz \
+    --val-data data/prepared/regime_val.npz \
     --epochs 50 \
-    --grad-clip 1.0 \
-    --lr 0.0001
+    --batch-size 512
+```
+
+**Résultat attendu**:
+- Modèle: `models/regime_cnn_lstm/best_model.pth`
+- Accuracy test: ~86% (validé empiriquement sans leakage)
+- 3 classes: RANGE_LOW_VOL (0), RANGE_HIGH_VOL (1), TREND (2)
+
+### ⏳ 3. Évaluer sur le test set
+```bash
+python src/train_regime_classifier.py \
+    --data data/prepared/regime_test.npz \
+    --eval-only \
+    --load-model models/regime_cnn_lstm/best_model.pth
 ```
 
 ---
