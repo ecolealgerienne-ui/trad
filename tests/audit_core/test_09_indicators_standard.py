@@ -88,15 +88,24 @@ class TestMACD:
         assert macd.shape == (len(df_linear),)
         assert macd.dtype == np.float64
 
-    def test_macd_stabilizes_on_linear(self, df_linear):
-        """Prix linéaire → MACD tend vers valeur stable après warmup."""
+    def test_macd_nonzero_during_warmup_then_converges(self, df_linear):
+        """
+        Sur un signal linéaire parfait:
+        - Début: histogram croît (line rattrape signal avec lag)
+        - Pic: vers 20-40 bougies
+        - Fin: converge vers 0 (signal EMA rattrape la line, qui est elle-même
+          différence de 2 EMAs qui convergent toutes deux vers la ligne)
+        """
         macd = calculate_macd(df_linear)
-        # Après warmup (>50 bougies), std doit être faible relative à mean
-        tail = macd[100:]
-        std = np.std(tail)
-        mean = np.mean(tail)
-        assert abs(mean) > 0.01, f"MACD on rising prices should be positive, got mean={mean}"
-        assert std / abs(mean) < 0.3, f"MACD should stabilize, got std/mean = {std/abs(mean):.3f}"
+        clean = macd[~np.isnan(macd)]
+        # Il existe un pic positif pendant le warmup
+        peak = np.max(clean)
+        assert peak > 0.01, f"MACD should peak positive during warmup, got {peak}"
+        # La fin converge vers 0 (propriété du MACD sur signal linéaire parfait)
+        tail_mean = np.mean(macd[-20:])
+        print(f"\n[MACD linear] peak = {peak:.4f}, tail mean = {tail_mean:.6f}")
+        # Documentaire : tail tend vers 0 (peut être très petit)
+        assert abs(tail_mean) < 0.01, f"Tail should converge to ~0, got {tail_mean}"
 
     def test_macd_zero_on_constant(self, df_constant):
         """Prix constant → MACD = 0."""
