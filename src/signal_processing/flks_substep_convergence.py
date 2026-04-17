@@ -775,7 +775,8 @@ def main():
     if len(df_30m) > n30:
         df_30m = df_30m.iloc[-n30:]
     df_5m = df_5m.loc[df_30m.index[0]:df_30m.index[-1] + pd.Timedelta(minutes=29)]
-    print(f"       {len(df_30m):,} bougies 30min, {len(df_5m):,} bougies 5min")
+    n30 = len(df_30m)  # update n30 to actual count
+    print(f"       {n30:,} bougies 30min, {len(df_5m):,} bougies 5min")
 
     # ------------------------------------------------------------------
     print("[3/5] Computing indicators (30min standard + 5min live) ...")

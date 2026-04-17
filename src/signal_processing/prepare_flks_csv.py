@@ -1,0 +1,215 @@
+#!/usr/bin/env python3
+"""
+Prepare CSV for LSTM training with FLKS backward slopes as features
+====================================================================
+
+Generates a 5min resolution CSV with:
+  - MACD live features (macd_30m_live, macd_30m_filtered, macd_30m_velocity)
+  - FLKS backward slopes (aq_t1_slope, aq_k1_slope, ..., aq_k6_slope)
+  - Oracle labels (oracle_label_macd_30m from pykalman.smooth)
+
+All FLKS slopes are at 30min resolution, forward-filled to 5min.
+Also computes concordance table to verify consistency.
+
+Usage:
+    python src/signal_processing/prepare_flks_csv.py \
+        --csv data_trad/BTCUSD_all_5m.csv --n-candles-30m 5000
+"""
+
+import argparse
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from core import (
+    load_csv, resample_ohlcv, compute_bucket_close_mask,
+    calculate_macd, compute_macd_live,
+    compute_kalman_live_standard, compute_kalman_live_aqkf,
+    forward_filter_30m, forward_filter_30m_adaptive,
+    compute_slopes_test1, compute_slopes_test2,
+    compute_oracle, sign_concordance, find_oracle_transitions,
+    sign_concordance_at_transitions, group_per_candle,
+    A,
+)
+
+TRIM = 100
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Prepare FLKS features CSV for LSTM training')
+    parser.add_argument('--csv', type=str, default='data_trad/BTCUSD_all_5m.csv')
+    parser.add_argument('--n-candles-30m', type=int, default=5000)
+    parser.add_argument('--output-dir', type=str, default='data/prepared')
+    args = parser.parse_args()
+
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # ==================================================================
+    print(f"[1/8] Loading {args.csv} ...")
+    df_5m = load_csv(args.csv)
+    print(f"       {len(df_5m):,} 5min candles")
+
+    # ==================================================================
+    print("[2/8] Resampling to 30min ...")
+    df_30m = resample_ohlcv(df_5m, 30)
+    if args.n_candles_30m > 0 and len(df_30m) > args.n_candles_30m:
+        df_30m = df_30m.iloc[-args.n_candles_30m:]
+    df_5m = df_5m.loc[df_30m.index[0]:df_30m.index[-1] + pd.Timedelta(minutes=29)]
+    n30 = len(df_30m)
+    print(f"       {n30:,} bougies 30min, {len(df_5m):,} bougies 5min")
+
+    # ==================================================================
+    print("[3/8] Computing MACD 30min + live 5min ...")
+    macd_30m = calculate_macd(df_30m)
+    is_close = compute_bucket_close_mask(df_5m.index, 30)
+    close_5m = df_5m['close'].values.astype(np.float64)
+    macd_live = compute_macd_live(close_5m, is_close)
+    macd_live_pc = group_per_candle(df_5m, df_30m, macd_live)
+    print(f"       MACD range: [{np.nanmin(macd_30m):.1f}, {np.nanmax(macd_30m):.1f}]")
+
+    # ==================================================================
+    print("[4/9] Standard Kalman live features (5min resolution) ...")
+    std_out = compute_kalman_live_standard(macd_live, is_close)
+    std_filtered = std_out[:, 0]
+    std_velocity = std_out[:, 1]
+    print(f"       {np.sum(~np.isnan(std_filtered)):,} valid Standard values")
+
+    # ==================================================================
+    print("[5/9] AQ-KF live features (5min resolution) ...")
+    aq_out = compute_kalman_live_aqkf(macd_live, is_close)
+    aq_filtered = aq_out[:, 0]
+    aq_velocity = aq_out[:, 1]
+    print(f"       {np.sum(~np.isnan(aq_filtered)):,} valid AQ-KF values")
+
+    # ==================================================================
+    print("[6/9] Oracle labels (pykalman.smooth on 30min) ...")
+    _, slopes_oracle = compute_oracle(macd_30m)
+    oracle_labels = np.where(slopes_oracle > 0, 1, 0)
+    oracle_labels_30m = pd.Series(oracle_labels, index=df_30m.index)
+    oracle_labels_5m = oracle_labels_30m.reindex(df_5m.index, method='ffill').fillna(0).astype(int)
+    oracle_slopes_30m = pd.Series(slopes_oracle, index=df_30m.index)
+    oracle_slopes_5m = oracle_slopes_30m.reindex(df_5m.index, method='ffill')
+    print(f"       Labels: {(oracle_labels_5m == 1).sum():,} UP, {(oracle_labels_5m == 0).sum():,} DOWN")
+
+    # ==================================================================
+    print("[7/9] FLKS backward slopes (Standard + AQ-KF, T1 + k=1..6) ...")
+
+    # Standard forward filter on 30min
+    x_std, P_std, xp_std, Pp_std, C_std = forward_filter_30m(macd_30m)
+    # AQ-KF forward filter on 30min
+    x_aq, P_aq, xp_aq, Pp_aq, C_aq = forward_filter_30m_adaptive(
+        macd_30m, window=30, Q_max_factor=10.0)
+
+    def compute_and_ffill(slopes_30m):
+        s = pd.Series(slopes_30m, index=df_30m.index)
+        return s.reindex(df_5m.index, method='ffill').values
+
+    # Standard slopes
+    std_slopes = {}
+    std_slopes['t1'] = compute_and_ffill(compute_slopes_test1(x_std, xp_std, C_std))
+    for k in range(1, 7):
+        std_slopes[f'k{k}'] = compute_and_ffill(
+            compute_slopes_test2(x_std, P_std, xp_std, C_std, macd_live_pc, k))
+
+    # AQ-KF slopes
+    aq_slopes = {}
+    aq_slopes['t1'] = compute_and_ffill(compute_slopes_test1(x_aq, xp_aq, C_aq))
+    for k in range(1, 7):
+        aq_slopes[f'k{k}'] = compute_and_ffill(
+            compute_slopes_test2(x_aq, P_aq, xp_aq, C_aq, macd_live_pc, k))
+
+    print("       Done.")
+
+    # ==================================================================
+    print("[8/9] Building CSV ...")
+    result = pd.DataFrame(index=df_5m.index)
+    result['close'] = df_5m['close'].values
+    # MACD live
+    result['macd_30m_live'] = macd_live
+    # Standard Kalman
+    result['std_filtered'] = std_filtered
+    result['std_velocity'] = std_velocity
+    result['std_t1_slope'] = std_slopes['t1']
+    for k in range(1, 7):
+        result[f'std_k{k}_slope'] = std_slopes[f'k{k}']
+    # AQ-KF
+    result['aq_filtered'] = aq_filtered
+    result['aq_velocity'] = aq_velocity
+    result['aq_t1_slope'] = aq_slopes['t1']
+    for k in range(1, 7):
+        result[f'aq_k{k}_slope'] = aq_slopes[f'k{k}']
+    # Oracle
+    result['oracle_label_macd_30m'] = oracle_labels_5m.values
+    result['oracle_slope_macd_30m'] = oracle_slopes_5m.values
+
+    out_path = output_dir / 'BTCUSD_flks_features.csv'
+    result.to_csv(out_path)
+    n_rows = len(result)
+    n_cols = len(result.columns)
+    print(f"       Saved: {out_path} ({n_rows:,} rows × {n_cols} columns)")
+
+    # ==================================================================
+    print(f"\n[9/9] Concordance verification from CSV ...")
+
+    # Compare at 30min closures only
+    common_idx = result.dropna().index.intersection(df_30m.index)
+    df_closures = result.loc[common_idx].dropna()
+    n_cl = len(df_closures)
+
+    eval_start = TRIM
+    eval_end = n_cl - TRIM
+    n_eval = eval_end - eval_start
+
+    oracle_sl = df_closures['oracle_slope_macd_30m'].values
+    trans_mask = find_oracle_transitions(oracle_sl, eval_start, eval_end)
+    n_trans = trans_mask.sum()
+
+    s_o = oracle_sl[eval_start:eval_end]
+    sign_o = np.where(np.abs(s_o) < 1e-8, 0, np.sign(s_o))
+    valid_signs = sign_o[sign_o != 0]
+    persistence = np.mean(valid_signs[1:] == valid_signs[:-1]) * 100.0
+
+    print(f"\n{'=' * 80}")
+    print(f"  CONCORDANCE VERIFICATION (from saved CSV, closures only)")
+    print(f"  Closures: {n_cl:,} | Eval [{eval_start}:{eval_end}] = {n_eval:,}")
+    print(f"  Transitions: {n_trans:,} | Persistence: {persistence:.1f}%")
+    print(f"{'=' * 80}")
+
+    print(f"\n  {'Méthode':<20} {'Std All':>9} {'Std Trans':>10} "
+          f"{'AQ All':>9} {'AQ Trans':>10}")
+    print(f"  {'-' * 60}")
+
+    methods = [('t1', 'T1 (0 pas)')]
+    for k in range(1, 7):
+        methods.append((f'k{k}', f'k={k} ({k*5}min)'))
+
+    for key, label in methods:
+        std_col = f'std_{key}_slope'
+        aq_col = f'aq_{key}_slope'
+        std_sl = df_closures[std_col].values
+        aq_sl = df_closures[aq_col].values
+
+        std_all, _ = sign_concordance(std_sl, oracle_sl, eval_start, eval_end)
+        std_tr, _ = sign_concordance_at_transitions(
+            std_sl, oracle_sl, eval_start, eval_end, trans_mask)
+        aq_all, _ = sign_concordance(aq_sl, oracle_sl, eval_start, eval_end)
+        aq_tr, _ = sign_concordance_at_transitions(
+            aq_sl, oracle_sl, eval_start, eval_end, trans_mask)
+
+        print(f"  {label:<20} {std_all:>8.2f}% {std_tr:>9.2f}% "
+              f"{aq_all:>8.2f}% {aq_tr:>9.2f}%")
+
+    print(f"  {'-' * 60}")
+    print(f"{'=' * 80}")
+    print("Done.")
+
+
+if __name__ == '__main__':
+    main()
