@@ -79,6 +79,24 @@ def main():
     print(f"\n{args.split}: {len(closes):,} rows  |  "
           f"{dates[0]} → {dates[-1]}  ({period_days:.0f} jours)")
 
+    # Distribution des probas (diagnostic)
+    print(f"\n[Proba distribution]")
+    bins_edges = [0.0, 0.05, 0.10, 0.20, 0.30, 0.40, 0.50,
+                   0.60, 0.70, 0.80, 0.90, 0.95, 1.0]
+    counts, _ = np.histogram(p, bins=bins_edges)
+    for i in range(len(bins_edges) - 1):
+        pct = counts[i] / len(p) * 100
+        bar = '█' * int(pct / 2)
+        print(f"  [{bins_edges[i]:.2f}, {bins_edges[i+1]:.2f}) "
+              f"{counts[i]:>10,} ({pct:>5.2f}%) {bar}")
+    # Stats clés
+    in_03_07 = ((p >= 0.3) & (p <= 0.7)).sum() / len(p) * 100
+    in_01_09 = ((p >= 0.1) & (p <= 0.9)).sum() / len(p) * 100
+    in_005_095 = ((p >= 0.05) & (p <= 0.95)).sum() / len(p) * 100
+    print(f"  → Dans [0.30, 0.70]: {in_03_07:.2f}%  "
+          f"| [0.10, 0.90]: {in_01_09:.2f}%  "
+          f"| [0.05, 0.95]: {in_005_095:.2f}%")
+
     # Baseline Oracle
     print(f"\n[Baseline] Oracle (référence)")
     r_oracle = backtest_5min_progressive(y_cont, closes, fees=args.fees)
