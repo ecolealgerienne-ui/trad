@@ -186,6 +186,53 @@ def compute_indicator_live(df_5m, is_close, indicator, tf_minutes):
     return pd.Series(values, index=df_5m.index, name=f'{key}_live')
 
 
+def compute_oracle_labels(df, indicator):
+    """
+    Dispatcher oracle : calcule les labels non-causaux (smoother RTS) pour
+    un indicateur sur n'importe quel df OHLC (tout timeframe).
+
+    Pipeline interne:
+        df --compute_indicator--> ind --pykalman.smooth--> positions
+                                                        --> slopes = pos[t-1] - pos[t-2]
+                                                        --> labels = 1 if slope > 0 else 0
+
+    ATTENTION: SMOOTHER NON-CAUSAL. Utilise des données futures par design.
+    À utiliser UNIQUEMENT pour générer des labels de training, JAMAIS en
+    production temps-réel.
+
+    Args:
+        df: DataFrame OHLC (index = timestamps, tout TF).
+        indicator: 'macd' | 'rsi' | 'cci'.
+
+    Returns:
+        pd.DataFrame indexé par les timestamps de df, colonnes:
+          - position : état lissé (smoother RTS)
+          - slope    : positions[t-1] - positions[t-2]
+          - label    : 1 si slope > 0 sinon 0 (int)
+        Les NaN (warm-up, bords, slopes[0]/[1]) sont remplacés par 0
+        pour alignement downstream.
+    """
+    # Étape 1 : indicateur standard (retourne Series, NaN déjà remplacés par 0)
+    ind_series = compute_indicator(df, indicator)
+    ind_array = ind_series.values.astype(np.float64)
+
+    # Étape 2 : smoother non-causal (RTS) via compute_oracle existant
+    positions, slopes = compute_oracle(ind_array)
+
+    # Étape 3 : fillna(0) cohérent avec le reste du pipeline
+    positions = np.where(np.isnan(positions), 0.0, positions)
+    slopes = np.where(np.isnan(slopes), 0.0, slopes)
+
+    # Étape 4 : labels = 1 si slope > 0 sinon 0
+    labels = (slopes > 0).astype(int)
+
+    return pd.DataFrame({
+        'position': positions,
+        'slope': slopes,
+        'label': labels,
+    }, index=df.index)
+
+
 # ============================================================================
 # INDICATORS — Live frozen/provisional
 # ============================================================================
