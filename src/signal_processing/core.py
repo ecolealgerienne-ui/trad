@@ -341,6 +341,73 @@ def compute_flks_slopes(df_tf, df_5m, indicator, tf_minutes, k_range=(1, 6),
     return df_slopes
 
 
+def compute_progressive_slopes(df_tf, df_5m, indicator, tf_minutes,
+                                 Q_var=KALMAN_PROCESS_VAR, R_var=KALMAN_MEASURE_VAR,
+                                 indicator_params=None):
+    """
+    Calcule une slope progressive à chaque ligne 5min.
+
+    À l'instant i (5min), on identifie :
+      - t_ref  : bougie TF la plus récente dont le close est déjà connu à i
+                 (= floor(i, tf) - tf ; cette bougie se ferme à t_ref + tf)
+      - step_k : nombre de sous-pas 5min écoulés dans la bougie courante (t_ref + tf)
+                 ∈ {0, 1, ..., tf/5 - 1}
+
+    Feature à la ligne i :
+      - step_k == 0 : slope_t1[t_ref]                (backward, pas de sous-pas)
+      - step_k >= 1 : slope_k<step_k>[t_ref]         (backward, step_k sous-pas live)
+
+    Args:
+        df_tf: DataFrame OHLC au timeframe TF.
+        df_5m: DataFrame OHLC au 5min.
+        indicator: 'macd' | 'rsi' | 'cci'.
+        tf_minutes: 30 ou 60.
+
+    Returns:
+        pd.DataFrame indexé par df_5m.index, colonnes:
+          - slope_progressive : float  (slope appropriée selon step_k)
+          - step_k            : int    (0..tf/5 - 1)
+    """
+    n_substeps_per_candle = tf_minutes // 5
+    k_max_live = n_substeps_per_candle - 1  # k=1..(n_substeps-1) en live
+
+    # Slopes TF (une seule fois) : slope_t1 + slope_k1..slope_k<k_max_live>
+    slopes_tf = compute_flks_slopes(df_tf, df_5m, indicator, tf_minutes,
+                                      k_range=(1, k_max_live),
+                                      Q_var=Q_var, R_var=R_var,
+                                      indicator_params=indicator_params)
+    # Colonnes disponibles : slope_t1, slope_k1, ..., slope_k<k_max_live>
+
+    tf_delta = pd.Timedelta(minutes=tf_minutes)
+    idx_5m = df_5m.index
+    # t_ref = floor(i, tf) - tf
+    #   i = 11:00 (frontière) → floor = 11:00, t_ref = 10:30 ✅
+    #   i = 11:05             → floor = 11:00, t_ref = 10:30 ✅
+    #   i = 11:30 (frontière) → floor = 11:30, t_ref = 11:00 ✅
+    t_ref = idx_5m.floor(tf_delta) - tf_delta
+    # step_k = (i - t_ref - tf) / 5min
+    step_k = (((idx_5m - t_ref - tf_delta).total_seconds()) // 300).astype(np.int64)
+
+    # Matrice (n_5m, n_substeps_per_candle) : [slope_t1, slope_k1, ..., slope_k<k_max>]
+    slope_cols = ['slope_t1'] + [f'slope_k{k}' for k in range(1, k_max_live + 1)]
+    slopes_aligned = slopes_tf.reindex(t_ref)[slope_cols]
+    slope_matrix = slopes_aligned.values  # (n_5m, n_substeps_per_candle)
+
+    # Sélection ligne par ligne selon step_k
+    row_idx = np.arange(len(idx_5m))
+    # Safeguard : clip step_k au range valide (devrait toujours être OK)
+    step_k_clipped = np.clip(step_k, 0, n_substeps_per_candle - 1)
+    slope_progressive = slope_matrix[row_idx, step_k_clipped]
+
+    # NaN si t_ref est antérieur au premier df_tf.index : fillna 0
+    slope_progressive = np.where(np.isnan(slope_progressive), 0.0, slope_progressive)
+
+    return pd.DataFrame({
+        'slope_progressive': slope_progressive.astype(np.float64),
+        'step_k': step_k.astype(np.int64),
+    }, index=idx_5m)
+
+
 # ============================================================================
 # ML DATA PREPARATION
 # ============================================================================
@@ -408,6 +475,73 @@ def prepare_features_and_labels(df_tf, df_5m, indicator, tf_minutes, trim=100,
     # 4. TRIM début et fin pour écarter warm-up et bords incomplets
     if trim > 0 and len(result) > 2 * trim:
         result = result.iloc[trim:-trim]
+    return result
+
+
+def prepare_features_and_labels_progressive(df_tf, df_5m, indicator, tf_minutes,
+                                               trim=100,
+                                               Q_var=KALMAN_PROCESS_VAR,
+                                               R_var=KALMAN_MEASURE_VAR,
+                                               indicator_params=None):
+    """
+    Version "progressive" à résolution 5min :
+      - Labels oracle[t_ref] ffill sur les tf/5 lignes 5min de la bougie courante
+      - Features slope évoluant à chaque 5min (slope_t1 ou slope_k<step_k>)
+      - step_k (0..tf/5-1) exposé comme feature auxiliaire
+
+    Pour chaque ligne 5min à l'instant i :
+      - t_ref  = floor(i, tf) - tf   (bougie TF la plus récente avec close connu)
+      - step_k = (i - t_ref - tf) / 5min
+
+    Colonnes de sortie :
+      - slope_progressive : slope_t1[t_ref] si step_k==0 sinon slope_k<step_k>[t_ref]
+      - step_k            : 0..tf/5-1
+      - label_binary      : oracle label[t_ref] ffill
+      - label_continuous  : oracle slope[t_ref] ffill
+      - close             : close 5min (prix d'exec pour backtest)
+
+    Args:
+        df_tf: DataFrame OHLC au timeframe TF.
+        df_5m: DataFrame OHLC au 5min.
+        indicator: 'macd' | 'rsi' | 'cci'.
+        tf_minutes: 30 ou 60.
+        trim: nombre de bougies TF à retirer au début ET à la fin.
+              Converti en lignes 5min : trim_5m = trim * (tf/5).
+
+    Returns:
+        pd.DataFrame indexé par df_5m.index (trimé), 5 colonnes.
+    """
+    # 1. Slopes progressives 5min + step_k
+    slopes_prog = compute_progressive_slopes(
+        df_tf, df_5m, indicator, tf_minutes,
+        Q_var=Q_var, R_var=R_var, indicator_params=indicator_params)
+
+    # 2. Oracle au TF
+    oracle = compute_oracle_labels(df_tf, indicator,
+                                     Q_var=Q_var, R_var=R_var,
+                                     indicator_params=indicator_params)
+
+    # 3. ffill oracle sur les 5min via t_ref (même logique que slopes)
+    tf_delta = pd.Timedelta(minutes=tf_minutes)
+    t_ref_5m = df_5m.index.floor(tf_delta) - tf_delta
+    oracle_aligned = oracle.reindex(t_ref_5m)
+    # Restore index 5min après reindex
+    oracle_aligned.index = df_5m.index
+
+    # 4. Assembler
+    result = pd.DataFrame({
+        'slope_progressive': slopes_prog['slope_progressive'].values,
+        'step_k': slopes_prog['step_k'].values,
+        'label_binary': oracle_aligned['label'].fillna(0).astype(int).values,
+        'label_continuous': oracle_aligned['slope'].fillna(0.0).astype(np.float64).values,
+        'close': df_5m['close'].astype(np.float64).values,
+    }, index=df_5m.index)
+
+    # 5. TRIM : convertir trim (bougies TF) en lignes 5min
+    n_sub = tf_minutes // 5
+    trim_5m = trim * n_sub
+    if trim > 0 and len(result) > 2 * trim_5m:
+        result = result.iloc[trim_5m:-trim_5m]
     return result
 
 
