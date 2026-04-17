@@ -79,12 +79,17 @@ def main():
     print(f"TÉLÉCHARGEMENT {SYMBOL} — 3 timeframes sur {DAYS} jours")
     print("=" * 80)
 
-    # Range unique pour les 3 timeframes
-    end_time = datetime.now()
+    # Alignement sur des bordures d'heure entière (xx:00) pour les 3 TFs.
+    # - end_ts = dernière heure entière COMPLÈTEMENT passée (bougie 1h close)
+    # - start_ts = end_ts - DAYS jours (déjà aligné xx:00)
+    # Les 3 CSV auront le même premier et dernier timestamp.
+    now = datetime.now()
+    end_time = now.replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
     start_time = end_time - timedelta(days=DAYS)
     start_ms = int(start_time.timestamp() * 1000)
     end_ms = int(end_time.timestamp() * 1000)
-    print(f"Période: {start_time} → {end_time}")
+    print(f"Période alignée (xx:00): {start_time} → {end_time}")
+    print(f"  (start et end sont des timestamps de 1ère/dernière bougie, pour les 3 TFs)")
     print()
 
     output_dir = Path('data/raw')
@@ -94,6 +99,8 @@ def main():
     for tf in TIMEFRAMES:
         print(f"[{tf}] Téléchargement …")
         df = download_range(SYMBOL, tf, start_ms, end_ms)
+        # Filtrer pour garantir start == start_time et end == end_time (bornes incluses)
+        df = df[(df['timestamp'] >= start_time) & (df['timestamp'] <= end_time)].reset_index(drop=True)
         out_path = output_dir / f'BTCUSD_3months_{tf}.csv'
         df.to_csv(out_path, index=False)
         results[tf] = (df, out_path)
@@ -112,13 +119,30 @@ def main():
         print(f"{tf:<12} {len(df):>10,} {str(df['timestamp'].iloc[0]):<22} {str(df['timestamp'].iloc[-1]):<22}")
     print("=" * 80)
 
+    # Vérifier alignement : les 3 fichiers commencent et finissent au même timestamp
+    starts = {tf: results[tf][0]['timestamp'].iloc[0] for tf in TIMEFRAMES}
+    ends = {tf: results[tf][0]['timestamp'].iloc[-1] for tf in TIMEFRAMES}
+    all_starts_equal = len(set(starts.values())) == 1
+    all_ends_equal = len(set(ends.values())) == 1
+    print(f"\nAlignement timestamps :")
+    print(f"  Starts identiques : {'✅' if all_starts_equal else '❌'}  ({dict(starts)})")
+    print(f"  Ends identiques   : {'✅' if all_ends_equal else '❌'}  ({dict(ends)})")
+
     # Sanity: les 3 fichiers devraient avoir un ratio cohérent
     n5m = len(results['5m'][0])
     n30m = len(results['30m'][0])
     n1h = len(results['1h'][0])
-    print(f"\nSanity check (ratios attendus ~6× et ~12×):")
-    print(f"  5m / 30m = {n5m / n30m:.2f} (attendu ~6.0)")
-    print(f"  5m / 1h  = {n5m / n1h:.2f} (attendu ~12.0)")
+    # Avec bornes incluses et alignement xx:00, on attend:
+    #   n1h  = DAYS*24 + 1
+    #   n30m = DAYS*48 + 1
+    #   n5m  = DAYS*288 + 1
+    expected_1h = DAYS * 24 + 1
+    expected_30m = DAYS * 48 + 1
+    expected_5m = DAYS * 288 + 1
+    print(f"\nSanity check (bornes incluses, alignement xx:00) :")
+    print(f"  1h  : {n1h:>6} (attendu {expected_1h})")
+    print(f"  30m : {n30m:>6} (attendu {expected_30m})")
+    print(f"  5m  : {n5m:>6} (attendu {expected_5m})")
     print()
     print("Prochaine étape: valider resample(5m → 30m) ≈ 30m téléchargé,")
     print("                 valider resample(5m → 1h) ≈ 1h téléchargé.")
