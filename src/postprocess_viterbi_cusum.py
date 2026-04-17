@@ -207,23 +207,11 @@ def main():
     ind = args.indicator
     tf = args.timeframe
 
-    # Load predictions
-    npz_path = f'{PREPARED_DATA_DIR}/{ind}_{tf}_dataset.npz'
-    data = np.load(npz_path, allow_pickle=True)
-    if 'y_test' in data:
-        y_test = data['y_test']
-        y_pred_proba = data['y_test_pred']
-    else:
-        y_test = data['test_labels']
-        y_pred_proba = data['test_preds']
-
-    n_test = len(y_test)
-
-    # Load closes
-    base = ASSET_CSV_MAP['BTC']
-    csv_path = f'{PREPARED_DATA_DIR}/{base}_multitf_macd_rsi_cci.csv'
-    df = pd.read_csv(csv_path, parse_dates=['datetime']).set_index('datetime').sort_index()
-    closes_test = df['close'].dropna().values[-n_test:]
+    # Load predictions + closes (aligned)
+    sys.path.insert(0, str(Path(__file__).parent / 'signal_processing'))
+    from core import load_test_data
+    y_test, y_pred_proba, _, closes_test, n_test, csv_used = load_test_data(ind, tf)
+    logger.info(f"  CSV: {csv_used}")
 
     bh = (closes_test[-1] - closes_test[0]) / closes_test[0] * 100
     oracle_switches = sum(1 for i in range(1, n_test) if y_test[i] != y_test[i-1])

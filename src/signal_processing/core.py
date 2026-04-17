@@ -739,3 +739,60 @@ def group_per_candle(df_5m, df_30m, array_5m):
         mask = (df_5m.index >= ts_30m) & (df_5m.index <= bucket_end)
         per_candle.append(array_5m[mask])
     return per_candle
+
+
+# ============================================================================
+# DATA LOADING — NPZ + CSV aligned for backtests
+# ============================================================================
+
+PREPARED_DATA_DIR = 'data/prepared'
+
+ASSET_CSV_MAP = {'BTC': 'BTCUSD'}
+
+
+def find_features_csv():
+    """Find the features CSV. Prefer FLKS features, fall back to old pipeline."""
+    candidates = [
+        f'{PREPARED_DATA_DIR}/BTCUSD_flks_features.csv',
+        f'{PREPARED_DATA_DIR}/BTCUSD_multitf_macd_rsi_cci.csv',
+    ]
+    for c in candidates:
+        from pathlib import Path
+        if Path(c).exists():
+            return c
+    raise FileNotFoundError(f"No features CSV found. Tried: {candidates}")
+
+
+def load_test_data(indicator='macd', timeframe='30m', threshold=0.5):
+    """
+    Load NPZ predictions + aligned closes from features CSV.
+
+    Returns:
+        y_test: oracle labels
+        y_pred_proba: model probability outputs
+        y_pred_binary: thresholded predictions
+        closes_test: aligned close prices
+        n_test: number of test samples
+    """
+    npz_path = f'{PREPARED_DATA_DIR}/{indicator}_{timeframe}_dataset.npz'
+    from pathlib import Path
+    if not Path(npz_path).exists():
+        raise FileNotFoundError(f"NPZ not found: {npz_path}")
+
+    data = np.load(npz_path, allow_pickle=True)
+    if 'y_test' in data:
+        y_test = data['y_test']
+        y_pred_proba = data['y_test_pred']
+    else:
+        y_test = data['test_labels']
+        y_pred_proba = data['test_preds']
+
+    n_test = len(y_test)
+    y_pred_binary = (y_pred_proba > threshold).astype(int)
+
+    csv_path = find_features_csv()
+    df = pd.read_csv(csv_path, parse_dates=['datetime']).set_index('datetime').sort_index()
+    closes_all = df['close'].dropna().values
+    closes_test = closes_all[-n_test:]
+
+    return y_test, y_pred_proba, y_pred_binary, closes_test, n_test, csv_path
