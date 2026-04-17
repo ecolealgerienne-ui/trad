@@ -231,22 +231,25 @@ class TestNonCausality:
     def test_oracle_differs_from_forward_filter(self, step_signal):
         """
         Sur un step, oracle smoother et forward filter causal doivent différer :
-        l'oracle a "vu" le step avant, le filter causal doit attendre.
+        l'oracle a "vu" le step avant (anticipation), le filter causal doit attendre.
+
+        Avec ratio R/Q = 0.1/0.01 = 10, le smoother anticipe sur ~3 bougies.
+        On compare donc tout près du step (t=98-99) où l'anticipation est visible.
         """
         y = step_signal
         _, slopes_oracle = compute_oracle(y)
         x_f, _, _, _, _ = forward_filter_30m(y)
-        # Forward filter velocity (peut être utilisé comme pente instantanée)
         velocity_fwd = x_f[:, 1]
-        # Autour de t=100 (step), oracle voit la pente avant, forward après
-        # Comparer slopes_oracle[90] (avant step) vs velocity_fwd[90]
-        t_before = 90
+        # À t=99 (juste avant step à t=100) : oracle anticipe fortement, filter ne voit rien
+        t_before = 99
         print(f"\n[ORACLE vs FILTER] slopes_oracle[{t_before}] = {slopes_oracle[t_before]:.4f}")
         print(f"[ORACLE vs FILTER] velocity_fwd[{t_before}] = {velocity_fwd[t_before]:.4f}")
-        # Oracle doit être significativement positif (anticipation)
-        # Forward filter doit être proche de 0 (pas encore vu le step)
-        assert slopes_oracle[t_before] > abs(velocity_fwd[t_before]), \
-            f"Oracle should anticipate step more than causal filter"
+        # Oracle doit avoir une pente positive significative (anticipation)
+        assert slopes_oracle[t_before] > 0.5, \
+            f"Oracle should anticipate step at t={t_before}: got {slopes_oracle[t_before]}"
+        # Le filter causal n'a pas encore vu le step → velocity ≈ 0
+        assert abs(velocity_fwd[t_before]) < 0.01, \
+            f"Causal filter should have near-zero velocity before step: got {velocity_fwd[t_before]}"
 
 
 # ============================================================================
@@ -294,26 +297,41 @@ class TestNaNHandling:
 
 class TestSmootherProperty:
 
-    def test_smoother_less_lag_than_filter(self, step_signal):
+    def test_smoother_lower_rmse_on_noisy_signal(self):
         """
-        Le smoother a moins de lag que le filter causal sur un step.
-        Au temps T=100 (step), la position smoothée doit être
-        plus proche du nouveau niveau (10) que la position filtrée.
+        Le vrai gain du smoother RTS : sur un signal bruité, la RMSE globale
+        par rapport au signal vrai doit être INFÉRIEURE à celle du filter causal.
+
+        (Note : sur un step brutal, le smoother LISSE la transition donc peut
+        être moins précis localement, mais gagne en RMSE globale.)
+        """
+        rng = np.random.default_rng(42)
+        n = 300
+        true_y = 50.0 + 0.1 * np.arange(n)
+        noisy_y = true_y + rng.normal(0, 1.0, n)
+        pos_oracle, _ = compute_oracle(noisy_y)
+        x_f, _, _, _, _ = forward_filter_30m(noisy_y)
+        pos_filter = x_f[:, 0]
+        # RMSE hors warm-up
+        rmse_oracle = np.sqrt(np.mean((pos_oracle[50:] - true_y[50:]) ** 2))
+        rmse_filter = np.sqrt(np.mean((pos_filter[50:] - true_y[50:]) ** 2))
+        print(f"\n[SMOOTHER RMSE] oracle = {rmse_oracle:.4f}, filter = {rmse_filter:.4f}")
+        assert rmse_oracle < rmse_filter, \
+            f"Smoother should have lower RMSE than filter on noisy signal"
+
+    def test_smoother_step_transition_is_smoothed(self, step_signal):
+        """
+        Corollaire (pas un 'gain') : le smoother LISSE la transition du step.
+        Documentaire : vérifie que pos_oracle autour de t=100 est une
+        transition graduelle, pas un saut.
         """
         y = step_signal
         pos_oracle, _ = compute_oracle(y)
-        x_f, _, _, _, _ = forward_filter_30m(y)
-        pos_filter = x_f[:, 0]
-
-        T = 101
-        # Au pas juste après le step, oracle est plus proche du vrai niveau (10)
-        # que le filter (qui met du temps à converger)
-        dist_oracle = abs(pos_oracle[T] - 10.0)
-        dist_filter = abs(pos_filter[T] - 10.0)
-        print(f"\n[SMOOTHER] at T={T}: pos_oracle={pos_oracle[T]:.4f}, pos_filter={pos_filter[T]:.4f}")
-        print(f"[SMOOTHER] dist to 10: oracle={dist_oracle:.4f}, filter={dist_filter:.4f}")
-        # Oracle doit être plus proche du vrai niveau (backward pass)
-        assert dist_oracle < dist_filter, (
-            f"Smoother oracle should be closer to true level than causal filter "
-            f"(oracle={dist_oracle}, filter={dist_filter})"
-        )
+        # Entre t=95 et t=105, la position oracle doit être monotone croissante
+        segment = pos_oracle[95:106]
+        diffs = np.diff(segment)
+        # Toutes positives (montée continue)
+        assert np.all(diffs >= 0), f"Oracle should rise monotonically across step: diffs={diffs}"
+        # Début < fin
+        assert segment[0] < 5.0 < segment[-1]
+        print(f"\n[SMOOTHER STEP] pos_oracle[95..105] = {[f'{x:.2f}' for x in segment]}")
