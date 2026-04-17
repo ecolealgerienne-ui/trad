@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
-Valide compute_forward_filter (standard + AQ-KF) sur MACD 30m et MACD 1h.
+Valide compute_forward_filter (Kalman standard, FLKS-1) sur MACD 30m et 1h.
+
+SCOPE: FLKS-1 = forward filter Kalman standard uniquement.
+AQ-KF (adaptatif Myers-Tapley) est une VARIANTE séparée, pas testée ici.
 
 Tests:
   [1] Structure : shape, colonnes, pas de NaN, index aligné
@@ -9,10 +12,9 @@ Tests:
   [4] Bug init corrigé : grâce au fillna(0) en amont, x_filt[0] ne dépend PAS
       d'une observation future (contrairement au bug audité en test_03)
   [5] P_filt PSD et convergente
-  [6] Standard vs AQ-KF : concordance sur régime stable, diff sur volatil
-  [7] Stats : convergence position vers indicator, range velocity
+  [6] Convergence position → indicator
 
-Scope: MACD × (30m, 1h) × (standard, AQ-KF) = 4 combinaisons.
+Scope: MACD × (30m, 1h) = 2 combinaisons.
 
 Usage:
     python scripts/validate_forward_filter.py
@@ -111,140 +113,108 @@ def main():
         dfs_R[tf], _ = drop_incomplete_last(dfs_R[tf], df_5m, tf)
 
     all_ok = True
-    results = {}  # (tf, mode) -> (res_A, res_B)
 
     for tf in TFS:
         lbl_tf = f'{tf}m' if tf < 60 else '1h'
-        for adaptive in [False, True]:
-            mode = 'aq-kf' if adaptive else 'std'
-            print(f"\n{'-' * 80}")
-            print(f"  TF = {lbl_tf}   MODE = {mode.upper()}")
-            print(f"{'-' * 80}")
+        print(f"\n{'-' * 80}")
+        print(f"  TF = {lbl_tf}   (Kalman standard)")
+        print(f"{'-' * 80}")
 
-            res_A = compute_forward_filter(dfs_R[tf], INDICATOR, adaptive=adaptive)
-            res_B = compute_forward_filter(dfs_dl[tf], INDICATOR, adaptive=adaptive)
-            results[(tf, mode)] = (res_A, res_B)
+        res_A = compute_forward_filter(dfs_R[tf], INDICATOR, adaptive=False)
+        res_B = compute_forward_filter(dfs_dl[tf], INDICATOR, adaptive=False)
 
-            # [1] Structure
-            print(f"  [1] Structure des sorties")
-            state = res_B['state']
-            n = len(state)
-            all_ok &= check(
-                f"  state shape = len(df)",
-                len(state) == len(dfs_dl[tf]),
-                f"{len(state)} vs {len(dfs_dl[tf])}")
-            all_ok &= check(
-                f"  colonnes state = [position, velocity, pred_position, pred_velocity]",
-                list(state.columns) == ['position', 'velocity',
-                                         'pred_position', 'pred_velocity'],
-                "")
-            all_ok &= check(
-                f"  P_filt shape = (n, 2, 2)",
-                res_B['P_filt'].shape == (n, 2, 2),
-                f"{res_B['P_filt'].shape}")
-            all_ok &= check(
-                f"  P_pred shape = (n, 2, 2)",
-                res_B['P_pred'].shape == (n, 2, 2),
-                "")
-            all_ok &= check(
-                f"  C shape = (n, 2, 2)",
-                res_B['C'].shape == (n, 2, 2),
-                "")
-            all_ok &= check(
-                f"  pas de NaN dans state",
-                not state.isna().any().any(),
-                "")
+        # [1] Structure
+        print(f"  [1] Structure des sorties")
+        state = res_B['state']
+        n = len(state)
+        all_ok &= check(
+            f"  state shape = len(df)",
+            len(state) == len(dfs_dl[tf]),
+            f"{len(state)} vs {len(dfs_dl[tf])}")
+        all_ok &= check(
+            f"  colonnes state = [position, velocity, pred_position, pred_velocity]",
+            list(state.columns) == ['position', 'velocity',
+                                     'pred_position', 'pred_velocity'],
+            "")
+        all_ok &= check(
+            f"  P_filt shape = (n, 2, 2)",
+            res_B['P_filt'].shape == (n, 2, 2),
+            f"{res_B['P_filt'].shape}")
+        all_ok &= check(
+            f"  P_pred shape = (n, 2, 2)",
+            res_B['P_pred'].shape == (n, 2, 2),
+            "")
+        all_ok &= check(
+            f"  C shape = (n, 2, 2)",
+            res_B['C'].shape == (n, 2, 2),
+            "")
+        all_ok &= check(
+            f"  pas de NaN dans state",
+            not state.isna().any().any(),
+            "")
 
-            # [2] Path A vs Path B
-            print(f"  [2] Path A (5m resamplé) vs Path B (TF téléchargé)")
-            all_ok &= compare_filter_outputs(res_A, res_B, lbl_tf, mode)
+        # [2] Path A vs Path B
+        print(f"  [2] Path A (5m resamplé) vs Path B (TF téléchargé)")
+        all_ok &= compare_filter_outputs(res_A, res_B, lbl_tf, 'std')
 
-            # [3] Causalité : polluer close[T+10] ne change pas state[:T+1]
-            print(f"  [3] Causalité (polluer close[T+10] ne change pas state[:T+1])")
-            df_pol = dfs_dl[tf].copy()
-            T = len(df_pol) // 2
-            df_pol.iloc[T + 10, df_pol.columns.get_loc('close')] += 10000.0
-            res_pol = compute_forward_filter(df_pol, INDICATOR, adaptive=adaptive)
-            diff_before = np.max(np.abs(
-                res_B['state']['position'].iloc[:T + 1].values
-                - res_pol['state']['position'].iloc[:T + 1].values))
-            all_ok &= check(
-                f"  max |position[:T+1]_orig - position[:T+1]_polluted| = {diff_before:.2e}",
-                diff_before < TOL_ABS, "")
-            # Confirmer qu'après T, les valeurs diffèrent (sinon pollution inefficace)
-            diff_after = np.max(np.abs(
-                res_B['state']['position'].iloc[T + 10:].values
-                - res_pol['state']['position'].iloc[T + 10:].values))
-            all_ok &= check(
-                f"  après T+10, états diffèrent (sanity pollution): {diff_after:.2e}",
-                diff_after > 1e-3, "")
+        # [3] Causalité : polluer close[T+10] ne change pas state[:T+1]
+        print(f"  [3] Causalité (polluer close[T+10] ne change pas state[:T+1])")
+        df_pol = dfs_dl[tf].copy()
+        T = len(df_pol) // 2
+        df_pol.iloc[T + 10, df_pol.columns.get_loc('close')] += 10000.0
+        res_pol = compute_forward_filter(df_pol, INDICATOR, adaptive=False)
+        diff_before = np.max(np.abs(
+            res_B['state']['position'].iloc[:T + 1].values
+            - res_pol['state']['position'].iloc[:T + 1].values))
+        all_ok &= check(
+            f"  max |position[:T+1]_orig - position[:T+1]_polluted| = {diff_before:.2e}",
+            diff_before < TOL_ABS, "")
+        diff_after = np.max(np.abs(
+            res_B['state']['position'].iloc[T + 10:].values
+            - res_pol['state']['position'].iloc[T + 10:].values))
+        all_ok &= check(
+            f"  après T+10, états diffèrent (sanity pollution): {diff_after:.2e}",
+            diff_after > 1e-3, "")
 
-            # [4] Bug init corrigé : x_filt[0] ne dépend PAS de indicator[1:]
-            #     Autrefois (bug audit test_03) : first_valid_val = première
-            #     non-NaN potentielle dans le futur. Avec fillna(0) amont,
-            #     first_valid_val = indicator[0] → pas de leakage.
-            print(f"  [4] Bug init (fillna(0)) : x_filt[0] ne dépend pas de indicator[1:]")
-            # Test : si on change indicator[5], x_filt[0] doit rester identique
-            df_pol_early = dfs_dl[tf].copy()
-            df_pol_early.iloc[5, df_pol_early.columns.get_loc('close')] += 5000.0
-            res_pol_early = compute_forward_filter(df_pol_early, INDICATOR, adaptive=adaptive)
-            diff_at_0 = abs(
-                res_B['state']['position'].iloc[0]
-                - res_pol_early['state']['position'].iloc[0])
-            all_ok &= check(
-                f"  |position[0]_orig - position[0]_close5_polluted| = {diff_at_0:.2e}",
-                diff_at_0 < TOL_ABS, "")
+        # [4] Bug init corrigé : x_filt[0] ne dépend PAS de indicator[1:]
+        print(f"  [4] Bug init (fillna(0)) : x_filt[0] ne dépend pas de indicator[1:]")
+        df_pol_early = dfs_dl[tf].copy()
+        df_pol_early.iloc[5, df_pol_early.columns.get_loc('close')] += 5000.0
+        res_pol_early = compute_forward_filter(df_pol_early, INDICATOR, adaptive=False)
+        diff_at_0 = abs(
+            res_B['state']['position'].iloc[0]
+            - res_pol_early['state']['position'].iloc[0])
+        all_ok &= check(
+            f"  |position[0]_orig - position[0]_close5_polluted| = {diff_at_0:.2e}",
+            diff_at_0 < TOL_ABS, "")
 
-            # [5] P_filt PSD et convergente
-            print(f"  [5] P_filt PSD et convergente")
-            P_filt = res_B['P_filt']
-            # Tous les éléments diagonaux doivent être >= 0
-            diag_min = min(P_filt[:, 0, 0].min(), P_filt[:, 1, 1].min())
-            all_ok &= check(
-                f"  min(diag P_filt) = {diag_min:.6g} (>= 0)",
-                diag_min >= -1e-10, "")
-            # Convergence : var(trace P_filt[TRIM:]) petite
-            traces = P_filt[:, 0, 0] + P_filt[:, 1, 1]
-            std_late = traces[TRIM:].std()
-            mean_late = traces[TRIM:].mean()
-            ratio = std_late / (mean_late + 1e-10)
-            print(f"        trace P_filt après warmup: mean={mean_late:.4f} "
-                  f"std={std_late:.4f} (ratio={ratio:.3f})")
-            if mode == 'std':
-                # Standard Kalman : converge vers steady-state
-                all_ok &= check(
-                    f"  [std] trace P_filt converge (ratio std/mean < 0.3)",
-                    ratio < 0.3, "")
-            # AQ-KF : Q varie, trace peut varier aussi — ratio plus tolérant
+        # [5] P_filt PSD et convergente
+        print(f"  [5] P_filt PSD et convergente")
+        P_filt = res_B['P_filt']
+        diag_min = min(P_filt[:, 0, 0].min(), P_filt[:, 1, 1].min())
+        all_ok &= check(
+            f"  min(diag P_filt) = {diag_min:.6g} (>= 0)",
+            diag_min >= -1e-10, "")
+        traces = P_filt[:, 0, 0] + P_filt[:, 1, 1]
+        std_late = traces[TRIM:].std()
+        mean_late = traces[TRIM:].mean()
+        ratio = std_late / (mean_late + 1e-10)
+        print(f"        trace P_filt après warmup: mean={mean_late:.4f} "
+              f"std={std_late:.4f} (ratio={ratio:.3f})")
+        all_ok &= check(
+            f"  trace P_filt converge (ratio std/mean < 0.3)",
+            ratio < 0.3, "")
 
-            # [7] Stats convergence position → indicator
-            print(f"  [6] Convergence position → indicator")
-            ind_vals = res_B['indicator'].values
-            pos_vals = state['position'].values
-            rmse = np.sqrt(np.mean((ind_vals[TRIM:] - pos_vals[TRIM:]) ** 2))
-            std_ind = ind_vals[TRIM:].std()
-            all_ok &= check(
-                f"  RMSE(position, indicator) after trim = {rmse:.4f} "
-                f"(std(ind) = {std_ind:.4f})",
-                rmse < std_ind, "")
-
-    # ========== [6] Standard vs AQ-KF ==========
-    print(f"\n{'-' * 80}")
-    print(f"  [BONUS] Standard vs AQ-KF — convergence sur signal réel")
-    print(f"{'-' * 80}")
-    for tf in TFS:
-        lbl_tf = f'{tf}m' if tf < 60 else '1h'
-        res_std = results[(tf, 'std')][1]  # Path B
-        res_aq = results[(tf, 'aq-kf')][1]
-        # Comparer position (après TRIM)
-        diff = np.abs(
-            res_std['state']['position'].values[TRIM:]
-            - res_aq['state']['position'].values[TRIM:])
-        max_d = diff.max()
-        mean_d = diff.mean()
-        ratio_to_std = mean_d / (res_std['indicator'].values[TRIM:].std() + 1e-10)
-        print(f"  {lbl_tf}: max |std.pos - aqkf.pos| = {max_d:.4f}  "
-              f"mean = {mean_d:.4f}  (ratio/std_ind = {ratio_to_std:.3f})")
+        # [6] Convergence position → indicator
+        print(f"  [6] Convergence position → indicator")
+        ind_vals = res_B['indicator'].values
+        pos_vals = state['position'].values
+        rmse = np.sqrt(np.mean((ind_vals[TRIM:] - pos_vals[TRIM:]) ** 2))
+        std_ind = ind_vals[TRIM:].std()
+        all_ok &= check(
+            f"  RMSE(position, indicator) after trim = {rmse:.4f} "
+            f"(std(ind) = {std_ind:.4f})",
+            rmse < std_ind, "")
 
     # Verdict
     print("\n" + "=" * 80)
