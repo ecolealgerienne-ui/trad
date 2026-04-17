@@ -351,9 +351,14 @@ def prepare_features_and_labels(df_tf, df_5m, indicator, tf_minutes, trim=100):
     """
     Prépare un DataFrame features + labels prêt pour split/normalize/sequences.
 
+    Scope V1 (actuel — reproduit exactement le script train_flks_slopes.py):
+        Features = [slope_k1, slope_k2, slope_k3, slope_k4, slope_k5, slope_k6]
+        Soit 6 slopes FLKS avec sous-pas 5min (k=1..6).
+
     Chaîne interne :
-        df_tf, df_5m → compute_flks_slopes   → 7 slopes features
-        df_tf        → compute_oracle_labels → label binary + continu (oracle slope)
+        df_tf, df_5m → compute_flks_slopes   → slopes_k1..k6 (+ slope_t1 calculée
+                                                 mais NON exposée en V1)
+        df_tf        → compute_oracle_labels → label binary + continu
         df_tf        → close (pour backtest downstream)
 
     Args:
@@ -365,14 +370,27 @@ def prepare_features_and_labels(df_tf, df_5m, indicator, tf_minutes, trim=100):
               les warm-up Kalman/oracle et les bords incomplets. Default 100.
 
     Returns:
-        pd.DataFrame indexée, colonnes:
-          - slope_t1, slope_k1..k6           (7 features FLKS)
-          - label_binary                     (int : 1 si oracle slope > 0 sinon 0)
-          - label_continuous                 (float : oracle slope brute)
-          - close                            (float : prix close pour backtest)
+        pd.DataFrame indexée, 9 colonnes:
+          - slope_k1..slope_k6              (6 features FLKS)
+          - label_binary                    (int : 1 si oracle slope > 0 sinon 0)
+          - label_continuous                (float : oracle slope brute)
+          - close                           (float : prix close pour backtest)
+
+    Améliorations futures documentées (V2, V3):
+        V2: ajouter slope_t1 (backward 2 pas, sans sous-pas) → 7 features
+            Motivation: slope_t1 est une estimation sans injection 5min live.
+            Peut servir à comparer l'apport des sous-pas vs un filtre plus pur.
+        V3: ajouter position + velocity (x_filt du forward filter Kalman) → 9 features
+            Motivation: capturer l'état Kalman en plus de ses différences.
+            ATTENTION: position a un ordre de grandeur BEAUCOUP plus grand
+            que les slopes (plusieurs dizaines vs ~1) → normalisation spécifique
+            nécessaire (z-score OK si appliqué par colonne).
+        Implémentation suggérée: paramètre `feature_set='v1'|'v2'|'v3'`.
     """
-    # 1. Features FLKS (7 slopes)
+    # 1. Features FLKS : on garde uniquement slope_k1..k6 (V1)
     slopes = compute_flks_slopes(df_tf, df_5m, indicator, tf_minutes)
+    v1_cols = [f'slope_k{k}' for k in range(1, 7)]
+    slopes = slopes[v1_cols]  # drop slope_t1 (calculée mais non exposée en V1)
 
     # 2. Labels oracle (position, slope, label=binary)
     oracle = compute_oracle_labels(df_tf, indicator)

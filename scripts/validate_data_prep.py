@@ -46,7 +46,7 @@ TRAIN_RATIO = 0.70
 VAL_RATIO = 0.15
 TOL_ABS = 1e-10
 
-FEATURE_COLS = ['slope_t1'] + [f'slope_k{k}' for k in range(1, 7)]
+FEATURE_COLS = [f'slope_k{k}' for k in range(1, 7)]  # V1 : 6 slopes k=1..6
 
 
 def check(name, passed, detail=""):
