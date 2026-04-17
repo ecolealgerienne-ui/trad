@@ -113,6 +113,33 @@ def calculate_cci(df):
     return ((tp - sma) / (0.015 * mad)).values.astype(np.float64)
 
 
+def compute_indicator(df, indicator):
+    """
+    Point d'entrée unique pour calculer un indicateur standard sur n'importe
+    quel df OHLC (tout timeframe).
+
+    Args:
+        df: DataFrame avec colonnes 'open', 'high', 'low', 'close'
+            (index = timestamps).
+        indicator: 'macd' | 'rsi' | 'cci'.
+
+    Returns:
+        np.ndarray (float64) de longueur len(df) avec la valeur de l'indicateur
+        à chaque bougie. NaN au warm-up et aux NaN d'input.
+    """
+    dispatch = {
+        'macd': calculate_macd,
+        'rsi': calculate_rsi,
+        'cci': calculate_cci,
+    }
+    key = indicator.lower()
+    if key not in dispatch:
+        raise ValueError(
+            f"Unknown indicator '{indicator}'. Expected one of: {list(dispatch)}"
+        )
+    return dispatch[key](df)
+
+
 # ============================================================================
 # INDICATORS — Live frozen/provisional
 # ============================================================================
