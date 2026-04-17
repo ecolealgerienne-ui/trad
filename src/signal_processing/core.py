@@ -765,14 +765,19 @@ def find_features_csv():
 
 def load_test_data(indicator='macd', timeframe='30m', threshold=0.5):
     """
-    Load NPZ predictions + aligned closes from features CSV.
+    Load NPZ predictions + aligned closes at 30min resolution.
+
+    The NPZ has predictions at 5min resolution (forward-filled labels).
+    This function sub-samples to 30min closures so that backtests
+    trade at 30min candle closes, not at every 5min step.
 
     Returns:
-        y_test: oracle labels
-        y_pred_proba: model probability outputs
-        y_pred_binary: thresholded predictions
-        closes_test: aligned close prices
-        n_test: number of test samples
+        y_test_30m: oracle labels at 30min closures
+        y_pred_proba_30m: model probabilities at 30min closures
+        y_pred_binary_30m: thresholded predictions at 30min closures
+        closes_30m: close prices at 30min closures
+        n_test_30m: number of 30min test samples
+        csv_path: path to CSV used
     """
     npz_path = f'{PREPARED_DATA_DIR}/{indicator}_{timeframe}_dataset.npz'
     from pathlib import Path
@@ -788,11 +793,22 @@ def load_test_data(indicator='macd', timeframe='30m', threshold=0.5):
         y_pred_proba = data['test_preds']
 
     n_test = len(y_test)
-    y_pred_binary = (y_pred_proba > threshold).astype(int)
 
     csv_path = find_features_csv()
     df = pd.read_csv(csv_path, parse_dates=['datetime']).set_index('datetime').sort_index()
-    closes_all = df['close'].dropna().values
-    closes_test = closes_all[-n_test:]
+    closes_all = df['close'].values
 
-    return y_test, y_pred_proba, y_pred_binary, closes_test, n_test, csv_path
+    # Test portion = last n_test rows of the CSV
+    df_test = df.iloc[-n_test:]
+
+    # Sub-sample to 30min closures (last row of each 30min bucket)
+    bucket = df_test.index.floor('30min')
+    is_closure = bucket != np.append(bucket[1:], pd.NaT)
+
+    y_test_30m = y_test[is_closure]
+    y_pred_proba_30m = y_pred_proba[is_closure]
+    y_pred_binary_30m = (y_pred_proba_30m > threshold).astype(int)
+    closes_30m = df_test['close'].values[is_closure]
+    n_test_30m = len(y_test_30m)
+
+    return y_test_30m, y_pred_proba_30m, y_pred_binary_30m, closes_30m, n_test_30m, csv_path
