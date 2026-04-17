@@ -233,6 +233,54 @@ def compute_oracle_labels(df, indicator):
     }, index=df.index)
 
 
+def compute_forward_filter(df, indicator, adaptive=False):
+    """
+    Dispatcher forward filter Kalman : calcule les états filtrés pour un
+    indicateur sur n'importe quel df OHLC (tout timeframe).
+
+    Pipeline interne:
+        df --compute_indicator--> ind --forward_filter[_adaptive]-->
+            (x_filt, P_filt, x_pred, P_pred, C)
+
+    Args:
+        df: DataFrame OHLC (index = timestamps, tout TF).
+        indicator: 'macd' | 'rsi' | 'cci'.
+        adaptive: False = Standard Kalman (Q fixe),
+                  True = AQ-KF adaptatif (Myers-Tapley).
+
+    Returns:
+        dict:
+          'state'  : pd.DataFrame indexée par les timestamps de df, colonnes
+                     [position, velocity, pred_position, pred_velocity]
+          'P_filt' : np.ndarray shape (n, 2, 2) — covariance filtrée
+          'P_pred' : np.ndarray shape (n, 2, 2) — covariance prédite
+          'C'      : np.ndarray shape (n, 2, 2) — gain RTS (pour backward)
+          'indicator' : pd.Series — l'indicateur d'entrée (utile pour debug)
+    """
+    ind_series = compute_indicator(df, indicator)
+    ind_array = ind_series.values.astype(np.float64)
+
+    if adaptive:
+        x_filt, P_filt, x_pred, P_pred, C = forward_filter_30m_adaptive(ind_array)
+    else:
+        x_filt, P_filt, x_pred, P_pred, C = forward_filter_30m(ind_array)
+
+    state = pd.DataFrame({
+        'position': x_filt[:, 0],
+        'velocity': x_filt[:, 1],
+        'pred_position': x_pred[:, 0],
+        'pred_velocity': x_pred[:, 1],
+    }, index=df.index)
+
+    return {
+        'state': state,
+        'P_filt': P_filt,
+        'P_pred': P_pred,
+        'C': C,
+        'indicator': ind_series,
+    }
+
+
 # ============================================================================
 # INDICATORS — Live frozen/provisional
 # ============================================================================
