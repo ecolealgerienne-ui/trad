@@ -104,8 +104,7 @@ def main():
     X_test = ds['X_test']
     y_test = ds['y_test_binary']
     feature_cols = [str(c) for c in ds['feature_cols']]
-    window = int(ds['window'])
-    print(f"   Features: {feature_cols}  (window={window})")
+    print(f"   Features: {feature_cols}  (tabulaire, pas de séquences)")
     print(f"   X_train: {X_train.shape}  |  "
           f"X_val: {X_val.shape}  |  X_test: {X_test.shape}")
     print(f"   y_train UP ratio: {y_train.mean()*100:.2f}%  "

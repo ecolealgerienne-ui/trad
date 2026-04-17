@@ -24,92 +24,11 @@ import pandas as pd
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-
-def backtest_5min(slopes, closes, fees=0.001):
-    """
-    Backtest simple à résolution 5min.
-    Signal > 0 → LONG, < 0 → SHORT, == 0 → pas de changement.
-    Exec à closes[i+1] (lag 1 tick).
-
-    Returns:
-        dict avec stats.
-    """
-    n = len(slopes)
-    position = 0    # 0=FLAT, 1=LONG, -1=SHORT
-    entry_price = 0.0
-    trades = []
-
-    for i in range(n - 1):
-        s = slopes[i]
-        if np.isnan(s) or s == 0:
-            target = position  # pas de signal → on garde la position
-        elif s > 0:
-            target = 1
-        else:
-            target = -1
-
-        if target == position:
-            continue
-
-        exec_price = closes[i + 1]
-        if np.isnan(exec_price):
-            continue
-
-        # Sortie de la position actuelle
-        if position != 0:
-            if position == 1:
-                pnl = (exec_price - entry_price) / entry_price
-            else:
-                pnl = (entry_price - exec_price) / entry_price
-            pnl -= 2 * fees
-            trades.append({
-                'exit_i': i + 1,
-                'pnl': pnl,
-                'position': position,
-                'entry_price': entry_price,
-                'exit_price': exec_price,
-            })
-
-        # Nouvelle entrée (flip ou depuis FLAT)
-        if target != 0:
-            entry_price = exec_price
-        position = target
-
-    # Close final
-    if position != 0:
-        exec_price = closes[-1]
-        if not np.isnan(exec_price):
-            if position == 1:
-                pnl = (exec_price - entry_price) / entry_price
-            else:
-                pnl = (entry_price - exec_price) / entry_price
-            pnl -= 2 * fees
-            trades.append({
-                'exit_i': n - 1, 'pnl': pnl, 'position': position,
-                'entry_price': entry_price, 'exit_price': exec_price,
-            })
-
-    if not trades:
-        return dict(n_trades=0, pnl_pct=0.0, win_rate=0.0,
-                    profit_factor=0.0, sharpe=0.0, n_long=0, n_short=0)
-
-    pnls = np.array([t['pnl'] for t in trades])
-    wins = pnls[pnls > 0]
-    losses = pnls[pnls < 0]
-    return dict(
-        n_trades=len(trades),
-        pnl_pct=pnls.sum() * 100,
-        win_rate=len(wins) / len(pnls) * 100,
-        profit_factor=(wins.sum() / abs(losses.sum())
-                       if len(losses) > 0 and losses.sum() != 0 else np.inf),
-        sharpe=(pnls.mean() / pnls.std()
-                if pnls.std() > 1e-10 else 0.0),
-        n_long=sum(1 for t in trades if t['position'] == 1),
-        n_short=sum(1 for t in trades if t['position'] == -1),
-    )
+from src.signal_processing.core import backtest_5min_progressive
 
 
-def buy_and_hold(closes):
+def buy_and_hold_5m(closes):
+    """B&H simple : rendement entre premier et dernier close."""
     first = closes[0]
     last = closes[-1]
     if np.isnan(first) or np.isnan(last) or first == 0:
@@ -166,10 +85,10 @@ def main():
         print(f"\n→ Signal = model (threshold={args.threshold})")
         print(f"   UP={(slopes>0).sum():,} DOWN={(slopes<0).sum():,}")
 
-    # Backtest
+    # Backtest (mutualisé dans core.backtest_5min_progressive)
     print(f"\n→ Backtest à 5min (exec à close_5m[i+1]) ...")
-    res = backtest_5min(slopes, closes, fees=args.fees)
-    bh = buy_and_hold(closes)
+    res = backtest_5min_progressive(slopes, closes, fees=args.fees)
+    bh = buy_and_hold_5m(closes)
 
     # Durée du split en jours
     period_days = (dates[-1] - dates[0]).total_seconds() / 86400

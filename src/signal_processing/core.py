@@ -1207,6 +1207,82 @@ def backtest_30m(slopes, closes_30m, start, end, fees,
     return {'pnl_pct': pnl_total * 100, 'trades': n_trades, 'win_rate': wr}
 
 
+def backtest_5min_progressive(slopes_5m, closes_5m, fees=0.001):
+    """
+    Backtest à résolution 5min pour un dataset progressif.
+
+    Chaque ligne 5min a son propre signal (slope). Execution à close_5m[i+1]
+    (lag 1 tick 5min) pour respecter la règle "pas de trade à xx:00/xx:30".
+
+    Args:
+        slopes_5m  : np.ndarray shape (n,)  — signal à chaque ligne 5min
+                     (positive=LONG, negative=SHORT, 0=conserver position)
+        closes_5m  : np.ndarray shape (n,)  — closes à chaque ligne 5min
+        fees       : float fees par côté (entry+exit = 2×fees)
+
+    Returns:
+        dict avec keys : n_trades, pnl_pct, win_rate, profit_factor, sharpe,
+        n_long, n_short (conventions identiques à backtest_30m/backtest_5m).
+    """
+    n = len(slopes_5m)
+    assert len(closes_5m) == n, "slopes_5m et closes_5m doivent avoir même longueur"
+
+    position = 0      # 0=FLAT, 1=LONG, -1=SHORT
+    entry_price = 0.0
+    trades = []
+
+    for i in range(n - 1):  # n-1 car exec à i+1
+        s = slopes_5m[i]
+        if np.isnan(s) or s == 0:
+            target = position  # pas de signal → conserve
+        elif s > 0:
+            target = 1
+        else:
+            target = -1
+
+        if target == position:
+            continue
+
+        exec_price = closes_5m[i + 1]
+        if np.isnan(exec_price):
+            continue
+
+        # Sortie
+        if position != 0:
+            pnl = _exec_trade(position, entry_price, exec_price, fees) - fees
+            trades.append({'exit_i': i + 1, 'pnl': pnl, 'position': position})
+
+        # Nouvelle entrée (flip ou depuis FLAT)
+        if target != 0:
+            entry_price = exec_price
+        position = target
+
+    # Close final
+    if position != 0:
+        exec_price = closes_5m[-1]
+        if not np.isnan(exec_price):
+            pnl = _exec_trade(position, entry_price, exec_price, fees) - fees
+            trades.append({'exit_i': n - 1, 'pnl': pnl, 'position': position})
+
+    if not trades:
+        return dict(n_trades=0, pnl_pct=0.0, win_rate=0.0,
+                    profit_factor=0.0, sharpe=0.0, n_long=0, n_short=0)
+
+    pnls = np.array([t['pnl'] for t in trades])
+    wins = pnls[pnls > 0]
+    losses = pnls[pnls < 0]
+    return dict(
+        n_trades=len(trades),
+        pnl_pct=pnls.sum() * 100,
+        win_rate=len(wins) / len(pnls) * 100,
+        profit_factor=(wins.sum() / abs(losses.sum())
+                       if len(losses) > 0 and losses.sum() != 0 else np.inf),
+        sharpe=(pnls.mean() / pnls.std() if pnls.std() > 1e-10 else 0.0),
+        n_long=sum(1 for t in trades if t['position'] == 1),
+        n_short=sum(1 for t in trades if t['position'] == -1),
+    )
+
+
 def _find_exec_price(closes_5m_per_candle, t, step_idx_offset):
     """
     Helper pour backtest_5m : trouve le prix à step_idx sous-pas 5min après
