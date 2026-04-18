@@ -65,14 +65,18 @@ CSV_5M = Path('data_trad/BTCUSD_all_5m.csv')
 
 
 def compute_features_full(df_5m_full, atr_period_short=14, atr_period_long=48,
-                            ma_short=20, ma_long=60, slope_short=12, slope_long=48,
-                            vol_window=288):
-    """Calcule toutes les features contextuelles causales sur tout df_5m."""
+                            ma_short=20, slope_short=12, vol_window=288):
+    """Calcule toutes les features contextuelles causales sur tout df_5m.
+
+    v3 (2026-04-18) : élimination de 3 features de faible discrimination
+    (Cohen's d <0.15) pour réduire le bruit avant entraînement XGBoost :
+      - distance_to_ma60 (d=-0.07)
+      - close_slope_4h   (d±0.03-0.13)
+      - recent_flip_count_1h (d=-0.05 à -0.11, dans compute_proba_features)
+    """
     out = pd.DataFrame(index=df_5m_full.index)
 
     close = df_5m_full['close']
-    high = df_5m_full['high']
-    low = df_5m_full['low']
     vol = df_5m_full['volume'] if 'volume' in df_5m_full.columns else None
 
     # Temporel (causal par construction)
@@ -86,15 +90,12 @@ def compute_features_full(df_5m_full, atr_period_short=14, atr_period_long=48,
     out['atr_14_norm'] = atr_short / close.values
     out['atr_ratio_sl'] = atr_short / np.where(atr_long > 0, atr_long, np.nan)
 
-    # Slopes (causales : pct_change backward)
+    # Slope court terme (1h) — borderline mais conservé (XGBoost décidera)
     out['close_slope_1h'] = close.pct_change(slope_short).values
-    out['close_slope_4h'] = close.pct_change(slope_long).values
 
-    # Distance à moyenne mobile (causale : rolling backward)
+    # Distance à MA20 (causale, asymétrique LONG/SHORT)
     ma20 = close.rolling(ma_short).mean()
-    ma60 = close.rolling(ma_long).mean()
     out['distance_to_ma20'] = ((close - ma20) / close).values
-    out['distance_to_ma60'] = ((close - ma60) / close).values
 
     # Volume relatif (causal)
     if vol is not None:
@@ -103,7 +104,6 @@ def compute_features_full(df_5m_full, atr_period_short=14, atr_period_long=48,
     else:
         out['volume_relative'] = np.nan
 
-    # NB: range_vs_atr supprimé (Cohen's d=0.04 = inutile)
     return out
 
 
@@ -116,41 +116,28 @@ def detect_flips(proba, threshold=0.5):
     return flip_indices, sig
 
 
-def compute_proba_features(proba, flip_indices, std_window=12,
-                              flip_count_window=12, trend_lag=3):
+def compute_proba_features(proba, std_window=12, trend_lag=3):
     """
-    Catégorie 1 — État interne du modèle (recommandation expert) :
+    Catégorie 1 — État interne du modèle (recommandation expert v3) :
       - proba_std_<W>           : std(proba) sur W rows précédentes
       - proba_distance_to_extreme : min(proba, 1-proba)
       - proba_trend_<L>         : (proba[t] - proba[t-L]) / L
-      - recent_flip_count_<W>   : nb flips dans les W rows précédentes (excl. t)
+
+    v3 : suppression de recent_flip_count_1h (Cohen's d -0.05 à -0.11 = peu utile)
     """
     n = len(proba)
     p_series = pd.Series(proba)
 
-    # Volatilité de la proba (modèle hésitant)
     proba_std = p_series.rolling(std_window, min_periods=2).std().values
-
-    # Distance à l'extrême (inverse de bimodalité)
     proba_dist_extreme = np.minimum(proba, 1.0 - proba)
-
-    # Trend de la proba (direction du changement)
     proba_trend = np.zeros(n)
     if n > trend_lag:
         proba_trend[trend_lag:] = (proba[trend_lag:] - proba[:-trend_lag]) / float(trend_lag)
-
-    # Nb flips récents (sur les W rows AVANT t, pas inclus t)
-    flip_mask = np.zeros(n, dtype=int)
-    flip_mask[flip_indices] = 1
-    flip_mask_shifted = np.concatenate([[0], flip_mask[:-1]])
-    recent_flip_count = (pd.Series(flip_mask_shifted)
-                          .rolling(flip_count_window, min_periods=1).sum().values)
 
     return {
         'proba_std_12rows': proba_std,
         'proba_distance_to_extreme': proba_dist_extreme,
         'proba_trend_3rows': proba_trend,
-        'recent_flip_count_1h': recent_flip_count,
     }
 
 
@@ -310,9 +297,8 @@ def main():
           f"({len(flip_indices) / len(p) * 100:.2f}% des rows)")
 
     # Catégorie 1 : features état interne du modèle (pré-calculées sur tout p)
-    print(f"\n[4.5] Calcul features modèle (proba_std, distance_extreme, "
-          f"trend, recent_flips) ...")
-    proba_features = compute_proba_features(p, flip_indices)
+    print(f"\n[4.5] Calcul features modèle (proba_std, distance_extreme, trend) ...")
+    proba_features = compute_proba_features(p)
 
     # Label is_profitable_flip via simulation des trades
     print(f"\n[4.6] Simulation trades pour is_profitable_flip "
@@ -345,7 +331,6 @@ def main():
             'proba_std_12rows': float(proba_features['proba_std_12rows'][fi]),
             'proba_distance_to_extreme': float(proba_features['proba_distance_to_extreme'][fi]),
             'proba_trend_3rows': float(proba_features['proba_trend_3rows'][fi]),
-            'recent_flip_count_1h': float(proba_features['recent_flip_count_1h'][fi]),
             **feats.to_dict(),
         }
         rows.append(row)
