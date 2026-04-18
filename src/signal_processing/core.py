@@ -116,6 +116,48 @@ def calculate_cci(df, period=CCI_PERIOD):
     return ((tp - sma) / (0.015 * mad)).values.astype(np.float64)
 
 
+def calculate_atr(df, period=14, normalize=False):
+    """
+    Average True Range (Wilder, EMA récursif). Causal.
+
+    Args:
+        df: DataFrame avec colonnes 'high', 'low', 'close'.
+        period: période de l'EMA (default 14, Wilder standard).
+        normalize: si True, retourne ATR / close (volatilité relative au prix).
+
+    Returns:
+        np.ndarray (n,) — ATR ou ATR/close (NaN sur les `period-1` premiers).
+
+    Formule :
+        TR_t = max(H_t - L_t, |H_t - C_{t-1}|, |L_t - C_{t-1}|)
+        ATR_0..period-1 : SMA des `period` premiers TR
+        ATR_t = (ATR_{t-1} * (period - 1) + TR_t) / period   (Wilder smoothing)
+    """
+    high = df['high'].values.astype(np.float64)
+    low = df['low'].values.astype(np.float64)
+    close = df['close'].values.astype(np.float64)
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan)
+
+    # True Range
+    prev_close = np.concatenate([[close[0]], close[:-1]])
+    tr1 = high - low
+    tr2 = np.abs(high - prev_close)
+    tr3 = np.abs(low - prev_close)
+    tr = np.maximum.reduce([tr1, tr2, tr3])
+
+    # Wilder smoothing : init = SMA des `period` premiers TR
+    atr = np.full(n, np.nan)
+    atr[period - 1] = tr[:period].mean()
+    for i in range(period, n):
+        atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
+
+    if normalize:
+        atr = atr / close
+    return atr
+
+
 def compute_indicator(df, indicator, **kwargs):
     """
     Point d'entrée unique pour calculer un indicateur standard sur n'importe
