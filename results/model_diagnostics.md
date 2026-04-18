@@ -30,6 +30,7 @@ référence future.
 | ⚠️ **Validation Option B OOB rigoureuse (CONCLUSION)** | **Pattern réel mais marginal** : AUC OOB 0.65, PnL OOB best -787% à 4,245 trades, +50% à 2 trades (artefact). **Pas exploitable en prod actuelle**. |
 | ❌ **Option A — Sample weighting par seuil PnL** | Dégrade tout : Acc -7.26%, Capture brute 59%→56.5%, Model ∩ Oracle +443%→+400%. Hypothèse "trades marginaux = bruit" confirmée FAUSSE |
 | 🏆 **Clustering K-means non-supervisé + filter lift ≥ 1.5** | **-39.09% PnL Net** (vs baseline -2,205%) — **RECORD ABSOLU OOB**. Gain +2,166 points (+98%). Quasi break-even, pattern clair : haute vol + volume + tendance alignée |
+| ❌ **Clustering Kalman AQ-KF RSI + transitions (sans modèle direction)** | WR 33% OOB (< hasard), PnL Net -66% (K=10), alpha -101% vs B&H. Cherry-picking confirmé, signal absent. PROJET CLOS |
 
 ### 🎯 Loi structurelle découverte
 
@@ -1869,6 +1870,164 @@ python scripts/backtest_with_cluster_filter.py \
         models/clusters/kmeans_k15_rsi_30m_full_cnnlstm_lag0_val.pkl \
     --min-lifts 1.3 1.5 1.8 2.0
 ```
+
+---
+
+## 20. Clustering Kalman AQ-KF du RSI — ÉCHEC validé (projet CLOS)
+
+Idée utilisateur (2026-04-18) : au lieu de clusterer les flips du modèle,
+clusterer directement l'**état du Kalman AQ-KF appliqué au RSI** et trader
+les **transitions de clusters** sans modèle ML direction.
+
+### 20.1 Pipeline
+
+**4 scripts créés** :
+1. `prepare_kalman_rsi_features.py` : RSI + AQ-KF → 4 features (position,
+   velocity, P_pos, P_vel)
+2. `cluster_kalman_rsi.py` : K-means grid (K=5,7,10,15,20,25) fit train
+3. `analyze_cluster_transitions.py` : analyse K²-K × 2 directions sur 1/3
+   train, identification transitions significatives (t-test p<0.05)
+4. `backtest_cluster_transitions_oob.py` : backtest OOB sur test full
+
+### 20.2 Résultats analyse transitions (1/3 train, ~2 ans)
+
+| K | N transitions | N good (p<0.05) | PnL total |
+|---|---------------|-----------------|-----------|
+| 10 | 19,945 | 1 | +90.70% (439 occ) |
+| 15 | 22,385 | 0 | — |
+| 20 | 23,971 | 1 | +61.10% (155 occ) |
+
+**Signal extrêmement faible** : sur 58-154 transitions analysées par K,
+seulement 1 passe le seuil de significativité.
+
+### 20.3 Résultats backtest OOB test (458 jours)
+
+| Config | Trades | WR | PF | PnL Net | vs B&H |
+|--------|--------|-----|-----|---------|--------|
+| **Buy & Hold** | — | — | — | **+35.65%** | 0 |
+| K=10 good (p<0.05) | 339 | 33.0% | 0.37 | -65.73% | **-101%** |
+| K=20 good (p<0.05) | 124 | 33.1% | 0.48 | -19.40% | -55% |
+| K=10 top_5 | 632 | 29.6% | 0.34 | -122.10% | -158% |
+| K=20 top_5 | 201 | 32.8% | 0.42 | -33.00% | -69% |
+
+**WR 33% = PIRE que hasard (50%)**. Le signal est **statistiquement négatif**
+en OOB.
+
+### 20.4 Diagnostic — cherry-picking confirmé
+
+**Sur train** (1/3) :
+- 1 transition K=10 identifiée comme "pertinente" (+90.70%, 439 occ, p<0.05)
+- Mais sur 58 tests, seule une passe → statistiquement faible
+
+**Sur test OOB** :
+- WR 33% (vs 50% hasard) = signal **anti-corrélé**
+- PnL Brut quasi-nul → fees dominent
+- Alpha vs Buy & Hold **massivement négatif**
+
+### 20.5 Pourquoi cette piste échoue (contrairement au clustering des flips)
+
+**Comparaison architecture** :
+
+| Aspect | Cluster flips modèle (-39% Net) | **Cluster Kalman RSI (-66% Net)** |
+|--------|---------------------------------|-----------------------------------|
+| Signal directionnel | ✅ CNN-LSTM direction | ❌ Aucun |
+| Moment de décision | ✅ Flips actifs du modèle | ❌ Transitions d'état interne |
+| Lien avec futur prix | ✅ Via preds ML | ❌ Uniquement passé filtré |
+| Contexte feature | 12 features (dont model_proba) | 4 features Kalman seul |
+
+**Conclusion théorique** :
+
+> L'état du Kalman AQ-KF du RSI reflète le **passé filtré** du RSI,
+> pas le **futur du prix**. Sans signal directionnel ML, les "transitions
+> de régime" détectées ne portent pas d'information prédictive exploitable.
+>
+> Le clustering peut identifier des **régimes de marché** cohérents, mais
+> ne dit rien sur la **direction à prendre** dans ces régimes.
+
+### 20.6 Comparaison finale pipeline
+
+| Rang | Approche | PnL Net test | Trades |
+|------|----------|--------------|--------|
+| 🥇 | Cluster flips modèle K=10 lift≥1.5 | **-39%** | 190 |
+| — | **Buy & Hold** | **+36%** | — |
+| — | Cluster Kalman RSI K=20 good | -19% | 124 |
+| — | Cluster Kalman RSI K=10 good | -66% | 339 |
+| — | Model pur baseline | -2,205% | 10,927 |
+
+**Aucune approche active ne bat le Buy & Hold** sur ce marché (bull 2024-2025).
+
+### 20.7 Verdict final — projet CLOS
+
+**L'idée clustering Kalman sans modèle direction est ABANDONNÉE** :
+- Signal OOB négatif (WR 33% < hasard)
+- Cherry-picking statistique confirmé
+- Buy & Hold reste la meilleure stratégie passive
+- Les pistes actives (meta-classifier, clustering flips, meta-filter ATR)
+  plafonnent à ~-39% PnL Net (proche break-even avec fees taker 0.1%)
+
+### 20.8 Synthèse globale du projet
+
+**20 sections documentées, 19+ approches testées rigoureusement** :
+
+#### Ce qui a été validé empiriquement
+
+- ✅ **Architecture CNN-LSTM direction** : ~90% accuracy mais -2,205% PnL
+- ✅ **Cible `slope_lag=0`** : double le PnL Oracle (×2.01-2.23)
+- ✅ **Model ∩ Oracle +443% RSI lag=0** : meilleur PnL filtré (mais Oracle
+  indisponible en prod)
+- ✅ **Clustering flips CNN-LSTM -39% Net** : meilleur OOB utilisable en prod
+- ✅ **Plafond structurel identifié** : capture brute ≈ 55-60% Oracle
+- ✅ **Fees sont le problème dominant** : 0.1%/côté × 2 écrase le signal
+
+#### Ce qui a été infirmé empiriquement
+
+- ❌ Hystérésis probabiliste (probas bimodales)
+- ❌ Persistence temporelle seule (insuffisante)
+- ❌ Consensus multi-indicateurs (erreurs corrélées 2.35-3.68×)
+- ❌ Filtre ATR externe (edge brut neutre)
+- ❌ Sample weighting par seuil PnL (trades marginaux contiennent du signal)
+- ❌ Meta-classifier out-of-bag (AUC 0.65 mais PnL insuffisant)
+- ❌ Adaptive + lag=0 combinés (antagonistes)
+- ❌ Clustering Kalman sans direction (signal OOB négatif)
+
+#### Conclusions stratégiques
+
+**Pour passer franchement positif en production**, il faudrait modifier le
+contexte structurel, pas les raffinements algorithmiques :
+
+1. **Fees maker** (0.02% vs 0.1% taker) → ÷5 fees, estimation PnL Net -8%
+2. **Changer la cible** : régression rendement futur, multi-horizon
+3. **Signal VRAIMENT indépendant** : order flow, microstructure, sentiment
+4. **Architecture différente** : Transformer attention, multi-task,
+   loss PnL-aware, reinforcement learning
+5. **Approche passive** : Buy & Hold BTC bat toutes les stratégies actives
+   sur ce marché (bull run 2024-2025)
+
+### 20.9 Apports scientifiques du projet
+
+Malgré l'absence de PnL positif en production, le projet a produit :
+
+1. **Pipeline reproductible complet** (20 scripts, 18 sections doc, 2 JSON)
+2. **Méthodologie OOB rigoureuse** pour chaque pivot
+3. **Architecture en 2-3 étages** validée techniquement
+4. **Compréhension fine de la limite structurelle** edge vs fees
+5. **Découverte de patterns de marché** (haute vol + volume + tendance)
+6. **Règle de trading explicite** interprétable (clustering flips)
+7. **Base pour pivots futurs** : maker fees, régression, Transformer
+
+### 20.10 Commandes finales reproductibles
+
+```bash
+# Pipeline complet clustering Kalman RSI (étapes 1-4)
+python scripts/prepare_kalman_rsi_features.py
+python scripts/cluster_kalman_rsi.py --ks 5 7 10 15 20 25
+python scripts/analyze_cluster_transitions.py --ks 10 15 20
+python scripts/backtest_cluster_transitions_oob.py --K 10
+python scripts/backtest_cluster_transitions_oob.py --K 20
+```
+
+**SUJET CLOS 🔒** — Tous chemins explorés jusqu'à leur conclusion
+empirique.
 
 ---
 
