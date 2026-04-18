@@ -1467,6 +1467,101 @@ def backtest_5min_filtered_by_oracle(slopes_model, slopes_oracle,
     )
 
 
+def extract_trades_5min_progressive(slopes_5m, closes_5m, fees=0.001):
+    """
+    Extrait la liste détaillée des trades générés par backtest_5min_progressive.
+
+    Mêmes règles d'exécution que backtest_5min_progressive (exec à close[i+1],
+    fees par côté, sign(slope) → direction). Au lieu de retourner le résumé
+    agrégé, retourne UN trade par ligne avec entry/exit/PnL/durée.
+
+    Args:
+        slopes_5m  : np.ndarray (n,) — signal à chaque ligne 5min
+        closes_5m  : np.ndarray (n,) — closes à chaque ligne 5min
+        fees       : float fees par côté
+
+    Returns:
+        list[dict] : un dict par trade avec keys
+            entry_i      : index 5min d'entrée
+            exit_i       : index 5min de sortie
+            position     : +1 (LONG) ou -1 (SHORT)
+            entry_price  : prix d'entrée (close à entry_i)
+            exit_price   : prix de sortie (close à exit_i)
+            pnl_brut     : PnL avant fees ((exit-entry)/entry signé)
+            pnl_net      : PnL après 2 × fees
+            duration_5m  : exit_i - entry_i (rows 5min entre entrée et sortie)
+    """
+    n = len(slopes_5m)
+    assert len(closes_5m) == n, "slopes_5m et closes_5m doivent avoir même longueur"
+
+    position = 0      # 0=FLAT, 1=LONG, -1=SHORT
+    entry_price = 0.0
+    entry_i = -1
+    trades = []
+
+    for i in range(n - 1):  # n-1 car exec à i+1
+        s = slopes_5m[i]
+        if np.isnan(s) or s == 0:
+            target = position
+        elif s > 0:
+            target = 1
+        else:
+            target = -1
+
+        if target == position:
+            continue
+
+        exec_price = closes_5m[i + 1]
+        if np.isnan(exec_price):
+            continue
+
+        # Sortie
+        if position != 0:
+            if position == 1:
+                pnl_brut = (exec_price - entry_price) / entry_price
+            else:
+                pnl_brut = (entry_price - exec_price) / entry_price
+            pnl_net = pnl_brut - 2 * fees
+            trades.append({
+                'entry_i': entry_i,
+                'exit_i': i + 1,
+                'position': position,
+                'entry_price': entry_price,
+                'exit_price': exec_price,
+                'pnl_brut': pnl_brut,
+                'pnl_net': pnl_net,
+                'duration_5m': (i + 1) - entry_i,
+            })
+
+        # Nouvelle entrée
+        if target != 0:
+            entry_price = exec_price
+            entry_i = i + 1
+        position = target
+
+    # Close final
+    if position != 0:
+        exec_price = closes_5m[-1]
+        if not np.isnan(exec_price):
+            if position == 1:
+                pnl_brut = (exec_price - entry_price) / entry_price
+            else:
+                pnl_brut = (entry_price - exec_price) / entry_price
+            pnl_net = pnl_brut - 2 * fees
+            trades.append({
+                'entry_i': entry_i,
+                'exit_i': n - 1,
+                'position': position,
+                'entry_price': entry_price,
+                'exit_price': exec_price,
+                'pnl_brut': pnl_brut,
+                'pnl_net': pnl_net,
+                'duration_5m': (n - 1) - entry_i,
+            })
+
+    return trades
+
+
 def _find_exec_price(closes_5m_per_candle, t, step_idx_offset):
     """
     Helper pour backtest_5m : trouve le prix à step_idx sous-pas 5min après
