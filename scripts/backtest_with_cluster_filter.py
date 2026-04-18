@@ -116,6 +116,12 @@ def main():
                         choices=['train', 'val', 'test'])
     parser.add_argument('--fees', type=float, default=0.001)
     parser.add_argument('--threshold', type=float, default=0.5)
+    parser.add_argument('--min-lifts', type=float, nargs='+',
+                        default=[1.3, 1.5, 1.8, 2.0],
+                        help='Seuils min_lift à tester (profitable_rate / base_rate). '
+                             'Plus haut = plus sélectif.')
+    parser.add_argument('--no-non-parasite', action='store_true',
+                        help='Désactive mode non_parasite (garde seulement relevant_only)')
     args = parser.parse_args()
 
     print("=" * 115)
@@ -187,8 +193,8 @@ def main():
                          if s['category'] == 'relevant']
         parasite_ids = [s['k_id'] for s in cluster_stats
                          if s['category'] == 'parasite']
-        print(f"  Relevant : {relevant_ids}")
-        print(f"  Parasite : {parasite_ids}")
+        print(f"  Relevant (cat='relevant') : {relevant_ids}")
+        print(f"  Parasite (cat='parasite') : {parasite_ids}")
 
         # Assigner les flips test aux clusters
         cluster_ids_test, nan_mask = assign_clusters(
@@ -200,50 +206,61 @@ def main():
         # Distribution des flips test par cluster
         print(f"\n  Distribution flips test par cluster :")
         unique, counts = np.unique(cluster_ids_test, return_counts=True)
+        # Map cluster_id → stats pour lookup
+        cluster_stats_by_id = {s['k_id']: s for s in cluster_stats}
         for cid, cnt in zip(unique, counts):
             cat = 'unknown'
             rate_val = 0
-            for s in cluster_stats:
-                if s['k_id'] == cid:
-                    cat = s['category']
-                    rate_val = s['rate_profit'] * 100
-                    break
+            lift_val = 0
+            if int(cid) in cluster_stats_by_id:
+                s = cluster_stats_by_id[int(cid)]
+                cat = s['category']
+                rate_val = s['rate_profit'] * 100
+                lift_val = s['lift_profit']
             marker = ('🔥' if cat == 'relevant'
                        else '❌' if cat == 'parasite'
                        else '')
             print(f"    Cluster {int(cid):>3} : {int(cnt):>5,} flips  "
-                  f"category={cat:<15} val_rate_profit={rate_val:>5.2f}%  {marker}")
+                  f"category={cat:<15} val_rate={rate_val:>5.2f}% "
+                  f"lift={lift_val:>4.2f}×  {marker}")
 
-        # Mode 1 : relevant_only (garde uniquement clusters relevant)
-        accepted_mask_rel = np.isin(cluster_ids_test, relevant_ids)
-        n_acc_rel = int(accepted_mask_rel.sum())
-        # Mode 2 : non_parasite (garde tout sauf parasite)
-        accepted_mask_np = ~np.isin(cluster_ids_test, parasite_ids)
-        n_acc_np = int(accepted_mask_np.sum())
+        # Grid de min_lifts pour relevant_only
+        for min_lift in args.min_lifts:
+            relevant_ids_at_lift = [
+                s['k_id'] for s in cluster_stats
+                if s['category'] == 'relevant' and s['lift_profit'] >= min_lift
+            ]
+            accepted_mask = np.isin(cluster_ids_test, relevant_ids_at_lift)
+            n_acc = int(accepted_mask.sum())
+            if n_acc == 0:
+                continue  # skip si pas de clusters sélectionnés
+            sig_filt = reconstruct_slopes_from_flips(
+                len(p), flip_indices, sig, accepted_mask)
+            r = backtest_5min_progressive(sig_filt, closes, fees=args.fees)
+            all_results.append({
+                'K': K, 'mode': f'rel_lift>={min_lift}',
+                'min_lift': min_lift,
+                'n_clusters': len(relevant_ids_at_lift),
+                'result': r,
+                'n_accepted': n_acc,
+                'n_rejected': len(cluster_ids_test) - n_acc,
+            })
 
-        print(f"\n  Filters :")
-        print(f"    relevant_only : {n_acc_rel:,}/{len(cluster_ids_test):,} flips acceptés "
-              f"({n_acc_rel/len(cluster_ids_test)*100:.1f}%)")
-        print(f"    non_parasite  : {n_acc_np:,}/{len(cluster_ids_test):,} flips acceptés "
-              f"({n_acc_np/len(cluster_ids_test)*100:.1f}%)")
-
-        # Reconstruction slopes + backtest
-        sig_filt_rel = reconstruct_slopes_from_flips(
-            len(p), flip_indices, sig, accepted_mask_rel)
-        r_rel = backtest_5min_progressive(sig_filt_rel, closes, fees=args.fees)
-
-        sig_filt_np = reconstruct_slopes_from_flips(
-            len(p), flip_indices, sig, accepted_mask_np)
-        r_np = backtest_5min_progressive(sig_filt_np, closes, fees=args.fees)
-
-        all_results.append({
-            'K': K, 'mode': 'relevant_only', 'result': r_rel,
-            'n_accepted': n_acc_rel, 'n_rejected': len(cluster_ids_test) - n_acc_rel,
-        })
-        all_results.append({
-            'K': K, 'mode': 'non_parasite', 'result': r_np,
-            'n_accepted': n_acc_np, 'n_rejected': len(cluster_ids_test) - n_acc_np,
-        })
+        # Mode non_parasite (inchangé, optionnel)
+        if not args.no_non_parasite and parasite_ids:
+            accepted_mask_np = ~np.isin(cluster_ids_test, parasite_ids)
+            n_acc_np = int(accepted_mask_np.sum())
+            sig_filt_np = reconstruct_slopes_from_flips(
+                len(p), flip_indices, sig, accepted_mask_np)
+            r_np = backtest_5min_progressive(sig_filt_np, closes, fees=args.fees)
+            all_results.append({
+                'K': K, 'mode': 'non_parasite',
+                'min_lift': None,
+                'n_clusters': K - len(parasite_ids),
+                'result': r_np,
+                'n_accepted': n_acc_np,
+                'n_rejected': len(cluster_ids_test) - n_acc_np,
+            })
 
     # Affichage comparatif
     print(f"\n{'=' * 115}")
@@ -257,15 +274,20 @@ def main():
     print(fmt_row('Model pur', r_model, args.fees, bh, oracle_pnl=r_oracle['pnl_pct']))
     print(f"  {'-' * 113}")
 
+    # Trier par PnL Net décroissant pour lisibilité
+    all_results.sort(key=lambda x: -x['result']['pnl_pct'])
     for res in all_results:
-        label = f"K={res['K']} mode={res['mode']} (kept={res['n_accepted']})"
+        nc = res.get('n_clusters', '?')
+        label = (f"K={res['K']:>2} {res['mode']:<18} "
+                  f"(C={nc} kept={res['n_accepted']:,})")
         print(fmt_row(label, res['result'], args.fees, bh,
                        oracle_pnl=r_oracle['pnl_pct']))
 
     # Best
     if all_results:
-        best = max(all_results, key=lambda x: x['result']['pnl_pct'])
-        print(f"\n  ★ BEST: K={best['K']} mode={best['mode']}")
+        best = all_results[0]
+        print(f"\n  ★ BEST: K={best['K']} mode={best['mode']} "
+              f"(C={best.get('n_clusters', '?')})")
         print(f"    PnL Net {best['result']['pnl_pct']:+.2f}%  "
               f"vs Model pur {r_model['pnl_pct']:+.2f}%  "
               f"(gain {best['result']['pnl_pct'] - r_model['pnl_pct']:+.2f})")
