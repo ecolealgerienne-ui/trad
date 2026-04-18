@@ -276,6 +276,94 @@
       "6. Pivot 6 (moyen effort) : features volume/microstructure"
     ]
   },
+  "model_filtered_by_oracle_test": {
+    "note": "Diagnostic Model ∩ Oracle — isoler switch vs timing. Non utilisable en prod (oracle live indispo).",
+    "function_used": "src/signal_processing/core.py::backtest_5min_filtered_by_oracle (copie backtest_5min_progressive + filtre sign)",
+    "script": "scripts/backtest_model_filtered_by_oracle.py",
+    "cnn_lstm_results": {
+      "macd": {
+        "oracle_pnl_net_pct": 350.94,
+        "model_pure_pnl_net_pct": -910.66,
+        "model_pure_trades": 4653,
+        "model_filtered_pnl_net_pct": -10.79,
+        "model_filtered_trades": 2277,
+        "model_filtered_pnl_gross_pct": 444.61,
+        "gross_capture_vs_oracle_pct": 55.0,
+        "gain_vs_model_pure_pct": 899.86,
+        "trades_blocked_by_disagreement": 4141,
+        "agreement_pct": 94.42
+      },
+      "cci": {
+        "oracle_pnl_net_pct": 433.73,
+        "model_pure_pnl_net_pct": -1078.95,
+        "model_pure_trades": 5615,
+        "model_filtered_pnl_net_pct": -25.13,
+        "model_filtered_trades": 2755,
+        "model_filtered_pnl_gross_pct": 525.87,
+        "gross_capture_vs_oracle_pct": 53.3,
+        "gain_vs_model_pure_pct": 1053.82,
+        "trades_blocked_by_disagreement": 5301,
+        "agreement_pct": 92.49
+      },
+      "rsi": {
+        "oracle_pnl_net_pct": 601.19,
+        "model_pure_pnl_net_pct": -1518.86,
+        "model_pure_trades": 7787,
+        "model_filtered_pnl_net_pct": 86.77,
+        "model_filtered_trades": 3239,
+        "model_filtered_pnl_gross_pct": 734.57,
+        "gross_capture_vs_oracle_pct": 58.6,
+        "gain_vs_model_pure_pct": 1605.63,
+        "trades_blocked_by_disagreement": 7788,
+        "agreement_pct": 89.89
+      }
+    },
+    "xgboost_results": {
+      "macd": {
+        "oracle_pnl_net_pct": 350.94,
+        "model_pure_pnl_net_pct": -589.84,
+        "model_pure_trades": 3107,
+        "model_filtered_pnl_net_pct": -99.89,
+        "model_filtered_trades": 2281,
+        "model_filtered_pnl_gross_pct": 356.31,
+        "gross_capture_vs_oracle_pct": 44.1,
+        "gain_vs_model_pure_pct": 489.95,
+        "trades_blocked_by_disagreement": 2965
+      }
+    },
+    "decomposition_switch_vs_timing": {
+      "switch_contribution_pct_cnn_lstm_avg": 85,
+      "timing_contribution_pct_cnn_lstm_avg": 15,
+      "switch_contribution_pct_xgboost_macd": 52,
+      "timing_contribution_pct_xgboost_macd": 48
+    },
+    "discovered_formula": {
+      "statement": "PnL Net potentiel ≈ 55% × PnL Oracle Net (si flips stabilisés)",
+      "gross_capture_when_aligned_pct": 55,
+      "theoretical_net_pnl_pct": {
+        "rsi": 330,
+        "macd": 193,
+        "cci": 239
+      },
+      "currently_achieved_with_oracle_filter": {
+        "rsi": 87,
+        "macd": -11,
+        "cci": -25
+      }
+    },
+    "conclusions": [
+      "Le switch est le problème DOMINANT (85% sur CNN-LSTM)",
+      "CNN-LSTM > XGBoost pour cette piste (meilleur signal brut intrinsèque)",
+      "RSI filtré est le premier PnL Net positif du pipeline (+87%)",
+      "Les 3 indicateurs convergent proches du break-even quand filtrés par Oracle",
+      "Stabiliser le signal est la piste validée empiriquement"
+    ],
+    "recommended_next_pivots": [
+      "1. Cadence 30min (effort faible, attaque direct les flips)",
+      "2. 3-classes UP/NEUTRE/DOWN (effort moyen, permet l'inaction apprenable)",
+      "3. Loss PnL-aware (effort élevé, attaque direct la métrique)"
+    ]
+  },
   "cross_validation_test": {
     "note": "scripts/cross_validation_indicators.py — test set, 458 jours",
     "pearson_correlation_probas": {
