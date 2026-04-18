@@ -51,7 +51,10 @@ def print_row(name, r, bh, fees):
     fees_pct = r['n_trades'] * 2 * fees * 100
     pnl_gross = r['pnl_pct'] + fees_pct
     alpha = r['pnl_pct'] - bh
-    extra = f" {'—' if 'n_filtered' not in r else f'{r[\"n_filtered\"]:>7,}'}"
+    if 'n_filtered' in r:
+        extra = f" {r['n_filtered']:>7,}"
+    else:
+        extra = f" {'—':>7}"
     print(f"  {name:<28}"
           f"{r['n_trades']:>8,} "
           f"{r['win_rate']:>6.1f}% "
