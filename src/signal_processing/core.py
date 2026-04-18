@@ -197,7 +197,7 @@ def compute_indicator_live(df_5m, is_close, indicator, tf_minutes, **kwargs):
 
 def compute_oracle_labels(df, indicator,
                            Q_var=KALMAN_PROCESS_VAR, R_var=KALMAN_MEASURE_VAR,
-                           indicator_params=None):
+                           indicator_params=None, slope_lag=1):
     """
     Dispatcher oracle : calcule les labels non-causaux (smoother RTS).
 
@@ -209,6 +209,9 @@ def compute_oracle_labels(df, indicator,
         Q_var, R_var: covariances Kalman smoother (défauts = globales).
         indicator_params: dict optionnel de params pour l'indicateur
                           (ex: {'fast': 8, 'slow': 17, 'signal': 9}).
+        slope_lag : décalage de la pente. Default 1 (legacy).
+            1 → slopes[t] = positions[t-1] - positions[t-2]
+            0 → slopes[t] = positions[t]   - positions[t-1] (gain de TF en précocité)
 
     Returns:
         pd.DataFrame (position, slope, label), NaN remplacés par 0.
@@ -216,7 +219,8 @@ def compute_oracle_labels(df, indicator,
     ind_kwargs = indicator_params or {}
     ind_series = compute_indicator(df, indicator, **ind_kwargs)
     ind_array = ind_series.values.astype(np.float64)
-    positions, slopes = compute_oracle(ind_array, Q_var=Q_var, R_var=R_var)
+    positions, slopes = compute_oracle(ind_array, Q_var=Q_var, R_var=R_var,
+                                          slope_lag=slope_lag)
     positions = np.where(np.isnan(positions), 0.0, positions)
     slopes = np.where(np.isnan(slopes), 0.0, slopes)
     labels = (slopes > 0).astype(int)
@@ -485,7 +489,8 @@ def prepare_features_and_labels_progressive(df_tf, df_5m, indicator, tf_minutes,
                                                Q_var=KALMAN_PROCESS_VAR,
                                                R_var=KALMAN_MEASURE_VAR,
                                                indicator_params=None,
-                                               adaptive=False):
+                                               adaptive=False,
+                                               slope_lag=1):
     """
     Version "progressive" à résolution 5min :
       - Labels oracle[t_ref] ffill sur les tf/5 lignes 5min de la bougie courante
@@ -522,10 +527,11 @@ def prepare_features_and_labels_progressive(df_tf, df_5m, indicator, tf_minutes,
         Q_var=Q_var, R_var=R_var, indicator_params=indicator_params,
         adaptive=adaptive)
 
-    # 2. Oracle au TF
+    # 2. Oracle au TF (slope_lag=0 → pente la plus récente, gain de précocité)
     oracle = compute_oracle_labels(df_tf, indicator,
                                      Q_var=Q_var, R_var=R_var,
-                                     indicator_params=indicator_params)
+                                     indicator_params=indicator_params,
+                                     slope_lag=slope_lag)
 
     # 3. ffill oracle sur les 5min via t_ref (même logique que slopes)
     tf_delta = pd.Timedelta(minutes=tf_minutes)
@@ -785,9 +791,23 @@ def compute_cci_live(high_live, low_live, close_5min, is_close, period=CCI_PERIO
 # ORACLE
 # ============================================================================
 
-def compute_oracle(indicator_30m, Q_var=KALMAN_PROCESS_VAR, R_var=KALMAN_MEASURE_VAR):
+def compute_oracle(indicator_30m, Q_var=KALMAN_PROCESS_VAR, R_var=KALMAN_MEASURE_VAR,
+                    slope_lag=1):
     """
     Smoother RTS (non-causal). Q_var et R_var paramétrables.
+
+    Args:
+        indicator_30m : valeurs indicateur (peut contenir NaN).
+        Q_var, R_var  : covariances Kalman smoother.
+        slope_lag     : décalage de la pente (default 1 = comportement legacy).
+            slope_lag=1 → slopes[t] = positions[t-1] - positions[t-2]
+                         (pente "passée", décalée d'une bougie)
+            slope_lag=0 → slopes[t] = positions[t]   - positions[t-1]
+                         (pente la plus récente possible, gain de 30min sur TF=30m)
+
+        ⚠️ slope_lag=0 reste causal pour le modèle car la slope est calculée
+        à t_ref = bougie déjà fermée. Le RTS smoother voit le futur uniquement
+        pour le calcul des labels training, pas pour l'exécution.
     """
     from pykalman import KalmanFilter as KF
     n = len(indicator_30m)
@@ -807,9 +827,13 @@ def compute_oracle(indicator_30m, Q_var=KALMAN_PROCESS_VAR, R_var=KALMAN_MEASURE
     positions = np.full(n, np.nan)
     positions[valid] = smooth_means[:, 0]
     slopes = np.full(n, np.nan)
-    for t in range(2, n):
-        if not np.isnan(positions[t - 1]) and not np.isnan(positions[t - 2]):
-            slopes[t] = positions[t - 1] - positions[t - 2]
+    # slopes[t] = positions[t - slope_lag] - positions[t - slope_lag - 1]
+    start = slope_lag + 1  # besoin de t-slope_lag et t-slope_lag-1 valides
+    for t in range(start, n):
+        a = positions[t - slope_lag]
+        b = positions[t - slope_lag - 1]
+        if not np.isnan(a) and not np.isnan(b):
+            slopes[t] = a - b
     return positions, slopes
 
 

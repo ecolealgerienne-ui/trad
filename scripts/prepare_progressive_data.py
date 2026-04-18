@@ -84,16 +84,21 @@ def main():
     parser.add_argument('--adaptive', action='store_true',
                         help='Utiliser AQ-KF (Adaptive Q Kalman Filter) au forward pass '
                              '→ meilleure détection des transitions. Oracle RTS inchangé.')
+    parser.add_argument('--slope-lag', type=int, default=1, choices=[0, 1],
+                        help='Décalage pente oracle. 1 (legacy) = pente t-1 vs t-2. '
+                             '0 = pente t vs t-1 (gain de TF en précocité).')
     args = parser.parse_args()
 
     RAW_DIR.mkdir(parents=True, exist_ok=True)
     PREP_DIR.mkdir(parents=True, exist_ok=True)
 
     tf_label = f'{args.tf}m' if args.tf < 60 else '1h'
-    filter_tag = 'AQ-KF adaptive' if args.adaptive else 'standard Kalman'
+    filter_tag_disp = 'AQ-KF adaptive' if args.adaptive else 'standard Kalman'
+    slope_tag_disp = 'slope_lag=0 (récente t/t-1)' if args.slope_lag == 0 else 'slope_lag=1 (legacy t-1/t-2)'
     print("=" * 80)
     print(f"PRÉPARATION DATASET ML — PROGRESSIVE — {args.indicator.upper()} × {tf_label}")
-    print(f"  filter={filter_tag}  trim={args.trim}  train={args.train_ratio}  "
+    print(f"  filter={filter_tag_disp}  oracle={slope_tag_disp}")
+    print(f"  trim={args.trim}  train={args.train_ratio}  "
           f"val={args.val_ratio}  gap_5m={args.gap_5m}")
     print("=" * 80)
 
@@ -126,10 +131,10 @@ def main():
 
     # ========== [3] Progressive features + labels ==========
     print(f"\n[3/7] prepare_features_and_labels_progressive "
-          f"(adaptive={args.adaptive}) ...")
+          f"(adaptive={args.adaptive}, slope_lag={args.slope_lag}) ...")
     data = prepare_features_and_labels_progressive(
         df_tf, df_5m, args.indicator, args.tf, trim=args.trim,
-        adaptive=args.adaptive)
+        adaptive=args.adaptive, slope_lag=args.slope_lag)
     print(f"  Shape: {data.shape}  |  colonnes: {list(data.columns)}")
     print(f"  Plage: {data.index[0]} → {data.index[-1]}")
     print(f"  Distribution step_k: {dict(data['step_k'].value_counts().sort_index())}")
@@ -138,8 +143,10 @@ def main():
           f"DOWN={(data['label_binary']==0).sum():,}")
 
     # ========== [4] Oracle slopes full TF (pour backtest) ==========
-    print(f"\n[4/7] compute_oracle_labels (full tf, pour backtest) ...")
-    oracle_full = compute_oracle_labels(df_tf, args.indicator)
+    print(f"\n[4/7] compute_oracle_labels (full tf, pour backtest, "
+          f"slope_lag={args.slope_lag}) ...")
+    oracle_full = compute_oracle_labels(df_tf, args.indicator,
+                                          slope_lag=args.slope_lag)
     oracle_slopes_full = oracle_full['slope'].values.astype(np.float64)
     print(f"  oracle_slopes_full shape: {oracle_slopes_full.shape}")
 
@@ -184,10 +191,12 @@ def main():
         return df_split.index.values
 
     # Nom du NPZ : si --days > 0, on tag avec _<N>d, sinon _full
-    # Si --adaptive, ajouter suffixe _adaptive pour éviter écrasement
+    # Suffixes optionnels (cumulés, ordre fixe : _adaptive puis _lag<N>)
     period_tag = f'{args.days}d' if args.days > 0 else 'full'
     adaptive_suffix = '_adaptive' if args.adaptive else ''
-    npz_path = PREP_DIR / f'dataset_{args.indicator}_{tf_label}_{period_tag}_progressive{adaptive_suffix}.npz'
+    lag_suffix = f'_lag{args.slope_lag}' if args.slope_lag != 1 else ''
+    full_suffix = adaptive_suffix + lag_suffix
+    npz_path = PREP_DIR / f'dataset_{args.indicator}_{tf_label}_{period_tag}_progressive{full_suffix}.npz'
     print(f"  Sauvegarde NPZ: {npz_path}")
     np.savez(
         npz_path,

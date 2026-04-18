@@ -49,26 +49,25 @@ MODELS_DIR = Path('models')
 def parse_npz_path(npz_path):
     """Extrait (indicator, tf_label, period_tag, filter_tag) du nom du NPZ.
 
-    Attend :
-      dataset_<ind>_<tf>_<period>_progressive.npz             → filter_tag=''
-      dataset_<ind>_<tf>_<period>_progressive_adaptive.npz    → filter_tag='_adaptive'
+    Reconnaît tous les suffixes optionnels après '_progressive' :
+      dataset_<ind>_<tf>_<period>_progressive.npz                   → filter_tag=''
+      dataset_<ind>_<tf>_<period>_progressive_adaptive.npz          → filter_tag='_adaptive'
+      dataset_<ind>_<tf>_<period>_progressive_lag0.npz              → filter_tag='_lag0'
+      dataset_<ind>_<tf>_<period>_progressive_adaptive_lag0.npz     → filter_tag='_adaptive_lag0'
     """
     name = npz_path.stem
     if not name.startswith('dataset_'):
         return None, None, None, None
-    # Suffixe adaptive optionnel
-    if name.endswith('_progressive_adaptive'):
-        core = name[len('dataset_'):-len('_progressive_adaptive')]
-        filter_tag = '_adaptive'
-    elif name.endswith('_progressive'):
-        core = name[len('dataset_'):-len('_progressive')]
-        filter_tag = ''
-    else:
+    if '_progressive' not in name:
         return None, None, None, None
+    core_part, _, filter_part = name.partition('_progressive')
+    # core_part = 'dataset_<ind>_<tf>_<period>'
+    # filter_part = '' ou '_adaptive' ou '_lag0' ou '_adaptive_lag0'
+    core = core_part[len('dataset_'):]
     parts = core.split('_')
     if len(parts) != 3:
         return None, None, None, None
-    return parts[0], parts[1], parts[2], filter_tag
+    return parts[0], parts[1], parts[2], filter_part
 
 
 def main():
