@@ -50,15 +50,27 @@ MODELS_DIR = Path('models')
 
 
 def parse_npz_path(npz_path):
-    """Extrait (indicator, tf_label, period_tag) du nom du NPZ."""
+    """Extrait (indicator, tf_label, period_tag, filter_tag) du nom du NPZ.
+
+    Attend :
+      dataset_<ind>_<tf>_<period>_progressive.npz             → filter_tag=''
+      dataset_<ind>_<tf>_<period>_progressive_adaptive.npz    → filter_tag='_adaptive'
+    """
     name = npz_path.stem
-    if not name.startswith('dataset_') or not name.endswith('_progressive'):
-        return None, None, None
-    core = name[len('dataset_'):-len('_progressive')]
+    if not name.startswith('dataset_'):
+        return None, None, None, None
+    if name.endswith('_progressive_adaptive'):
+        core = name[len('dataset_'):-len('_progressive_adaptive')]
+        filter_tag = '_adaptive'
+    elif name.endswith('_progressive'):
+        core = name[len('dataset_'):-len('_progressive')]
+        filter_tag = ''
+    else:
+        return None, None, None, None
     parts = core.split('_')
     if len(parts) != 3:
-        return None, None, None
-    return parts[0], parts[1], parts[2]
+        return None, None, None, None
+    return parts[0], parts[1], parts[2], filter_tag
 
 
 def build_sequences(X_tab, window):
@@ -160,7 +172,7 @@ def main():
     if not npz_path.exists():
         print(f"❌ NPZ introuvable: {npz_path}")
         return
-    indicator, tf_label, period_tag = parse_npz_path(npz_path)
+    indicator, tf_label, period_tag, filter_tag = parse_npz_path(npz_path)
     if indicator is None:
         print(f"❌ Impossible de parser: {npz_path.name}")
         return
@@ -300,7 +312,7 @@ def main():
 
     # [6] Sauvegarde
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    model_path = MODELS_DIR / f'cnnlstm_progressive_{indicator}_{tf_label}_{period_tag}.pth'
+    model_path = MODELS_DIR / f'cnnlstm_progressive_{indicator}_{tf_label}_{period_tag}{filter_tag}.pth'
     torch.save({
         'model_state_dict': model.state_dict(),
         'args': vars(args),
@@ -313,7 +325,7 @@ def main():
     print(f"\n[6/6] Modèle sauvé: {model_path}  "
           f"({model_path.stat().st_size / 1024:.1f} KB)")
 
-    preds_path = PREP_DIR / f'preds_{indicator}_{tf_label}_{period_tag}_progressive_cnnlstm.npz'
+    preds_path = PREP_DIR / f'preds_{indicator}_{tf_label}_{period_tag}_progressive_cnnlstm{filter_tag}.npz'
     np.savez(
         preds_path,
         train_preds_proba=train_proba.astype(np.float32),

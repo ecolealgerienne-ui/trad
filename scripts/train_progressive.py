@@ -47,18 +47,28 @@ MODELS_DIR = Path('models')
 
 
 def parse_npz_path(npz_path):
-    """Extrait (indicator, tf_label, period_tag) du nom du NPZ.
+    """Extrait (indicator, tf_label, period_tag, filter_tag) du nom du NPZ.
 
-    Attend : dataset_<ind>_<tf>_<period>_progressive.npz
+    Attend :
+      dataset_<ind>_<tf>_<period>_progressive.npz             → filter_tag=''
+      dataset_<ind>_<tf>_<period>_progressive_adaptive.npz    → filter_tag='_adaptive'
     """
-    name = npz_path.stem  # dataset_macd_30m_full_progressive
-    if not name.startswith('dataset_') or not name.endswith('_progressive'):
-        return None, None, None
-    core = name[len('dataset_'):-len('_progressive')]  # macd_30m_full
+    name = npz_path.stem
+    if not name.startswith('dataset_'):
+        return None, None, None, None
+    # Suffixe adaptive optionnel
+    if name.endswith('_progressive_adaptive'):
+        core = name[len('dataset_'):-len('_progressive_adaptive')]
+        filter_tag = '_adaptive'
+    elif name.endswith('_progressive'):
+        core = name[len('dataset_'):-len('_progressive')]
+        filter_tag = ''
+    else:
+        return None, None, None, None
     parts = core.split('_')
     if len(parts) != 3:
-        return None, None, None
-    return parts[0], parts[1], parts[2]
+        return None, None, None, None
+    return parts[0], parts[1], parts[2], filter_tag
 
 
 def main():
@@ -83,7 +93,7 @@ def main():
         print(f"❌ NPZ introuvable: {npz_path}")
         return
 
-    indicator, tf_label, period_tag = parse_npz_path(npz_path)
+    indicator, tf_label, period_tag, filter_tag = parse_npz_path(npz_path)
     if indicator is None:
         print(f"❌ Impossible de parser le NPZ: {npz_path.name}")
         print(f"   Attendu: dataset_<ind>_<tf>_<period>_progressive.npz")
@@ -163,7 +173,7 @@ def main():
 
     # Sauvegarde
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    model_path = MODELS_DIR / f'xgb_progressive_{indicator}_{tf_label}_{period_tag}.pkl'
+    model_path = MODELS_DIR / f'xgb_progressive_{indicator}_{tf_label}_{period_tag}{filter_tag}.pkl'
     with open(model_path, 'wb') as f:
         pickle.dump({
             'model': model,
@@ -177,7 +187,7 @@ def main():
           f"({model_path.stat().st_size / 1024:.1f} KB)")
 
     # Preds NPZ (compatible avec backtest_progressive.py --mode model)
-    preds_path = PREP_DIR / f'preds_{indicator}_{tf_label}_{period_tag}_progressive.npz'
+    preds_path = PREP_DIR / f'preds_{indicator}_{tf_label}_{period_tag}_progressive{filter_tag}.npz'
     np.savez(
         preds_path,
         train_preds_proba=train_proba.astype(np.float32),
