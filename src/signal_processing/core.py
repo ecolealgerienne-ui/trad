@@ -1283,6 +1283,118 @@ def backtest_5min_progressive(slopes_5m, closes_5m, fees=0.001):
     )
 
 
+def backtest_5min_filtered_by_oracle(slopes_model, slopes_oracle,
+                                        closes_5m, fees=0.001):
+    """
+    DIAGNOSTIC : backtest 5min filtrant les signaux du modèle par l'oracle.
+
+    COPIE de backtest_5min_progressive avec UN SEUL ajout : une vérification
+    que le signal du modèle est d'accord avec le signal de l'oracle à la
+    même ligne 5min. Si désaccord → slope=0 → conserve position.
+
+    ⚠️ NON UTILISABLE EN PRODUCTION : requiert la connaissance de l'oracle
+    en temps réel. C'est un outil de diagnostic pour isoler :
+      - Problème = switch (flips parasites) → PnL remonte vers l'Oracle
+      - Problème = timing/lag (mauvais moment)  → PnL reste catastrophique
+
+    Args:
+        slopes_model  : np.ndarray (n,) — signal du modèle (±1 / 0 / NaN)
+        slopes_oracle : np.ndarray (n,) — signal de l'oracle (même format)
+        closes_5m     : np.ndarray (n,) — closes 5min (même que non-filtered)
+        fees          : fees par côté (identique)
+
+    Returns:
+        dict identique à backtest_5min_progressive
+        + clé supplémentaire 'n_filtered' = rows où le modèle voulait trader
+          mais a été bloqué par désaccord oracle.
+    """
+    n = len(slopes_model)
+    assert len(slopes_oracle) == n, \
+        "slopes_model et slopes_oracle doivent avoir même longueur"
+    assert len(closes_5m) == n, \
+        "slopes et closes_5m doivent avoir même longueur"
+
+    position = 0      # 0=FLAT, 1=LONG, -1=SHORT
+    entry_price = 0.0
+    trades = []
+    n_filtered = 0    # compteur désaccords model/oracle
+
+    for i in range(n - 1):  # n-1 car exec à i+1
+        s_m = slopes_model[i]
+        s_o = slopes_oracle[i]
+
+        # Target depuis le signal model (même logique que l'originale)
+        if np.isnan(s_m) or s_m == 0:
+            target_model = position
+        elif s_m > 0:
+            target_model = 1
+        else:
+            target_model = -1
+
+        # ⚠️ AJOUT : filtre oracle
+        # Si le signal model est différent de la position actuelle (veut flip)
+        # ET que l'oracle donne un signe différent → on bloque
+        if target_model != position:
+            # Signal oracle
+            if np.isnan(s_o) or s_o == 0:
+                sign_oracle = 0
+            elif s_o > 0:
+                sign_oracle = 1
+            else:
+                sign_oracle = -1
+
+            # Désaccord → bloque le trade, conserve position
+            if target_model != sign_oracle:
+                n_filtered += 1
+                continue
+
+        target = target_model
+
+        if target == position:
+            continue
+
+        exec_price = closes_5m[i + 1]
+        if np.isnan(exec_price):
+            continue
+
+        # Sortie
+        if position != 0:
+            pnl = _exec_trade(position, entry_price, exec_price, fees) - fees
+            trades.append({'exit_i': i + 1, 'pnl': pnl, 'position': position})
+
+        # Nouvelle entrée (flip ou depuis FLAT)
+        if target != 0:
+            entry_price = exec_price
+        position = target
+
+    # Close final
+    if position != 0:
+        exec_price = closes_5m[-1]
+        if not np.isnan(exec_price):
+            pnl = _exec_trade(position, entry_price, exec_price, fees) - fees
+            trades.append({'exit_i': n - 1, 'pnl': pnl, 'position': position})
+
+    if not trades:
+        return dict(n_trades=0, pnl_pct=0.0, win_rate=0.0,
+                    profit_factor=0.0, sharpe=0.0, n_long=0, n_short=0,
+                    n_filtered=n_filtered)
+
+    pnls = np.array([t['pnl'] for t in trades])
+    wins = pnls[pnls > 0]
+    losses = pnls[pnls < 0]
+    return dict(
+        n_trades=len(trades),
+        pnl_pct=pnls.sum() * 100,
+        win_rate=len(wins) / len(pnls) * 100,
+        profit_factor=(wins.sum() / abs(losses.sum())
+                       if len(losses) > 0 and losses.sum() != 0 else np.inf),
+        sharpe=(pnls.mean() / pnls.std() if pnls.std() > 1e-10 else 0.0),
+        n_long=sum(1 for t in trades if t['position'] == 1),
+        n_short=sum(1 for t in trades if t['position'] == -1),
+        n_filtered=n_filtered,
+    )
+
+
 def _find_exec_price(closes_5m_per_candle, t, step_idx_offset):
     """
     Helper pour backtest_5m : trouve le prix à step_idx sous-pas 5min après
