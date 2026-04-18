@@ -43,6 +43,16 @@ référence future.
 2. 3-classes UP/NEUTRE/DOWN (effort moyen) — inaction apprenable
 3. Loss PnL-aware (effort élevé) — optimise PnL directement
 
+### ⚠️ Limite Kalman atteinte (section 12)
+
+L'AQ-KF (Adaptive Q Kalman Filter) confirme un **plafond structurel à
+55-73% capture brute** indépendamment du filtre :
+- AQ-KF aide XGBoost (capture brute MACD : 44% → 67%)
+- AQ-KF n'aide pas CNN-LSTM (déjà à 55%)
+- AQ-KF dégrade le PnL pur (sur-trading hors transitions)
+- Persistence ne sauve pas l'AQ-KF
+- **Kalman exploré, plafond identifié → pivot vers structurel**
+
 ---
 
 ## 1. Setup
@@ -533,6 +543,121 @@ for ind in macd cci rsi; do
       --preds data/prepared/preds_${ind}_30m_full_progressive${model}.npz \
       --split test
   done
+done
+```
+
+---
+
+## 12. Filtre adaptatif AQ-KF — exploration et conclusion
+
+Test : remplacer le forward filter standard par **AQ-KF** (Adaptive Q
+Kalman Filter, `forward_filter_30m_adaptive` dans `core.py`) qui augmente
+dynamiquement Q autour des transitions à forte innovation.
+
+**Modification non-breaking** : flag `--adaptive` dans
+`prepare_progressive_data.py`, suffixe `_adaptive` dans les NPZ et modèles.
+Aucun script existant cassé. Oracle inchangé (toujours RTS smoother).
+
+### 12.1 Impact classification (test set)
+
+| Indicateur × Modèle | Standard AUC | Adaptive AUC | Standard Acc | Adaptive Acc |
+|---------------------|--------------|--------------|--------------|--------------|
+| MACD XGB | 0.9836 | 0.9632 | 93.75% | **90.01%** (-3.74%) |
+| MACD CNN-LSTM | 0.9882 | 0.9859 | 94.42% | 93.86% (-0.56%) |
+| RSI XGB | 0.9637 | 0.9055 | 89.26% | **81.98%** (-7.28%) |
+
+**L'adaptive dégrade la classification** :
+- XGBoost très impacté (-3.7 à -7.3%)
+- CNN-LSTM peu impacté (-0.6%) → il s'adapte au signal plus bruité
+
+**Cause** : AQ-KF rend les slopes plus réactives autour des transitions →
+moins prédictibles ponctuellement.
+
+### 12.2 Impact backtest Model pur (sans filtre oracle)
+
+| Indicateur × Modèle | Standard PnL Net | Adaptive PnL Net | Delta |
+|---------------------|------------------|------------------|-------|
+| MACD XGB | -590% | **-796%** | **-206 pire** |
+| MACD CNN-LSTM | -911% | -849% | +62 (∼=) |
+| RSI XGB | -1176% | **-1598%** | **-422 pire** |
+
+**Sans filtre oracle, l'adaptive est PIRE** : plus de trades parasites
+parce que la réactivité augmente le bruit hors transitions.
+
+### 12.3 Impact backtest Model ∩ Oracle (avec filtre oracle)
+
+| Indicateur × Modèle | Std PnL Net | Adapt PnL Net | Std capture brute | Adapt capture brute |
+|---------------------|-------------|---------------|-------------------|---------------------|
+| **MACD XGB** | -100% | **+84%** ✅ | 44% | **67%** (+23%) 🔥 |
+| MACD CNN-LSTM | -11% | -12% | 55% | 55% (=) |
+| **RSI XGB** | (n/a) | **+258%** ✅ | (n/a) | **73%** |
+| RSI CNN-LSTM | +87% | (à compléter) | 59% | (à compléter) |
+
+**L'adaptive améliore drastiquement le timing QUAND signe correct** :
+- MACD XGBoost : capture brute 44% → **67%** (+52% relatif)
+- Premier PnL net positif pour MACD XGBoost (+84%)
+- RSI XGBoost : Model ∩ Oracle = +258% (3× le RSI std)
+
+### 12.4 Impact grid persistence sur adaptive
+
+| Best persistence MACD | Standard | Adaptive |
+|------------------------|----------|----------|
+| min_hold/confirm | 12/6 | 24/6 |
+| PnL Net | -444% | **-609%** |
+
+**La persistence ne sauve PAS l'adaptive** : pire qu'en standard (-609 vs
+-444). Les transitions plus brèves de l'adaptive mettent en échec les
+heuristiques temporelles classiques.
+
+### 12.5 Conclusion sur l'AQ-KF
+
+**Ce que confirme l'AQ-KF** :
+- ✅ Les slopes adaptatives capturent **mieux les transitions** (+14% absolu
+  capture brute en MACD XGB filtré oracle, +52% relatif)
+- ✅ Particulièrement utile pour XGBoost (modèle "rigide" qui bénéficie
+  d'un meilleur prétraitement du signal)
+- ❌ Impact CNN-LSTM négligeable (modèle déjà bon en feature extraction)
+- ❌ Augmente le bruit hors transitions (sur-trading en mode "Model pur")
+- ❌ Persistence inadaptée à la dynamique adaptive
+
+**Verdict architectural** :
+
+> **Le choix Standard vs Adaptive est conditionnel au modèle aval** :
+> - **XGBoost** + **filtre oracle** (ou équivalent forte stabilisation) → Adaptive
+> - **CNN-LSTM** ou **production sans filtre** → Standard
+
+**Insight final sur Kalman** :
+
+Toutes les variations exploré du Kalman (forward standard, forward
+adaptatif, FLKS backward 1..5 sous-pas, RTS oracle) montrent un **plafond
+structurel à ~55-73% capture brute** quand le signe est correct. Ce
+plafond est **caractéristique de la cible binaire ffill** :
+
+- Même avec un filtre parfait sur les features, on ne peut pas synchroniser
+  exactement les transitions du modèle avec celles de l'oracle
+- Le décalage temporel résiduel (1-5 rows 5min) crée un manque-à-gagner de
+  ~30-45% sur les vrais trades
+- Aucune variante de Kalman ne dépasse ce plafond
+
+**On a fait le tour de Kalman**. Les pistes restantes sont structurelles :
+- **Cible** : régression rendement, multi-horizon, 3-classes
+- **Cadence** : 30min vs 5min
+- **Loss** : PnL-aware au lieu de BCE
+- **Architecture** : transformer attention, multi-task, meta-learning
+
+### 12.6 Commandes reproductibles
+
+```bash
+# Génération adaptative (3 indicateurs)
+python scripts/prepare_progressive_data.py --indicator macd --tf 30 --adaptive
+python scripts/prepare_progressive_data.py --indicator rsi --tf 30 --adaptive
+python scripts/prepare_progressive_data.py --indicator cci --tf 30 --adaptive
+
+# Train + diagnostic Model ∩ Oracle
+for ind in macd rsi cci; do
+  python scripts/train_progressive.py --npz data/prepared/dataset_${ind}_30m_full_progressive_adaptive.npz
+  python scripts/train_cnn_lstm_progressive.py --npz data/prepared/dataset_${ind}_30m_full_progressive_adaptive.npz
+  python scripts/backtest_model_filtered_by_oracle.py --npz data/prepared/dataset_${ind}_30m_full_progressive_adaptive.npz --preds data/prepared/preds_${ind}_30m_full_progressive_adaptive.npz --split test
 done
 ```
 

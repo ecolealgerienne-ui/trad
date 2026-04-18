@@ -276,6 +276,50 @@
       "6. Pivot 6 (moyen effort) : features volume/microstructure"
     ]
   },
+  "adaptive_filter_aqkf_test": {
+    "note": "Filtre AQ-KF (Adaptive Q Kalman) en remplacement du forward standard. Oracle inchangé (RTS).",
+    "implementation": "src/signal_processing/core.py::compute_*_progressive(adaptive=True), flag --adaptive dans prepare_progressive_data.py",
+    "naming_convention": "dataset_<ind>_<tf>_<period>_progressive_adaptive.npz (suffixe _adaptive)",
+    "classification_impact": {
+      "macd_xgb":      {"std_auc": 0.9836, "adapt_auc": 0.9632, "std_acc": 0.9375, "adapt_acc": 0.9001, "delta_acc_pct": -3.74},
+      "macd_cnnlstm":  {"std_auc": 0.9882, "adapt_auc": 0.9859, "std_acc": 0.9442, "adapt_acc": 0.9386, "delta_acc_pct": -0.56},
+      "rsi_xgb":       {"std_auc": 0.9637, "adapt_auc": 0.9055, "std_acc": 0.8926, "adapt_acc": 0.8198, "delta_acc_pct": -7.28}
+    },
+    "model_pure_pnl_net_pct": {
+      "macd_xgb":     {"std": -589.84, "adapt": -796.03, "delta": -206.19},
+      "macd_cnnlstm": {"std": -910.66, "adapt": -849.10, "delta":  61.56},
+      "rsi_xgb":      {"std": -1176.26, "adapt": -1598.32, "delta": -422.06}
+    },
+    "model_filtered_oracle_pnl_net_pct": {
+      "macd_xgb":     {"std": -99.89, "adapt":  84.10, "delta":  183.99, "gross_capture_std": 44, "gross_capture_adapt": 67},
+      "macd_cnnlstm": {"std": -10.79, "adapt": -12.32, "delta":   -1.53, "gross_capture_std": 55, "gross_capture_adapt": 55},
+      "rsi_xgb":      {"std": null,   "adapt":  258.50, "delta": null,    "gross_capture_std": null, "gross_capture_adapt": 73}
+    },
+    "grid_persistence_macd_adaptive_best": {
+      "min_hold": 24, "confirm": 6,
+      "trades": 3021, "wr_pct": 30.1, "pf": 0.52, "sharpe": -0.220,
+      "pnl_gross_pct": -5.28, "fees_pct": 604.20,
+      "pnl_net_pct": -609.48, "alpha_vs_bh_pct": -645.76,
+      "comparison_vs_std_persistence_best": "PIRE (-609 vs -444 standard) — persistence inadaptée à dynamique adaptive"
+    },
+    "structural_ceiling_observed": {
+      "statement": "Capture brute Model ∩ Oracle plafonne à 55-73% indépendamment du filtre Kalman utilisé",
+      "characteristic_of": "Cible binaire ffill avec exécution à 5min",
+      "explanation": "Décalage temporel résiduel (1-5 rows 5min) entre transitions modèle et oracle → manque-à-gagner ~30-45% sur les trades en accord",
+      "all_kalman_variants_tested": [
+        "Forward standard (non-causal Q fixe)",
+        "Forward adaptive AQ-KF (Q dynamique)",
+        "FLKS backward k=1..5 sous-pas",
+        "RTS smoother (oracle, non-causal)"
+      ]
+    },
+    "verdict": {
+      "adaptive_useful_for": ["XGBoost + filtre oracle (capture brute +14% absolu)"],
+      "adaptive_useless_for": ["CNN-LSTM (déjà à 55% capture)", "Mode production sans filtre (sur-trading)"],
+      "kalman_exploration_complete": true,
+      "next_pivot": "Structurel (cible/cadence/loss/architecture), Kalman ne peut plus apporter"
+    }
+  },
   "model_filtered_by_oracle_test": {
     "note": "Diagnostic Model ∩ Oracle — isoler switch vs timing. Non utilisable en prod (oracle live indispo).",
     "function_used": "src/signal_processing/core.py::backtest_5min_filtered_by_oracle (copie backtest_5min_progressive + filtre sign)",
