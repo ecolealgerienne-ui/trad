@@ -155,6 +155,14 @@ def main():
     parser.add_argument('--dropout', type=float, default=0.3)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--device', default='auto', choices=['auto', 'cuda', 'cpu'])
+    parser.add_argument('--pnl-per-row', default=None,
+                        help='Option A — Path NPZ pnl_per_row (généré par '
+                             'analyze_oracle_trade_thresholds.py --save-pnl-per-row). '
+                             'Si fourni + --pnl-threshold > 0 → active sample weighting.')
+    parser.add_argument('--pnl-threshold', type=float, default=0.0,
+                        help='Option A — Seuil absolu |pnl_net| (default 0.0 = désactivé). '
+                             'Ex: 0.002 = garde que les rows où le trade Oracle a '
+                             '|PnL net| >= 0.2%% (filtre trades marginaux).')
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -196,6 +204,41 @@ def main():
     print(f"   X_train tab: {X_train_tab.shape}  |  "
           f"X_val tab: {X_val_tab.shape}  |  X_test tab: {X_test_tab.shape}")
 
+    # [1.5] Option A : sample weighting via pnl_per_row (optionnel)
+    use_sample_weighting = (args.pnl_per_row is not None
+                             and args.pnl_threshold > 0)
+    sw_tag = ''
+    if use_sample_weighting:
+        pnl_path = Path(args.pnl_per_row)
+        if not pnl_path.exists():
+            print(f"❌ pnl_per_row NPZ introuvable: {pnl_path}")
+            return
+        pnl_npz = np.load(pnl_path, allow_pickle=True)
+        pnl_train = pnl_npz['pnl_per_row_train']
+        pnl_val = pnl_npz['pnl_per_row_val']
+        assert len(pnl_train) == len(X_train_tab), \
+            f"Mismatch pnl_train ({len(pnl_train)}) vs X_train ({len(X_train_tab)})"
+        assert len(pnl_val) == len(X_val_tab), \
+            f"Mismatch pnl_val ({len(pnl_val)}) vs X_val ({len(X_val_tab)})"
+        w_train = (np.abs(pnl_train) >= args.pnl_threshold).astype(np.float32)
+        w_val = (np.abs(pnl_val) >= args.pnl_threshold).astype(np.float32)
+        n_train_kept = int(w_train.sum())
+        n_val_kept = int(w_val.sum())
+        # Tag pour noms de fichiers
+        sw_str = f'{args.pnl_threshold:.4f}'.rstrip('0').rstrip('.')
+        sw_tag = f'_sw{sw_str.replace(".", "p")}'
+        print(f"\n[1.5/6] Option A ACTIVÉE  pnl_threshold={args.pnl_threshold*100:.3f}%  "
+              f"(suffix={sw_tag})")
+        print(f"   Train : {n_train_kept:,}/{len(w_train):,} rows kept "
+              f"({n_train_kept/len(w_train)*100:.2f}%)")
+        print(f"   Val   : {n_val_kept:,}/{len(w_val):,} rows kept "
+              f"({n_val_kept/len(w_val)*100:.2f}%)")
+    else:
+        w_train = np.ones(len(X_train_tab), dtype=np.float32)
+        w_val = np.ones(len(X_val_tab), dtype=np.float32)
+        if args.pnl_per_row is not None:
+            print(f"\n[1.5/6] pnl_per_row fourni mais pnl_threshold=0 → Option A DÉSACTIVÉE")
+
     # [2] Build sequences (rolling window avec padding début)
     print(f"\n[2/6] Build sequences (window={args.window}, padding début)")
     X_train = build_sequences(X_train_tab, args.window)
@@ -221,20 +264,24 @@ def main():
     n_params = sum(p.numel() for p in model.parameters())
     print(f"   {n_params:,} paramètres")
 
-    # DataLoaders
+    # DataLoaders (tensors incluent sample_weight pour Option A)
     train_ds = TensorDataset(torch.from_numpy(X_train),
-                               torch.from_numpy(y_train))
+                               torch.from_numpy(y_train),
+                               torch.from_numpy(w_train))
     val_ds = TensorDataset(torch.from_numpy(X_val),
-                             torch.from_numpy(y_val))
+                             torch.from_numpy(y_val),
+                             torch.from_numpy(w_val))
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
                                 num_workers=0, pin_memory=(device.type == 'cuda'))
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
                               num_workers=0, pin_memory=(device.type == 'cuda'))
 
     # [4] Train
-    print(f"\n[4/6] Training ...")
+    print(f"\n[4/6] Training ..."
+          + (f" (Option A sample weighting active)" if use_sample_weighting else ""))
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
-    criterion = nn.BCEWithLogitsLoss()
+    # reduction='none' pour pondérer row par row
+    criterion = nn.BCEWithLogitsLoss(reduction='none')
 
     best_val_loss = float('inf')
     best_state = None
@@ -243,30 +290,41 @@ def main():
     for epoch in range(1, args.epochs + 1):
         model.train()
         train_loss_sum = 0.0
-        n_train = 0
-        for xb, yb in train_loader:
-            xb, yb = xb.to(device, non_blocking=True), yb.to(device, non_blocking=True)
+        train_weight_sum = 0.0
+        for xb, yb, wb in train_loader:
+            xb = xb.to(device, non_blocking=True)
+            yb = yb.to(device, non_blocking=True)
+            wb = wb.to(device, non_blocking=True)
             optimizer.zero_grad()
             logits = model(xb)
-            loss = criterion(logits, yb)
-            loss.backward()
-            optimizer.step()
-            train_loss_sum += loss.item() * xb.size(0)
-            n_train += xb.size(0)
-        train_loss = train_loss_sum / n_train
+            loss_per_sample = criterion(logits, yb)
+            # Loss pondérée : somme(loss * w) / somme(w) (évite division par 0)
+            w_sum = wb.sum()
+            if w_sum.item() > 0:
+                loss = (loss_per_sample * wb).sum() / w_sum
+                loss.backward()
+                optimizer.step()
+                train_loss_sum += loss.item() * w_sum.item()
+                train_weight_sum += w_sum.item()
+        train_loss = train_loss_sum / max(train_weight_sum, 1e-8)
 
-        # Validation
+        # Validation (pondérée aussi pour cohérence early stop)
         model.eval()
         val_loss_sum = 0.0
-        n_val = 0
+        val_weight_sum = 0.0
         with torch.no_grad():
-            for xb, yb in val_loader:
-                xb, yb = xb.to(device, non_blocking=True), yb.to(device, non_blocking=True)
+            for xb, yb, wb in val_loader:
+                xb = xb.to(device, non_blocking=True)
+                yb = yb.to(device, non_blocking=True)
+                wb = wb.to(device, non_blocking=True)
                 logits = model(xb)
-                loss = criterion(logits, yb)
-                val_loss_sum += loss.item() * xb.size(0)
-                n_val += xb.size(0)
-        val_loss = val_loss_sum / n_val
+                loss_per_sample = criterion(logits, yb)
+                w_sum = wb.sum()
+                if w_sum.item() > 0:
+                    loss = (loss_per_sample * wb).sum() / w_sum
+                    val_loss_sum += loss.item() * w_sum.item()
+                    val_weight_sum += w_sum.item()
+        val_loss = val_loss_sum / max(val_weight_sum, 1e-8)
 
         marker = ''
         if val_loss < best_val_loss:
@@ -310,7 +368,7 @@ def main():
 
     # [6] Sauvegarde
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    model_path = MODELS_DIR / f'cnnlstm_progressive_{indicator}_{tf_label}_{period_tag}{filter_tag}.pth'
+    model_path = MODELS_DIR / f'cnnlstm_progressive_{indicator}_{tf_label}_{period_tag}{filter_tag}{sw_tag}.pth'
     torch.save({
         'model_state_dict': model.state_dict(),
         'args': vars(args),
@@ -323,7 +381,7 @@ def main():
     print(f"\n[6/6] Modèle sauvé: {model_path}  "
           f"({model_path.stat().st_size / 1024:.1f} KB)")
 
-    preds_path = PREP_DIR / f'preds_{indicator}_{tf_label}_{period_tag}_progressive_cnnlstm{filter_tag}.npz'
+    preds_path = PREP_DIR / f'preds_{indicator}_{tf_label}_{period_tag}_progressive_cnnlstm{filter_tag}{sw_tag}.npz'
     np.savez(
         preds_path,
         train_preds_proba=train_proba.astype(np.float32),
