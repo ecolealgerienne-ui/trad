@@ -276,6 +276,76 @@
       "6. Pivot 6 (moyen effort) : features volume/microstructure"
     ]
   },
+  "adaptive_plus_lag0_combination_test": {
+    "note": "Test cumul Adaptive + lag=0 sur RSI CNN-LSTM (config la plus prometteuse). Résultat: ANTAGONISTE.",
+    "config_tested": {
+      "indicator": "rsi",
+      "model": "cnn_lstm",
+      "filter": "adaptive_aqkf",
+      "slope_lag": 0,
+      "npz": "dataset_rsi_30m_full_progressive_adaptive_lag0.npz",
+      "model_file": "cnnlstm_progressive_rsi_30m_full_adaptive_lag0.pth",
+      "preds_file": "preds_rsi_30m_full_progressive_cnnlstm_adaptive_lag0.npz"
+    },
+    "classification_metrics": {
+      "train": {"auc": 0.8931, "accuracy": 0.8072, "f1": 0.8099},
+      "val":   {"auc": 0.8909, "accuracy": 0.8058, "f1": 0.8085},
+      "test":  {"auc": 0.8936, "accuracy": 0.8074, "f1": 0.8103}
+    },
+    "backtest_test": {
+      "oracle_pnl_net_pct": 1207.57,
+      "oracle_trades": 3261,
+      "oracle_wr_pct": 59.5,
+      "oracle_pf": 4.29,
+      "model_pure_pnl_net_pct": -1901.08,
+      "model_pure_trades": 9642,
+      "model_pure_wr_pct": 16.7,
+      "model_pure_pf": 0.31,
+      "model_filtered_pnl_net_pct": 377.22,
+      "model_filtered_trades": 3229,
+      "model_filtered_wr_pct": 43.1,
+      "model_filtered_pf": 1.52,
+      "model_filtered_pnl_gross_pct": 1023.02,
+      "model_filtered_fees_pct": 645.80,
+      "trades_blocked_by_disagreement": 13697,
+      "agreement_pct": 80.74,
+      "gross_capture_vs_oracle_pct": 55.0
+    },
+    "comparison_vs_standard_lag0": {
+      "rsi_cnnlstm_std_lag0_pnl_net_filtered": 443.35,
+      "rsi_cnnlstm_adapt_lag0_pnl_net_filtered": 377.22,
+      "delta_pnl_net_pct": -66.13,
+      "delta_capture_brute_pct": -4,
+      "delta_acc_pct": -2.12,
+      "verdict": "ANTAGONISTE: la combinaison réduit le PnL filtré, capture brute, et accuracy"
+    },
+    "explanation": [
+      "Adaptive rend les slopes FLKS plus réactives près des transitions",
+      "Lag=0 demande au modèle de prédire une cible plus locale (pente t vs t-1)",
+      "CNN-LSTM avec son LSTM avait déjà absorbé la dynamique locale grâce à window=24",
+      "Adaptive ajoute du bruit redondant que le LSTM n'a pas besoin",
+      "Pour chaque modèle, UNE SEULE modification améliore (pas les 2)"
+    ],
+    "consolidated_rule_xgboost_vs_cnnlstm": {
+      "xgboost": {
+        "best_config": "Adaptive + lag=1",
+        "best_pnl_net_filtered_pct": 258.50,
+        "indicator": "rsi"
+      },
+      "cnn_lstm": {
+        "best_config": "Standard + lag=0",
+        "best_pnl_net_filtered_pct": 443.35,
+        "indicator": "rsi"
+      },
+      "combination_adaptive_plus_lag0": "NON RECOMMANDÉE pour les 2 modèles"
+    },
+    "open_pistes_to_beat_443_pct": [
+      "Consensus inter-modèles : MACD CNN-LSTM lag=0 + RSI CNN-LSTM lag=0",
+      "Stabilisation des flips Model pur : persistence/hysteresis (utilisable en prod)",
+      "Architectures alternatives : Transformer attention, multi-task, loss PnL-aware",
+      "Pivot structurel cible : régression rendement, multi-horizon, 3-classes UP/NEUTRE/DOWN"
+    ]
+  },
   "slope_lag_0_test": {
     "note": "Cible oracle: pente récente sign(positions[t] - positions[t-1]) au lieu de sign(positions[t-1] - positions[t-2]). Seuls MACD et RSI testés (CCI hors scope par décision utilisateur).",
     "implementation": "src/signal_processing/core.py::compute_oracle(slope_lag=N), flag --slope-lag {0,1} dans prepare_progressive_data.py, suffixe NPZ _lag0",

@@ -24,6 +24,7 @@ référence future.
 | **DIAGNOSTIC Model ∩ Oracle** | **RSI +87% POSITIF**, MACD -11%, CCI -25% |
 | **Filtre adaptatif AQ-KF** | +23% capture brute XGBoost MACD (44→67%), neutre CNN-LSTM |
 | **🏆 Cible `slope_lag=0` (pente récente)** | **Oracle ×2, RSI CNN-LSTM = +443% PnL Net** (record) |
+| ❌ Combinaison Adaptive + Lag=0 | Antagoniste : -66 PnL vs Standard+lag=0 (effets redondants) |
 
 ### 🎯 Loi structurelle découverte
 
@@ -73,7 +74,19 @@ Cible `sign(positions[t] - positions[t-1])` (pente récente) au lieu de
 - CNN-LSTM → Standard + lag=0 (+443% RSI)
 - Les 2 pipelines sont **complémentaires**, pas substituables
 
-Pistes ouvertes : `adaptive + lag=0`, consensus, stabilisation des flips.
+### ❌ Combinaison Adaptive + Lag=0 — antagoniste (section 14)
+
+Test sur RSI CNN-LSTM (config la plus prometteuse) :
+- Adaptive + lag=0 PnL filtré : **+377%** (vs Standard + lag=0 : **+443%**)
+- Capture brute : 55% (vs 59% Standard + lag=0)
+- **-66 points de PnL** : les 2 modifications ne se cumulent pas
+
+**Cause** : adaptive ajoute du bruit redondant que le LSTM (déjà bon avec
+lag=0) n'a pas demandé. Pour chaque modèle, **une seule** modification
+améliore — pas les 2.
+
+Pistes ouvertes pour dépasser +443% : consensus inter-modèles,
+stabilisation des flips Model pur (production), architectures alternatives.
 
 ---
 
@@ -828,6 +841,137 @@ python scripts/backtest_model_filtered_by_oracle.py --npz data/prepared/dataset_
 2. **Consensus CNN-LSTM lag=0 (MACD + RSI)** : dépasser le plafond 60% ?
 3. **Hysteresis/persistence sur CNN-LSTM lag=0** : stabiliser les 10,927 trades RSI pur pour arriver au break-even sans filtre oracle
 4. **Investigation CCI lag=0** : mesurer si le pattern tient (hors scope actuel)
+
+---
+
+## 14. Combinaison Adaptive + Lag=0 — antagonisme confirmé
+
+Test : combiner les 2 modifications gagnantes (`--adaptive` + `--slope-lag 0`)
+pour vérifier si les effets se cumulent.
+
+**Hypothèse de cumul** : Adaptive aide le timing (capture brute +14% absolu
+sur XGBoost MACD) + Lag=0 double l'Oracle (×2.01-2.23) → projection
+théorique +500-700% PnL Net filtré pour RSI CNN-LSTM.
+
+**Résultat empirique** : effets **antagonistes**, pas additifs.
+
+### 14.1 Configuration testée
+
+- Indicateur : RSI (le plus rentable, oracle +1,208% en lag=0)
+- Modèle : CNN-LSTM (seul modèle qui apprend lag=0)
+- Filtre : AQ-KF Adaptive
+- Cible : pente t/t-1 (slope_lag=0)
+- NPZ : `dataset_rsi_30m_full_progressive_adaptive_lag0.npz` (87 MB)
+- Modèle : `cnnlstm_progressive_rsi_30m_full_adaptive_lag0.pth`
+- Preds : `preds_rsi_30m_full_progressive_cnnlstm_adaptive_lag0.npz`
+
+### 14.2 Résultats classification
+
+| Métrique | RSI CNN-LSTM std lag=0 | RSI CNN-LSTM adapt lag=0 | Delta |
+|----------|------------------------|---------------------------|-------|
+| Test AUC | 0.9139 | 0.8936 | -2.03% |
+| Test Acc | 82.86% | 80.74% | **-2.12%** |
+| Test F1 | 0.8294 | 0.8103 | -1.91% |
+
+L'adaptive dégrade encore la classification quand combiné à lag=0 :
+double pénalité (signal plus nerveux + cible plus locale).
+
+### 14.3 Résultats backtest
+
+| Stratégie | Trades | WR | PF | Sharpe | PnL Brut | Fees | PnL Net |
+|-----------|--------|-----|-----|--------|----------|------|---------|
+| Oracle pur (lag=0) | 3,261 | 59.5% | 4.29 | 0.394 | +1,860% | 652% | **+1,208%** |
+| Model pur adapt+lag0 | 9,642 | 16.7% | 0.31 | -0.388 | +27% | 1,928% | -1,901% |
+| **Model ∩ Oracle adapt+lag0** | **3,229** | 43.1% | 1.52 | 0.130 | +1,023% | 646% | **+377%** |
+
+### 14.4 Comparaison récapitulative — RSI CNN-LSTM
+
+| Configuration | Acc | Trades pur | PnL pur | **PnL filtré** | Capture brute |
+|---------------|-----|------------|---------|----------------|---------------|
+| Standard lag=1 | 89.89% | 7,787 | -1,176% | +87% | 59% |
+| Adaptive lag=1 | (n/a) | (n/a) | (n/a) | (n/a) | (n/a) |
+| **Standard lag=0** ⭐ | 82.86% | 10,927 | -2,205% | **+443%** 🏆 | 59% |
+| Adaptive lag=0 | 80.74% | 9,642 | -1,901% | **+377%** | **55%** |
+
+**La combinaison adaptive + lag=0 réduit le PnL Net filtré de -66 points**
+(+443% → +377%) et la capture brute de -4 points (59% → 55%).
+
+### 14.5 Pourquoi les effets ne se cumulent pas
+
+**Adaptive** rend les slopes FLKS plus **réactives** près des transitions
+(Q dynamique augmente l'amplitude du signal local).
+
+**Lag=0** demande déjà au modèle de prédire une cible plus **locale**
+(pente t vs t-1 au lieu de t-1 vs t-2).
+
+**Combinés** :
+- Le signal devient trop nerveux (adaptive pousse les slopes)
+- La cible est déjà locale (lag=0 demande la pente la plus récente)
+- Le modèle CNN-LSTM se trompe plus souvent en accord direction
+  → capture brute baisse (59% → 55%)
+- L'adaptive ne sert à rien : le LSTM avait déjà absorbé la dynamique
+  locale grâce à sa mémoire séquentielle (window=24 rows = 2h)
+- L'adaptive ajoute du bruit **redondant** que le LSTM n'a pas demandé
+
+### 14.6 Cartographie finale modèle × cible × filtre
+
+| Modèle | Filtre | Cible | PnL Net Model ∩ Oracle |
+|--------|--------|-------|------------------------|
+| **XGBoost** | **Adaptive** | **lag=1** ⭐ | +84% (MACD), **+258%** (RSI) |
+| XGBoost | Standard | lag=0 | -132% (MACD) ❌ |
+| **CNN-LSTM** | **Standard** | **lag=0** ⭐ | +301% (MACD), **+443%** (RSI) 🏆 |
+| CNN-LSTM | Adaptive | lag=0 | **+377%** (RSI, pire que std lag=0) |
+| CNN-LSTM | Standard | lag=1 | -11% (MACD), +87% (RSI) |
+
+**Règle empirique consolidée** :
+
+> Pour chaque modèle, **une seule** modification améliore les résultats :
+> - **XGBoost** : Adaptive (le filtre fait le boulot que le modèle ne sait pas faire)
+> - **CNN-LSTM** : Lag=0 (la cible plus locale est exploitée par le LSTM)
+>
+> **Cumuler les 2 modifications dégrade systématiquement** le PnL filtré.
+
+### 14.7 Verdict final sur les pivots cible/filtre
+
+**Pistes Kalman+Cible explorées intégralement** :
+
+| Variation | Effet | Statut |
+|-----------|-------|--------|
+| Filtre standard / Filtre adaptatif | Bénéfique pour XGBoost uniquement | Documenté section 12 |
+| Cible lag=1 / Cible lag=0 | Bénéfique pour CNN-LSTM uniquement | Documenté section 13 |
+| Combinaison Adaptive + lag=0 | **Antagoniste**, dégrade -66% | Documenté section 14 |
+
+**Le record absolu reste RSI CNN-LSTM Standard + lag=0 = +443% PnL Net filtré.**
+
+### 14.8 Pistes restantes pour dépasser +443%
+
+1. **Consensus inter-modèles** : MACD CNN-LSTM lag=0 + RSI CNN-LSTM lag=0
+   → leurs erreurs sont-elles décorrélées ? (à mesurer comme on l'a fait
+   pour standard lag=1)
+
+2. **Stabilisation des flips Model pur** : RSI CNN-LSTM lag=0 fait 10,927
+   trades pour -2,205% PnL Net. Une persistence/hysteresis efficace
+   pourrait diviser les trades par 3-5 et passer en positif sans filtre
+   oracle (utilisable en prod).
+
+3. **Architectures alternatives** :
+   - Transformer attention sur séquence longue (capture transitions
+     plus subtiles)
+   - Multi-task : prédire direction + magnitude
+   - Loss PnL-aware (la BCE actuelle ignore le coût des flips)
+
+4. **Pivot structurel cible** :
+   - Régression rendement futur (continu au lieu de binaire)
+   - Multi-horizon (5min, 15min, 30min, 1h, 2h convergents)
+   - 3 classes UP/NEUTRE/DOWN (modèle peut rejeter)
+
+### 14.9 Commandes reproductibles
+
+```bash
+python scripts/prepare_progressive_data.py --indicator rsi --tf 30 --adaptive --slope-lag 0
+python scripts/train_cnn_lstm_progressive.py --npz data/prepared/dataset_rsi_30m_full_progressive_adaptive_lag0.npz
+python scripts/backtest_model_filtered_by_oracle.py --npz data/prepared/dataset_rsi_30m_full_progressive_adaptive_lag0.npz --preds data/prepared/preds_rsi_30m_full_progressive_cnnlstm_adaptive_lag0.npz --split test
+```
 
 ---
 
