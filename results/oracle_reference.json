@@ -276,6 +276,68 @@
       "6. Pivot 6 (moyen effort) : features volume/microstructure"
     ]
   },
+  "slope_lag_0_test": {
+    "note": "Cible oracle: pente récente sign(positions[t] - positions[t-1]) au lieu de sign(positions[t-1] - positions[t-2]). Seuls MACD et RSI testés (CCI hors scope par décision utilisateur).",
+    "implementation": "src/signal_processing/core.py::compute_oracle(slope_lag=N), flag --slope-lag {0,1} dans prepare_progressive_data.py, suffixe NPZ _lag0",
+    "oracle_impact": {
+      "macd": {
+        "lag1_pnl_net_pct": 350.94, "lag0_pnl_net_pct": 783.87, "multiplier": 2.23,
+        "lag1_wr_pct": 45.6, "lag0_wr_pct": 56.6, "lag1_pf": 1.58, "lag0_pf": 2.99,
+        "lag1_sharpe": 0.146, "lag0_sharpe": 0.326,
+        "lag1_pnl_gross_pct": 807.14, "lag0_pnl_gross_pct": 1240.07
+      },
+      "rsi": {
+        "lag1_pnl_net_pct": 601.19, "lag0_pnl_net_pct": 1207.57, "multiplier": 2.01,
+        "lag1_wr_pct": 47.0, "lag0_wr_pct": 59.5, "lag1_pf": 1.96, "lag0_pf": 4.29,
+        "lag1_sharpe": 0.199, "lag0_sharpe": 0.394,
+        "lag1_pnl_gross_pct": 1253.39, "lag0_pnl_gross_pct": 1859.77
+      }
+    },
+    "classification_impact": {
+      "macd_xgb":      {"lag1_auc": 0.9836, "lag0_auc": 0.9201, "lag1_acc": 0.9375, "lag0_acc": 0.8483, "delta_acc_pct": -8.92},
+      "macd_cnnlstm":  {"lag1_auc": 0.9882, "lag0_auc": 0.9646, "lag1_acc": 0.9442, "lag0_acc": 0.8990, "delta_acc_pct": -4.52},
+      "rsi_cnnlstm":   {"lag1_auc": 0.9676, "lag0_auc": 0.9139, "lag1_acc": 0.8989, "lag0_acc": 0.8286, "delta_acc_pct": -7.03}
+    },
+    "model_pure_pnl_net_pct": {
+      "macd_xgb":     {"lag1": -589.84, "lag0": -592.09},
+      "macd_cnnlstm": {"lag1": -910.66, "lag0": -1524.65, "worse": true},
+      "rsi_cnnlstm":  {"lag1": -1176.26, "lag0": -2205.29, "worse": true}
+    },
+    "model_filtered_oracle_pnl_net_pct": {
+      "macd_xgb":     {"lag1": -99.89,  "lag0": -131.82, "gross_capture_lag1_pct": 44, "gross_capture_lag0_pct": 26, "delta": -31.93, "verdict": "XGBoost échoue avec lag0 (modèle trop rigide)"},
+      "macd_cnnlstm": {"lag1": -10.79,  "lag0":  300.89, "gross_capture_lag1_pct": 55, "gross_capture_lag0_pct": 61, "delta": 311.68, "verdict": "CNN-LSTM x28 meilleur"},
+      "rsi_cnnlstm":  {"lag1":  86.77,  "lag0":  443.35, "gross_capture_lag1_pct": 59, "gross_capture_lag0_pct": 59, "delta": 356.58, "verdict": "CNN-LSTM x5.1 meilleur, RECORD"}
+    },
+    "structural_insights": [
+      "Le plafond de capture brute Model ∩ Oracle reste ~60% (peu de changement)",
+      "L'Oracle lui-même double en PnL Net (+100-123%)",
+      "Le gain absolu vient du produit capture × Oracle (Oracle doublé → PnL doublé)",
+      "XGBoost ne peut pas apprendre la cible lag=0 (pas de mémoire séquentielle)",
+      "CNN-LSTM absorbe la dynamique plus locale grâce au LSTM"
+    ],
+    "rule_discovered": {
+      "XGBoost_best": "Adaptive + lag=1 (MACD XGB = +84%, RSI XGB = +258%)",
+      "CNN_LSTM_best": "Standard + lag=0 (MACD CNN-LSTM = +301%, RSI CNN-LSTM = +443%)",
+      "note": "Les 2 pipelines sont complémentaires, pas substituables"
+    },
+    "all_time_record": {
+      "config": "RSI CNN-LSTM lag=0 Model ∩ Oracle",
+      "pnl_net_pct": 443.35,
+      "pnl_gross_pct": 1093.95,
+      "fees_pct": 650.60,
+      "trades": 3253,
+      "wr_pct": 44.0,
+      "pf": 1.65,
+      "gross_capture_vs_oracle_pct": 58.8,
+      "agreement_model_oracle_pct": 82.86
+    },
+    "open_pistes": [
+      "Combiner adaptive + lag=0 : cumuler les gains ?",
+      "Consensus CNN-LSTM lag=0 (MACD + RSI) : dépasser plafond 60% ?",
+      "Stabilisation des flips : persistence/hysteresis sur CNN-LSTM lag=0 pour arriver au break-even sans filtre oracle",
+      "CCI lag=0 : hors scope actuel"
+    ]
+  },
   "adaptive_filter_aqkf_test": {
     "note": "Filtre AQ-KF (Adaptive Q Kalman) en remplacement du forward standard. Oracle inchangé (RTS).",
     "implementation": "src/signal_processing/core.py::compute_*_progressive(adaptive=True), flag --adaptive dans prepare_progressive_data.py",

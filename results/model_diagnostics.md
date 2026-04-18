@@ -22,6 +22,8 @@ référence future.
 | Consensus Unanimité 3/3 | +87% PnL mais toujours -503% |
 | **CNN-LSTM en remplacement XGBoost** | **+0.7% acc mais -320% PnL** (paradoxe aggravé) |
 | **DIAGNOSTIC Model ∩ Oracle** | **RSI +87% POSITIF**, MACD -11%, CCI -25% |
+| **Filtre adaptatif AQ-KF** | +23% capture brute XGBoost MACD (44→67%), neutre CNN-LSTM |
+| **🏆 Cible `slope_lag=0` (pente récente)** | **Oracle ×2, RSI CNN-LSTM = +443% PnL Net** (record) |
 
 ### 🎯 Loi structurelle découverte
 
@@ -52,6 +54,26 @@ L'AQ-KF (Adaptive Q Kalman Filter) confirme un **plafond structurel à
 - AQ-KF dégrade le PnL pur (sur-trading hors transitions)
 - Persistence ne sauve pas l'AQ-KF
 - **Kalman exploré, plafond identifié → pivot vers structurel**
+
+### 🏆 Pivot `slope_lag=0` — record absolu (section 13)
+
+Cible `sign(positions[t] - positions[t-1])` (pente récente) au lieu de
+`sign(positions[t-1] - positions[t-2])` (pente passée).
+
+**L'Oracle lui-même double en PnL Net** :
+- MACD Oracle : +351% → **+784%** (×2.23)
+- RSI Oracle : +601% → **+1,208%** (×2.01)
+
+**Model ∩ Oracle — records absolus** :
+- **MACD CNN-LSTM lag=0 : +301%** (×28 vs lag=1)
+- **RSI CNN-LSTM lag=0 : +443%** 🏆 (×5.1 vs lag=1)
+
+**Règle découverte** :
+- XGBoost → Adaptive + lag=1 (+84% RSI)
+- CNN-LSTM → Standard + lag=0 (+443% RSI)
+- Les 2 pipelines sont **complémentaires**, pas substituables
+
+Pistes ouvertes : `adaptive + lag=0`, consensus, stabilisation des flips.
 
 ---
 
@@ -660,6 +682,152 @@ for ind in macd rsi cci; do
   python scripts/backtest_model_filtered_by_oracle.py --npz data/prepared/dataset_${ind}_30m_full_progressive_adaptive.npz --preds data/prepared/preds_${ind}_30m_full_progressive_adaptive.npz --split test
 done
 ```
+
+---
+
+## 13. Cible `slope_lag=0` — pente récente vs pente passée
+
+Test : remplacer la pente de l'oracle `positions[t-1] - positions[t-2]`
+(legacy) par `positions[t] - positions[t-1]` (plus récente de 30min TF).
+
+**Modification non-breaking** : param `slope_lag=1` (défaut legacy) dans
+`compute_oracle`, `compute_oracle_labels`,
+`prepare_features_and_labels_progressive`. Flag `--slope-lag {0,1}` dans
+`prepare_progressive_data.py`. NPZ suffixe `_lag0` (vide pour défaut).
+
+### 13.1 Impact sur l'Oracle lui-même (× 2)
+
+| | Standard (lag=1) | Lag=0 | Delta |
+|---|------------------|-------|-------|
+| **MACD Oracle PnL Net** | +351% | **+784%** | **×2.23** 🔥 |
+| MACD Oracle WR | 45.6% | 56.6% | +11.0% |
+| MACD Oracle PF | 1.58 | 2.99 | +89% |
+| MACD Oracle Sharpe | 0.146 | 0.326 | +123% |
+| **RSI Oracle PnL Net** | +601% | **+1,208%** | **×2.01** 🔥 |
+| RSI Oracle WR | 47.0% | 59.5% | +12.5% |
+| RSI Oracle PF | 1.96 | 4.29 | +119% |
+| RSI Oracle Sharpe | 0.199 | 0.394 | +98% |
+
+**Découverte structurelle majeure** : la cible `lag=1` était **sous-optimale
+de ~100%**. La pente "pente actuelle" capture 2× plus d'alpha que la pente
+"pente passée de 30min".
+
+### 13.2 Impact classification
+
+| Modèle × Indic | Lag=1 AUC | Lag=0 AUC | Delta AUC | Lag=1 Acc | Lag=0 Acc | Delta Acc |
+|----------------|-----------|-----------|-----------|-----------|-----------|-----------|
+| MACD XGBoost | 0.9836 | 0.9201 | -6.35% | 93.75% | 84.83% | **-8.92%** |
+| MACD CNN-LSTM | 0.9882 | 0.9646 | -2.36% | 94.42% | 89.90% | -4.52% |
+| RSI CNN-LSTM | 0.9676 | 0.9139 | -5.37% | 89.89% | 82.86% | -7.03% |
+
+**XGBoost encaisse plus** (-8.92%) que CNN-LSTM (-4.52%). La cible plus
+locale nécessite de la mémoire temporelle que XGBoost n'a pas (modèle
+tree-based sans contexte séquentiel).
+
+### 13.3 Impact Model pur (sans filtre oracle)
+
+| Modèle × Indic | Lag=1 Trades | Lag=0 Trades | Lag=1 PnL Net | Lag=0 PnL Net |
+|----------------|--------------|--------------|---------------|---------------|
+| MACD XGBoost | 3,107 | 3,111 | -590% | -592% |
+| MACD CNN-LSTM | 4,653 | 7,531 | -911% | **-1,525%** |
+| RSI CNN-LSTM | 7,787 | 10,927 | -1,176% | **-2,205%** |
+
+**Model pur ne bénéficie pas du lag=0** : plus de flips parasites car la
+cible plus locale génère plus de transitions à détecter (et à confondre).
+
+### 13.4 Impact Model ∩ Oracle — RÉSULTATS RECORDS
+
+| Modèle × Indic | Lag=1 PnL Net | Lag=0 PnL Net | Delta | Capture brute lag=1 | Capture brute lag=0 |
+|----------------|---------------|---------------|-------|---------------------|---------------------|
+| MACD XGBoost | -100% | **-132%** ❌ | pire | 44% | **26%** (pire) |
+| **MACD CNN-LSTM** | -11% | **+301%** ✅ | **×28** 🏆 | 55% | **61%** |
+| **RSI CNN-LSTM** | +87% | **+443%** ✅ | **×5.1** 🏆 | 59% | **59%** (stable) |
+
+**MACD CNN-LSTM `lag=0` Model ∩ Oracle = +301% PnL Net**
+**RSI CNN-LSTM `lag=0` Model ∩ Oracle = +443% PnL Net** → **RECORD**
+
+### 13.5 Insight clé — le plafond NE bouge pas mais la base × 2
+
+**Capture brute reste à ~60%** pour CNN-LSTM lag=0 (vs ~55% en lag=1) :
+- MACD : 55% → 61% (+6%)
+- RSI : 59% → 59% (=)
+
+Le **plafond structurel 55-73%** est peu impacté. Mais comme l'Oracle a
+doublé, le **produit `capture × Oracle` double aussi** :
+
+> **Formule lag=1** : PnL Net ≈ 55-60% × PnL Oracle_lag1
+> → +193% MACD théorique, +330% RSI théorique
+>
+> **Formule lag=0** : PnL Net ≈ 60% × PnL Oracle_lag0 (double)
+> → **+470% MACD, +724% RSI théorique**
+>
+> Atteint : +301% MACD (64% du théorique), +443% RSI (61% du théorique)
+
+### 13.6 Pourquoi XGBoost échoue en lag=0
+
+XGBoost est un modèle **stateless pointwise** : chaque sample est classifié
+indépendamment à partir de `[slope_progressive, step_k]` actuels.
+
+La cible lag=1 (`sign(positions[t-1] - positions[t-2])`) est **lissée**
+(décalage de 1 bougie après l'événement le plus récent) → plus prévisible.
+
+La cible lag=0 (`sign(positions[t] - positions[t-1])`) est **locale** à
+l'instant courant → nécessite **la mémoire des rows précédentes** pour
+stabiliser la prédiction. Le LSTM dans CNN-LSTM absorbe cette dynamique.
+
+### 13.7 Cartographie "modèle × cible"
+
+| Cible \ Modèle | XGBoost | CNN-LSTM |
+|----------------|---------|----------|
+| Standard lag=1 | -590% PnL (44% capt.) | -911% PnL (55% capt.) |
+| Adaptive lag=1 | -796% PnL (67% capt.) | -849% PnL (55% capt.) |
+| **Standard lag=0** | **-592% PnL (26% capt.)** | **-1,525% PnL (61% capt.)** |
+
+| Cible \ Modèle (Model ∩ Oracle) | XGBoost | CNN-LSTM |
+|---------------------------------|---------|----------|
+| Standard lag=1 | -100% | -11% |
+| Adaptive lag=1 | **+84%** ✅ | -12% |
+| **Standard lag=0** | -132% ❌ | **+301%** 🏆 |
+
+**Règle empirique découverte** :
+- **XGBoost** performe mieux avec **Adaptive + lag=1** (+84%)
+- **CNN-LSTM** performe mieux avec **Standard + lag=0** (+301%)
+- Les 2 pipelines sont **complémentaires**, pas substituables
+
+### 13.8 Nouveau record absolu du pipeline
+
+**RSI CNN-LSTM lag=0 Model ∩ Oracle = +443% PnL Net** est le **meilleur
+résultat filtré** de tout le diagnostic :
+
+| Rang | Config | PnL Net filtré |
+|------|--------|----------------|
+| 🥇 | **RSI CNN-LSTM lag=0** | **+443%** |
+| 🥈 | MACD CNN-LSTM lag=0 | +301% |
+| 🥉 | RSI XGBoost adaptive | +258% |
+| 4 | MACD XGBoost adaptive | +84% |
+| 5 | RSI CNN-LSTM std lag=1 | +87% |
+
+### 13.9 Commandes reproductibles
+
+```bash
+# MACD et RSI lag=0 (CCI non testé par décision utilisateur)
+for ind in macd rsi; do
+  python scripts/prepare_progressive_data.py --indicator ${ind} --tf 30 --slope-lag 0
+  python scripts/train_cnn_lstm_progressive.py --npz data/prepared/dataset_${ind}_30m_full_progressive_lag0.npz
+  python scripts/backtest_model_filtered_by_oracle.py --npz data/prepared/dataset_${ind}_30m_full_progressive_lag0.npz --preds data/prepared/preds_${ind}_30m_full_progressive_cnnlstm_lag0.npz --split test
+done
+
+# MACD XGBoost lag=0 (pour montrer l'échec)
+python scripts/train_progressive.py --npz data/prepared/dataset_macd_30m_full_progressive_lag0.npz
+python scripts/backtest_model_filtered_by_oracle.py --npz data/prepared/dataset_macd_30m_full_progressive_lag0.npz --preds data/prepared/preds_macd_30m_full_progressive_lag0.npz --split test
+```
+
+### 13.10 Pistes ouvertes après lag=0
+
+1. **Combiner `adaptive + lag=0`** : cumuler les gains ? (Oracle +230% × capture adaptive +14%)
+2. **Consensus CNN-LSTM lag=0 (MACD + RSI)** : dépasser le plafond 60% ?
+3. **Hysteresis/persistence sur CNN-LSTM lag=0** : stabiliser les 10,927 trades RSI pur pour arriver au break-even sans filtre oracle
+4. **Investigation CCI lag=0** : mesurer si le pattern tient (hors scope actuel)
 
 ---
 
