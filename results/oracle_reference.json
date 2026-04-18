@@ -1,0 +1,1092 @@
+{
+  "description": "Oracle backtest reference on full progressive dataset — borne supérieure théorique",
+  "generated_by": "scripts/backtest_progressive.py --mode oracle",
+  "dataset": "data/prepared/dataset_macd_30m_full_progressive.npz",
+  "indicator": "macd",
+  "tf_minutes": 30,
+  "fees_per_side": 0.001,
+  "signal": "oracle.slope[t_ref] ffill on 5min rows → sign() → ±1",
+  "exec_convention": "close_5m[i+1] (lag 1 tick, realistic)",
+  "splits": {
+    "train": {
+      "period": "2017-08-19 06:00 → 2023-06-30 11:15",
+      "days": 2141.2,
+      "rows_5min": 614957,
+      "trades": 10805,
+      "n_long": 5402,
+      "n_short": 5403,
+      "trades_per_day": 5.05,
+      "win_rate_pct": 49.0,
+      "profit_factor": 2.02,
+      "sharpe": 0.202,
+      "pnl_net_pct": 3855.64,
+      "fees_total_pct": 2161.00,
+      "pnl_gross_pct": 6016.64,
+      "buy_and_hold_pct": 655.38,
+      "alpha_vs_bh_pct": 3200.26,
+      "pnl_net_per_year_pct": 657.2
+    },
+    "val": {
+      "period": "2023-06-30 11:20 → 2024-09-30 00:35",
+      "days": 457.6,
+      "rows_5min": 131776,
+      "trades": 2339,
+      "n_long": 1169,
+      "n_short": 1170,
+      "trades_per_day": 5.11,
+      "win_rate_pct": 45.1,
+      "profit_factor": 1.63,
+      "sharpe": 0.148,
+      "pnl_net_pct": 370.79,
+      "fees_total_pct": 467.80,
+      "pnl_gross_pct": 838.59,
+      "buy_and_hold_pct": 111.92,
+      "alpha_vs_bh_pct": 258.87,
+      "pnl_net_per_year_pct": 295.8
+    },
+    "test": {
+      "period": "2024-09-30 00:40 → 2025-12-31 14:00",
+      "days": 457.6,
+      "rows_5min": 131777,
+      "trades": 2281,
+      "n_long": 1140,
+      "n_short": 1141,
+      "trades_per_day": 4.98,
+      "win_rate_pct": 45.6,
+      "profit_factor": 1.58,
+      "sharpe": 0.146,
+      "pnl_net_pct": 350.94,
+      "fees_total_pct": 456.20,
+      "pnl_gross_pct": 807.14,
+      "buy_and_hold_pct": 36.27,
+      "alpha_vs_bh_pct": 314.67,
+      "pnl_net_per_year_pct": 280.0
+    }
+  },
+  "flks_improvement_vs_forward_baseline_180d": {
+    "note": "Mesuré sur 180j (validate_flks_improvement.py), concordance vs oracle",
+    "forward_naif_pct": 87.94,
+    "slope_t1_pct": 90.48,
+    "slope_k1_pct": 93.65,
+    "slope_k2_pct": 94.49,
+    "slope_k3_pct": 94.93,
+    "slope_k4_pct": 95.40,
+    "slope_k5_pct": 95.59
+  },
+  "xgboost_progressive_full": {
+    "hyperparameters": {
+      "n_estimators": 500,
+      "max_depth": 6,
+      "learning_rate": 0.1,
+      "objective": "binary:logistic",
+      "early_stopping_rounds": 20,
+      "best_iteration": 41
+    },
+    "features": ["slope_progressive", "step_k"],
+    "feature_importance": {
+      "slope_progressive": 0.9903,
+      "step_k": 0.0097
+    },
+    "classification_metrics": {
+      "train": {"auc": 0.9762, "accuracy": 0.9369, "f1": 0.9367, "up_ratio_pct": 49.94},
+      "val":   {"auc": 0.9788, "accuracy": 0.9352, "f1": 0.9356, "up_ratio_pct": 50.46},
+      "test":  {"auc": 0.9836, "accuracy": 0.9375, "f1": 0.9373, "up_ratio_pct": 49.86}
+    },
+    "backtest_threshold_0_5": {
+      "note": "Signal = sign(proba - 0.5), exec close_5m[i+1], fees 0.001",
+      "train": {"trades": 14559, "win_rate_pct": 29.9, "profit_factor": 0.65,
+                "sharpe": -0.132, "pnl_gross_pct": 61.58, "fees_pct": 2911.80,
+                "pnl_net_pct": -2850.22, "capture_vs_oracle_pct": -73.9},
+      "val":   {"trades": 3171, "win_rate_pct": 26.3, "profit_factor": 0.51,
+                "sharpe": -0.214, "pnl_gross_pct": -1.56, "fees_pct": 634.20,
+                "pnl_net_pct": -635.76, "capture_vs_oracle_pct": -171.5},
+      "test":  {"trades": 3107, "win_rate_pct": 27.5, "profit_factor": 0.54,
+                "sharpe": -0.207, "pnl_gross_pct": 31.56, "fees_pct": 621.40,
+                "pnl_net_pct": -589.84, "capture_vs_oracle_pct": -168.1}
+    },
+    "proba_distribution_test": {
+      "note": "89% des probas aux extrêmes, modèle sur-confiant",
+      "bins": [
+        {"range": "[0.00, 0.05)", "count": 59171, "pct": 44.90},
+        {"range": "[0.05, 0.10)", "count": 4863,  "pct":  3.69},
+        {"range": "[0.10, 0.20)", "count": 1259,  "pct":  0.96},
+        {"range": "[0.20, 0.30)", "count": 427,   "pct":  0.32},
+        {"range": "[0.30, 0.40)", "count": 216,   "pct":  0.16},
+        {"range": "[0.40, 0.50)", "count": 200,   "pct":  0.15},
+        {"range": "[0.50, 0.60)", "count": 122,   "pct":  0.09},
+        {"range": "[0.60, 0.70)", "count": 196,   "pct":  0.15},
+        {"range": "[0.70, 0.80)", "count": 368,   "pct":  0.28},
+        {"range": "[0.80, 0.90)", "count": 1340,  "pct":  1.02},
+        {"range": "[0.90, 0.95)", "count": 5113,  "pct":  3.88},
+        {"range": "[0.95, 1.00)", "count": 58502, "pct": 44.39}
+      ],
+      "in_0_30_to_0_70_pct": 0.56,
+      "in_0_10_to_0_90_pct": 3.13,
+      "in_0_05_to_0_95_pct": 10.70
+    },
+    "grid_hysteresis_test_best": {
+      "note": "ÉCHEC — dead zone <1% car probas bimodales",
+      "low": 0.30, "high": 0.70, "dead_zone_pct": 0.6,
+      "trades": 2975, "win_rate_pct": 28.6, "profit_factor": 0.55,
+      "pnl_net_pct": -566.80, "capture_pct": -161.5,
+      "improvement_vs_baseline_pct": 23.04
+    },
+    "grid_persistence_test_best": {
+      "note": "ÉCHEC PARTIEL — aide marginalement mais toujours catastrophique",
+      "min_hold": 12, "confirm": 6,
+      "min_hold_minutes": 60, "confirm_minutes": 30,
+      "trades": 2535, "win_rate_pct": 30.8, "profit_factor": 0.60,
+      "sharpe": -0.175, "pnl_gross_pct": 62.56, "fees_pct": 507.00,
+      "pnl_net_pct": -444.44, "capture_pct": -126.6,
+      "improvement_vs_baseline_pct": 145.40,
+      "trades_reduction_pct": 18.4,
+      "wr_improvement_abs_pct": 3.3
+    }
+  },
+  "xgboost_progressive_cci_full": {
+    "note": "CCI × 30m, même pipeline progressif que MACD",
+    "hyperparameters": {
+      "n_estimators": 500,
+      "max_depth": 6,
+      "learning_rate": 0.1,
+      "best_iteration": 71
+    },
+    "feature_importance": {
+      "slope_progressive": 0.9912,
+      "step_k": 0.0088
+    },
+    "classification_metrics": {
+      "train": {"auc": 0.9715, "accuracy": 0.9110, "f1": 0.9113, "up_ratio_pct": 50.29},
+      "val":   {"auc": 0.9712, "accuracy": 0.9119, "f1": 0.9122, "up_ratio_pct": 50.49},
+      "test":  {"auc": 0.9737, "accuracy": 0.9164, "f1": 0.9170, "up_ratio_pct": 50.51}
+    },
+    "oracle_test": {
+      "trades": 2763, "win_rate_pct": 45.7, "profit_factor": 1.69,
+      "sharpe": 0.164, "pnl_gross_pct": 986.33, "fees_pct": 552.60,
+      "pnl_net_pct": 433.73, "alpha_vs_bh_pct": 397.45
+    },
+    "model_test_threshold_0_5": {
+      "trades": 4159, "win_rate_pct": 24.8, "profit_factor": 0.49,
+      "sharpe": -0.238, "pnl_gross_pct": 51.42, "fees_pct": 831.80,
+      "pnl_net_pct": -780.38, "alpha_vs_bh_pct": -816.65,
+      "capture_vs_oracle_pct": -179.9,
+      "trades_excess_vs_oracle": 1396,
+      "trades_ratio_vs_oracle": 1.505
+    }
+  },
+  "xgboost_progressive_rsi_full": {
+    "note": "RSI × 30m, même pipeline progressif que MACD",
+    "hyperparameters": {
+      "n_estimators": 500,
+      "max_depth": 6,
+      "learning_rate": 0.1,
+      "best_iteration": 116
+    },
+    "feature_importance": {
+      "slope_progressive": 0.9917,
+      "step_k": 0.0083
+    },
+    "classification_metrics": {
+      "train": {"auc": 0.9627, "accuracy": 0.8916, "f1": 0.8919, "up_ratio_pct": 50.27},
+      "val":   {"auc": 0.9623, "accuracy": 0.8909, "f1": 0.8915, "up_ratio_pct": 50.46},
+      "test":  {"auc": 0.9637, "accuracy": 0.8926, "f1": 0.8930, "up_ratio_pct": 50.36}
+    },
+    "oracle_test": {
+      "trades": 3261, "win_rate_pct": 47.0, "profit_factor": 1.96,
+      "sharpe": 0.199, "pnl_gross_pct": 1253.39, "fees_pct": 652.20,
+      "pnl_net_pct": 601.19, "alpha_vs_bh_pct": 564.91
+    },
+    "model_test_threshold_0_5": {
+      "trades": 6007, "win_rate_pct": 19.6, "profit_factor": 0.40,
+      "sharpe": -0.305, "pnl_gross_pct": 25.14, "fees_pct": 1201.40,
+      "pnl_net_pct": -1176.26, "alpha_vs_bh_pct": -1212.53,
+      "capture_vs_oracle_pct": -195.7,
+      "trades_excess_vs_oracle": 2746,
+      "trades_ratio_vs_oracle": 1.842
+    }
+  },
+  "cnn_lstm_progressive_test": {
+    "note": "CNN-LSTM en remplacement drop-in de XGBoost, même pipeline",
+    "architecture": {
+      "window": 24,
+      "n_features": 2,
+      "conv_filters": 32,
+      "lstm_hidden": 32,
+      "lstm_layers": 2,
+      "dense_hidden": 32,
+      "dropout": 0.3,
+      "total_params": 18273,
+      "loss": "BCEWithLogitsLoss",
+      "optimizer": "Adam",
+      "learning_rate": 0.001,
+      "batch_size": 512,
+      "early_stop_patience": 3
+    },
+    "classification_metrics": {
+      "macd": {"train_auc": 0.9871, "train_acc": 0.9418,
+                "val_auc": 0.9871, "val_acc": 0.9423,
+                "test_auc": 0.9882, "test_acc": 0.9442, "test_f1": 0.9439,
+                "best_val_loss": 0.1467, "epochs_trained": 10},
+      "cci":  {"train_auc": 0.9783, "train_acc": 0.9215,
+                "val_auc": 0.9780, "val_acc": 0.9206,
+                "test_auc": 0.9798, "test_acc": 0.9249, "test_f1": 0.9254,
+                "best_val_loss": 0.1910, "epochs_trained": 14},
+      "rsi":  {"train_auc": 0.9671, "train_acc": 0.8987,
+                "val_auc": 0.9669, "val_acc": 0.8977,
+                "test_auc": 0.9676, "test_acc": 0.8989, "test_f1": 0.9005,
+                "best_val_loss": 0.2329, "epochs_trained": 14}
+    },
+    "backtest_test_threshold_0_5": {
+      "macd": {"trades": 4653, "wr_pct": 20.8, "pf": 0.44, "sharpe": -0.257,
+                "pnl_gross_pct": 19.94, "fees_pct": 930.60,
+                "pnl_net_pct": -910.66, "alpha_vs_bh_pct": -946.93,
+                "capture_vs_oracle_pct": -259.5,
+                "trades_excess_vs_oracle": 2372},
+      "cci":  {"trades": 5615, "wr_pct": 20.1, "pf": 0.41, "sharpe": -0.281,
+                "pnl_gross_pct": 44.05, "fees_pct": 1123.00,
+                "pnl_net_pct": -1078.95, "alpha_vs_bh_pct": -1115.22,
+                "capture_vs_oracle_pct": -248.8,
+                "trades_excess_vs_oracle": 2852},
+      "rsi":  {"trades": 7787, "wr_pct": 17.2, "pf": 0.35, "sharpe": -0.342,
+                "pnl_gross_pct": 38.54, "fees_pct": 1557.40,
+                "pnl_net_pct": -1518.86, "alpha_vs_bh_pct": -1555.13,
+                "capture_vs_oracle_pct": -252.6,
+                "trades_excess_vs_oracle": 4526}
+    },
+    "vs_xgboost_comparison": {
+      "note": "CNN-LSTM meilleure classification mais PIRE backtest",
+      "delta_acc_pct":      {"macd": 0.67, "cci": 0.85, "rsi": 0.63},
+      "delta_trades_pct":   {"macd": 49.8, "cci": 35.0, "rsi": 29.6},
+      "delta_pnl_net_pct":  {"macd": -320.82, "cci": -298.57, "rsi": -342.60},
+      "delta_wr_pct":       {"macd": -6.7,  "cci": -4.7,  "rsi": -2.4}
+    },
+    "structural_law_discovered": {
+      "statement": "Gagner +0.7% acc classification = +40% trades = -320% PnL Net",
+      "cause": "Meilleure détection pointwise → plus de micro-oscillations capturées → plus de flips parasites",
+      "implication": "Le problème n'est pas le modèle, c'est la cible binaire à chaque row 5min",
+      "confirmed_across": ["MACD", "CCI", "RSI"],
+      "pattern_universal": true
+    },
+    "recommended_pivots": [
+      "1. Pivot 4 (faible effort) : cadence de décision 30min au lieu de 5min",
+      "2. Pivot 2 (moyen effort) : 3 classes UP/NEUTRE/DOWN",
+      "3. Pivot 1 (moyen effort) : régression rendement futur",
+      "4. Pivot 3 (gros effort) : loss PnL-aware custom",
+      "5. Pivot 5 (moyen effort) : multi-horizon labels + convergence",
+      "6. Pivot 6 (moyen effort) : features volume/microstructure"
+    ]
+  },
+  "kalman_clustering_without_model_direction_FAILURE": {
+    "note": "Idée utilisateur (2026-04-18) : clusterer directement l'état Kalman AQ-KF du RSI (sans modèle direction) et trader les transitions. ÉCHEC OOB.",
+    "pipeline": [
+      "1. prepare_kalman_rsi_features.py : RSI + AQ-KF → 4 features (position, velocity, P_pos, P_vel)",
+      "2. cluster_kalman_rsi.py : K-means grid K=5,7,10,15,20,25 fit train (~102k bougies 30m)",
+      "3. analyze_cluster_transitions.py : K²-K × 2 directions sur 1/3 train, t-test p<0.05",
+      "4. backtest_cluster_transitions_oob.py : OOB test full (458 jours)"
+    ],
+    "features_kalman_4": ["position", "velocity", "P_pos", "P_vel"],
+    "features_note": "Q_adaptive non exposé par core (décision utilisateur), utilisé x_filt et P_filt",
+    "inertia_elbow": {
+      "K_5": 57285.18, "K_7": 43354.16, "K_10": 31357.60,
+      "K_15": 21630.23, "K_20": 16672.99, "K_25": 13497.98,
+      "comment": "Pas d'elbow franc, décroissance continue"
+    },
+    "transitions_train_analysis_1third": {
+      "K_10": {"n_transitions": 19945, "n_good_p05": 1, "pnl_total_good": 90.70, "n_occ_good": 439},
+      "K_15": {"n_transitions": 22385, "n_good_p05": 0, "pnl_total_good": 0.0, "n_occ_good": 0},
+      "K_20": {"n_transitions": 23971, "n_good_p05": 1, "pnl_total_good": 61.10, "n_occ_good": 155}
+    },
+    "backtest_oob_test_458days": {
+      "buy_and_hold_pnl_net_pct": 35.65,
+      "K_10_good_p05": {"trades": 339, "l_s": "339/0", "wr_pct": 33.0, "pf": 0.37,
+                         "pnl_brut_pct": 2.07, "fees_pct": 67.80,
+                         "pnl_net_pct": -65.73, "alpha_vs_bh": -101.38},
+      "K_20_good_p05": {"trades": 124, "wr_pct": 33.1, "pf": 0.48,
+                         "pnl_brut_pct": 5.40, "fees_pct": 24.80,
+                         "pnl_net_pct": -19.40, "alpha_vs_bh": -55.05},
+      "K_10_top_5":    {"trades": 632, "wr_pct": 29.6, "pf": 0.34,
+                         "pnl_net_pct": -122.10, "alpha_vs_bh": -157.75},
+      "K_20_top_5":    {"trades": 201, "wr_pct": 32.8, "pf": 0.42,
+                         "pnl_net_pct": -33.00, "alpha_vs_bh": -68.65}
+    },
+    "diagnostic": [
+      "Signal OOB négatif : WR 33% (pire que 50% hasard)",
+      "Cherry-picking confirmé : 1 transition sur 58 en train, ne généralise pas",
+      "PnL brut quasi-nul (+2 à +7%) → fees dominent",
+      "Alpha vs Buy & Hold massivement négatif (-55% à -170%)",
+      "Sans signal directionnel ML, les transitions de régime ne portent pas d'info prédictive"
+    ],
+    "why_it_fails": {
+      "vs_cluster_model_flips": "Les flips modèle incorporent le signal CNN-LSTM direction et le contexte de décision active. Les transitions Kalman pure sont juste des changements d'état interne du RSI filtré.",
+      "theoretical": "L'état Kalman AQ-KF du RSI reflète le passé filtré, pas le futur du prix. Sans signal directionnel, pas d'information prédictive exploitable."
+    },
+    "verdict": "SUJET CLOS — piste abandonnée définitivement"
+  },
+  "kmeans_clustering_test_RECORD": {
+    "note": "Clustering K-means non-supervisé sur flips val → filter test (OOB rigoureux). RECORD ABSOLU du pipeline : -39.09% PnL Net (vs baseline -2205%, amélioration +98%).",
+    "implementation": "scripts/cluster_model_flips.py + scripts/backtest_with_cluster_filter.py",
+    "architecture": "3 étages : CNN-LSTM direction + K-means régimes + backtest 5min",
+    "features_used_9": [
+      "atr_14_norm", "atr_ratio_sl",
+      "distance_to_ma20",
+      "proba_distance_to_extreme", "proba_trend_3rows", "proba_std_12rows", "model_proba",
+      "close_slope_1h", "volume_relative"
+    ],
+    "features_excluded": {
+      "categorical_temporal": ["hour_utc", "dayofweek", "month"],
+      "direction": ["new_signal_model"],
+      "labels_leakage": ["is_good_flip", "is_profitable_flip", "pnl_net_flip", "duration_flip"]
+    },
+    "methodology": "Fit K-means sur 11,084 flips val, predict sur 10,927 flips test (OOB modèle direction ET OOB clustering)",
+    "cluster_classification": {
+      "relevant": "lift_profit >= 1.3, size >= 100, chi2 p-value < 0.05",
+      "parasite": "lift_profit <= 0.5, size >= 100, chi2 p-value < 0.05",
+      "neutral": "entre les 2",
+      "too_small": "size < 100",
+      "non_significant": "p-value >= 0.05"
+    },
+    "grid_results_val": {
+      "K_5":  {"n_relevant": 2, "n_parasite": 0, "coverage_pct": 12.75, "rate_rel_pct": 23.71},
+      "K_7":  {"n_relevant": 3, "n_parasite": 0, "coverage_pct": 16.84, "rate_rel_pct": 21.26},
+      "K_10": {"n_relevant": 4, "n_parasite": 0, "coverage_pct": 21.72, "rate_rel_pct": 21.52, "best_cluster_lift": 1.91},
+      "K_15": {"n_relevant": 6, "n_parasite": 1, "coverage_pct": 25.53, "rate_rel_pct": 22.33, "best_cluster_lift": 1.98}
+    },
+    "backtest_oob_test_458_days": {
+      "oracle_pnl_net": 1207.57,
+      "model_pure_pnl_net": -2205.29,
+      "results_by_config": [
+        {"K": 10, "min_lift": 1.5, "n_clusters_kept": 2, "kept_flips": 320,
+         "trades": 190, "wr_pct": 40.5, "pf": 0.85, "sharpe": -0.055,
+         "pnl_gross_pct": -1.09, "fees_pct": 38.00, "pnl_net_pct": -39.09,
+         "verdict": "🏆 BEST du pipeline"},
+        {"K": 15, "min_lift": 1.8, "n_clusters_kept": 2, "kept_flips": 221,
+         "trades": 126, "wr_pct": 39.7, "pf": 0.74, "sharpe": -0.107,
+         "pnl_gross_pct": -28.70, "fees_pct": 25.20, "pnl_net_pct": -53.90},
+        {"K": 15, "min_lift": 1.5, "n_clusters_kept": 4, "kept_flips": 1398,
+         "trades": 787, "wr_pct": 34.8, "pf": 0.79, "sharpe": -0.080,
+         "pnl_gross_pct": 39.52, "fees_pct": 157.40, "pnl_net_pct": -117.88},
+        {"K": 10, "min_lift": 1.3, "n_clusters_kept": 4, "kept_flips": 2261,
+         "trades": 1319, "wr_pct": 34.0, "pf": 0.75, "sharpe": -0.094,
+         "pnl_gross_pct": 85.16, "fees_pct": 263.80, "pnl_net_pct": -178.64},
+        {"K": 15, "min_lift": 1.3, "n_clusters_kept": 6, "kept_flips": 2738,
+         "trades": 1992, "wr_pct": 31.2, "pf": 0.62, "sharpe": -0.159,
+         "pnl_gross_pct": 27.82, "fees_pct": 398.40, "pnl_net_pct": -370.58}
+      ]
+    },
+    "best_configuration": {
+      "K": 10, "min_lift": 1.5, "clusters_kept": [2, 3],
+      "trades": 190, "trades_per_day": 0.41,
+      "wr_pct": 40.5, "pf": 0.85,
+      "pnl_net_pct": -39.09,
+      "gain_vs_baseline": 2166.20,
+      "gain_vs_baseline_pct_improvement": 98.2,
+      "interpretation": "2 clusters relevant top lift (1.91× et 1.87×). Régime identifié : haute volatilité + fort volume + tendance MA20 alignée"
+    },
+    "cluster_centroids_interpretation_K10": {
+      "cluster_2_long_majority": {
+        "atr_14_norm": 0.00388, "atr_ratio_sl": 1.294,
+        "distance_to_ma20": 0.00859, "volume_relative": 4.056,
+        "proba_trend_3rows": 0.118, "model_proba": 0.665,
+        "val_rate_profit_pct": 27.64,
+        "description": "Expansion haussière confirmée par volume"
+      },
+      "cluster_3_short_majority": {
+        "atr_14_norm": 0.00480, "atr_ratio_sl": 1.251,
+        "distance_to_ma20": -0.00902, "volume_relative": 3.261,
+        "proba_trend_3rows": -0.085, "model_proba": 0.387,
+        "val_rate_profit_pct": 27.06,
+        "description": "Expansion baissière confirmée par volume"
+      }
+    },
+    "discovered_trading_rule": "Trade quand : volatilité (ATR) >= 3× moyenne ET volume >= 3× moyenne ET prix aligné MA20 ET modèle bascule dans la même direction que la tendance MA20",
+    "pipeline_final_ranking": [
+      {"rank": 1, "approach": "Cluster K=10 lift>=1.5", "pnl_net": -39.09, "trades": 190},
+      {"rank": 2, "approach": "Cluster K=15 lift>=1.8", "pnl_net": -53.90, "trades": 126},
+      {"rank": 3, "approach": "Cluster K=15 lift>=1.5", "pnl_net": -117.88, "trades": 787},
+      {"rank": 4, "approach": "Cluster K=10 lift>=1.3", "pnl_net": -178.64, "trades": 1319},
+      {"rank": 5, "approach": "Meta-classifier OOB best", "pnl_net": -787.40, "trades": 4245},
+      {"rank": 6, "approach": "Model pur (baseline)", "pnl_net": -2205.29, "trades": 10927}
+    ],
+    "structural_limit_identified": {
+      "statement": "PnL brut du best config = -1% (quasi nul) même dans le régime le plus fiable",
+      "implication": "Le edge intrinsèque du modèle CNN-LSTM lag=0 n'est pas suffisant pour battre fees taker 0.1%",
+      "extrapolation_with_maker_fees_002": "PnL Net estimé ≈ -9% (proche break-even)",
+      "to_pass_positive": [
+        "Maker fees 0.02% au lieu de 0.1% taker (réduction mécanique)",
+        "Cible modifiée (régression, multi-horizon au lieu de binaire)",
+        "Features supplémentaires (order flow, bid-ask, multi-TF)",
+        "Architecture deep (Transformer, multi-task, loss PnL-aware)"
+      ]
+    },
+    "scientific_value": [
+      "Architecture 3 étages validée empiriquement",
+      "Régimes de marché identifiés sans supervision",
+      "Pattern interprétable et reproductible (haute vol + volume + tendance)",
+      "Méthodologie OOB rigoureuse (clustering fit val, test test)",
+      "Record absolu pipeline : +2,166 points d'amélioration vs baseline (98%)",
+      "Plafond structurel identifié (edge brut quasi-nul)"
+    ]
+  },
+  "option_a_sample_weighting_test": {
+    "note": "Option A — Filtrer trades Oracle marginaux (|PnL net| < seuil) du training. Hypothèse : le modèle apprend mieux sans les cas neutres. ÉCHEC sur toutes les métriques.",
+    "implementation": "scripts/analyze_oracle_trade_thresholds.py (analyse seuils + save pnl_per_row NPZ) + scripts/train_cnn_lstm_progressive.py (--pnl-per-row, --pnl-threshold)",
+    "threshold_analysis": {
+      "train": {"n_trades": 15262, "wr_pct": 66.06, "pnl_mean_pct": 0.7309,
+                 "p50_abs_pnl_pct": 0.4525, "p75_abs_pnl_pct": 1.1527},
+      "val":   {"n_trades": 3360, "wr_pct": 58.27, "pnl_mean_pct": 0.3446,
+                 "p50_abs_pnl_pct": 0.2900, "p75_abs_pnl_pct": 0.6846},
+      "test":  {"n_trades": 3261, "wr_pct": 59.52, "pnl_mean_pct": 0.3703,
+                 "p50_abs_pnl_pct": 0.3157, "p75_abs_pnl_pct": 0.6898}
+    },
+    "threshold_impact_test_split": [
+      {"threshold": 0.000, "pct_rows_kept": 100.0, "wr_kept": 59.52, "pnl_mean_kept": 0.37, "pnl_mean_drop": 0.0},
+      {"threshold": 0.002, "pct_rows_kept": 72.25, "wr_kept": 67.09, "pnl_mean_kept": 0.57, "pnl_mean_drop": -0.010, "verdict": "sweet spot identifié"},
+      {"threshold": 0.003, "pct_rows_kept": 61.71, "wr_kept": 73.39, "pnl_mean_kept": 0.73, "pnl_mean_drop": -0.017},
+      {"threshold": 0.005, "pct_rows_kept": 46.29, "wr_kept": 84.62, "pnl_mean_kept": 1.10, "pnl_mean_drop": -0.008},
+      {"threshold": 0.0075, "pct_rows_kept": 34.17, "wr_kept": 92.07, "pnl_mean_kept": 1.52, "pnl_mean_drop": 0.030, "warning": "PnL drop devient POSITIF — filtre des vrais bons trades"}
+    ],
+    "test_sw_0002": {
+      "config": "RSI CNN-LSTM lag=0 + sw threshold 0.002 (0.2%)",
+      "rows_kept_train_pct": 78.72,
+      "rows_kept_val_pct": 68.95,
+      "classification_baseline": {"acc_test": 0.8990, "auc_test": 0.9646, "f1_test": 0.8985},
+      "classification_option_a": {"acc_test": 0.8264, "auc_test": 0.9109, "f1_test": 0.8273},
+      "classification_delta": {"acc": -0.0726, "auc": -0.0537, "f1": -0.0712},
+      "backtest_baseline": {
+        "model_pur_trades": 10927, "model_pur_pnl_net": -2205.29,
+        "model_oracle_pnl_net": 443.35, "model_oracle_gross_capture_pct": 58.8,
+        "agreement_pct": 89.89
+      },
+      "backtest_option_a": {
+        "model_pur_trades": 10585, "model_pur_pnl_net": -2119.07,
+        "model_oracle_pnl_net": 400.53, "model_oracle_gross_capture_pct": 56.5,
+        "agreement_pct": 82.64
+      },
+      "verdict": "ÉCHEC : dégrade toutes les métriques sauf +86 PnL Model pur (négligeable)"
+    },
+    "diagnostic": [
+      "L'hypothèse 'trades marginaux = bruit' est FAUSSE empiriquement",
+      "Les trades |PnL|<0.2% contiennent les transitions critiques du marché",
+      "Filtrer 20% des rows prive le modèle d'info essentielle",
+      "Accord model/oracle BAISSE (89.89% → 82.64%) = modèle moins aligné avec l'oracle"
+    ],
+    "alternative_option_b_not_tested": {
+      "description": "Classification 3 classes UP/NEUTRE/DOWN au lieu de binaire",
+      "advantage": "Préserve l'information (samples marginaux → classe NEUTRE au lieu d'être supprimés), modèle peut s'abstenir en prod",
+      "cost": "Refactor lourd (softmax 3 classes, CrossEntropyLoss, modif prepare+train+backtest)"
+    },
+    "topic_status": "Option A CLOSE. Option B non testée (refactor trop lourd vu probabilité de succès faible)."
+  },
+  "meta_classifier_oob_validation_final": {
+    "note": "Option B — Validation OOB rigoureuse du pipeline meta-classifier. Train meta sur flips val, test sur flips test (out-of-sample modèle direction ET meta).",
+    "pipeline_oob": [
+      "1. extract_model_flips.py --split val → flips_to_long/short_..._val.csv (~5,542 each)",
+      "2. train_meta_classifier_flips.py --long-csv (val) --long-test-csv (test) → mode OOB rigoureux",
+      "3. backtest_with_meta_filter.py avec preds OOB"
+    ],
+    "classification_oob_results": {
+      "long": {
+        "train_auc": 0.7619, "val_auc": 0.6384, "test_auc_oob": 0.6581,
+        "gap_vs_in_sample": -0.0375, "best_iteration": 40,
+        "scale_pos_weight": 5.846,
+        "test_at_thr_f1_055": {"prec": 0.2329, "rec": 0.5318, "f1": 0.3239},
+        "test_at_thr_prec_065": {"prec": 0.2941, "rec": 0.1140, "lift_vs_base": 1.93}
+      },
+      "short": {
+        "train_auc": 0.7277, "val_auc": 0.5472, "test_auc_oob": 0.6468,
+        "gap_vs_in_sample": -0.0322, "best_iteration": 2,
+        "scale_pos_weight": 6.348,
+        "warning": "best_iter=2 → sous-entraîné, classifier rejette tout aux seuils calibrés sur val",
+        "test_at_thr_050": {"prec": 0.1937, "rec": 0.7093, "f1": 0.3043}
+      }
+    },
+    "feature_importance_oob_top3": {
+      "long": [
+        {"feature": "atr_14_norm", "gain": 57.36, "rank": 1},
+        {"feature": "distance_to_ma20", "gain": 40.91, "rank": 2},
+        {"feature": "dayofweek", "gain": 30.69, "rank": 3}
+      ],
+      "short": [
+        {"feature": "atr_14_norm", "gain": 93.08, "rank": 1},
+        {"feature": "distance_to_ma20", "gain": 51.10, "rank": 2},
+        {"feature": "model_proba", "gain": 34.55, "rank": 3}
+      ]
+    },
+    "backtest_oob_results": {
+      "oracle_pnl_net_pct": 1207.57,
+      "model_pure_pnl_net_pct": -2205.29,
+      "configs_top_oob": [
+        {"threshold": 0.70, "trades": 2, "wr_pct": 100.0, "pf": "inf",
+         "pnl_net_pct": 53.56, "verdict": "ARTEFACT (2 trades = positions tenues plusieurs mois, SHORT rejette tout)"},
+        {"threshold": 0.65, "trades": 2, "wr_pct": 100.0, "pnl_net_pct": 49.11, "verdict": "ARTEFACT"},
+        {"threshold": 0.55, "trades": 2, "wr_pct": 100.0, "pnl_net_pct": 38.97, "verdict": "ARTEFACT"},
+        {"threshold": 0.50, "trades": 4245, "wr_pct": 25.6, "pf": 0.50,
+         "pnl_net_pct": -787.40, "verdict": "Réaliste mais NÉGATIF"},
+        {"threshold": 0.40, "trades": 7535, "wr_pct": 19.1, "pnl_net_pct": -1532.67}
+      ],
+      "diagnostic": "Aucun seuil ne donne PnL Net positif avec un nombre de trades statistiquement significatif. Les +50% à 2 trades sont des artefacts (SHORT classifier rejette tout, on tient une position LONG plusieurs mois)."
+    },
+    "comparison_in_sample_vs_oob": {
+      "in_sample_partial_best_pnl": 135.13,
+      "oob_realistic_best_pnl": -787.40,
+      "gap": -922.53,
+      "verdict": "Le +135% in-sample était dominé par memorization. Vrai signal OOB existe (AUC 0.65) mais amplitude insuffisante pour battre fees 0.2%/trade."
+    },
+    "final_verdict": {
+      "pattern_exists": true,
+      "auc_oob_long": 0.6581,
+      "auc_oob_short": 0.6468,
+      "exploitable_in_production": false,
+      "reason_not_exploitable": [
+        "Lift 1.5-2× insuffisant pour battre fees taker 0.2%/trade",
+        "Sweet spot 'trades modérés + PnL positif' n'existe pas",
+        "SHORT classifier sous-entraîné (best_iter=2)",
+        "Sans réduction de fees (maker 0.02%) ou features additionnelles, pas de gain net"
+      ],
+      "topic_status": "CLOS dans son état actuel. Pour aller plus loin, modifications structurelles requises (fees, features Cat 2-3, architecture deep)."
+    },
+    "untested_pistes_to_make_exploitable": [
+      "Maker fees 0.02% au lieu de 0.1% taker → fees ÷10 → -787 → potentiellement +0",
+      "Ajuster SHORT classifier (scale_pos_weight modéré, max_depth=5, plus epochs)",
+      "Catégorie 2 features : HMM régime, ADX, Hurst exponent",
+      "Catégorie 3 features : multi-TF agreement (5min vs 30min vs 1h)",
+      "Ensemble : meta sur consensus MACD+CCI+RSI au lieu de RSI seul",
+      "Architecture deep : Transformer, multi-task avec loss PnL-aware"
+    ]
+  },
+  "meta_classifier_pipeline_test": {
+    "note": "Pipeline meta-classifier en 2 étages (étapes 2.A → 2.D). PoC validée avec biais in-sample partiel.",
+    "architecture": "CNN-LSTM direction + XGBoost meta (LONG/SHORT spécialisés)",
+    "pipeline_steps": [
+      "2.A : extract_model_flips.py — extrait flips + features contextuelles + label is_profitable_flip",
+      "2.A.bis : élimination 3 features faibles (Cohen's d <0.15)",
+      "2.C : train_meta_classifier_flips.py — 2 XGBoost (LONG, SHORT)",
+      "2.D : backtest_with_meta_filter.py — filtre flips selon proba_meta > seuil"
+    ],
+    "config_tested": {
+      "indicator": "rsi",
+      "model_direction": "cnn_lstm + Standard + lag=0",
+      "model_direction_acc": 0.8990,
+      "split": "test",
+      "n_flips_total": 10927,
+      "n_flips_long": 5464,
+      "n_flips_short": 5463
+    },
+    "features_final": {
+      "count": 12,
+      "list": [
+        "model_proba", "proba_std_12rows", "proba_distance_to_extreme", "proba_trend_3rows",
+        "hour_utc", "dayofweek", "month",
+        "atr_14_norm", "atr_ratio_sl", "close_slope_1h", "distance_to_ma20", "volume_relative"
+      ],
+      "dropped_in_loop": [
+        "time_since_last_flip (d=0.07)",
+        "range_vs_atr (d=0.04)",
+        "recent_flip_count_1h (d=-0.05 à -0.11)",
+        "distance_to_ma60 (d=-0.07)",
+        "close_slope_4h (d=±0.03-0.13)"
+      ]
+    },
+    "labels_comparison": {
+      "is_good_flip_rate_long": 0.6347,
+      "is_good_flip_rate_short": 0.6108,
+      "is_profitable_flip_rate_long": 0.1525,
+      "is_profitable_flip_rate_short": 0.1417,
+      "discovery": "label is_profitable_flip 3× plus discriminant que is_good_flip sur ATR"
+    },
+    "classification_metrics_test_oos": {
+      "long": {
+        "train_auc": 0.7954, "val_auc": 0.6674, "test_auc": 0.6956,
+        "train_test_gap": 0.10, "best_iteration": 38,
+        "threshold_f1": 0.500, "threshold_precision": 0.650,
+        "test_at_thr_f1": {"prec": 0.1969, "rec": 0.7075, "f1": 0.3080},
+        "test_at_thr_prec": {"prec": 0.3014, "rec": 0.2075, "lift_vs_base": 2.33}
+      },
+      "short": {
+        "train_auc": 0.7786, "val_auc": 0.6381, "test_auc": 0.6790,
+        "train_test_gap": 0.10, "best_iteration": 26,
+        "threshold_f1": 0.450, "threshold_precision": 0.550,
+        "test_at_thr_f1": {"prec": 0.2190, "rec": 0.7886, "f1": 0.3428},
+        "test_at_thr_prec": {"prec": 0.2762, "rec": 0.4065, "lift_vs_base": 1.84}
+      }
+    },
+    "feature_importance_top3": {
+      "long": [
+        {"feature": "atr_14_norm", "gain": 43.32},
+        {"feature": "distance_to_ma20", "gain": 32.91},
+        {"feature": "proba_distance_to_extreme", "gain": 32.23}
+      ],
+      "short": [
+        {"feature": "atr_14_norm", "gain": 40.02},
+        {"feature": "distance_to_ma20", "gain": 37.34},
+        {"feature": "hour_utc", "gain": 25.53}
+      ]
+    },
+    "backtest_mode_all_in_sample_partial": {
+      "note": "70% des flips ont été vus en training meta → biais in-sample",
+      "oracle_pnl_net_pct": 1207.57,
+      "model_pure_pnl_net_pct": -2205.29,
+      "configs_top": [
+        {"threshold": 0.65, "trades": 296, "wr_pct": 57.4, "pf": 1.55,
+         "pnl_gross_pct": 194.33, "fees_pct": 59.20, "pnl_net_pct": 135.13,
+         "capture_pct": 11.2, "verdict": "🏆 POSITIF"},
+        {"threshold": 0.60, "trades": 984, "wr_pct": 43.7, "pf": 1.17,
+         "pnl_gross_pct": 283.28, "fees_pct": 196.80, "pnl_net_pct": 86.48,
+         "capture_pct": 7.2, "verdict": "POSITIF"},
+        {"threshold": 0.55, "trades": 1815, "wr_pct": 38.1, "pf": 0.95,
+         "pnl_gross_pct": 321.62, "fees_pct": 363.00, "pnl_net_pct": -41.38,
+         "capture_pct": -3.4, "verdict": "Négatif léger"}
+      ],
+      "best": {
+        "threshold": 0.65,
+        "pnl_net_pct": 135.13,
+        "gain_vs_model_pure": 2340.42,
+        "trades_reduction_pct": 97.3,
+        "wr_improvement": "14.7% → 57.4% (×4)"
+      }
+    },
+    "backtest_mode_meta_test_only_rigorous": {
+      "note": "Filtre uniquement les 1640 flips test du meta (out-of-sample propre)",
+      "best_threshold": 0.65,
+      "trades": 9336,
+      "pnl_net_pct": -1887.26,
+      "gain_vs_model_pure": 318.03,
+      "diagnostic": "Le filtre ne s'applique que sur 15% des flips → effet limité, dominé par les 85% non-filtrés"
+    },
+    "estimation_oos_realistic": {
+      "based_on_auc_oos": "0.69-0.70 sur 1640 flips test",
+      "estimated_pnl_net_pct_60_65_days": "+20 à +70%",
+      "estimated_pnl_net_per_year_pct": "+120 à +400%",
+      "validation_required": "Option B (régénérer preds direction sur train+val) — REPORTÉE"
+    },
+    "scientific_value_delivered": [
+      "Architecture en 2 étages techniquement viable et validée (PoC)",
+      "Premier PnL Net positif du pipeline (+135% mode all)",
+      "Meta-classifier discriminant existe (AUC 0.69 out-of-sample)",
+      "Label is_profitable_flip 3× plus discriminant que is_good_flip",
+      "ATR émerge comme top feature quand label = PnL réel (vs accord oracle)",
+      "2 classifiers spécialisés justifiés (asymétrie LONG/SHORT)"
+    ],
+    "limitations": [
+      "Validation rigoureuse non faite (Option B)",
+      "Test sur RSI uniquement (pas étendu à MACD/CCI)",
+      "Test sur lag=0 uniquement (best config CNN-LSTM)",
+      "Catégories 2 (HMM régime) et 3 (multi-TF) non testées"
+    ]
+  },
+  "external_atr_filter_test": {
+    "note": "Filtre ATR appliqué EN AVAL du modèle (architecture 2 étages, modèle non retrained). Test sur RSI CNN-LSTM Standard + lag=0 (best config). Objectif: transformer Model pur -2205% PnL Net en POSITIF.",
+    "implementation": "src/signal_processing/core.py::calculate_atr (Wilder, causal), scripts/backtest_external_filter.py",
+    "config_tested": {
+      "indicator": "rsi",
+      "model": "cnn_lstm",
+      "model_config": "Standard + lag=0",
+      "atr_period": 14,
+      "atr_normalized": true,
+      "objective": "PnL Net positif sans filtre oracle (utilisable en production)"
+    },
+    "baseline_model_pur": {
+      "trades": 10927, "wr_pct": 14.7, "pf": 0.28,
+      "pnl_gross_pct": -19.89, "fees_pct": 2185.40, "pnl_net_pct": -2205.29,
+      "pnl_gross_per_trade_pct": -0.00182
+    },
+    "grids_tested": {
+      "high_vol_band": {
+        "description": "Filtrer marchés actifs (low > 0.003)",
+        "best_config": {"low": 0.005, "high": 0.010,
+                          "inband_pct": 1.6, "trades": 181,
+                          "wr_pct": 32.6, "pf": 0.51,
+                          "pnl_gross_pct": -90.90, "pnl_net_pct": -127.10,
+                          "gain_vs_model_pur": 2078.19,
+                          "pnl_gross_per_trade_pct": -0.5022}
+      },
+      "low_vol_band": {
+        "description": "Filtrer marchés calmes (high < 0.0025)",
+        "best_config": {"low": 0.0, "high": 0.0005,
+                          "inband_pct": 4.6, "trades": 624,
+                          "wr_pct": 7.9, "pf": 0.25,
+                          "pnl_gross_pct": -73.51, "pnl_net_pct": -198.31,
+                          "gain_vs_model_pur": 2006.98}
+      },
+      "medium_vol_band": {
+        "description": "Sweet spot hypothétique (0.001-0.003)",
+        "best_config": {"low": 0.0015, "high": 0.002,
+                          "inband_pct": 18.4, "trades": 2619,
+                          "wr_pct": 20.4, "pf": 0.47,
+                          "pnl_gross_pct": -17.82, "pnl_net_pct": -541.62,
+                          "gain_vs_model_pur": 1663.66}
+      }
+    },
+    "diagnostic": [
+      "Aucun filtre ATR ne rend le PnL positif sur Model pur",
+      "Best gain absolu = +2078 points (vol haute), mais reste -127% net",
+      "Edge brut/trade Model pur = -0.0018% → fees (0.2%/trade) dominent toujours",
+      "Le problème n'est pas la quantité de trades (filtrable) mais la qualité du signal",
+      "ATR seul ne discrimine pas les bons des mauvais signaux directionnels"
+    ],
+    "alternative_pistes_not_tested": [
+      "Volume comme filtre (signal de conviction marché)",
+      "Confidence filter : |proba - 0.5| > seuil",
+      "Combinaison ATR + Volume + Confidence (triple filtre)",
+      "Pivot structurel : régression rendement, multi-horizon"
+    ],
+    "value_delivered": [
+      "Architecture 2 étages techniquement viable et validée",
+      "Itération ultra-rapide (secondes par seuil vs 10min retrain)",
+      "core.calculate_atr mutualisé pour tests futurs",
+      "Confirmation que filtrer la volatilité seule ne sauve pas un signal d'edge nul"
+    ]
+  },
+  "adaptive_plus_lag0_combination_test": {
+    "note": "Test cumul Adaptive + lag=0 sur RSI CNN-LSTM (config la plus prometteuse). Résultat: ANTAGONISTE.",
+    "config_tested": {
+      "indicator": "rsi",
+      "model": "cnn_lstm",
+      "filter": "adaptive_aqkf",
+      "slope_lag": 0,
+      "npz": "dataset_rsi_30m_full_progressive_adaptive_lag0.npz",
+      "model_file": "cnnlstm_progressive_rsi_30m_full_adaptive_lag0.pth",
+      "preds_file": "preds_rsi_30m_full_progressive_cnnlstm_adaptive_lag0.npz"
+    },
+    "classification_metrics": {
+      "train": {"auc": 0.8931, "accuracy": 0.8072, "f1": 0.8099},
+      "val":   {"auc": 0.8909, "accuracy": 0.8058, "f1": 0.8085},
+      "test":  {"auc": 0.8936, "accuracy": 0.8074, "f1": 0.8103}
+    },
+    "backtest_test": {
+      "oracle_pnl_net_pct": 1207.57,
+      "oracle_trades": 3261,
+      "oracle_wr_pct": 59.5,
+      "oracle_pf": 4.29,
+      "model_pure_pnl_net_pct": -1901.08,
+      "model_pure_trades": 9642,
+      "model_pure_wr_pct": 16.7,
+      "model_pure_pf": 0.31,
+      "model_filtered_pnl_net_pct": 377.22,
+      "model_filtered_trades": 3229,
+      "model_filtered_wr_pct": 43.1,
+      "model_filtered_pf": 1.52,
+      "model_filtered_pnl_gross_pct": 1023.02,
+      "model_filtered_fees_pct": 645.80,
+      "trades_blocked_by_disagreement": 13697,
+      "agreement_pct": 80.74,
+      "gross_capture_vs_oracle_pct": 55.0
+    },
+    "comparison_vs_standard_lag0": {
+      "rsi_cnnlstm_std_lag0_pnl_net_filtered": 443.35,
+      "rsi_cnnlstm_adapt_lag0_pnl_net_filtered": 377.22,
+      "delta_pnl_net_pct": -66.13,
+      "delta_capture_brute_pct": -4,
+      "delta_acc_pct": -2.12,
+      "verdict": "ANTAGONISTE: la combinaison réduit le PnL filtré, capture brute, et accuracy"
+    },
+    "explanation": [
+      "Adaptive rend les slopes FLKS plus réactives près des transitions",
+      "Lag=0 demande au modèle de prédire une cible plus locale (pente t vs t-1)",
+      "CNN-LSTM avec son LSTM avait déjà absorbé la dynamique locale grâce à window=24",
+      "Adaptive ajoute du bruit redondant que le LSTM n'a pas besoin",
+      "Pour chaque modèle, UNE SEULE modification améliore (pas les 2)"
+    ],
+    "consolidated_rule_xgboost_vs_cnnlstm": {
+      "xgboost": {
+        "best_config": "Adaptive + lag=1",
+        "best_pnl_net_filtered_pct": 258.50,
+        "indicator": "rsi"
+      },
+      "cnn_lstm": {
+        "best_config": "Standard + lag=0",
+        "best_pnl_net_filtered_pct": 443.35,
+        "indicator": "rsi"
+      },
+      "combination_adaptive_plus_lag0": "NON RECOMMANDÉE pour les 2 modèles"
+    },
+    "open_pistes_to_beat_443_pct": [
+      "Consensus inter-modèles : MACD CNN-LSTM lag=0 + RSI CNN-LSTM lag=0",
+      "Stabilisation des flips Model pur : persistence/hysteresis (utilisable en prod)",
+      "Architectures alternatives : Transformer attention, multi-task, loss PnL-aware",
+      "Pivot structurel cible : régression rendement, multi-horizon, 3-classes UP/NEUTRE/DOWN"
+    ]
+  },
+  "slope_lag_0_test": {
+    "note": "Cible oracle: pente récente sign(positions[t] - positions[t-1]) au lieu de sign(positions[t-1] - positions[t-2]). Seuls MACD et RSI testés (CCI hors scope par décision utilisateur).",
+    "implementation": "src/signal_processing/core.py::compute_oracle(slope_lag=N), flag --slope-lag {0,1} dans prepare_progressive_data.py, suffixe NPZ _lag0",
+    "oracle_impact": {
+      "macd": {
+        "lag1_pnl_net_pct": 350.94, "lag0_pnl_net_pct": 783.87, "multiplier": 2.23,
+        "lag1_wr_pct": 45.6, "lag0_wr_pct": 56.6, "lag1_pf": 1.58, "lag0_pf": 2.99,
+        "lag1_sharpe": 0.146, "lag0_sharpe": 0.326,
+        "lag1_pnl_gross_pct": 807.14, "lag0_pnl_gross_pct": 1240.07
+      },
+      "rsi": {
+        "lag1_pnl_net_pct": 601.19, "lag0_pnl_net_pct": 1207.57, "multiplier": 2.01,
+        "lag1_wr_pct": 47.0, "lag0_wr_pct": 59.5, "lag1_pf": 1.96, "lag0_pf": 4.29,
+        "lag1_sharpe": 0.199, "lag0_sharpe": 0.394,
+        "lag1_pnl_gross_pct": 1253.39, "lag0_pnl_gross_pct": 1859.77
+      }
+    },
+    "classification_impact": {
+      "macd_xgb":      {"lag1_auc": 0.9836, "lag0_auc": 0.9201, "lag1_acc": 0.9375, "lag0_acc": 0.8483, "delta_acc_pct": -8.92},
+      "macd_cnnlstm":  {"lag1_auc": 0.9882, "lag0_auc": 0.9646, "lag1_acc": 0.9442, "lag0_acc": 0.8990, "delta_acc_pct": -4.52},
+      "rsi_cnnlstm":   {"lag1_auc": 0.9676, "lag0_auc": 0.9139, "lag1_acc": 0.8989, "lag0_acc": 0.8286, "delta_acc_pct": -7.03}
+    },
+    "model_pure_pnl_net_pct": {
+      "macd_xgb":     {"lag1": -589.84, "lag0": -592.09},
+      "macd_cnnlstm": {"lag1": -910.66, "lag0": -1524.65, "worse": true},
+      "rsi_cnnlstm":  {"lag1": -1176.26, "lag0": -2205.29, "worse": true}
+    },
+    "model_filtered_oracle_pnl_net_pct": {
+      "macd_xgb":     {"lag1": -99.89,  "lag0": -131.82, "gross_capture_lag1_pct": 44, "gross_capture_lag0_pct": 26, "delta": -31.93, "verdict": "XGBoost échoue avec lag0 (modèle trop rigide)"},
+      "macd_cnnlstm": {"lag1": -10.79,  "lag0":  300.89, "gross_capture_lag1_pct": 55, "gross_capture_lag0_pct": 61, "delta": 311.68, "verdict": "CNN-LSTM x28 meilleur"},
+      "rsi_cnnlstm":  {"lag1":  86.77,  "lag0":  443.35, "gross_capture_lag1_pct": 59, "gross_capture_lag0_pct": 59, "delta": 356.58, "verdict": "CNN-LSTM x5.1 meilleur, RECORD"}
+    },
+    "structural_insights": [
+      "Le plafond de capture brute Model ∩ Oracle reste ~60% (peu de changement)",
+      "L'Oracle lui-même double en PnL Net (+100-123%)",
+      "Le gain absolu vient du produit capture × Oracle (Oracle doublé → PnL doublé)",
+      "XGBoost ne peut pas apprendre la cible lag=0 (pas de mémoire séquentielle)",
+      "CNN-LSTM absorbe la dynamique plus locale grâce au LSTM"
+    ],
+    "rule_discovered": {
+      "XGBoost_best": "Adaptive + lag=1 (MACD XGB = +84%, RSI XGB = +258%)",
+      "CNN_LSTM_best": "Standard + lag=0 (MACD CNN-LSTM = +301%, RSI CNN-LSTM = +443%)",
+      "note": "Les 2 pipelines sont complémentaires, pas substituables"
+    },
+    "all_time_record": {
+      "config": "RSI CNN-LSTM lag=0 Model ∩ Oracle",
+      "pnl_net_pct": 443.35,
+      "pnl_gross_pct": 1093.95,
+      "fees_pct": 650.60,
+      "trades": 3253,
+      "wr_pct": 44.0,
+      "pf": 1.65,
+      "gross_capture_vs_oracle_pct": 58.8,
+      "agreement_model_oracle_pct": 82.86
+    },
+    "open_pistes": [
+      "Combiner adaptive + lag=0 : cumuler les gains ?",
+      "Consensus CNN-LSTM lag=0 (MACD + RSI) : dépasser plafond 60% ?",
+      "Stabilisation des flips : persistence/hysteresis sur CNN-LSTM lag=0 pour arriver au break-even sans filtre oracle",
+      "CCI lag=0 : hors scope actuel"
+    ]
+  },
+  "adaptive_filter_aqkf_test": {
+    "note": "Filtre AQ-KF (Adaptive Q Kalman) en remplacement du forward standard. Oracle inchangé (RTS).",
+    "implementation": "src/signal_processing/core.py::compute_*_progressive(adaptive=True), flag --adaptive dans prepare_progressive_data.py",
+    "naming_convention": "dataset_<ind>_<tf>_<period>_progressive_adaptive.npz (suffixe _adaptive)",
+    "classification_impact": {
+      "macd_xgb":      {"std_auc": 0.9836, "adapt_auc": 0.9632, "std_acc": 0.9375, "adapt_acc": 0.9001, "delta_acc_pct": -3.74},
+      "macd_cnnlstm":  {"std_auc": 0.9882, "adapt_auc": 0.9859, "std_acc": 0.9442, "adapt_acc": 0.9386, "delta_acc_pct": -0.56},
+      "rsi_xgb":       {"std_auc": 0.9637, "adapt_auc": 0.9055, "std_acc": 0.8926, "adapt_acc": 0.8198, "delta_acc_pct": -7.28}
+    },
+    "model_pure_pnl_net_pct": {
+      "macd_xgb":     {"std": -589.84, "adapt": -796.03, "delta": -206.19},
+      "macd_cnnlstm": {"std": -910.66, "adapt": -849.10, "delta":  61.56},
+      "rsi_xgb":      {"std": -1176.26, "adapt": -1598.32, "delta": -422.06}
+    },
+    "model_filtered_oracle_pnl_net_pct": {
+      "macd_xgb":     {"std": -99.89, "adapt":  84.10, "delta":  183.99, "gross_capture_std": 44, "gross_capture_adapt": 67},
+      "macd_cnnlstm": {"std": -10.79, "adapt": -12.32, "delta":   -1.53, "gross_capture_std": 55, "gross_capture_adapt": 55},
+      "rsi_xgb":      {"std": null,   "adapt":  258.50, "delta": null,    "gross_capture_std": null, "gross_capture_adapt": 73}
+    },
+    "grid_persistence_macd_adaptive_best": {
+      "min_hold": 24, "confirm": 6,
+      "trades": 3021, "wr_pct": 30.1, "pf": 0.52, "sharpe": -0.220,
+      "pnl_gross_pct": -5.28, "fees_pct": 604.20,
+      "pnl_net_pct": -609.48, "alpha_vs_bh_pct": -645.76,
+      "comparison_vs_std_persistence_best": "PIRE (-609 vs -444 standard) — persistence inadaptée à dynamique adaptive"
+    },
+    "structural_ceiling_observed": {
+      "statement": "Capture brute Model ∩ Oracle plafonne à 55-73% indépendamment du filtre Kalman utilisé",
+      "characteristic_of": "Cible binaire ffill avec exécution à 5min",
+      "explanation": "Décalage temporel résiduel (1-5 rows 5min) entre transitions modèle et oracle → manque-à-gagner ~30-45% sur les trades en accord",
+      "all_kalman_variants_tested": [
+        "Forward standard (non-causal Q fixe)",
+        "Forward adaptive AQ-KF (Q dynamique)",
+        "FLKS backward k=1..5 sous-pas",
+        "RTS smoother (oracle, non-causal)"
+      ]
+    },
+    "verdict": {
+      "adaptive_useful_for": ["XGBoost + filtre oracle (capture brute +14% absolu)"],
+      "adaptive_useless_for": ["CNN-LSTM (déjà à 55% capture)", "Mode production sans filtre (sur-trading)"],
+      "kalman_exploration_complete": true,
+      "next_pivot": "Structurel (cible/cadence/loss/architecture), Kalman ne peut plus apporter"
+    }
+  },
+  "model_filtered_by_oracle_test": {
+    "note": "Diagnostic Model ∩ Oracle — isoler switch vs timing. Non utilisable en prod (oracle live indispo).",
+    "function_used": "src/signal_processing/core.py::backtest_5min_filtered_by_oracle (copie backtest_5min_progressive + filtre sign)",
+    "script": "scripts/backtest_model_filtered_by_oracle.py",
+    "cnn_lstm_results": {
+      "macd": {
+        "oracle_pnl_net_pct": 350.94,
+        "model_pure_pnl_net_pct": -910.66,
+        "model_pure_trades": 4653,
+        "model_filtered_pnl_net_pct": -10.79,
+        "model_filtered_trades": 2277,
+        "model_filtered_pnl_gross_pct": 444.61,
+        "gross_capture_vs_oracle_pct": 55.0,
+        "gain_vs_model_pure_pct": 899.86,
+        "trades_blocked_by_disagreement": 4141,
+        "agreement_pct": 94.42
+      },
+      "cci": {
+        "oracle_pnl_net_pct": 433.73,
+        "model_pure_pnl_net_pct": -1078.95,
+        "model_pure_trades": 5615,
+        "model_filtered_pnl_net_pct": -25.13,
+        "model_filtered_trades": 2755,
+        "model_filtered_pnl_gross_pct": 525.87,
+        "gross_capture_vs_oracle_pct": 53.3,
+        "gain_vs_model_pure_pct": 1053.82,
+        "trades_blocked_by_disagreement": 5301,
+        "agreement_pct": 92.49
+      },
+      "rsi": {
+        "oracle_pnl_net_pct": 601.19,
+        "model_pure_pnl_net_pct": -1518.86,
+        "model_pure_trades": 7787,
+        "model_filtered_pnl_net_pct": 86.77,
+        "model_filtered_trades": 3239,
+        "model_filtered_pnl_gross_pct": 734.57,
+        "gross_capture_vs_oracle_pct": 58.6,
+        "gain_vs_model_pure_pct": 1605.63,
+        "trades_blocked_by_disagreement": 7788,
+        "agreement_pct": 89.89
+      }
+    },
+    "xgboost_results": {
+      "macd": {
+        "oracle_pnl_net_pct": 350.94,
+        "model_pure_pnl_net_pct": -589.84,
+        "model_pure_trades": 3107,
+        "model_filtered_pnl_net_pct": -99.89,
+        "model_filtered_trades": 2281,
+        "model_filtered_pnl_gross_pct": 356.31,
+        "gross_capture_vs_oracle_pct": 44.1,
+        "gain_vs_model_pure_pct": 489.95,
+        "trades_blocked_by_disagreement": 2965
+      }
+    },
+    "decomposition_switch_vs_timing": {
+      "switch_contribution_pct_cnn_lstm_avg": 85,
+      "timing_contribution_pct_cnn_lstm_avg": 15,
+      "switch_contribution_pct_xgboost_macd": 52,
+      "timing_contribution_pct_xgboost_macd": 48
+    },
+    "discovered_formula": {
+      "statement": "PnL Net potentiel ≈ 55% × PnL Oracle Net (si flips stabilisés)",
+      "gross_capture_when_aligned_pct": 55,
+      "theoretical_net_pnl_pct": {
+        "rsi": 330,
+        "macd": 193,
+        "cci": 239
+      },
+      "currently_achieved_with_oracle_filter": {
+        "rsi": 87,
+        "macd": -11,
+        "cci": -25
+      }
+    },
+    "conclusions": [
+      "Le switch est le problème DOMINANT (85% sur CNN-LSTM)",
+      "CNN-LSTM > XGBoost pour cette piste (meilleur signal brut intrinsèque)",
+      "RSI filtré est le premier PnL Net positif du pipeline (+87%)",
+      "Les 3 indicateurs convergent proches du break-even quand filtrés par Oracle",
+      "Stabiliser le signal est la piste validée empiriquement"
+    ],
+    "recommended_next_pivots": [
+      "1. Cadence 30min (effort faible, attaque direct les flips)",
+      "2. 3-classes UP/NEUTRE/DOWN (effort moyen, permet l'inaction apprenable)",
+      "3. Loss PnL-aware (effort élevé, attaque direct la métrique)"
+    ]
+  },
+  "cross_validation_test": {
+    "note": "scripts/cross_validation_indicators.py — test set, 458 jours",
+    "pearson_correlation_probas": {
+      "macd_cci": 0.7184,
+      "macd_rsi": 0.6634,
+      "cci_rsi": 0.8496,
+      "mean_off_diagonal": 0.7438
+    },
+    "binary_agreement_pct": {
+      "macd_eq_cci": 82.94,
+      "macd_eq_rsi": 79.45,
+      "cci_eq_rsi": 86.82,
+      "unanimity_3_of_3": 74.60,
+      "unanimity_up": 37.27,
+      "unanimity_down": 37.34
+    },
+    "error_rate_vs_own_oracle_pct": {
+      "macd": 6.25,
+      "cci": 8.36,
+      "rsi": 10.74
+    },
+    "conditional_error_ratios": {
+      "note": "P(err[b] | err[a]) / P(err[b]) — ratio vs baseline",
+      "cci_given_macd_error": 2.98,
+      "rsi_given_macd_error": 2.35,
+      "macd_given_cci_error": 2.98,
+      "rsi_given_cci_error": 3.68,
+      "macd_given_rsi_error": 2.35,
+      "cci_given_rsi_error": 3.68,
+      "all_three_error_simultaneous_pct": 0.77
+    },
+    "accuracy_vs_oracle_consensus_pct": {
+      "macd": 84.62,
+      "cci": 89.19,
+      "rsi": 86.58,
+      "consensus_majority_2_of_3": 91.10
+    },
+    "backtest_results_test": {
+      "oracle_macd":  {"trades": 2281, "wr": 45.6, "pf": 1.58, "pnl_net_pct":  350.94},
+      "oracle_cci":   {"trades": 2763, "wr": 45.7, "pf": 1.69, "pnl_net_pct":  433.73},
+      "oracle_rsi":   {"trades": 3261, "wr": 47.0, "pf": 1.96, "pnl_net_pct":  601.19},
+      "model_macd":   {"trades": 3107, "wr": 27.5, "pf": 0.54, "pnl_net_pct": -589.84},
+      "model_cci":    {"trades": 4159, "wr": 24.8, "pf": 0.49, "pnl_net_pct": -780.38},
+      "model_rsi":    {"trades": 6007, "wr": 19.6, "pf": 0.40, "pnl_net_pct": -1176.26},
+      "consensus_majority_2_3":  {"trades": 4599, "wr": 22.3, "pf": 0.46, "pnl_net_pct": -891.48},
+      "consensus_unanimity_3_3": {"trades": 2707, "wr": 30.2, "pf": 0.57, "pnl_net_pct": -502.97,
+                                    "rows_with_action_pct": 74.60}
+    },
+    "conclusions": [
+      "Les 3 indicateurs sont trop similaires (corr 0.66-0.85, tous dérivés du close)",
+      "Les erreurs sont CORRÉLÉES (ratios conditionnels 2.35-3.68× baseline)",
+      "Consensus Majorité 2/3 améliore accuracy (+1.91% vs CCI) mais DÉTRUIT le PnL (-302% vs MACD)",
+      "Consensus Unanimité 3/3 améliore le PnL de +87% vs MACD mais reste très négatif (-503%)",
+      "Le voting classique est inadapté au trading (paradoxe accuracy ≠ PnL)",
+      "Il faut du signal VRAIMENT indépendant (volume, microstructure, order flow)"
+    ],
+    "recommended_next_steps": [
+      "1+2: Régularisation XGBoost forte (max_depth=3, reg_lambda=10) + filter step_k >= 3",
+      "5: Features volume/volatility (signal décorrélé)",
+      "7: LSTM/TCN sur séquences 5min (dynamique temporelle)",
+      "6: Classification 3 classes UP/DOWN/INCERTAIN (probas par design moins bimodales)"
+    ]
+  },
+  "indicator_comparison_summary_test": {
+    "note": "Synthèse 3 indicateurs, test set (458 jours, 2024-09 → 2025-12)",
+    "observations": [
+      "Paradoxe inversé accuracy ↔ Oracle PnL : RSI pire acc mais meilleur Oracle",
+      "Sur-trading proportionnel à la nervosité : MACD ×1.36, CCI ×1.50, RSI ×1.84",
+      "Win Rate Oracle 45-47% → Model 20-28% (divisé par 2) → pattern structurel",
+      "step_k quasi-ignoré (<1%) par XGBoost sur les 3 indicateurs",
+      "Pas d'overfit : test ≈ val ≈ train pour les 3 modèles"
+    ],
+    "table": [
+      {"indicator": "MACD", "auc_test": 0.9836, "acc_test_pct": 93.75,
+       "oracle_trades": 2281, "oracle_pnl_net_pct": 350.94,
+       "model_trades": 3107, "model_pnl_net_pct": -589.84,
+       "trade_ratio": 1.362, "capture_pct": -168.1},
+      {"indicator": "CCI",  "auc_test": 0.9737, "acc_test_pct": 91.64,
+       "oracle_trades": 2763, "oracle_pnl_net_pct": 433.73,
+       "model_trades": 4159, "model_pnl_net_pct": -780.38,
+       "trade_ratio": 1.505, "capture_pct": -179.9},
+      {"indicator": "RSI",  "auc_test": 0.9637, "acc_test_pct": 89.26,
+       "oracle_trades": 3261, "oracle_pnl_net_pct": 601.19,
+       "model_trades": 6007, "model_pnl_net_pct": -1176.26,
+       "trade_ratio": 1.842, "capture_pct": -195.7}
+    ],
+    "next_step": "scripts/cross_validation_indicators.py — mesurer corrélation des erreurs entre les 3 modèles pour décider si consensus/meta-model est viable"
+  }
+}

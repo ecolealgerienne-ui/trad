@@ -1,24 +1,26 @@
 #!/usr/bin/env python3
 """
-Entraîne un XGBoost sur les features FLKS V1 (6 slopes k=1..6).
+Entraîne un XGBoost depuis un dataset ML préparé par prepare_*_data.py.
+
+Ce script fait UNIQUEMENT le train. La préparation (load, resample, features,
+labels, split, normalize, sequences) est faite en amont et sauvée dans un NPZ.
 
 Pipeline:
-  1. Charge 5m + TF téléchargés
-  2. prepare_features_and_labels → DataFrame (6 slopes + label_binary + close)
-  3. split_train_val_test (gap = window)
-  4. normalize_features (stats from train only)
-  5. make_sequences (X shape (n, window, 6), y = label_binary)
-  6. XGBoost.fit sur X_flat (n, window*6) avec early stopping sur val
-  7. Prédit probas sur test
-  8. Sauvegarde modèle + NPZ (pour backtest_model.py)
+  1. Charge dataset_{indicator}_{tf}_{source}.npz
+  2. Flatten X: (n, window, n_feat) → (n, window*n_feat)
+  3. XGBoost.fit sur train, eval_set=val, early stopping
+  4. Predict proba sur test
+  5. Metrics: accuracy, F1, AUC
+  6. Feature importance top 10
+  7. Save model + NPZ predictions (pour backtest_model.py)
 
 Sorties:
-  models/xgb_{indicator}_{tf}m.json
-  data/prepared/preds_{indicator}_{tf}m.npz
+  models/xgb_{indicator}_{tf}m_{source}.json     (modèle)
+  data/prepared/preds_{indicator}_{tf}m_{source}.npz (predictions)
 
 Usage:
-    python scripts/train_model.py
-    python scripts/train_model.py --indicator rsi --tf 60
+    python scripts/train_model.py --source full --indicator macd --tf 30
+    python scripts/train_model.py --source full --n-estimators 1000
 """
 
 import argparse
@@ -26,37 +28,13 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-from src.signal_processing.core import (
-    load_csv,
-    prepare_features_and_labels, split_train_val_test,
-    normalize_features, make_sequences,
-)
 
-DATA_DIR = Path('data/raw')
-OUT_DIR = Path('data/prepared')
+PREP_DIR = Path('data/prepared')
 MODELS_DIR = Path('models')
-
-FEATURE_COLS = [f'slope_k{k}' for k in range(1, 7)]
-
-
-def drop_incomplete_last(df_tf, df_5m, tf_minutes):
-    expected = tf_minutes // 5
-    drop_count = 0
-    for ts in reversed(df_tf.index):
-        end = ts + pd.Timedelta(minutes=tf_minutes)
-        mask = (df_5m.index >= ts) & (df_5m.index < end)
-        if mask.sum() < expected:
-            drop_count += 1
-        else:
-            break
-    if drop_count > 0:
-        df_tf = df_tf.iloc[:-drop_count]
-    return df_tf, drop_count
 
 
 def main():
@@ -64,73 +42,60 @@ def main():
     parser.add_argument('--indicator', default='macd',
                         choices=['macd', 'rsi', 'cci'])
     parser.add_argument('--tf', type=int, default=30, choices=[30, 60])
-    parser.add_argument('--window', type=int, default=25)
-    parser.add_argument('--trim', type=int, default=100)
-    parser.add_argument('--train-ratio', type=float, default=0.70)
-    parser.add_argument('--val-ratio', type=float, default=0.15)
+    parser.add_argument('--source', default='full',
+                        choices=['3months', 'full'])
+    # Hyperparams XGBoost
+    parser.add_argument('--n-estimators', type=int, default=500)
+    parser.add_argument('--max-depth', type=int, default=6)
+    parser.add_argument('--learning-rate', type=float, default=0.05)
+    parser.add_argument('--subsample', type=float, default=0.8)
+    parser.add_argument('--colsample-bytree', type=float, default=0.8)
+    parser.add_argument('--min-child-weight', type=int, default=5)
+    parser.add_argument('--gamma', type=float, default=0.1)
+    parser.add_argument('--reg-alpha', type=float, default=0.1)
+    parser.add_argument('--reg-lambda', type=float, default=1.0)
+    parser.add_argument('--early-stopping-rounds', type=int, default=20)
     parser.add_argument('--seed', type=int, default=42)
     args = parser.parse_args()
 
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
     tf_label = f'{args.tf}m' if args.tf < 60 else '1h'
     print("=" * 80)
     print(f"TRAIN XGBoost — {args.indicator.upper()} × {tf_label}  "
-          f"(window={args.window}, trim={args.trim})")
+          f"source={args.source}")
     print("=" * 80)
 
-    # [1] Load
-    print("\n[1/6] Load data ...")
-    df_5m = load_csv(DATA_DIR / 'BTCUSD_3months_5m.csv')
-    df_tf = load_csv(DATA_DIR / f'BTCUSD_3months_{tf_label}.csv')
-    df_tf, _ = drop_incomplete_last(df_tf, df_5m, args.tf)
-    print(f"  5m: {len(df_5m):,}  |  {tf_label}: {len(df_tf):,}")
+    # ========== [1] Charger dataset ==========
+    dataset_path = PREP_DIR / f'dataset_{args.indicator}_{tf_label}_{args.source}.npz'
+    if not dataset_path.exists():
+        print(f"❌ Dataset non trouvé: {dataset_path}")
+        if args.source == 'full':
+            print(f"   Lance d'abord: python scripts/prepare_full_data.py "
+                  f"--indicator {args.indicator} --tf {args.tf}")
+        return
 
-    # [2] Prepare
-    print("\n[2/6] prepare_features_and_labels ...")
-    data = prepare_features_and_labels(df_tf, df_5m, args.indicator,
-                                         args.tf, trim=args.trim)
-    print(f"  Shape: {data.shape}  |  colonnes: {list(data.columns)}")
+    print(f"\n[1/5] Charge dataset: {dataset_path}")
+    data = np.load(dataset_path, allow_pickle=True)
+    X_train = data['X_train']
+    y_train = data['y_train_binary']
+    X_val = data['X_val']
+    y_val = data['y_val_binary']
+    X_test = data['X_test']
+    y_test = data['y_test_binary']
+    window = int(data['window'])
+    n_feat = X_train.shape[2]
+    print(f"  X_train={X_train.shape}  X_val={X_val.shape}  X_test={X_test.shape}")
+    print(f"  window={window}  n_features={n_feat}")
 
-    # [3] Split (gap = window)
-    print(f"\n[3/6] split_train_val_test (gap={args.window}) ...")
-    df_train, df_val, df_test = split_train_val_test(
-        data, args.train_ratio, args.val_ratio, gap=args.window)
-    print(f"  train={len(df_train):,}  val={len(df_val):,}  test={len(df_test):,}")
+    # ========== [2] Flatten ==========
+    print(f"\n[2/5] Flatten X → (n, {window}×{n_feat}={window*n_feat}) ...")
+    X_tr_flat = X_train.reshape(len(X_train), -1)
+    X_va_flat = X_val.reshape(len(X_val), -1)
+    X_te_flat = X_test.reshape(len(X_test), -1)
 
-    # [4] Normalize
-    print("\n[4/6] normalize_features (stats from train) ...")
-    df_tr_n, df_va_n, df_te_n, stats = normalize_features(
-        df_train, df_val, df_test, FEATURE_COLS)
-
-    # [5] Sequences
-    print(f"\n[5/6] make_sequences (window={args.window}) ...")
-    seq_tr = make_sequences(df_tr_n, FEATURE_COLS, 'label_binary', args.window)
-    seq_va = make_sequences(df_va_n, FEATURE_COLS, 'label_binary', args.window)
-    seq_te = make_sequences(df_te_n, FEATURE_COLS, 'label_binary', args.window)
-    X_tr, y_tr = seq_tr['X'], seq_tr['y']
-    X_va, y_va = seq_va['X'], seq_va['y']
-    X_te, y_te = seq_te['X'], seq_te['y']
-    print(f"  X_train={X_tr.shape}  X_val={X_va.shape}  X_test={X_te.shape}")
-
-    # Distribution labels
-    for name, y in [('train', y_tr), ('val', y_va), ('test', y_te)]:
-        up = int((y == 1).sum())
-        down = int((y == 0).sum())
-        print(f"  {name}: UP={up:,} ({up/(up+down)*100:.1f}%) "
-              f"DOWN={down:,} ({down/(up+down)*100:.1f}%)")
-
-    # Flatten pour XGBoost (pas de notion de séquence native)
-    X_tr_flat = X_tr.reshape(len(X_tr), -1)
-    X_va_flat = X_va.reshape(len(X_va), -1)
-    X_te_flat = X_te.reshape(len(X_te), -1)
-    n_feat = len(FEATURE_COLS)
-    print(f"  Flatten: X_train_flat={X_tr_flat.shape} "
-          f"(window*n_feat = {args.window}*{n_feat} = {args.window*n_feat})")
-
-    # [6] XGBoost
-    print("\n[6/6] Train XGBoost ...")
+    # ========== [3] XGBoost fit ==========
+    print(f"\n[3/5] XGBoost.fit ...")
     try:
         import xgboost as xgb
     except ImportError:
@@ -138,22 +103,30 @@ def main():
         return
 
     model = xgb.XGBClassifier(
-        n_estimators=500, max_depth=6, learning_rate=0.05,
-        subsample=0.8, colsample_bytree=0.8, min_child_weight=5,
-        gamma=0.1, reg_alpha=0.1, reg_lambda=1.0,
-        random_state=args.seed, eval_metric='logloss',
-        early_stopping_rounds=20, n_jobs=-1,
+        n_estimators=args.n_estimators,
+        max_depth=args.max_depth,
+        learning_rate=args.learning_rate,
+        subsample=args.subsample,
+        colsample_bytree=args.colsample_bytree,
+        min_child_weight=args.min_child_weight,
+        gamma=args.gamma,
+        reg_alpha=args.reg_alpha,
+        reg_lambda=args.reg_lambda,
+        random_state=args.seed,
+        eval_metric='logloss',
+        early_stopping_rounds=args.early_stopping_rounds,
+        n_jobs=-1,
     )
-    model.fit(X_tr_flat, y_tr, eval_set=[(X_va_flat, y_va)], verbose=50)
+    model.fit(X_tr_flat, y_train, eval_set=[(X_va_flat, y_val)], verbose=50)
 
-    # Metrics
+    # ========== [4] Métriques ==========
     print("\n" + "=" * 80)
     print("MÉTRIQUES")
     print("=" * 80)
     from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
-    for name, Xf, y in [('TRAIN', X_tr_flat, y_tr),
-                         ('VAL', X_va_flat, y_va),
-                         ('TEST', X_te_flat, y_te)]:
+    for name, Xf, y in [('TRAIN', X_tr_flat, y_train),
+                         ('VAL', X_va_flat, y_val),
+                         ('TEST', X_te_flat, y_test)]:
         preds = model.predict(Xf)
         probas = model.predict_proba(Xf)[:, 1]
         acc = accuracy_score(y, preds)
@@ -161,47 +134,39 @@ def main():
         auc = roc_auc_score(y, probas)
         print(f"  {name:<6} acc={acc:.4f}  F1={f1:.4f}  AUC={auc:.4f}")
 
-    # Feature importance (Top 10)
+    # Feature importance
     print("\nTop 10 feature importance:")
     importances = model.feature_importances_
-    # Reconstruire names: feature × timestep
-    flat_names = [f'{feat}_t-{args.window - 1 - ts}'
-                  for ts in range(args.window) for feat in FEATURE_COLS]
+    feature_cols = [str(c) for c in data['feature_cols']]
+    flat_names = [f'{feat}_t-{window - 1 - ts}'
+                  for ts in range(window) for feat in feature_cols]
     top_idx = np.argsort(importances)[::-1][:10]
     for i in top_idx:
         print(f"  {flat_names[i]:<25} {importances[i]:.4f}")
 
-    # Save model
-    model_path = MODELS_DIR / f'xgb_{args.indicator}_{tf_label}.json'
+    # ========== [5] Sauvegarde ==========
+    model_path = MODELS_DIR / f'xgb_{args.indicator}_{tf_label}_{args.source}.json'
     model.save_model(model_path)
     print(f"\n✅ Modèle sauvé: {model_path}")
 
-    # Save predictions NPZ (for backtest_model.py)
-    # Indices dans df_tf pour chaque sample test
-    # Dans make_sequences: dates[i] = df_te_n.index[i + window - 1]
+    # NPZ predictions pour le backtest
     test_preds_proba = model.predict_proba(X_te_flat)[:, 1]
-    test_dates = seq_te['dates']  # ndarray datetime64
-    test_closes = seq_te['closes']
-    # Reconstruction des indices dans df_tf
-    test_indices = np.array([df_tf.index.get_loc(pd.Timestamp(d)) for d in test_dates])
-
-    npz_path = OUT_DIR / f'preds_{args.indicator}_{tf_label}.npz'
-    np.savez(npz_path,
-             test_preds_proba=test_preds_proba.astype(np.float64),
-             test_y_true=y_te.astype(np.int64),
-             test_dates=test_dates,
-             test_closes=test_closes.astype(np.float64),
-             test_indices=test_indices.astype(np.int64),
-             indicator=args.indicator,
-             tf_minutes=args.tf,
-             window=args.window,
-             trim=args.trim,
-             train_ratio=args.train_ratio,
-             val_ratio=args.val_ratio,
-             )
+    npz_path = PREP_DIR / f'preds_{args.indicator}_{tf_label}_{args.source}.npz'
+    np.savez(
+        npz_path,
+        test_preds_proba=test_preds_proba.astype(np.float64),
+        test_y_true=y_test.astype(np.int64),
+        test_dates=data['dates_test'],
+        test_closes=data['closes_test'].astype(np.float64),
+        test_indices=data['indices_test'].astype(np.int64),
+        indicator=args.indicator,
+        tf_minutes=args.tf,
+        source=args.source,
+    )
     print(f"✅ Predictions sauvées: {npz_path}")
-    print(f"   test_preds_proba: {test_preds_proba.shape}  "
-          f"test_indices: {test_indices.shape}")
+    print(f"\nPour backtester:")
+    print(f"  python scripts/backtest_model.py --indicator {args.indicator} "
+          f"--tf {args.tf} --source {args.source} --threshold 0.5")
 
 
 if __name__ == '__main__':

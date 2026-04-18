@@ -116,6 +116,48 @@ def calculate_cci(df, period=CCI_PERIOD):
     return ((tp - sma) / (0.015 * mad)).values.astype(np.float64)
 
 
+def calculate_atr(df, period=14, normalize=False):
+    """
+    Average True Range (Wilder, EMA récursif). Causal.
+
+    Args:
+        df: DataFrame avec colonnes 'high', 'low', 'close'.
+        period: période de l'EMA (default 14, Wilder standard).
+        normalize: si True, retourne ATR / close (volatilité relative au prix).
+
+    Returns:
+        np.ndarray (n,) — ATR ou ATR/close (NaN sur les `period-1` premiers).
+
+    Formule :
+        TR_t = max(H_t - L_t, |H_t - C_{t-1}|, |L_t - C_{t-1}|)
+        ATR_0..period-1 : SMA des `period` premiers TR
+        ATR_t = (ATR_{t-1} * (period - 1) + TR_t) / period   (Wilder smoothing)
+    """
+    high = df['high'].values.astype(np.float64)
+    low = df['low'].values.astype(np.float64)
+    close = df['close'].values.astype(np.float64)
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan)
+
+    # True Range
+    prev_close = np.concatenate([[close[0]], close[:-1]])
+    tr1 = high - low
+    tr2 = np.abs(high - prev_close)
+    tr3 = np.abs(low - prev_close)
+    tr = np.maximum.reduce([tr1, tr2, tr3])
+
+    # Wilder smoothing : init = SMA des `period` premiers TR
+    atr = np.full(n, np.nan)
+    atr[period - 1] = tr[:period].mean()
+    for i in range(period, n):
+        atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
+
+    if normalize:
+        atr = atr / close
+    return atr
+
+
 def compute_indicator(df, indicator, **kwargs):
     """
     Point d'entrée unique pour calculer un indicateur standard sur n'importe
@@ -197,7 +239,7 @@ def compute_indicator_live(df_5m, is_close, indicator, tf_minutes, **kwargs):
 
 def compute_oracle_labels(df, indicator,
                            Q_var=KALMAN_PROCESS_VAR, R_var=KALMAN_MEASURE_VAR,
-                           indicator_params=None):
+                           indicator_params=None, slope_lag=1):
     """
     Dispatcher oracle : calcule les labels non-causaux (smoother RTS).
 
@@ -209,6 +251,9 @@ def compute_oracle_labels(df, indicator,
         Q_var, R_var: covariances Kalman smoother (défauts = globales).
         indicator_params: dict optionnel de params pour l'indicateur
                           (ex: {'fast': 8, 'slow': 17, 'signal': 9}).
+        slope_lag : décalage de la pente. Default 1 (legacy).
+            1 → slopes[t] = positions[t-1] - positions[t-2]
+            0 → slopes[t] = positions[t]   - positions[t-1] (gain de TF en précocité)
 
     Returns:
         pd.DataFrame (position, slope, label), NaN remplacés par 0.
@@ -216,7 +261,8 @@ def compute_oracle_labels(df, indicator,
     ind_kwargs = indicator_params or {}
     ind_series = compute_indicator(df, indicator, **ind_kwargs)
     ind_array = ind_series.values.astype(np.float64)
-    positions, slopes = compute_oracle(ind_array, Q_var=Q_var, R_var=R_var)
+    positions, slopes = compute_oracle(ind_array, Q_var=Q_var, R_var=R_var,
+                                          slope_lag=slope_lag)
     positions = np.where(np.isnan(positions), 0.0, positions)
     slopes = np.where(np.isnan(slopes), 0.0, slopes)
     labels = (slopes > 0).astype(int)
@@ -273,7 +319,7 @@ def compute_forward_filter(df, indicator, adaptive=False,
 
 def compute_flks_slopes(df_tf, df_5m, indicator, tf_minutes, k_range=(1, 6),
                          Q_var=KALMAN_PROCESS_VAR, R_var=KALMAN_MEASURE_VAR,
-                         indicator_params=None):
+                         indicator_params=None, adaptive=False):
     """
     Dispatcher FLKS-2 : calcule les backward slopes (Fixed-Lag Kalman Smoother)
     pour un indicateur, au timeframe TF, avec sous-pas 5min.
@@ -306,7 +352,8 @@ def compute_flks_slopes(df_tf, df_5m, indicator, tf_minutes, k_range=(1, 6),
     ind_kwargs = indicator_params or {}
 
     # Étape 1: forward filter sur df_tf (avec Q/R et params indicateur)
-    fwd = compute_forward_filter(df_tf, indicator, adaptive=False,
+    # adaptive=True → AQ-KF (Adaptive Q Kalman Filter) détecte mieux les transitions
+    fwd = compute_forward_filter(df_tf, indicator, adaptive=adaptive,
                                    Q_var=Q_var, R_var=R_var,
                                    indicator_params=ind_kwargs)
     x_filt_pos = fwd['state'][['position', 'velocity']].values
@@ -339,6 +386,74 @@ def compute_flks_slopes(df_tf, df_5m, indicator, tf_minutes, k_range=(1, 6),
     df_slopes = pd.DataFrame(result, index=df_tf.index)
     df_slopes = df_slopes.fillna(0.0)
     return df_slopes
+
+
+def compute_progressive_slopes(df_tf, df_5m, indicator, tf_minutes,
+                                 Q_var=KALMAN_PROCESS_VAR, R_var=KALMAN_MEASURE_VAR,
+                                 indicator_params=None, adaptive=False):
+    """
+    Calcule une slope progressive à chaque ligne 5min.
+
+    À l'instant i (5min), on identifie :
+      - t_ref  : bougie TF la plus récente dont le close est déjà connu à i
+                 (= floor(i, tf) - tf ; cette bougie se ferme à t_ref + tf)
+      - step_k : nombre de sous-pas 5min écoulés dans la bougie courante (t_ref + tf)
+                 ∈ {0, 1, ..., tf/5 - 1}
+
+    Feature à la ligne i :
+      - step_k == 0 : slope_t1[t_ref]                (backward, pas de sous-pas)
+      - step_k >= 1 : slope_k<step_k>[t_ref]         (backward, step_k sous-pas live)
+
+    Args:
+        df_tf: DataFrame OHLC au timeframe TF.
+        df_5m: DataFrame OHLC au 5min.
+        indicator: 'macd' | 'rsi' | 'cci'.
+        tf_minutes: 30 ou 60.
+
+    Returns:
+        pd.DataFrame indexé par df_5m.index, colonnes:
+          - slope_progressive : float  (slope appropriée selon step_k)
+          - step_k            : int    (0..tf/5 - 1)
+    """
+    n_substeps_per_candle = tf_minutes // 5
+    k_max_live = n_substeps_per_candle - 1  # k=1..(n_substeps-1) en live
+
+    # Slopes TF (une seule fois) : slope_t1 + slope_k1..slope_k<k_max_live>
+    slopes_tf = compute_flks_slopes(df_tf, df_5m, indicator, tf_minutes,
+                                      k_range=(1, k_max_live),
+                                      Q_var=Q_var, R_var=R_var,
+                                      indicator_params=indicator_params,
+                                      adaptive=adaptive)
+    # Colonnes disponibles : slope_t1, slope_k1, ..., slope_k<k_max_live>
+
+    tf_delta = pd.Timedelta(minutes=tf_minutes)
+    idx_5m = df_5m.index
+    # t_ref = floor(i, tf) - tf
+    #   i = 11:00 (frontière) → floor = 11:00, t_ref = 10:30 ✅
+    #   i = 11:05             → floor = 11:00, t_ref = 10:30 ✅
+    #   i = 11:30 (frontière) → floor = 11:30, t_ref = 11:00 ✅
+    t_ref = idx_5m.floor(tf_delta) - tf_delta
+    # step_k = (i - t_ref - tf) / 5min
+    step_k = (((idx_5m - t_ref - tf_delta).total_seconds()) // 300).astype(np.int64)
+
+    # Matrice (n_5m, n_substeps_per_candle) : [slope_t1, slope_k1, ..., slope_k<k_max>]
+    slope_cols = ['slope_t1'] + [f'slope_k{k}' for k in range(1, k_max_live + 1)]
+    slopes_aligned = slopes_tf.reindex(t_ref)[slope_cols]
+    slope_matrix = slopes_aligned.values  # (n_5m, n_substeps_per_candle)
+
+    # Sélection ligne par ligne selon step_k
+    row_idx = np.arange(len(idx_5m))
+    # Safeguard : clip step_k au range valide (devrait toujours être OK)
+    step_k_clipped = np.clip(step_k, 0, n_substeps_per_candle - 1)
+    slope_progressive = slope_matrix[row_idx, step_k_clipped]
+
+    # NaN si t_ref est antérieur au premier df_tf.index : fillna 0
+    slope_progressive = np.where(np.isnan(slope_progressive), 0.0, slope_progressive)
+
+    return pd.DataFrame({
+        'slope_progressive': slope_progressive.astype(np.float64),
+        'step_k': step_k.astype(np.int64),
+    }, index=idx_5m)
 
 
 # ============================================================================
@@ -408,6 +523,79 @@ def prepare_features_and_labels(df_tf, df_5m, indicator, tf_minutes, trim=100,
     # 4. TRIM début et fin pour écarter warm-up et bords incomplets
     if trim > 0 and len(result) > 2 * trim:
         result = result.iloc[trim:-trim]
+    return result
+
+
+def prepare_features_and_labels_progressive(df_tf, df_5m, indicator, tf_minutes,
+                                               trim=100,
+                                               Q_var=KALMAN_PROCESS_VAR,
+                                               R_var=KALMAN_MEASURE_VAR,
+                                               indicator_params=None,
+                                               adaptive=False,
+                                               slope_lag=1):
+    """
+    Version "progressive" à résolution 5min :
+      - Labels oracle[t_ref] ffill sur les tf/5 lignes 5min de la bougie courante
+      - Features slope évoluant à chaque 5min (slope_t1 ou slope_k<step_k>)
+      - step_k (0..tf/5-1) exposé comme feature auxiliaire
+
+    Pour chaque ligne 5min à l'instant i :
+      - t_ref  = floor(i, tf) - tf   (bougie TF la plus récente avec close connu)
+      - step_k = (i - t_ref - tf) / 5min
+
+    Colonnes de sortie :
+      - slope_progressive : slope_t1[t_ref] si step_k==0 sinon slope_k<step_k>[t_ref]
+      - step_k            : 0..tf/5-1
+      - label_binary      : oracle label[t_ref] ffill
+      - label_continuous  : oracle slope[t_ref] ffill
+      - close             : close 5min (prix d'exec pour backtest)
+
+    Args:
+        df_tf: DataFrame OHLC au timeframe TF.
+        df_5m: DataFrame OHLC au 5min.
+        indicator: 'macd' | 'rsi' | 'cci'.
+        tf_minutes: 30 ou 60.
+        trim: nombre de bougies TF à retirer au début ET à la fin.
+              Converti en lignes 5min : trim_5m = trim * (tf/5).
+
+    Returns:
+        pd.DataFrame indexé par df_5m.index (trimé), 5 colonnes.
+    """
+    # 1. Slopes progressives 5min + step_k
+    # adaptive=True active AQ-KF (Adaptive Q Kalman Filter) dans le forward pass
+    # — détecte mieux les transitions, laisse l'oracle RTS inchangé
+    slopes_prog = compute_progressive_slopes(
+        df_tf, df_5m, indicator, tf_minutes,
+        Q_var=Q_var, R_var=R_var, indicator_params=indicator_params,
+        adaptive=adaptive)
+
+    # 2. Oracle au TF (slope_lag=0 → pente la plus récente, gain de précocité)
+    oracle = compute_oracle_labels(df_tf, indicator,
+                                     Q_var=Q_var, R_var=R_var,
+                                     indicator_params=indicator_params,
+                                     slope_lag=slope_lag)
+
+    # 3. ffill oracle sur les 5min via t_ref (même logique que slopes)
+    tf_delta = pd.Timedelta(minutes=tf_minutes)
+    t_ref_5m = df_5m.index.floor(tf_delta) - tf_delta
+    oracle_aligned = oracle.reindex(t_ref_5m)
+    # Restore index 5min après reindex
+    oracle_aligned.index = df_5m.index
+
+    # 4. Assembler
+    result = pd.DataFrame({
+        'slope_progressive': slopes_prog['slope_progressive'].values,
+        'step_k': slopes_prog['step_k'].values,
+        'label_binary': oracle_aligned['label'].fillna(0).astype(int).values,
+        'label_continuous': oracle_aligned['slope'].fillna(0.0).astype(np.float64).values,
+        'close': df_5m['close'].astype(np.float64).values,
+    }, index=df_5m.index)
+
+    # 5. TRIM : convertir trim (bougies TF) en lignes 5min
+    n_sub = tf_minutes // 5
+    trim_5m = trim * n_sub
+    if trim > 0 and len(result) > 2 * trim_5m:
+        result = result.iloc[trim_5m:-trim_5m]
     return result
 
 
@@ -645,9 +833,23 @@ def compute_cci_live(high_live, low_live, close_5min, is_close, period=CCI_PERIO
 # ORACLE
 # ============================================================================
 
-def compute_oracle(indicator_30m, Q_var=KALMAN_PROCESS_VAR, R_var=KALMAN_MEASURE_VAR):
+def compute_oracle(indicator_30m, Q_var=KALMAN_PROCESS_VAR, R_var=KALMAN_MEASURE_VAR,
+                    slope_lag=1):
     """
     Smoother RTS (non-causal). Q_var et R_var paramétrables.
+
+    Args:
+        indicator_30m : valeurs indicateur (peut contenir NaN).
+        Q_var, R_var  : covariances Kalman smoother.
+        slope_lag     : décalage de la pente (default 1 = comportement legacy).
+            slope_lag=1 → slopes[t] = positions[t-1] - positions[t-2]
+                         (pente "passée", décalée d'une bougie)
+            slope_lag=0 → slopes[t] = positions[t]   - positions[t-1]
+                         (pente la plus récente possible, gain de 30min sur TF=30m)
+
+        ⚠️ slope_lag=0 reste causal pour le modèle car la slope est calculée
+        à t_ref = bougie déjà fermée. Le RTS smoother voit le futur uniquement
+        pour le calcul des labels training, pas pour l'exécution.
     """
     from pykalman import KalmanFilter as KF
     n = len(indicator_30m)
@@ -667,9 +869,13 @@ def compute_oracle(indicator_30m, Q_var=KALMAN_PROCESS_VAR, R_var=KALMAN_MEASURE
     positions = np.full(n, np.nan)
     positions[valid] = smooth_means[:, 0]
     slopes = np.full(n, np.nan)
-    for t in range(2, n):
-        if not np.isnan(positions[t - 1]) and not np.isnan(positions[t - 2]):
-            slopes[t] = positions[t - 1] - positions[t - 2]
+    # slopes[t] = positions[t - slope_lag] - positions[t - slope_lag - 1]
+    start = slope_lag + 1  # besoin de t-slope_lag et t-slope_lag-1 valides
+    for t in range(start, n):
+        a = positions[t - slope_lag]
+        b = positions[t - slope_lag - 1]
+        if not np.isnan(a) and not np.isnan(b):
+            slopes[t] = a - b
     return positions, slopes
 
 
@@ -1073,8 +1279,328 @@ def backtest_30m(slopes, closes_30m, start, end, fees,
     return {'pnl_pct': pnl_total * 100, 'trades': n_trades, 'win_rate': wr}
 
 
+def backtest_5min_progressive(slopes_5m, closes_5m, fees=0.001):
+    """
+    Backtest à résolution 5min pour un dataset progressif.
+
+    Chaque ligne 5min a son propre signal (slope). Execution à close_5m[i+1]
+    (lag 1 tick 5min) pour respecter la règle "pas de trade à xx:00/xx:30".
+
+    Args:
+        slopes_5m  : np.ndarray shape (n,)  — signal à chaque ligne 5min
+                     (positive=LONG, negative=SHORT, 0=conserver position)
+        closes_5m  : np.ndarray shape (n,)  — closes à chaque ligne 5min
+        fees       : float fees par côté (entry+exit = 2×fees)
+
+    Returns:
+        dict avec keys : n_trades, pnl_pct, win_rate, profit_factor, sharpe,
+        n_long, n_short (conventions identiques à backtest_30m/backtest_5m).
+    """
+    n = len(slopes_5m)
+    assert len(closes_5m) == n, "slopes_5m et closes_5m doivent avoir même longueur"
+
+    position = 0      # 0=FLAT, 1=LONG, -1=SHORT
+    entry_price = 0.0
+    trades = []
+
+    for i in range(n - 1):  # n-1 car exec à i+1
+        s = slopes_5m[i]
+        if np.isnan(s) or s == 0:
+            target = position  # pas de signal → conserve
+        elif s > 0:
+            target = 1
+        else:
+            target = -1
+
+        if target == position:
+            continue
+
+        exec_price = closes_5m[i + 1]
+        if np.isnan(exec_price):
+            continue
+
+        # Sortie
+        if position != 0:
+            pnl = _exec_trade(position, entry_price, exec_price, fees) - fees
+            trades.append({'exit_i': i + 1, 'pnl': pnl, 'position': position})
+
+        # Nouvelle entrée (flip ou depuis FLAT)
+        if target != 0:
+            entry_price = exec_price
+        position = target
+
+    # Close final
+    if position != 0:
+        exec_price = closes_5m[-1]
+        if not np.isnan(exec_price):
+            pnl = _exec_trade(position, entry_price, exec_price, fees) - fees
+            trades.append({'exit_i': n - 1, 'pnl': pnl, 'position': position})
+
+    if not trades:
+        return dict(n_trades=0, pnl_pct=0.0, win_rate=0.0,
+                    profit_factor=0.0, sharpe=0.0, n_long=0, n_short=0)
+
+    pnls = np.array([t['pnl'] for t in trades])
+    wins = pnls[pnls > 0]
+    losses = pnls[pnls < 0]
+    return dict(
+        n_trades=len(trades),
+        pnl_pct=pnls.sum() * 100,
+        win_rate=len(wins) / len(pnls) * 100,
+        profit_factor=(wins.sum() / abs(losses.sum())
+                       if len(losses) > 0 and losses.sum() != 0 else np.inf),
+        sharpe=(pnls.mean() / pnls.std() if pnls.std() > 1e-10 else 0.0),
+        n_long=sum(1 for t in trades if t['position'] == 1),
+        n_short=sum(1 for t in trades if t['position'] == -1),
+    )
+
+
+def backtest_5min_filtered_by_oracle(slopes_model, slopes_oracle,
+                                        closes_5m, fees=0.001):
+    """
+    DIAGNOSTIC : backtest 5min filtrant les signaux du modèle par l'oracle.
+
+    COPIE de backtest_5min_progressive avec UN SEUL ajout : une vérification
+    que le signal du modèle est d'accord avec le signal de l'oracle à la
+    même ligne 5min. Si désaccord → slope=0 → conserve position.
+
+    ⚠️ NON UTILISABLE EN PRODUCTION : requiert la connaissance de l'oracle
+    en temps réel. C'est un outil de diagnostic pour isoler :
+      - Problème = switch (flips parasites) → PnL remonte vers l'Oracle
+      - Problème = timing/lag (mauvais moment)  → PnL reste catastrophique
+
+    Args:
+        slopes_model  : np.ndarray (n,) — signal du modèle (±1 / 0 / NaN)
+        slopes_oracle : np.ndarray (n,) — signal de l'oracle (même format)
+        closes_5m     : np.ndarray (n,) — closes 5min (même que non-filtered)
+        fees          : fees par côté (identique)
+
+    Returns:
+        dict identique à backtest_5min_progressive
+        + clé supplémentaire 'n_filtered' = rows où le modèle voulait trader
+          mais a été bloqué par désaccord oracle.
+    """
+    n = len(slopes_model)
+    assert len(slopes_oracle) == n, \
+        "slopes_model et slopes_oracle doivent avoir même longueur"
+    assert len(closes_5m) == n, \
+        "slopes et closes_5m doivent avoir même longueur"
+
+    position = 0      # 0=FLAT, 1=LONG, -1=SHORT
+    entry_price = 0.0
+    trades = []
+    n_filtered = 0    # compteur désaccords model/oracle
+
+    for i in range(n - 1):  # n-1 car exec à i+1
+        s_m = slopes_model[i]
+        s_o = slopes_oracle[i]
+
+        # Target depuis le signal model (même logique que l'originale)
+        if np.isnan(s_m) or s_m == 0:
+            target_model = position
+        elif s_m > 0:
+            target_model = 1
+        else:
+            target_model = -1
+
+        # ⚠️ AJOUT : filtre oracle
+        # Si le signal model est différent de la position actuelle (veut flip)
+        # ET que l'oracle donne un signe différent → on bloque
+        if target_model != position:
+            # Signal oracle
+            if np.isnan(s_o) or s_o == 0:
+                sign_oracle = 0
+            elif s_o > 0:
+                sign_oracle = 1
+            else:
+                sign_oracle = -1
+
+            # Désaccord → bloque le trade, conserve position
+            if target_model != sign_oracle:
+                n_filtered += 1
+                continue
+
+        target = target_model
+
+        if target == position:
+            continue
+
+        exec_price = closes_5m[i + 1]
+        if np.isnan(exec_price):
+            continue
+
+        # Sortie
+        if position != 0:
+            pnl = _exec_trade(position, entry_price, exec_price, fees) - fees
+            trades.append({'exit_i': i + 1, 'pnl': pnl, 'position': position})
+
+        # Nouvelle entrée (flip ou depuis FLAT)
+        if target != 0:
+            entry_price = exec_price
+        position = target
+
+    # Close final
+    if position != 0:
+        exec_price = closes_5m[-1]
+        if not np.isnan(exec_price):
+            pnl = _exec_trade(position, entry_price, exec_price, fees) - fees
+            trades.append({'exit_i': n - 1, 'pnl': pnl, 'position': position})
+
+    if not trades:
+        return dict(n_trades=0, pnl_pct=0.0, win_rate=0.0,
+                    profit_factor=0.0, sharpe=0.0, n_long=0, n_short=0,
+                    n_filtered=n_filtered)
+
+    pnls = np.array([t['pnl'] for t in trades])
+    wins = pnls[pnls > 0]
+    losses = pnls[pnls < 0]
+    return dict(
+        n_trades=len(trades),
+        pnl_pct=pnls.sum() * 100,
+        win_rate=len(wins) / len(pnls) * 100,
+        profit_factor=(wins.sum() / abs(losses.sum())
+                       if len(losses) > 0 and losses.sum() != 0 else np.inf),
+        sharpe=(pnls.mean() / pnls.std() if pnls.std() > 1e-10 else 0.0),
+        n_long=sum(1 for t in trades if t['position'] == 1),
+        n_short=sum(1 for t in trades if t['position'] == -1),
+        n_filtered=n_filtered,
+    )
+
+
+def extract_trades_5min_progressive(slopes_5m, closes_5m, fees=0.001):
+    """
+    Extrait la liste détaillée des trades générés par backtest_5min_progressive.
+
+    Mêmes règles d'exécution que backtest_5min_progressive (exec à close[i+1],
+    fees par côté, sign(slope) → direction). Au lieu de retourner le résumé
+    agrégé, retourne UN trade par ligne avec entry/exit/PnL/durée.
+
+    Args:
+        slopes_5m  : np.ndarray (n,) — signal à chaque ligne 5min
+        closes_5m  : np.ndarray (n,) — closes à chaque ligne 5min
+        fees       : float fees par côté
+
+    Returns:
+        list[dict] : un dict par trade avec keys
+            entry_i      : index 5min d'entrée
+            exit_i       : index 5min de sortie
+            position     : +1 (LONG) ou -1 (SHORT)
+            entry_price  : prix d'entrée (close à entry_i)
+            exit_price   : prix de sortie (close à exit_i)
+            pnl_brut     : PnL avant fees ((exit-entry)/entry signé)
+            pnl_net      : PnL après 2 × fees
+            duration_5m  : exit_i - entry_i (rows 5min entre entrée et sortie)
+    """
+    n = len(slopes_5m)
+    assert len(closes_5m) == n, "slopes_5m et closes_5m doivent avoir même longueur"
+
+    position = 0      # 0=FLAT, 1=LONG, -1=SHORT
+    entry_price = 0.0
+    entry_i = -1
+    trades = []
+
+    for i in range(n - 1):  # n-1 car exec à i+1
+        s = slopes_5m[i]
+        if np.isnan(s) or s == 0:
+            target = position
+        elif s > 0:
+            target = 1
+        else:
+            target = -1
+
+        if target == position:
+            continue
+
+        exec_price = closes_5m[i + 1]
+        if np.isnan(exec_price):
+            continue
+
+        # Sortie
+        if position != 0:
+            if position == 1:
+                pnl_brut = (exec_price - entry_price) / entry_price
+            else:
+                pnl_brut = (entry_price - exec_price) / entry_price
+            pnl_net = pnl_brut - 2 * fees
+            trades.append({
+                'entry_i': entry_i,
+                'exit_i': i + 1,
+                'position': position,
+                'entry_price': entry_price,
+                'exit_price': exec_price,
+                'pnl_brut': pnl_brut,
+                'pnl_net': pnl_net,
+                'duration_5m': (i + 1) - entry_i,
+            })
+
+        # Nouvelle entrée
+        if target != 0:
+            entry_price = exec_price
+            entry_i = i + 1
+        position = target
+
+    # Close final
+    if position != 0:
+        exec_price = closes_5m[-1]
+        if not np.isnan(exec_price):
+            if position == 1:
+                pnl_brut = (exec_price - entry_price) / entry_price
+            else:
+                pnl_brut = (entry_price - exec_price) / entry_price
+            pnl_net = pnl_brut - 2 * fees
+            trades.append({
+                'entry_i': entry_i,
+                'exit_i': n - 1,
+                'position': position,
+                'entry_price': entry_price,
+                'exit_price': exec_price,
+                'pnl_brut': pnl_brut,
+                'pnl_net': pnl_net,
+                'duration_5m': (n - 1) - entry_i,
+            })
+
+    return trades
+
+
+def _find_exec_price(closes_5m_per_candle, t, step_idx_offset):
+    """
+    Helper pour backtest_5m : trouve le prix à step_idx sous-pas 5min après
+    la fin de la bougie 30min t (soit au début de la bougie t+1).
+
+    step_idx_offset = 0  → premier sous-pas 5min de la bougie t+1 (= prix à t+30min+5min)
+    step_idx_offset = 5  → dernier sous-pas 5min de la bougie t+1 (= prix à t+30min+30min)
+    step_idx_offset = 6  → premier sous-pas 5min de la bougie t+2 (= prix à t+60min+5min)
+    ...
+
+    Gère le débordement automatique vers les bougies 30m suivantes.
+    Retourne (exec_price, bool_found).
+    """
+    target_t = t + 1
+    remaining = step_idx_offset
+    while target_t < len(closes_5m_per_candle):
+        closes_5m = closes_5m_per_candle[target_t]
+        if remaining < len(closes_5m):
+            return closes_5m[remaining], True
+        remaining -= len(closes_5m)
+        target_t += 1
+    return np.nan, False
+
+
 def backtest_5m(slopes, closes_5m_per_candle, k_substep, start, end, fees,
-                threshold=0.0, holding_min=0):
+                threshold=0.0, holding_min=0, lag_5min=1):
+    """
+    Backtest direction-based avec exécution au sous-pas 5min.
+
+    Args:
+        lag_5min: décalage d'exécution en ticks 5min (default 1 = réaliste).
+                  0 → exec au tick où le signal devient dispo (instantané, legacy)
+                  1 → exec au prochain tick 5min (ta convention : exec au close
+                      de la bougie 5min qui suit la disponibilité du signal)
+
+        Avec lag_5min=1 et k_substep=6 : signal slope_k6[t] dispo à t+60min,
+        exec à t+65min (prix à t+30min+30min+5min = fin de 1ère 5min de la
+        bougie 30m t+2).
+    """
     pnl_total = 0.0
     n_trades = 0
     n_wins = 0
@@ -1089,15 +1615,11 @@ def backtest_5m(slopes, closes_5m_per_candle, k_substep, start, end, fees,
             continue
         if position != 0 and (t - entry_t) < holding_min:
             continue
-        candle_idx = t + 1
-        if candle_idx >= len(closes_5m_per_candle):
-            continue
-        closes_5m = closes_5m_per_candle[candle_idx]
-        step_idx = k_substep - 1
-        if step_idx >= len(closes_5m):
-            continue
-        exec_price = closes_5m[step_idx]
-        if np.isnan(exec_price):
+
+        # Nouveau : step_idx = k_substep - 1 + lag_5min (default lag=1)
+        step_idx = k_substep - 1 + lag_5min
+        exec_price, found = _find_exec_price(closes_5m_per_candle, t, step_idx)
+        if not found or np.isnan(exec_price):
             continue
         if position != 0:
             trade_pnl = _exec_trade(position, entry_price, exec_price, fees)
@@ -1191,13 +1713,38 @@ def cusum_filter(probs, threshold=2.0):
 # ============================================================================
 
 def group_per_candle(df_5m, df_30m, array_5m):
-    """Group 5min values by 30min candle."""
-    per_candle = []
-    for ts_30m in df_30m.index:
-        bucket_end = ts_30m + pd.Timedelta(minutes=29, seconds=59)
-        mask = (df_5m.index >= ts_30m) & (df_5m.index <= bucket_end)
-        per_candle.append(array_5m[mask])
-    return per_candle
+    """
+    Groupe les valeurs 5min par bougie TF (30m, 1h, etc.).
+
+    Vectorisé via pandas.groupby(floor) — O(n log n) au lieu de O(n×m)
+    de l'ancienne version à boucle.
+
+    Retourne une liste de length = len(df_30m), où per_candle[t] est un
+    np.ndarray des valeurs 5min tombant dans la bougie df_30m.index[t].
+
+    Args:
+        df_5m: DataFrame 5min (index = timestamps).
+        df_30m: DataFrame au timeframe supérieur (tf détecté automatiquement).
+        array_5m: np.ndarray de longueur len(df_5m).
+    """
+    # Détecter tf_minutes depuis df_30m (plus robuste : mode des diffs)
+    if len(df_30m) >= 2:
+        tf_seconds = (df_30m.index[1] - df_30m.index[0]).total_seconds()
+        tf_minutes = int(round(tf_seconds / 60))
+    else:
+        tf_minutes = 30  # fallback arbitraire (cas dégénéré)
+
+    # Groupby vectorisé : chaque 5m est assigné à son bucket (floor)
+    bucket = df_5m.index.floor(f'{tf_minutes}min')
+    series = pd.Series(array_5m, index=df_5m.index)
+    grouped = series.groupby(bucket)
+
+    # Dict pour lookup O(1) par timestamp
+    grouped_dict = {ts: vals.values for ts, vals in grouped}
+
+    # Aligner sur df_30m.index (bougies absentes du groupby → array vide)
+    empty = np.array([], dtype=array_5m.dtype)
+    return [grouped_dict.get(ts, empty) for ts in df_30m.index]
 
 
 # ============================================================================
