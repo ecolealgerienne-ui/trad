@@ -1,8 +1,47 @@
-# Diagnostics — XGBoost Progressive (MACD / RSI / CCI × 30m)
+# Diagnostics — Pipeline Progressif MACD / RSI / CCI × 30m
 
 Document de synthèse des mesures réalisées sur le pipeline progressif.
-Objectif : documenter toutes les mesures (oracle, modèle, filtres,
-comparaison inter-indicateurs) pour référence future.
+Objectif : documenter toutes les mesures (oracle, modèles XGBoost & CNN-LSTM,
+filtres, cross-validation indicateurs, diagnostic Model∩Oracle) pour
+référence future.
+
+---
+
+## 📊 Résumé exécutif
+
+| Étape | Résultat clé |
+|-------|--------------|
+| Oracle reference (3 splits × 3 indic.) | +280 à +657% PnL/an (borne supérieure) |
+| Amélioration FLKS vs forward | +7.65% concordance (step_k=5) |
+| XGBoost classification | AUC 0.96-0.98, Acc 89-94% (pas d'overfit) |
+| XGBoost backtest | **-590% à -1,176% PnL Net** (catastrophe) |
+| Grid hysteresis probas | **ÉCHEC** (dead zone <1% car probas bimodales 89%) |
+| Grid persistence temporelle | **ÉCHEC PARTIEL** (+146% gain, toujours -444%) |
+| Cross-validation 3 indicateurs | Corr 0.74, erreurs corrélées 2-4× |
+| Consensus Majorité 2/3 | **ÉCHEC** (-302% vs best individuel) |
+| Consensus Unanimité 3/3 | +87% PnL mais toujours -503% |
+| **CNN-LSTM en remplacement XGBoost** | **+0.7% acc mais -320% PnL** (paradoxe aggravé) |
+| **DIAGNOSTIC Model ∩ Oracle** | **RSI +87% POSITIF**, MACD -11%, CCI -25% |
+
+### 🎯 Loi structurelle découverte
+
+> **Gagner +0.7% accuracy classification = +40% trades = -320% PnL Net**
+
+### 🔍 Décomposition causale (CNN-LSTM)
+
+- **Switch** (flips parasites) : **~85% de la destruction** ← cause dominante
+- **Timing/Lag** : ~15% (capture brute 55% uniforme quand signe correct)
+
+### 📐 Formule opérationnelle
+
+> **PnL Net potentiel ≈ 55% × PnL Oracle Net** (si stabilisation switch)
+
+### ✅ Piste validée empiriquement
+
+**Stabiliser le signal** (réduire flips parasites) par ordre de priorité :
+1. Cadence 30min (effort faible) — mécaniquement moins de rows = moins de flips
+2. 3-classes UP/NEUTRE/DOWN (effort moyen) — inaction apprenable
+3. Loss PnL-aware (effort élevé) — optimise PnL directement
 
 ---
 
