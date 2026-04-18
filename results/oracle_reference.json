@@ -276,6 +276,69 @@
       "6. Pivot 6 (moyen effort) : features volume/microstructure"
     ]
   },
+  "external_atr_filter_test": {
+    "note": "Filtre ATR appliqué EN AVAL du modèle (architecture 2 étages, modèle non retrained). Test sur RSI CNN-LSTM Standard + lag=0 (best config). Objectif: transformer Model pur -2205% PnL Net en POSITIF.",
+    "implementation": "src/signal_processing/core.py::calculate_atr (Wilder, causal), scripts/backtest_external_filter.py",
+    "config_tested": {
+      "indicator": "rsi",
+      "model": "cnn_lstm",
+      "model_config": "Standard + lag=0",
+      "atr_period": 14,
+      "atr_normalized": true,
+      "objective": "PnL Net positif sans filtre oracle (utilisable en production)"
+    },
+    "baseline_model_pur": {
+      "trades": 10927, "wr_pct": 14.7, "pf": 0.28,
+      "pnl_gross_pct": -19.89, "fees_pct": 2185.40, "pnl_net_pct": -2205.29,
+      "pnl_gross_per_trade_pct": -0.00182
+    },
+    "grids_tested": {
+      "high_vol_band": {
+        "description": "Filtrer marchés actifs (low > 0.003)",
+        "best_config": {"low": 0.005, "high": 0.010,
+                          "inband_pct": 1.6, "trades": 181,
+                          "wr_pct": 32.6, "pf": 0.51,
+                          "pnl_gross_pct": -90.90, "pnl_net_pct": -127.10,
+                          "gain_vs_model_pur": 2078.19,
+                          "pnl_gross_per_trade_pct": -0.5022}
+      },
+      "low_vol_band": {
+        "description": "Filtrer marchés calmes (high < 0.0025)",
+        "best_config": {"low": 0.0, "high": 0.0005,
+                          "inband_pct": 4.6, "trades": 624,
+                          "wr_pct": 7.9, "pf": 0.25,
+                          "pnl_gross_pct": -73.51, "pnl_net_pct": -198.31,
+                          "gain_vs_model_pur": 2006.98}
+      },
+      "medium_vol_band": {
+        "description": "Sweet spot hypothétique (0.001-0.003)",
+        "best_config": {"low": 0.0015, "high": 0.002,
+                          "inband_pct": 18.4, "trades": 2619,
+                          "wr_pct": 20.4, "pf": 0.47,
+                          "pnl_gross_pct": -17.82, "pnl_net_pct": -541.62,
+                          "gain_vs_model_pur": 1663.66}
+      }
+    },
+    "diagnostic": [
+      "Aucun filtre ATR ne rend le PnL positif sur Model pur",
+      "Best gain absolu = +2078 points (vol haute), mais reste -127% net",
+      "Edge brut/trade Model pur = -0.0018% → fees (0.2%/trade) dominent toujours",
+      "Le problème n'est pas la quantité de trades (filtrable) mais la qualité du signal",
+      "ATR seul ne discrimine pas les bons des mauvais signaux directionnels"
+    ],
+    "alternative_pistes_not_tested": [
+      "Volume comme filtre (signal de conviction marché)",
+      "Confidence filter : |proba - 0.5| > seuil",
+      "Combinaison ATR + Volume + Confidence (triple filtre)",
+      "Pivot structurel : régression rendement, multi-horizon"
+    ],
+    "value_delivered": [
+      "Architecture 2 étages techniquement viable et validée",
+      "Itération ultra-rapide (secondes par seuil vs 10min retrain)",
+      "core.calculate_atr mutualisé pour tests futurs",
+      "Confirmation que filtrer la volatilité seule ne sauve pas un signal d'edge nul"
+    ]
+  },
   "adaptive_plus_lag0_combination_test": {
     "note": "Test cumul Adaptive + lag=0 sur RSI CNN-LSTM (config la plus prometteuse). Résultat: ANTAGONISTE.",
     "config_tested": {

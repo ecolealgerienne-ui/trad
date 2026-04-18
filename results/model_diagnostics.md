@@ -25,6 +25,7 @@ référence future.
 | **Filtre adaptatif AQ-KF** | +23% capture brute XGBoost MACD (44→67%), neutre CNN-LSTM |
 | **🏆 Cible `slope_lag=0` (pente récente)** | **Oracle ×2, RSI CNN-LSTM = +443% PnL Net** (record) |
 | ❌ Combinaison Adaptive + Lag=0 | Antagoniste : -66 PnL vs Standard+lag=0 (effets redondants) |
+| ❌ Filtre externe ATR (architecture 2 étages) | Best -127% sur Model pur (gain +2078% mais pas positif), edge brut/trade neutre |
 
 ### 🎯 Loi structurelle découverte
 
@@ -85,8 +86,28 @@ Test sur RSI CNN-LSTM (config la plus prometteuse) :
 lag=0) n'a pas demandé. Pour chaque modèle, **une seule** modification
 améliore — pas les 2.
 
+### ❌ Filtre externe ATR (architecture 2 étages) — échec validé (section 15)
+
+Test sur RSI CNN-LSTM lag=0 — filtre ATR appliqué EN AVAL du modèle (pas
+comme feature interne) pour bloquer les signaux dans des conditions
+défavorables. 3 grids testés (vol haute / basse / moyenne).
+
+**Résultats** :
+- Best (vol haute [0.005, 0.010]) : **-127% PnL Net** (vs Model pur -2,205%)
+- Gain massif : +2,078 points, mais reste négatif
+- WR amélioré (14.7% → 32.6%) mais PnL Brut/trade reste neutre
+
+**Diagnostic** : le modèle a un edge brut **quasi-nul par trade** (-0.0018%).
+Quel que soit le filtre ATR, les fees (0.2%/trade) dominent.
+
+**Apport positif** :
+- Architecture 2 étages **techniquement viable** (itération secondes vs 10 min)
+- Filtrer la volatilité seule ne sauve pas un signal d'edge nul
+- `core.calculate_atr` mutualisé pour tests futurs
+
 Pistes ouvertes pour dépasser +443% : consensus inter-modèles,
-stabilisation des flips Model pur (production), architectures alternatives.
+stabilisation des flips Model pur (production), architectures alternatives,
+volume/confidence comme filtres externes complémentaires.
 
 ---
 
@@ -971,6 +992,125 @@ double pénalité (signal plus nerveux + cible plus locale).
 python scripts/prepare_progressive_data.py --indicator rsi --tf 30 --adaptive --slope-lag 0
 python scripts/train_cnn_lstm_progressive.py --npz data/prepared/dataset_rsi_30m_full_progressive_adaptive_lag0.npz
 python scripts/backtest_model_filtered_by_oracle.py --npz data/prepared/dataset_rsi_30m_full_progressive_adaptive_lag0.npz --preds data/prepared/preds_rsi_30m_full_progressive_cnnlstm_adaptive_lag0.npz --split test
+```
+
+---
+
+## 15. Filtre externe ATR — architecture 2 étages (échec validé)
+
+Test : appliquer un filtre ATR **EN AVAL** du modèle (pas comme feature
+interne) pour bloquer les signaux émis dans des conditions de marché
+défavorables.
+
+**Principe** :
+- Niveau 1 (rapide) : signal direction = `sign(model.proba - 0.5)` du modèle
+- Niveau 2 (lent)   : filtre ATR (low ≤ ATR ≤ high) → garde le signal seulement si dans la bande
+- Décision finale   : trade si OK, conserve position si bloqué (slope = 0)
+
+⚠️ Le modèle N'EST PAS retrained. On utilise les preds existantes.
+Itération rapide : on teste plusieurs seuils ATR sans toucher au modèle.
+
+### 15.1 Architecture testée
+
+- Indicateur : RSI (config best : Oracle +1,208% PnL Net en lag=0)
+- Modèle : CNN-LSTM Standard + lag=0 (record à +443% Model ∩ Oracle)
+- Filtre : ATR(14) Wilder (causal, EMA récursif)
+- Cible objectif : transformer Model pur **-2,205% PnL Net** en POSITIF
+- Implémentation : `core.calculate_atr` + `scripts/backtest_external_filter.py`
+
+### 15.2 Stats ATR normalisé (test set, RSI CNN-LSTM lag=0)
+
+ATR/close en zone test : la majorité du temps en faible volatilité
+- Médiane ~0.001-0.002
+- 99% du temps < 0.005
+- Très rare au-dessus de 0.01
+
+### 15.3 Grids testés (3 angles)
+
+**Grid 1 — Vol haute (filtrer marchés actifs)** :
+
+| Bande ATR | Inband% | Trades | WR | PnL Brut | **PnL Net** |
+|-----------|---------|--------|-----|----------|-------------|
+| [0.005, 0.010] | 1.6% | 181 | 32.6% | -91% | **-127%** ⭐ best |
+| [0.005, 0.020] | 1.6% | 183 | 32.8% | -94% | -130% |
+| [0.003, 0.010] | 10.1% | 1,092 | 31.0% | +34% | -184% |
+| [0.002, 0.010] | 26.8% | 2,983 | 25.2% | +28% | -568% |
+| [0.001, 0.010] | 72.2% | 7,929 | 18.1% | -13% | -1,599% |
+
+**Grid 2 — Vol basse (filtrer marchés calmes)** :
+
+| Bande ATR | Inband% | Trades | WR | PnL Brut | **PnL Net** |
+|-----------|---------|--------|-----|----------|-------------|
+| [0, 0.0005] | 4.6% | 624 | 7.9% | -73.5% | **-198%** ⭐ best |
+| [0, 0.001] | 27.8% | 3,580 | 9.5% | -23% | -739% |
+| [0, 0.0015] | 54.8% | 6,632 | 11.4% | -75.5% | -1,402% |
+| [0, 0.002] | 73.2% | 8,541 | 12.6% | -15% | -1,723% |
+| [0, 0.0025] | 83.9% | 9,563 | 13.2% | -102% | -2,014% |
+
+**Grid 3 — Vol moyenne (sweet spot hypothétique)** :
+
+| Bande ATR | Inband% | Trades | WR | PnL Brut | **PnL Net** |
+|-----------|---------|--------|-----|----------|-------------|
+| [0.0015, 0.002] | 18.4% | 2,619 | 20.4% | -18% | **-542%** ⭐ best |
+| [0.0015, 0.003] | 35.1% | 4,199 | 19.9% | -91% | -931% |
+| [0.001, 0.002] | 45.4% | 5,545 | 16.3% | -10% | -1,120% |
+
+### 15.4 Diagnostic — pourquoi l'ATR seul échoue
+
+**Le modèle a un edge brut quasi-nul par trade** :
+
+| Stratégie | Trades | PnL Brut | **PnL Brut / trade** |
+|-----------|--------|----------|----------------------|
+| Model pur | 10,927 | -19.89% | -0.0018% |
+| ATR vol haute (best) | 181 | -90.90% | -0.502% (275× pire) |
+| ATR vol moyenne (best) | 2,619 | -17.82% | -0.0068% |
+
+**Quel que soit le filtre ATR**, le PnL Brut moyen reste entre -0.5% et
++0.04% par trade. **Les fees (0.2%/trade) dominent dans toutes les zones
+de volatilité**.
+
+### 15.5 Conclusion sur ATR seul
+
+**ATR seul ne peut PAS sauver le Model pur** :
+- ✅ Réduction massive des trades (jusqu'à -98%, ex: 10,927 → 181)
+- ✅ Léger gain WR (14.7% → 32.6% en best vol haute)
+- ❌ Aucune config positive sur le Model pur
+- ❌ Le PnL Brut/trade reste dominé par les fees dans toutes les zones
+
+**Le problème n'est pas la quantité de trades (filtrable par ATR) mais
+la qualité intrinsèque du signal** (non discriminée par la volatilité seule).
+
+### 15.6 Pistes alternatives (non testées par décision utilisateur)
+
+1. **Volume comme filtre** : volume confirmé = institutions actives vs bruit
+2. **Confidence filter** : ne trader que si `|proba - 0.5| > seuil`
+3. **Combinaison ATR + Volume + Confidence** : triple filtre, grid 3D
+4. **Pivot structurel** : changer la cible (régression rendement, multi-horizon)
+
+### 15.7 Ce que ce test apporte
+
+Même négatif, ce test confirme :
+- ✅ L'architecture en 2 étages (modèle + filtre) est **techniquement viable**
+  (`core.calculate_atr` + `backtest_external_filter.py` fonctionnent)
+- ✅ Itération **ultra-rapide** : tester un nouveau seuil ATR = secondes
+  (vs 10 min pour un retrain modèle)
+- ✅ Le modèle CNN-LSTM lag=0 a un **edge brut neutre** (-0.0018% par trade)
+  → pas un problème de filtrage, mais de signal sous-jacent
+- ✅ Filtrer la volatilité ne suffit jamais quand l'edge intrinsèque est nul
+
+### 15.8 Commandes reproductibles
+
+```bash
+# Stats ATR + grid auto
+python scripts/backtest_external_filter.py \
+    --npz data/prepared/dataset_rsi_30m_full_progressive_lag0.npz \
+    --preds data/prepared/preds_rsi_30m_full_progressive_cnnlstm_lag0.npz \
+    --split test --period 14 --normalize
+
+# Grids spécifiques (vol haute / vol basse / vol moyenne)
+python scripts/backtest_external_filter.py ... --atr-lows 0.005 --atr-highs 0.010 0.020 0.050
+python scripts/backtest_external_filter.py ... --atr-lows 0.0 --atr-highs 0.0005 0.001 0.0015
+python scripts/backtest_external_filter.py ... --atr-lows 0.0015 0.001 --atr-highs 0.002 0.003 0.004
 ```
 
 ---
