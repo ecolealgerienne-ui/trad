@@ -129,17 +129,41 @@ def evaluate(label, y_true, proba, threshold):
             'n': n, 'n_pos': n_pos, 'n_pred_pos': int(n_pred_pos)}
 
 
-def train_one_classifier(direction, df, label_col='is_profitable_flip',
+def train_one_classifier(direction, df_train_pool, df_test_external=None,
+                            label_col='is_profitable_flip',
                             n_estimators=500, max_depth=4, lr=0.05,
                             early_stop=20, seed=42):
-    """Train + evaluate XGBoost pour une direction (LONG ou SHORT)."""
+    """Train + evaluate XGBoost pour une direction (LONG ou SHORT).
+
+    Modes :
+      df_test_external=None : split chronologique 70/15/15 sur df_train_pool
+                               (legacy, in-sample partiel)
+      df_test_external=df   : split chronologique 85/15 sur df_train_pool pour
+                               train/val (early stop), df_test_external pour
+                               évaluation finale (OOB rigoureux)
+    """
     print(f"\n{'=' * 100}")
-    print(f"TRAIN META-CLASSIFIER {direction}  ({len(df):,} flips)")
+    print(f"TRAIN META-CLASSIFIER {direction}  "
+          f"({len(df_train_pool):,} flips train pool"
+          + (f", {len(df_test_external):,} flips test external" if df_test_external is not None else "")
+          + ")")
     print(f"{'=' * 100}")
 
-    df_tr, df_va, df_te = chronological_split(df)
-    print(f"  Split chronologique : train={len(df_tr):,}  val={len(df_va):,}  "
-          f"test={len(df_te):,}")
+    if df_test_external is not None:
+        # OOB mode : train/val split interne, test externe
+        df_train_pool = df_train_pool.sort_values('flip_dt').reset_index(drop=True)
+        n = len(df_train_pool)
+        cut = int(n * 0.85)
+        df_tr = df_train_pool.iloc[:cut]
+        df_va = df_train_pool.iloc[cut:]
+        df_te = df_test_external.sort_values('flip_dt').reset_index(drop=True)
+        mode = 'OOB (rigoureux)'
+    else:
+        df_tr, df_va, df_te = chronological_split(df_train_pool)
+        mode = 'in-sample partiel (legacy 70/15/15)'
+
+    print(f"  Mode : {mode}")
+    print(f"  Split : train={len(df_tr):,}  val={len(df_va):,}  test={len(df_te):,}")
     print(f"  Périodes : train {df_tr['flip_dt'].min()} → {df_tr['flip_dt'].max()}")
     print(f"             val   {df_va['flip_dt'].min()} → {df_va['flip_dt'].max()}")
     print(f"             test  {df_te['flip_dt'].min()} → {df_te['flip_dt'].max()}")
@@ -249,9 +273,14 @@ def train_one_classifier(direction, df, label_col='is_profitable_flip',
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--long-csv', required=True,
-                        help='Path CSV flips_to_long_*.csv')
+                        help='Path CSV flips_to_long_*.csv (train pool)')
     parser.add_argument('--short-csv', required=True,
-                        help='Path CSV flips_to_short_*.csv')
+                        help='Path CSV flips_to_short_*.csv (train pool)')
+    parser.add_argument('--long-test-csv', default=None,
+                        help='Path CSV flips_to_long_*.csv pour test OOB '
+                             '(si fourni → mode OOB rigoureux)')
+    parser.add_argument('--short-test-csv', default=None,
+                        help='Path CSV flips_to_short_*.csv pour test OOB')
     parser.add_argument('--label', default='is_profitable_flip',
                         choices=['is_profitable_flip', 'is_good_flip'])
     parser.add_argument('--n-estimators', type=int, default=500)
@@ -259,10 +288,17 @@ def main():
     parser.add_argument('--learning-rate', type=float, default=0.05)
     parser.add_argument('--early-stop', type=int, default=20)
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--out-suffix', default='',
+                        help='Suffixe pour fichiers sauvés (ex: _oob)')
     args = parser.parse_args()
 
+    oob_mode = args.long_test_csv is not None and args.short_test_csv is not None
+    if oob_mode and args.out_suffix == '':
+        args.out_suffix = '_oob'
+
     print("=" * 100)
-    print(f"META-CLASSIFIER FLIPS — label={args.label}")
+    print(f"META-CLASSIFIER FLIPS — label={args.label}  "
+          f"mode={'OOB rigoureux' if oob_mode else 'in-sample partiel (legacy)'}")
     print("=" * 100)
 
     long_csv = Path(args.long_csv)
@@ -273,24 +309,44 @@ def main():
 
     df_long = pd.read_csv(long_csv, parse_dates=['flip_dt'])
     df_short = pd.read_csv(short_csv, parse_dates=['flip_dt'])
-    print(f"\n✅ Loaded:")
+    print(f"\n✅ Train pool loaded:")
     print(f"   LONG  : {long_csv}  ({len(df_long):,} flips)")
     print(f"   SHORT : {short_csv}  ({len(df_short):,} flips)")
 
-    # Tag pour sauvegarde
-    long_tag = long_csv.stem.replace('flips_to_long_', '')
-    short_tag = short_csv.stem.replace('flips_to_short_', '')
+    df_long_test = None
+    df_short_test = None
+    if oob_mode:
+        long_test_csv = Path(args.long_test_csv)
+        short_test_csv = Path(args.short_test_csv)
+        if not long_test_csv.exists() or not short_test_csv.exists():
+            print(f"❌ Test CSV introuvable")
+            return
+        df_long_test = pd.read_csv(long_test_csv, parse_dates=['flip_dt'])
+        df_short_test = pd.read_csv(short_test_csv, parse_dates=['flip_dt'])
+        print(f"\n✅ Test external (OOB) loaded:")
+        print(f"   LONG  : {long_test_csv}  ({len(df_long_test):,} flips)")
+        print(f"   SHORT : {short_test_csv}  ({len(df_short_test):,} flips)")
+
+    # Tag pour sauvegarde — basé sur le test_csv si OOB (pour cohérence avec backtest)
+    if oob_mode:
+        long_tag = long_test_csv.stem.replace('flips_to_long_', '')
+        short_tag = short_test_csv.stem.replace('flips_to_short_', '')
+    else:
+        long_tag = long_csv.stem.replace('flips_to_long_', '')
+        short_tag = short_csv.stem.replace('flips_to_short_', '')
     assert long_tag == short_tag, f"Mismatch tags: {long_tag} vs {short_tag}"
-    tag = long_tag
+    tag = long_tag + args.out_suffix
 
     # Train les 2 classifiers
-    res_long = train_one_classifier('LONG', df_long, label_col=args.label,
+    res_long = train_one_classifier('LONG', df_long, df_long_test,
+                                       label_col=args.label,
                                        n_estimators=args.n_estimators,
                                        max_depth=args.max_depth,
                                        lr=args.learning_rate,
                                        early_stop=args.early_stop,
                                        seed=args.seed)
-    res_short = train_one_classifier('SHORT', df_short, label_col=args.label,
+    res_short = train_one_classifier('SHORT', df_short, df_short_test,
+                                        label_col=args.label,
                                         n_estimators=args.n_estimators,
                                         max_depth=args.max_depth,
                                         lr=args.learning_rate,
