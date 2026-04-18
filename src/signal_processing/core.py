@@ -273,7 +273,7 @@ def compute_forward_filter(df, indicator, adaptive=False,
 
 def compute_flks_slopes(df_tf, df_5m, indicator, tf_minutes, k_range=(1, 6),
                          Q_var=KALMAN_PROCESS_VAR, R_var=KALMAN_MEASURE_VAR,
-                         indicator_params=None):
+                         indicator_params=None, adaptive=False):
     """
     Dispatcher FLKS-2 : calcule les backward slopes (Fixed-Lag Kalman Smoother)
     pour un indicateur, au timeframe TF, avec sous-pas 5min.
@@ -306,7 +306,8 @@ def compute_flks_slopes(df_tf, df_5m, indicator, tf_minutes, k_range=(1, 6),
     ind_kwargs = indicator_params or {}
 
     # Étape 1: forward filter sur df_tf (avec Q/R et params indicateur)
-    fwd = compute_forward_filter(df_tf, indicator, adaptive=False,
+    # adaptive=True → AQ-KF (Adaptive Q Kalman Filter) détecte mieux les transitions
+    fwd = compute_forward_filter(df_tf, indicator, adaptive=adaptive,
                                    Q_var=Q_var, R_var=R_var,
                                    indicator_params=ind_kwargs)
     x_filt_pos = fwd['state'][['position', 'velocity']].values
@@ -343,7 +344,7 @@ def compute_flks_slopes(df_tf, df_5m, indicator, tf_minutes, k_range=(1, 6),
 
 def compute_progressive_slopes(df_tf, df_5m, indicator, tf_minutes,
                                  Q_var=KALMAN_PROCESS_VAR, R_var=KALMAN_MEASURE_VAR,
-                                 indicator_params=None):
+                                 indicator_params=None, adaptive=False):
     """
     Calcule une slope progressive à chaque ligne 5min.
 
@@ -375,7 +376,8 @@ def compute_progressive_slopes(df_tf, df_5m, indicator, tf_minutes,
     slopes_tf = compute_flks_slopes(df_tf, df_5m, indicator, tf_minutes,
                                       k_range=(1, k_max_live),
                                       Q_var=Q_var, R_var=R_var,
-                                      indicator_params=indicator_params)
+                                      indicator_params=indicator_params,
+                                      adaptive=adaptive)
     # Colonnes disponibles : slope_t1, slope_k1, ..., slope_k<k_max_live>
 
     tf_delta = pd.Timedelta(minutes=tf_minutes)
@@ -482,7 +484,8 @@ def prepare_features_and_labels_progressive(df_tf, df_5m, indicator, tf_minutes,
                                                trim=100,
                                                Q_var=KALMAN_PROCESS_VAR,
                                                R_var=KALMAN_MEASURE_VAR,
-                                               indicator_params=None):
+                                               indicator_params=None,
+                                               adaptive=False):
     """
     Version "progressive" à résolution 5min :
       - Labels oracle[t_ref] ffill sur les tf/5 lignes 5min de la bougie courante
@@ -512,9 +515,12 @@ def prepare_features_and_labels_progressive(df_tf, df_5m, indicator, tf_minutes,
         pd.DataFrame indexé par df_5m.index (trimé), 5 colonnes.
     """
     # 1. Slopes progressives 5min + step_k
+    # adaptive=True active AQ-KF (Adaptive Q Kalman Filter) dans le forward pass
+    # — détecte mieux les transitions, laisse l'oracle RTS inchangé
     slopes_prog = compute_progressive_slopes(
         df_tf, df_5m, indicator, tf_minutes,
-        Q_var=Q_var, R_var=R_var, indicator_params=indicator_params)
+        Q_var=Q_var, R_var=R_var, indicator_params=indicator_params,
+        adaptive=adaptive)
 
     # 2. Oracle au TF
     oracle = compute_oracle_labels(df_tf, indicator,

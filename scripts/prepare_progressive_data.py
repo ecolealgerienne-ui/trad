@@ -81,15 +81,19 @@ def main():
     parser.add_argument('--val-ratio', type=float, default=0.15)
     parser.add_argument('--gap-5m', type=int, default=0,
                         help='Gap en lignes 5min entre splits (default 0)')
+    parser.add_argument('--adaptive', action='store_true',
+                        help='Utiliser AQ-KF (Adaptive Q Kalman Filter) au forward pass '
+                             '→ meilleure détection des transitions. Oracle RTS inchangé.')
     args = parser.parse_args()
 
     RAW_DIR.mkdir(parents=True, exist_ok=True)
     PREP_DIR.mkdir(parents=True, exist_ok=True)
 
     tf_label = f'{args.tf}m' if args.tf < 60 else '1h'
+    filter_tag = 'AQ-KF adaptive' if args.adaptive else 'standard Kalman'
     print("=" * 80)
     print(f"PRÉPARATION DATASET ML — PROGRESSIVE — {args.indicator.upper()} × {tf_label}")
-    print(f"  source=full  trim={args.trim}  train={args.train_ratio}  "
+    print(f"  filter={filter_tag}  trim={args.trim}  train={args.train_ratio}  "
           f"val={args.val_ratio}  gap_5m={args.gap_5m}")
     print("=" * 80)
 
@@ -121,9 +125,11 @@ def main():
     print(f"  {len(df_tf):,} bougies {tf_label}  (dropped {n_dropped} incomplete)")
 
     # ========== [3] Progressive features + labels ==========
-    print(f"\n[3/7] prepare_features_and_labels_progressive ...")
+    print(f"\n[3/7] prepare_features_and_labels_progressive "
+          f"(adaptive={args.adaptive}) ...")
     data = prepare_features_and_labels_progressive(
-        df_tf, df_5m, args.indicator, args.tf, trim=args.trim)
+        df_tf, df_5m, args.indicator, args.tf, trim=args.trim,
+        adaptive=args.adaptive)
     print(f"  Shape: {data.shape}  |  colonnes: {list(data.columns)}")
     print(f"  Plage: {data.index[0]} → {data.index[-1]}")
     print(f"  Distribution step_k: {dict(data['step_k'].value_counts().sort_index())}")
@@ -178,8 +184,10 @@ def main():
         return df_split.index.values
 
     # Nom du NPZ : si --days > 0, on tag avec _<N>d, sinon _full
+    # Si --adaptive, ajouter suffixe _adaptive pour éviter écrasement
     period_tag = f'{args.days}d' if args.days > 0 else 'full'
-    npz_path = PREP_DIR / f'dataset_{args.indicator}_{tf_label}_{period_tag}_progressive.npz'
+    adaptive_suffix = '_adaptive' if args.adaptive else ''
+    npz_path = PREP_DIR / f'dataset_{args.indicator}_{tf_label}_{period_tag}_progressive{adaptive_suffix}.npz'
     print(f"  Sauvegarde NPZ: {npz_path}")
     np.savez(
         npz_path,
