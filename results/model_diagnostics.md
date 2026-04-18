@@ -27,6 +27,7 @@ référence future.
 | ❌ Combinaison Adaptive + Lag=0 | Antagoniste : -66 PnL vs Standard+lag=0 (effets redondants) |
 | ❌ Filtre externe ATR (architecture 2 étages) | Best -127% sur Model pur (gain +2078% mais pas positif), edge brut/trade neutre |
 | 🏆 **Pipeline Meta-Classifier (architecture 2 étages bis)** | **+135.13% PnL Net** mode 'all' (in-sample partiel, AUC test out-of-sample 0.69) |
+| ⚠️ **Validation Option B OOB rigoureuse (CONCLUSION)** | **Pattern réel mais marginal** : AUC OOB 0.65, PnL OOB best -787% à 4,245 trades, +50% à 2 trades (artefact). **Pas exploitable en prod actuelle**. |
 
 ### 🎯 Loi structurelle découverte
 
@@ -104,35 +105,46 @@ Quel que soit le filtre ATR, les fees (0.2%/trade) dominent.
 ### 🏆 Pipeline Meta-Classifier — PoC validée (section 16)
 
 Architecture en 2 étages : modèle direction (CNN-LSTM) + meta-classifier
-(XGBoost) qui apprend à filtrer les **flips parasites** en utilisant
-l'oracle comme superviseur.
+(XGBoost) qui apprend à filtrer les **flips parasites**.
 
-**Pipeline** : extract flips → features contextuelles (12 finales) →
-2 XGBoost spécialisés (LONG / SHORT) → backtest avec meta-filter.
+**Pipeline** : extract flips → features (12 finales) → 2 XGBoost
+(LONG / SHORT spécialisés) → backtest avec meta-filter.
 
-**Métriques classification (out-of-sample propre)** :
-- LONG  : AUC test = **0.6956** ✅
-- SHORT : AUC test = **0.6790** ✅
-- Lift vs base rate : **2.33× LONG, 1.84× SHORT**
-- Top features : `atr_14_norm` (#1 sur les 2), `distance_to_ma20`,
-  `proba_distance_to_extreme`
+**In-sample partiel mode 'all'** : +135% PnL Net (AUC test 0.69) — biais
+memorization confirmé par Option B.
 
-**Backtest mode 'all' (in-sample partiel)** :
-- Best seuil 0.65 : **+135.13% PnL Net** ✅ (premier positif du pipeline)
-- Trades : 296 (vs 10,927 baseline, -97%)
-- WR : 57.4% (vs 14.7%, ×4)
-- Capture vs Oracle : +11.2%
+**Apports scientifiques** : architecture 2 étages validée, label
+`is_profitable_flip` 3× plus discriminant, ATR top feature, asymétrie
+LONG/SHORT confirmée.
 
-**Caveat** : in-sample partiel (le meta a vu 70% des flips test). Validation
-rigoureuse non faite (Option B reportée). Estimation prudente
-out-of-sample : **+20% à +70% PnL Net** sur 60-65 jours (~+120 à +400%/an).
+### ⚠️ Validation Option B OOB rigoureuse — CONCLUSION FINALE (section 17)
 
-**Apports scientifiques** :
-- Architecture 2 étages validée techniquement
-- Label `is_profitable_flip` (simulation trade) **3× plus discriminant**
-  que `is_good_flip` (oracle instantané)
-- ATR émerge comme **top feature** quand on labellise par PnL réel
-- 2 classifiers spécialisés justifiés (asymétrie LONG/SHORT confirmée)
+Train meta sur **flips val** (out-of-sample modèle direction), test sur
+**flips test** (out-of-sample meta ET modèle direction).
+
+**Résultats classification OOB** :
+- LONG : AUC test = **0.6581** ✅ (gap -3.7% vs in-sample, signal réel)
+- SHORT : AUC test = **0.6468** ✅ (gap -3.2%, MAIS best_iter=2 = sous-entraîné)
+
+**Backtest OOB pratique** :
+- Aux seuils sélectifs (0.65+) : **2 trades sur 458 jours** (artefact, SHORT
+  classifier rejette tout)
+- Aux seuils raisonnables (0.50) : **-787% PnL Net** (4,245 trades)
+- Pas de sweet spot exploitable
+
+**Verdict honnête** :
+- ✅ Pattern réel détecté (AUC OOB > 0.65)
+- ✅ Architecture techniquement viable
+- ❌ **Amplitude trop faible pour battre fees 0.2%/trade** en production
+- ❌ Le +135% in-sample précédent était bien de l'overfit (confirmé)
+
+**Pistes pour rendre exploitable** (non testées) :
+- Maker fees (0.02% au lieu de 0.1% taker) : ÷10 fees → potentiellement positif
+- Catégorie 2-3 features (HMM régime, multi-TF agreement)
+- Ré-entrainer SHORT (scale_pos_weight modéré, max_depth=5)
+- Architecture deep (Transformer, multi-task)
+
+**Sujet meta-classifier CLOS** dans son état actuel.
 
 ---
 
@@ -1326,6 +1338,147 @@ python scripts/backtest_with_meta_filter.py \
     --preds data/prepared/preds_rsi_30m_full_progressive_cnnlstm_lag0.npz \
     --meta-long results/meta_flips/meta_long_preds_rsi_30m_full_cnnlstm_lag0_test.npz \
     --meta-short results/meta_flips/meta_short_preds_rsi_30m_full_cnnlstm_lag0_test.npz \
+    --split test
+```
+
+---
+
+## 17. Option B — Validation OOB rigoureuse (CONCLUSION FINALE)
+
+Validation rigoureuse du pipeline meta-classifier sans biais in-sample.
+
+**Méthodologie OOB** :
+1. Extraction flips sur split **val** (out-of-sample modèle direction)
+2. Train meta sur ces flips val (split interne 85/15 pour early stop)
+3. Évaluation finale sur flips **test** (out-of-sample modèle direction
+   ET out-of-sample meta) — vraie performance attendue en production
+
+### 17.1 Résultats classification OOB
+
+| Direction | Train AUC | Val AUC | **Test AUC** | Gap vs in-sample | best_iter |
+|-----------|-----------|---------|--------------|------------------|-----------|
+| **LONG** | 0.7619 | 0.6384 | **0.6581** ✅ | -3.7% (modeste) | 40 |
+| **SHORT** | 0.7277 | 0.5472 | **0.6468** ✅ | -3.2% | **2** ⚠️ |
+
+**Diagnostic important** : le SHORT classifier converge en seulement
+**2 itérations** vs 26 en in-sample. Indique un sous-entraînement
+(`scale_pos_weight=6.35` peut-être trop élevé).
+
+### 17.2 Top features OOB (cohérent avec in-sample)
+
+LONG :
+- `atr_14_norm` : 57.36 (gain) — **#1 confirmé**
+- `distance_to_ma20` : 40.91
+- `dayofweek` : 30.69 (nouveau dans top 3)
+
+SHORT :
+- `atr_14_norm` : 93.08 — **#1 confirmé**
+- `distance_to_ma20` : 51.10
+- `model_proba` : 34.55
+
+### 17.3 Backtest OOB — Le +135% in-sample s'effondre à +54% (artefact)
+
+**Sur le test set RSI CNN-LSTM lag=0 (458 jours)** :
+
+| Stratégie | Trades | WR | PF | PnL Net | Statistiquement valide ? |
+|-----------|--------|-----|-----|---------|--------------------------|
+| Oracle | 3,261 | 59.5% | 4.29 | +1,208% | (référence) |
+| Model pur | 10,927 | 14.7% | 0.28 | -2,205% | (baseline) |
+| Meta in-sample 'all' best | 296 | 57.4% | 1.55 | +135% | ❌ overfit |
+| **Meta OOB thr=0.70 best** | **2** | **100%** | **inf** | **+54%** | ❌ trop peu (2 trades !) |
+| Meta OOB thr=0.65 | 2 | 100% | inf | +49% | ❌ trop peu |
+| Meta OOB thr=0.50 (raisonnable) | 4,245 | 25.6% | 0.50 | **-787%** | ⚠️ négatif |
+| Meta OOB thr=0.55 | 2 | 100% | inf | -39% | ❌ trop peu |
+
+**Pourquoi seulement 2 trades aux seuils ≥ 0.55 ?**
+
+- LONG accepts 1,902 flips (35%), SHORT accepts **0** flips
+- Le SHORT classifier (mal entraîné, best_iter=2) rejette TOUT
+- → On entre LONG, on ne sort jamais → 2 positions tenues plusieurs mois
+- **C'est un artefact, pas un signal**
+
+### 17.4 Conclusion finale du pipeline meta-classifier
+
+#### Ce qui est validé scientifiquement
+
+✅ **Pattern réel détecté** :
+- AUC OOB ~0.65 sur les 2 directions (vrai signal hors training)
+- Gap in-sample/OOB modeste (~3-4%, pas catastrophique)
+- Top features cohérents : ATR, distance_to_ma20, proba_distance_to_extreme
+
+✅ **Architecture en 2 étages techniquement viable**
+✅ **Méthodologie correcte** (label is_profitable_flip, features causales,
+   séparation LONG/SHORT)
+
+#### Ce qui n'est PAS exploitable
+
+❌ **Le PnL OOB pratique n'est pas viable en production** :
+- Aux seuils raisonnables (0.50) : -787% net
+- Aux seuils sélectifs (0.65+) : 2 trades sur 458 jours = artefact
+- Pas de sweet spot "trades modérés + PnL positif"
+
+❌ **Le SHORT classifier nécessite ré-engineering** :
+- Sous-entraîné (best_iter=2)
+- Rejette tout aux seuils calibrés sur val
+- Possible : `scale_pos_weight` trop élevé, `max_depth` trop bas
+
+❌ **Le +135% in-sample précédent était de l'overfit** :
+- Confirmation par OOB : best honnête = +50% à 2 trades (statistiquement nul)
+- L'extrapolation +20-70% antérieure était trop optimiste
+
+#### Verdict honnête
+
+**Le pattern existe mais l'amplitude est trop faible pour battre les fees 0.2%/trade en production.**
+
+| Métrique | Valeur OOB |
+|----------|------------|
+| AUC LONG | 0.6581 (signal réel) |
+| AUC SHORT | 0.6468 (signal réel) |
+| Lift vs base rate | ~1.5-2× (modeste) |
+| **Edge net après fees** | **insuffisant** |
+
+### 17.5 Pistes pour rendre le pattern exploitable (non testées)
+
+1. **Ajuster SHORT classifier** : scale_pos_weight modéré, max_depth=5,
+   plus d'epochs, peut-être early_stop=50
+2. **Maker fees 0.02%** : fees ÷10 → -787% deviendrait peut-être ~-50%
+   ou positif (à vérifier)
+3. **Catégorie 2 features** : HMM régime, ADX, Hurst (jamais testées)
+4. **Catégorie 3 features** : multi-TF agreement (5min/30min/1h)
+5. **Ensemble** : meta-classifier sur consensus MACD+CCI+RSI au lieu de RSI seul
+6. **Architecture différente** : Transformer, multi-task learning avec
+   loss PnL-aware
+
+### 17.6 Décision sur la suite du sujet "meta-classifier"
+
+**Le sujet est CLOS** dans son état actuel :
+- Pattern réel détecté mais marginal
+- Pas de PnL Net positif rigoureux
+- Pour aller plus loin il faudrait des modifications structurelles
+  (fees taker→maker, features Cat 2-3, ou architecture deep)
+
+### 17.7 Commandes Option B reproductibles
+
+```bash
+# 1. Extract flips sur val (out-of-sample modèle direction)
+python scripts/extract_model_flips.py \
+    --npz data/prepared/dataset_rsi_30m_full_progressive_lag0.npz \
+    --preds data/prepared/preds_rsi_30m_full_progressive_cnnlstm_lag0.npz \
+    --split val --label profitable
+
+# 2. Train meta OOB (val=train, test=eval externe)
+python scripts/train_meta_classifier_flips.py \
+    --long-csv  results/flips/flips_to_long_rsi_30m_full_cnnlstm_lag0_val.csv \
+    --short-csv results/flips/flips_to_short_rsi_30m_full_cnnlstm_lag0_val.csv \
+    --long-test-csv  results/flips/flips_to_long_rsi_30m_full_cnnlstm_lag0_test.csv \
+    --short-test-csv results/flips/flips_to_short_rsi_30m_full_cnnlstm_lag0_test.csv
+
+# 3. Backtest OOB (mode 'all' = vraiment OOB)
+python scripts/backtest_with_meta_filter.py \
+    --npz data/prepared/dataset_rsi_30m_full_progressive_lag0.npz \
+    --preds data/prepared/preds_rsi_30m_full_progressive_cnnlstm_lag0.npz \
+    --meta-long  results/meta_flips/meta_long_preds_rsi_30m_full_cnnlstm_lag0_test_oob.npz \
+    --meta-short results/meta_flips/meta_short_preds_rsi_30m_full_cnnlstm_lag0_test_oob.npz \
     --split test
 ```
 

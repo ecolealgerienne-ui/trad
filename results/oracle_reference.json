@@ -276,6 +276,83 @@
       "6. Pivot 6 (moyen effort) : features volume/microstructure"
     ]
   },
+  "meta_classifier_oob_validation_final": {
+    "note": "Option B — Validation OOB rigoureuse du pipeline meta-classifier. Train meta sur flips val, test sur flips test (out-of-sample modèle direction ET meta).",
+    "pipeline_oob": [
+      "1. extract_model_flips.py --split val → flips_to_long/short_..._val.csv (~5,542 each)",
+      "2. train_meta_classifier_flips.py --long-csv (val) --long-test-csv (test) → mode OOB rigoureux",
+      "3. backtest_with_meta_filter.py avec preds OOB"
+    ],
+    "classification_oob_results": {
+      "long": {
+        "train_auc": 0.7619, "val_auc": 0.6384, "test_auc_oob": 0.6581,
+        "gap_vs_in_sample": -0.0375, "best_iteration": 40,
+        "scale_pos_weight": 5.846,
+        "test_at_thr_f1_055": {"prec": 0.2329, "rec": 0.5318, "f1": 0.3239},
+        "test_at_thr_prec_065": {"prec": 0.2941, "rec": 0.1140, "lift_vs_base": 1.93}
+      },
+      "short": {
+        "train_auc": 0.7277, "val_auc": 0.5472, "test_auc_oob": 0.6468,
+        "gap_vs_in_sample": -0.0322, "best_iteration": 2,
+        "scale_pos_weight": 6.348,
+        "warning": "best_iter=2 → sous-entraîné, classifier rejette tout aux seuils calibrés sur val",
+        "test_at_thr_050": {"prec": 0.1937, "rec": 0.7093, "f1": 0.3043}
+      }
+    },
+    "feature_importance_oob_top3": {
+      "long": [
+        {"feature": "atr_14_norm", "gain": 57.36, "rank": 1},
+        {"feature": "distance_to_ma20", "gain": 40.91, "rank": 2},
+        {"feature": "dayofweek", "gain": 30.69, "rank": 3}
+      ],
+      "short": [
+        {"feature": "atr_14_norm", "gain": 93.08, "rank": 1},
+        {"feature": "distance_to_ma20", "gain": 51.10, "rank": 2},
+        {"feature": "model_proba", "gain": 34.55, "rank": 3}
+      ]
+    },
+    "backtest_oob_results": {
+      "oracle_pnl_net_pct": 1207.57,
+      "model_pure_pnl_net_pct": -2205.29,
+      "configs_top_oob": [
+        {"threshold": 0.70, "trades": 2, "wr_pct": 100.0, "pf": "inf",
+         "pnl_net_pct": 53.56, "verdict": "ARTEFACT (2 trades = positions tenues plusieurs mois, SHORT rejette tout)"},
+        {"threshold": 0.65, "trades": 2, "wr_pct": 100.0, "pnl_net_pct": 49.11, "verdict": "ARTEFACT"},
+        {"threshold": 0.55, "trades": 2, "wr_pct": 100.0, "pnl_net_pct": 38.97, "verdict": "ARTEFACT"},
+        {"threshold": 0.50, "trades": 4245, "wr_pct": 25.6, "pf": 0.50,
+         "pnl_net_pct": -787.40, "verdict": "Réaliste mais NÉGATIF"},
+        {"threshold": 0.40, "trades": 7535, "wr_pct": 19.1, "pnl_net_pct": -1532.67}
+      ],
+      "diagnostic": "Aucun seuil ne donne PnL Net positif avec un nombre de trades statistiquement significatif. Les +50% à 2 trades sont des artefacts (SHORT classifier rejette tout, on tient une position LONG plusieurs mois)."
+    },
+    "comparison_in_sample_vs_oob": {
+      "in_sample_partial_best_pnl": 135.13,
+      "oob_realistic_best_pnl": -787.40,
+      "gap": -922.53,
+      "verdict": "Le +135% in-sample était dominé par memorization. Vrai signal OOB existe (AUC 0.65) mais amplitude insuffisante pour battre fees 0.2%/trade."
+    },
+    "final_verdict": {
+      "pattern_exists": true,
+      "auc_oob_long": 0.6581,
+      "auc_oob_short": 0.6468,
+      "exploitable_in_production": false,
+      "reason_not_exploitable": [
+        "Lift 1.5-2× insuffisant pour battre fees taker 0.2%/trade",
+        "Sweet spot 'trades modérés + PnL positif' n'existe pas",
+        "SHORT classifier sous-entraîné (best_iter=2)",
+        "Sans réduction de fees (maker 0.02%) ou features additionnelles, pas de gain net"
+      ],
+      "topic_status": "CLOS dans son état actuel. Pour aller plus loin, modifications structurelles requises (fees, features Cat 2-3, architecture deep)."
+    },
+    "untested_pistes_to_make_exploitable": [
+      "Maker fees 0.02% au lieu de 0.1% taker → fees ÷10 → -787 → potentiellement +0",
+      "Ajuster SHORT classifier (scale_pos_weight modéré, max_depth=5, plus epochs)",
+      "Catégorie 2 features : HMM régime, ADX, Hurst exponent",
+      "Catégorie 3 features : multi-TF agreement (5min vs 30min vs 1h)",
+      "Ensemble : meta sur consensus MACD+CCI+RSI au lieu de RSI seul",
+      "Architecture deep : Transformer, multi-task avec loss PnL-aware"
+    ]
+  },
   "meta_classifier_pipeline_test": {
     "note": "Pipeline meta-classifier en 2 étages (étapes 2.A → 2.D). PoC validée avec biais in-sample partiel.",
     "architecture": "CNN-LSTM direction + XGBoost meta (LONG/SHORT spécialisés)",
