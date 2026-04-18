@@ -28,6 +28,7 @@ référence future.
 | ❌ Filtre externe ATR (architecture 2 étages) | Best -127% sur Model pur (gain +2078% mais pas positif), edge brut/trade neutre |
 | 🏆 **Pipeline Meta-Classifier (architecture 2 étages bis)** | **+135.13% PnL Net** mode 'all' (in-sample partiel, AUC test out-of-sample 0.69) |
 | ⚠️ **Validation Option B OOB rigoureuse (CONCLUSION)** | **Pattern réel mais marginal** : AUC OOB 0.65, PnL OOB best -787% à 4,245 trades, +50% à 2 trades (artefact). **Pas exploitable en prod actuelle**. |
+| ❌ **Option A — Sample weighting par seuil PnL** | Dégrade tout : Acc -7.26%, Capture brute 59%→56.5%, Model ∩ Oracle +443%→+400%. Hypothèse "trades marginaux = bruit" confirmée FAUSSE |
 
 ### 🎯 Loi structurelle découverte
 
@@ -145,6 +146,26 @@ Train meta sur **flips val** (out-of-sample modèle direction), test sur
 - Architecture deep (Transformer, multi-task)
 
 **Sujet meta-classifier CLOS** dans son état actuel.
+
+### ❌ Option A — Sample weighting par seuil PnL (section 18)
+
+Test : filtrer les trades Oracle marginaux (|PnL net| < seuil) du training
+pour forcer le modèle à apprendre sur les trades "décisifs".
+
+**Résultats Option A seuil 0.002 (0.2%)** :
+- Acc test : 89.90% → **82.64%** (-7.26%)
+- Model ∩ Oracle PnL : +443% → **+400%** (-43)
+- Capture brute : 59% → **56.5%** (-2.5%)
+- **Dégrade sur toutes les métriques** ❌
+
+**Diagnostic** :
+> L'hypothèse "trades marginaux = bruit pur" est **fausse**. Les trades
+> à |PnL| < 0.2% contiennent les **transitions critiques du marché**.
+> Filtrer ces samples prive le modèle de l'info nécessaire pour gérer
+> les cas difficiles.
+
+**Option A CLOSE**. Option B (3 classes UP/NEUTRE/DOWN) serait sans doute
+meilleure mais nécessite refactor lourd.
 
 ---
 
@@ -1479,6 +1500,155 @@ python scripts/backtest_with_meta_filter.py \
     --preds data/prepared/preds_rsi_30m_full_progressive_cnnlstm_lag0.npz \
     --meta-long  results/meta_flips/meta_long_preds_rsi_30m_full_cnnlstm_lag0_test_oob.npz \
     --meta-short results/meta_flips/meta_short_preds_rsi_30m_full_cnnlstm_lag0_test_oob.npz \
+    --split test
+```
+
+---
+
+## 18. Option A — Sample weighting par seuil PnL (ÉCHEC)
+
+Idée utilisateur (2026-04-18) : filtrer les trades Oracle marginaux
+(|PnL net| proche de 0) du training pour forcer le modèle à apprendre
+uniquement sur les trades "décisifs".
+
+**Principe** :
+```
+sample_weight[i] = 1.0 si |pnl_per_row[i]| >= seuil
+sample_weight[i] = 0.0 sinon  (row ignorée par la loss)
+```
+
+### 18.1 Analyse distribution PnL Oracle (préalable)
+
+Script : `scripts/analyze_oracle_trade_thresholds.py`
+
+**Distribution |PnL net|/trade (percentiles)** :
+
+| Split | Trades | WR | P50 |PnL| | P75 |PnL| | P90 |PnL| |
+|-------|--------|-----|-----------|-----------|-----------|
+| Train | 15,262 | 66.06% | 0.45% | 1.15% | 2.52% |
+| Val | 3,360 | 58.27% | 0.29% | 0.68% | 1.37% |
+| Test | 3,261 | 59.52% | 0.32% | 0.69% | 1.46% |
+
+**Observation** : train a une distribution plus large (P50 0.45% vs 0.29-0.32%)
+→ marché 2017-2023 plus volatil/trendy.
+
+**Impact des seuils** (exemple split test) :
+
+| Seuil | % rows gardées | WR_kept | PnL mean_kept | PnL mean_drop |
+|-------|----------------|---------|---------------|---------------|
+| 0.0% | 100% | 59.5% | +0.37% | 0 |
+| 0.1% | 85% | 62.4% | +0.45% | -0.006% |
+| **0.2%** | **72%** | **67.1%** | **+0.57%** | **-0.010%** (sweet spot) |
+| 0.3% | 62% | 73.4% | +0.73% | -0.017% |
+| 0.5% | 46% | 84.6% | +1.10% | -0.008% |
+| ≥ 0.75% | <35% | ≥92% | +1.5%+ | **POSITIF** (filtre aussi les bons trades) |
+
+**Sweet spot identifié : 0.20-0.30%** (PnL mean_drop reste négatif/neutre =
+on filtre bien les parasites sans sacrifier les bons trades).
+
+### 18.2 Test Option A avec seuil 0.002 (0.2%) sur RSI CNN-LSTM lag=0
+
+**Configuration** :
+- Modèle : CNN-LSTM RSI lag=0 (best config actuelle)
+- Seuil : 0.002 absolu sur |pnl_per_row|
+- Rows gardées : 484,088 / 614,957 (78.72%) train, 90,861 / 131,776 (68.95%) val
+- Loss pondérée train ET val pour cohérence early stop
+
+### 18.3 Résultats — dégradation sur tous les axes
+
+**Classification** :
+
+| Métrique | Baseline CNN-LSTM lag=0 | **Option A sw=0.002** | Delta |
+|----------|-------------------------|----------------------|-------|
+| Acc test | 89.90% | **82.64%** | **-7.26%** ❌ |
+| AUC test | 0.9646 | 0.9109 | -0.054 |
+| F1 test | 0.8985 | 0.8273 | -0.071 |
+
+**Backtest test (458 jours)** :
+
+| Métrique | Baseline | **Option A sw=0.002** | Delta |
+|----------|----------|-----------------------|-------|
+| Accord model/oracle | 89.89% | **82.64%** | -7.25% ❌ |
+| Model pur Trades | 10,927 | 10,585 | -342 (-3%) |
+| Model pur PnL Net | -2,205% | **-2,119%** | +86 (négligeable) |
+| Model ∩ Oracle PnL Net | **+443%** | **+400%** | **-43** ❌ |
+| Capture brute Model∩Oracle | 59% | **56.5%** | -2.5% ❌ |
+
+### 18.4 Diagnostic — pourquoi l'intuition échoue
+
+**Option A dégrade PLUS qu'elle ne répare** sur toutes les métriques :
+
+1. **Accuracy -7.26%** : filtrer 20% des rows training sous-entraîne le modèle
+2. **Model pur gain marginal** (+86 sur -2,205 = +3.9%) — insuffisant
+3. **Capture brute BAISSE** (59% → 56.5%) — le modèle suit MOINS bien l'oracle
+4. **Les rows rejetés (trades marginaux) contenaient du signal utile**
+
+**Cause racine de l'échec** :
+
+> L'hypothèse "trades marginaux = bruit pur" est **fausse**.
+>
+> Les trades à |PnL| < 0.2% contiennent souvent les **transitions critiques
+> du marché** (moments charnière où la direction change). Filtrer ces
+> samples prive le modèle de l'information nécessaire pour apprendre
+> à distinguer les cas difficiles.
+>
+> En ML, les cas "difficiles" sont souvent les plus instructifs. Les
+> retirer du training crée un biais d'échantillonnage (data snooping
+> inversé).
+
+**Comparaison à l'idée de départ** :
+- Espéré : modèle apprend mieux en se concentrant sur signal clair
+- Observé : modèle perd sa capacité à gérer les zones transitoires
+- Conclusion : filtrer le training par profitabilité ex-post ≠ filtrer le
+  bruit (c'est retirer les cas limites)
+
+### 18.5 Pourquoi Option B serait sans doute meilleure (non testée)
+
+**Option B — 3 classes UP / NEUTRE / DOWN** :
+- Le modèle NE perd pas les samples marginaux (il apprend à les classer NEUTRE)
+- Il peut s'abstenir en prod au lieu de forcer un signe binaire
+- Plus propre ML : préserve l'information, ajoute une option "je ne sais pas"
+
+**Mais nécessite refactor** :
+- Architecture softmax 3 classes (vs sigmoid binaire)
+- Loss CrossEntropy (vs BCEWithLogits)
+- Labeling : `pnl > +seuil` → UP, `pnl < -seuil` → DOWN, sinon NEUTRE
+- Scripts à modifier : `prepare_progressive_data.py`, `train_*.py`, `backtest_*.py`
+
+### 18.6 Conclusion
+
+**Option A (sample weighting par seuil PnL) CLOSE :**
+- ❌ Pas de gain net sur aucune métrique
+- ❌ Pire sur toutes les métriques clés
+- ✅ Confirmation empirique que les trades marginaux ne sont pas du bruit
+  mais contiennent du signal essentiel pour le modèle
+
+**Décision** : abandonner Option A, ne pas tester seuil 0.003 (probablement
+pire vu la tendance).
+
+### 18.7 Commandes reproductibles
+
+```bash
+# 1. Analyse seuils (génère pnl_per_row.npz + tableaux comparatifs)
+python scripts/analyze_oracle_trade_thresholds.py \
+    --npz data/prepared/dataset_rsi_30m_full_progressive_lag0.npz \
+    --save-pnl-per-row
+
+# 2. Train Option A (seuil 0.2%)
+python scripts/train_cnn_lstm_progressive.py \
+    --npz data/prepared/dataset_rsi_30m_full_progressive_lag0.npz \
+    --pnl-per-row results/oracle_analysis/pnl_per_row_rsi_30m_full_progressive_lag0.npz \
+    --pnl-threshold 0.002
+
+# 3. Backtest + diagnostic (comparaison baseline)
+python scripts/backtest_progressive.py \
+    --npz data/prepared/dataset_rsi_30m_full_progressive_lag0.npz \
+    --preds data/prepared/preds_rsi_30m_full_progressive_cnnlstm_lag0_sw0p002.npz \
+    --split test
+
+python scripts/backtest_model_filtered_by_oracle.py \
+    --npz data/prepared/dataset_rsi_30m_full_progressive_lag0.npz \
+    --preds data/prepared/preds_rsi_30m_full_progressive_cnnlstm_lag0_sw0p002.npz \
     --split test
 ```
 

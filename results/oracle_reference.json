@@ -276,6 +276,56 @@
       "6. Pivot 6 (moyen effort) : features volume/microstructure"
     ]
   },
+  "option_a_sample_weighting_test": {
+    "note": "Option A — Filtrer trades Oracle marginaux (|PnL net| < seuil) du training. Hypothèse : le modèle apprend mieux sans les cas neutres. ÉCHEC sur toutes les métriques.",
+    "implementation": "scripts/analyze_oracle_trade_thresholds.py (analyse seuils + save pnl_per_row NPZ) + scripts/train_cnn_lstm_progressive.py (--pnl-per-row, --pnl-threshold)",
+    "threshold_analysis": {
+      "train": {"n_trades": 15262, "wr_pct": 66.06, "pnl_mean_pct": 0.7309,
+                 "p50_abs_pnl_pct": 0.4525, "p75_abs_pnl_pct": 1.1527},
+      "val":   {"n_trades": 3360, "wr_pct": 58.27, "pnl_mean_pct": 0.3446,
+                 "p50_abs_pnl_pct": 0.2900, "p75_abs_pnl_pct": 0.6846},
+      "test":  {"n_trades": 3261, "wr_pct": 59.52, "pnl_mean_pct": 0.3703,
+                 "p50_abs_pnl_pct": 0.3157, "p75_abs_pnl_pct": 0.6898}
+    },
+    "threshold_impact_test_split": [
+      {"threshold": 0.000, "pct_rows_kept": 100.0, "wr_kept": 59.52, "pnl_mean_kept": 0.37, "pnl_mean_drop": 0.0},
+      {"threshold": 0.002, "pct_rows_kept": 72.25, "wr_kept": 67.09, "pnl_mean_kept": 0.57, "pnl_mean_drop": -0.010, "verdict": "sweet spot identifié"},
+      {"threshold": 0.003, "pct_rows_kept": 61.71, "wr_kept": 73.39, "pnl_mean_kept": 0.73, "pnl_mean_drop": -0.017},
+      {"threshold": 0.005, "pct_rows_kept": 46.29, "wr_kept": 84.62, "pnl_mean_kept": 1.10, "pnl_mean_drop": -0.008},
+      {"threshold": 0.0075, "pct_rows_kept": 34.17, "wr_kept": 92.07, "pnl_mean_kept": 1.52, "pnl_mean_drop": 0.030, "warning": "PnL drop devient POSITIF — filtre des vrais bons trades"}
+    ],
+    "test_sw_0002": {
+      "config": "RSI CNN-LSTM lag=0 + sw threshold 0.002 (0.2%)",
+      "rows_kept_train_pct": 78.72,
+      "rows_kept_val_pct": 68.95,
+      "classification_baseline": {"acc_test": 0.8990, "auc_test": 0.9646, "f1_test": 0.8985},
+      "classification_option_a": {"acc_test": 0.8264, "auc_test": 0.9109, "f1_test": 0.8273},
+      "classification_delta": {"acc": -0.0726, "auc": -0.0537, "f1": -0.0712},
+      "backtest_baseline": {
+        "model_pur_trades": 10927, "model_pur_pnl_net": -2205.29,
+        "model_oracle_pnl_net": 443.35, "model_oracle_gross_capture_pct": 58.8,
+        "agreement_pct": 89.89
+      },
+      "backtest_option_a": {
+        "model_pur_trades": 10585, "model_pur_pnl_net": -2119.07,
+        "model_oracle_pnl_net": 400.53, "model_oracle_gross_capture_pct": 56.5,
+        "agreement_pct": 82.64
+      },
+      "verdict": "ÉCHEC : dégrade toutes les métriques sauf +86 PnL Model pur (négligeable)"
+    },
+    "diagnostic": [
+      "L'hypothèse 'trades marginaux = bruit' est FAUSSE empiriquement",
+      "Les trades |PnL|<0.2% contiennent les transitions critiques du marché",
+      "Filtrer 20% des rows prive le modèle d'info essentielle",
+      "Accord model/oracle BAISSE (89.89% → 82.64%) = modèle moins aligné avec l'oracle"
+    ],
+    "alternative_option_b_not_tested": {
+      "description": "Classification 3 classes UP/NEUTRE/DOWN au lieu de binaire",
+      "advantage": "Préserve l'information (samples marginaux → classe NEUTRE au lieu d'être supprimés), modèle peut s'abstenir en prod",
+      "cost": "Refactor lourd (softmax 3 classes, CrossEntropyLoss, modif prepare+train+backtest)"
+    },
+    "topic_status": "Option A CLOSE. Option B non testée (refactor trop lourd vu probabilité de succès faible)."
+  },
   "meta_classifier_oob_validation_final": {
     "note": "Option B — Validation OOB rigoureuse du pipeline meta-classifier. Train meta sur flips val, test sur flips test (out-of-sample modèle direction ET meta).",
     "pipeline_oob": [
