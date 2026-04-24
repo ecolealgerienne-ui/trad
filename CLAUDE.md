@@ -8614,6 +8614,48 @@ Volume (4):    volume_ratio, volume_spike, vwap_deviation, obv_derivative
 
 ---
 
+## 🔬 SECTION — Consolidation AQ-KF + MLE (slope_improvement, 2026-04-24)
+
+**Module** : `experiments/slope_improvement/` (branche `claude/improve-kalman-filter-bMDBP`)
+**Rapport complet** : `experiments/slope_improvement/final_report.md`
+
+### Finding principal
+Le `KALMAN_PROCESS_VAR = 0.01` du pipeline est **structurellement trop bas**. Sur RSI 30min, le régime σ²=0.01 produit une accuracy transitions de **45.34% à T1 pur (anti-prédictif, pire que hasard)**. C'est la cause probable du gap Phase 2.10 (transition accuracy ~58%). Toute alternative (AQ-KF Myers-Tapley ou MLE fixe) sort de ce régime toxique.
+
+### Deux régimes σ² gagnants distincts — PAS équivalents
+
+| Régime | σ² | Méthode | T1 trans (0 sous-pas) | k=6 trans (30min sous-pas) |
+|--------|-----|---------|----------------------|----------------------------|
+| Toxique | 0.01 | Fixe historique | **45.34%** (anti-prédictif) | 81.52% |
+| Myers-Tapley equilibrium | **~0.10** | AQ-KF adaptatif | **77.93%** | 80.48% (plateau) |
+| MLE optimum | **1.155** | MLE fixed (Étape B.4) | 71.90% | **85.66%** |
+
+**Finding théorique** : Myers-Tapley (method-of-moments) converge à σ² ≈ 0.11, **PAS** à l'optimum MLE (1.155). Même en déverrouillant le clipping à 10 (test C2 : σ²_mean=0.111, σ²_P95=0.173). Deux estimateurs, deux optima.
+
+### Recommandations opérationnelles
+
+- **Temps-réel pur (T1, 0 latence)** : AQ-KF Myers-Tapley clip historique `[0.001, 0.1]` — 78% transitions
+- **Avec latence ≥ 15 min acceptable** : FLKS(lag=3) sur 2D MLE fixe (σ²=1.155, R=3.27) — 83-86% transitions
+- **Nouveaux labels ML** : utiliser MLE (σ²=1.155, R=3.27) pour générer les labels Kalman. Évite le régime toxique σ²=0.01 des labels Phase 2.15 actuels. Gap estimé ~2-3pp sur accuracy transitions CNN-LSTM si réentraînement.
+
+### Pipeline reproductible (séquentiel)
+
+```bash
+# Étape B.4/B.5 — recalibration Kalman via MLE
+python experiments/slope_improvement/validate_gt_and_R.py
+python experiments/slope_improvement/finalize_2d_baseline.py
+# Étape 2 — comparaison 2D vs 3D (conclusion : 2D gagne en causal)
+python experiments/slope_improvement/etape2_multi_ref.py
+# Étape 4 — FLKS sweep (conclusion : FLKS(lag=3) optimal)
+python experiments/slope_improvement/etape4_flks_sweep.py
+# Vérification croisée AQ-KF + MLE
+python experiments/slope_improvement/flks_substep_mle.py
+```
+
+Sortie : `artifacts/*.json` + `final_report.md` pour détails chiffrés complets, diagnostics innovations (ACF, Ljung-Box, Jarque-Bera), et règles de décision.
+
+---
+
 **Cree par**: Claude Code
-**Derniere MAJ**: 2026-01-14
-**Version**: 5.1 (+ XGBoost Regime Classifier)
+**Derniere MAJ**: 2026-04-24
+**Version**: 5.2 (+ AQ-KF / MLE consolidation, slope_improvement)

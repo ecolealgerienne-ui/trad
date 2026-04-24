@@ -431,5 +431,80 @@ Durée totale : ~25-30 minutes pour reproduire l'ensemble. Tous les artefacts so
 
 ---
 
+## 8. Convergence AQ-KF sub-step + comparaison avec MLE fixed
+
+**Contexte** : après la conclusion principale du projet (FLKS(lag=3) retenu), une vérification croisée a été menée pour relier ce travail au pipeline AQ-KF (Adaptive Q Kalman Filter, Myers-Tapley) documenté dans `STATUS_v4.0.md`. Le test historique `src/signal_processing/flks_substep_convergence.py` mesure la convergence du FLKS 30min en fonction du nombre de sous-pas 5min accumulés dans le bucket suivant (k=0..6).
+
+Script : `experiments/slope_improvement/flks_substep_mle.py` (commit cd6af58).
+
+### 8.1 Protocole
+
+Reproduction exacte du test historique (5000 bougies 30min BTC, RSI, eval_start=1000, oracle = pykalman.smooth global avec params historiques comme référence commune) avec **4 calibrations Kalman** exécutées en parallèle :
+
+| Calibration | Type | σ² | R | Notes |
+|---|---|---|---|---|
+| **A — Historique fixe** | Fixed | 0.01 | 0.1 | `src/constants.py` — reproduit le test CNN-LSTM historique |
+| **B — MLE fixed** | Fixed | 1.155 | 3.27 | Étape B.4/B.5 MLE fit sur 5min |
+| **C1 — AQ-KF historique** | Adaptive | init 0.01, clip [0.001, 0.1] | 0.1 | Reproduit STATUS_v4.0.md |
+| **C2 — AQ-KF unlocked** | Adaptive | init 0.01, clip [0.001, 10.0] | 0.1 | Teste si l'adaptation peut atteindre la zone MLE |
+
+### 8.2 Résultats bruts (% concordance signe vs Oracle, RSI)
+
+| Calibration | k=0 | k=1 | k=2 | k=3 | k=4 | k=5 | k=6 |
+|---|---|---|---|---|---|---|---|
+| **A all** | 86.67 | 88.32 | 89.25 | 89.75 | 90.10 | 91.60 | 92.32 |
+| **A transitions** | 45.34 | 61.49 | 69.60 | 73.92 | 76.17 | 79.45 | 81.52 |
+| **B all** | 85.12 | 86.25 | 86.92 | 87.42 | 87.75 | 88.65 | 89.10 |
+| **B transitions** | 71.90 | 77.72 | 82.21 | **83.25** | 83.42 | 85.32 | **85.66** |
+| **C1 all** | 80.90 | 81.37 | 81.90 | 81.85 | 81.82 | 81.90 | 81.82 |
+| **C1 transitions** | **77.93** | 79.97 | 81.52 | 81.35 | 81.00 | 81.35 | 80.48 |
+| **C2 all** | 69.23 | 69.12 | 69.24 | 69.27 | 69.22 | 69.27 | 69.22 |
+| **C2 transitions** | 72.41 | 72.54 | 72.71 | 72.88 | 72.19 | 72.37 | 72.37 |
+
+### 8.3 σ² adaptatif — stats révélatrices
+
+| Calibration | σ²_mean | σ²_P95 | % temps à la borne haute |
+|---|---|---|---|
+| C1 (clip [0.001, 0.1]) | 0.0994 | 0.1000 | **99.3%** |
+| C2 (clip [0.001, 10.0]) | 0.1113 | 0.1731 | **0.0%** |
+
+**Finding critique** : quand on déverrouille la borne haute à 10 (C2), σ² ne monte **que** à ~0.11. Il ne va **pas** vers la zone MLE (1.155). Ce n'est pas un problème de clipping — **Myers-Tapley converge naturellement à σ² ≈ 0.11, pas à l'optimum MLE**.
+
+### 8.4 Trois findings structurels
+
+**Finding 1 — Myers-Tapley ≠ MLE**. Les deux méthodes ne trouvent pas le même optimum. Raison théorique : Myers-Tapley est un estimateur method-of-moments (appariement de variances d'innovations) tandis que le MLE optimise la likelihood complète. Sur cette surface de paramètres, les deux objectifs ont des optima différents (~0.11 vs 1.155).
+
+**Finding 2 — Deux régimes gagnants selon la latence acceptable** :
+
+| Régime de latence | Gagnant | σ² | Transitions |
+|---|---|---|---|
+| **T1 pur (0 sous-pas, 30min causal)** | **C1 (AQ-KF)** | ~0.10 | 77.93% (+6pp vs B) |
+| k=1-2 (5-10 min de sous-pas) | C1 ≈ B | — | ~80-82% |
+| **k=3-6 (15-30 min de sous-pas)** | **B (MLE)** | 1.155 | 83-86% (+3-5pp vs C1) |
+
+Les deux approches sortent du régime toxique σ²=0.01 (A transitions 45.34% à T1 — anti-prédictif). Mais elles ne sont pas équivalentes : elles occupent deux plateaux différents.
+
+**Finding 3 — C2 légèrement pire que C1**. Déverrouiller le clipping n'améliore pas l'adaptation, et dégrade même légèrement (−5pp T1 vs C1). La volatilité supplémentaire de σ² (P95 0.17 vs 0.10) introduit du bruit dans le filtre sans gain d'information.
+
+### 8.5 Conséquences pour le projet historique (AQ-KF + CNN-LSTM)
+
+Le pipeline de production historique utilisait :
+- `KALMAN_PROCESS_VAR = 0.01` (constants.py) pour les **labels** — régime σ²=0.01 toxique confirmé (45% transitions à T1)
+- AQ-KF Myers-Tapley pour le filtrage **features** — converge à σ²≈0.1, bon à T1 (~74% transitions, consistent avec STATUS_v4.0.md sur MACD)
+
+Le gap Phase 2.10 (58% transition accuracy RSI) s'explique alors par une **double source** :
+1. Les labels étaient générés avec σ²=0.01 fixe (zone toxique)
+2. Le modèle CNN-LSTM était entraîné sur ces labels bruités aux transitions
+
+Même avec des features de bonne qualité (AQ-KF), un modèle ne peut pas excéder la qualité de ses labels.
+
+### 8.6 Recommandation complétée
+
+- **Estimation temps-réel sans latence** (décision à T1 pur) : **AQ-KF C1** (Myers-Tapley clip historique) — 78% transitions, stable, pas de MLE fit requis
+- **Estimation avec latence ≥ 15 min acceptable** : **FLKS(lag=3) sur 2D MLE fixed** (notre pipeline principal, §1-7) — 83% transitions, monte à 85.7% à lag=∞
+- **Labels pour réentraînement ML** : utiliser **MLE fixed** (σ²=1.155, R=3.27) — élimine le régime toxique σ²=0.01 des labels historiques, attendu gain ~2-3pp sur les accuracies CNN-LSTM
+
+---
+
 *Fin du rapport final.*
 
