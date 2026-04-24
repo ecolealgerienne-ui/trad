@@ -35,7 +35,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -203,6 +203,26 @@ def _forward_filter_30m_adaptive(
     return x_filt, P_filt, x_pred, P_pred, C_gains, Q_trace
 
 
+def _compute_slopes_test0_forward(x_filt):
+    """
+    Test 0 — Pure forward causal, lag 0 STRICT.
+
+    Aucun backward smoothing. À l'instant t, on prédit la pente entre t-1
+    et t-2 en utilisant UNIQUEMENT les états filtrés forward (pas
+    d'observation à t).
+
+        slopes[t] = x_filt[t-1, 0] - x_filt[t-2, 0]
+
+    Ainsi la prédiction faite à l'instant t-1 (info disponible jusqu'à t-1)
+    est évaluée à l'index t. Lag d'information = 0 (par rapport à t-1).
+    """
+    n = len(x_filt)
+    slopes = np.full(n, np.nan)
+    for t in range(2, n):
+        slopes[t] = x_filt[t - 1, 0] - x_filt[t - 2, 0]
+    return slopes
+
+
 def _compute_slopes_test1(x_filt, x_pred, C):
     """Test 1 : FLKS 30min pur. Identique au script historique."""
     n = len(x_filt)
@@ -273,10 +293,12 @@ class CalibrationResult:
     sigma2: float
     r_scalar: float
     mode: str           # 'fixed' | 'adaptive'
-    t1_all: float       # sign concordance Test 1, all samples
-    t1_tr: float        # sign concordance Test 1, at transitions
-    k_all: Dict[int, float]   # concordance Test 2, all, per k (1..6)
-    k_tr: Dict[int, float]    # concordance Test 2, at transitions, per k
+    t0_all: float = float("nan")   # Test 0 — forward pur, lag 0 strict, all samples
+    t0_tr: float = float("nan")    # Test 0 — at transitions
+    t1_all: float = float("nan")   # Test 1 — FLKS backward depuis x_filt[t], all
+    t1_tr: float = float("nan")    # Test 1 — at transitions
+    k_all: Dict[int, float] = field(default_factory=dict)   # Test 2 per k (1..6), all
+    k_tr: Dict[int, float] = field(default_factory=dict)    # Test 2 per k, at transitions
     sigma2_mean: float = float("nan")   # For adaptive: mean of σ² trace
     sigma2_p95: float = float("nan")    # For adaptive: P95 of σ² trace
     frac_at_ceil: float = float("nan")  # For adaptive: fraction of time at upper bound
@@ -308,11 +330,17 @@ def run_calibration(
     # Forward filter
     x_filt, P_filt, x_pred, P_pred, C = _forward_filter_30m(rsi_30m, A, H, Q, R)
 
+    # Test 0 — Forward pur (lag 0 strict, no backward smoothing)
+    slopes_t0 = _compute_slopes_test0_forward(x_filt)
+    c_t0_all, _ = sign_concordance(slopes_t0, slopes_oracle, eval_start, n30)
+    c_t0_tr, _ = sign_concordance_at_transitions(slopes_t0, slopes_oracle, eval_start, n30, trans_mask)
+    print(f"    Test 0 (forward pur) : all = {c_t0_all:6.2f}%   trans = {c_t0_tr:6.2f}%")
+
     # Test 1
     slopes_t1 = _compute_slopes_test1(x_filt, x_pred, C)
     c_t1_all, _ = sign_concordance(slopes_t1, slopes_oracle, eval_start, n30)
     c_t1_tr, _ = sign_concordance_at_transitions(slopes_t1, slopes_oracle, eval_start, n30, trans_mask)
-    print(f"    Test 1 (30m pur)     : all = {c_t1_all:6.2f}%   trans = {c_t1_tr:6.2f}%")
+    print(f"    Test 1 (30m + 1 lag) : all = {c_t1_all:6.2f}%   trans = {c_t1_tr:6.2f}%")
 
     # Test 2, k=1..6
     k_all_dict: Dict[int, float] = {}
@@ -333,6 +361,8 @@ def run_calibration(
         sigma2=float(sigma2),
         r_scalar=float(r_scalar),
         mode="fixed",
+        t0_all=float(c_t0_all),
+        t0_tr=float(c_t0_tr),
         t1_all=float(c_t1_all),
         t1_tr=float(c_t1_tr),
         k_all={int(k): float(v) for k, v in k_all_dict.items()},
@@ -384,11 +414,17 @@ def run_calibration_adaptive(
     print(f"    σ² adaptatif : mean={sigma2_mean:.4g}, P95={sigma2_p95:.4g}, "
           f"frac_at_ceil={frac_at_ceil*100:.1f}%")
 
+    # Test 0 — Forward pur (lag 0 strict)
+    slopes_t0 = _compute_slopes_test0_forward(x_filt)
+    c_t0_all, _ = sign_concordance(slopes_t0, slopes_oracle, eval_start, n30)
+    c_t0_tr, _ = sign_concordance_at_transitions(slopes_t0, slopes_oracle, eval_start, n30, trans_mask)
+    print(f"    Test 0 (forward pur) : all = {c_t0_all:6.2f}%   trans = {c_t0_tr:6.2f}%")
+
     # Test 1
     slopes_t1 = _compute_slopes_test1(x_filt, x_pred, C)
     c_t1_all, _ = sign_concordance(slopes_t1, slopes_oracle, eval_start, n30)
     c_t1_tr, _ = sign_concordance_at_transitions(slopes_t1, slopes_oracle, eval_start, n30, trans_mask)
-    print(f"    Test 1 (30m pur)     : all = {c_t1_all:6.2f}%   trans = {c_t1_tr:6.2f}%")
+    print(f"    Test 1 (30m + 1 lag) : all = {c_t1_all:6.2f}%   trans = {c_t1_tr:6.2f}%")
 
     # Test 2 — pour les sous-pas, on utilise Q_sub = Q_mean_recent * DT_SUB
     # (approximation raisonnable : le script historique fige aussi Q au dernier niveau)
@@ -412,6 +448,8 @@ def run_calibration_adaptive(
         sigma2=float(sigma2_init),
         r_scalar=float(r_scalar),
         mode="adaptive",
+        t0_all=float(c_t0_all),
+        t0_tr=float(c_t0_tr),
         t1_all=float(c_t1_all),
         t1_tr=float(c_t1_tr),
         k_all={int(k): float(v) for k, v in k_all_dict.items()},
@@ -538,13 +576,15 @@ def main() -> int:
     print("TABLEAU COMPARATIF — Concordance de signe vs Oracle (RSI)")
     print("=" * 100)
 
-    hdr = f"{'Calibration':<22s} {'Test':<13s}" + "".join(f" {'k='+str(k):>7s}" for k in [0, 1, 2, 3, 4, 5, 6])
+    # Header : T0 (lag 0 strict) puis k=0 (Test 1) puis k=1..6 (Test 2)
+    col_labels = ["T0", "k=0", "k=1", "k=2", "k=3", "k=4", "k=5", "k=6"]
+    hdr = f"{'Calibration':<22s} {'Test':<13s}" + "".join(f" {lbl:>7s}" for lbl in col_labels)
     print(hdr)
     print("-" * len(hdr))
     # Lignes : all + trans pour chaque calibration
     for res in results:
-        row_all = f"{res.name:<22s} {'all':<13s} {res.t1_all:>7.2f}"
-        row_tr = f"{res.name:<22s} {'transitions':<13s} {res.t1_tr:>7.2f}"
+        row_all = f"{res.name:<22s} {'all':<13s} {res.t0_all:>7.2f} {res.t1_all:>7.2f}"
+        row_tr = f"{res.name:<22s} {'transitions':<13s} {res.t0_tr:>7.2f} {res.t1_tr:>7.2f}"
         for k in range(1, 7):
             row_all += f" {res.k_all[k]:>7.2f}"
             row_tr += f" {res.k_tr[k]:>7.2f}"
@@ -555,8 +595,10 @@ def main() -> int:
     # Delta B - A (benchmark MLE vs historique)
     A_res = next(r for r in results if r.name == "A_historique")
     B_res = next(r for r in results if r.name == "B_MLE_fixe")
-    row_delta_all = f"{'Δ (B − A) MLE vs hist':<22s} {'all':<13s} {B_res.t1_all - A_res.t1_all:>+7.2f}"
-    row_delta_tr = f"{'Δ (B − A) MLE vs hist':<22s} {'transitions':<13s} {B_res.t1_tr - A_res.t1_tr:>+7.2f}"
+    row_delta_all = (f"{'Δ (B − A) MLE vs hist':<22s} {'all':<13s} "
+                     f"{B_res.t0_all - A_res.t0_all:>+7.2f} {B_res.t1_all - A_res.t1_all:>+7.2f}")
+    row_delta_tr = (f"{'Δ (B − A) MLE vs hist':<22s} {'transitions':<13s} "
+                    f"{B_res.t0_tr - A_res.t0_tr:>+7.2f} {B_res.t1_tr - A_res.t1_tr:>+7.2f}")
     for k in range(1, 7):
         row_delta_all += f" {B_res.k_all[k] - A_res.k_all[k]:>+7.2f}"
         row_delta_tr += f" {B_res.k_tr[k] - A_res.k_tr[k]:>+7.2f}"
@@ -565,14 +607,16 @@ def main() -> int:
 
     # Delta C1 - A (AQ-KF vs historique)
     C1_res = next(r for r in results if r.name == "C1_AQKF_historique")
-    row_delta_c1_tr = f"{'Δ (C1 − A) AQKF vs hist':<22s} {'transitions':<13s} {C1_res.t1_tr - A_res.t1_tr:>+7.2f}"
+    row_delta_c1_tr = (f"{'Δ (C1 − A) AQKF vs hist':<22s} {'transitions':<13s} "
+                      f"{C1_res.t0_tr - A_res.t0_tr:>+7.2f} {C1_res.t1_tr - A_res.t1_tr:>+7.2f}")
     for k in range(1, 7):
         row_delta_c1_tr += f" {C1_res.k_tr[k] - A_res.k_tr[k]:>+7.2f}"
     print(row_delta_c1_tr)
 
     # Delta C2 - B (AQ-KF unlocked vs MLE)
     C2_res = next(r for r in results if r.name == "C2_AQKF_unlocked")
-    row_delta_c2b_tr = f"{'Δ (C2 − B) unlck vs MLE':<22s} {'transitions':<13s} {C2_res.t1_tr - B_res.t1_tr:>+7.2f}"
+    row_delta_c2b_tr = (f"{'Δ (C2 − B) unlck vs MLE':<22s} {'transitions':<13s} "
+                       f"{C2_res.t0_tr - B_res.t0_tr:>+7.2f} {C2_res.t1_tr - B_res.t1_tr:>+7.2f}")
     for k in range(1, 7):
         row_delta_c2b_tr += f" {C2_res.k_tr[k] - B_res.k_tr[k]:>+7.2f}"
     print(row_delta_c2b_tr)
@@ -590,7 +634,8 @@ def main() -> int:
     print("\n  Lecture :")
     print("  - 'all' = % concordance sur tous les samples (eval_start..n30)")
     print("  - 'transitions' = % concordance UNIQUEMENT aux points de changement de signe de l'oracle")
-    print("  - Colonne k=0 = Test 1 (FLKS 30min pur, 0 sous-pas)")
+    print("  - Colonne T0 = Test 0 (forward pur, lag 0 STRICT — aucun backward smoothing)")
+    print("  - Colonne k=0 = Test 1 (FLKS backward 1 lag, ≈ 30min de futur)")
     print("  - Colonnes k=1..6 = Test 2 (FLKS + k sous-pas 5min live de la bougie t+1)")
     print("  - Δ > 0 → B (MLE) mieux que A (historique). Δ < 0 → A mieux.")
 
@@ -613,16 +658,20 @@ def main() -> int:
         },
         "results": [asdict(r) for r in results],
         "delta_B_minus_A": {
+            "t0_all": B_res.t0_all - A_res.t0_all,
+            "t0_tr": B_res.t0_tr - A_res.t0_tr,
             "t1_all": B_res.t1_all - A_res.t1_all,
             "t1_tr": B_res.t1_tr - A_res.t1_tr,
             "k_all": {int(k): B_res.k_all[k] - A_res.k_all[k] for k in range(1, 7)},
             "k_tr": {int(k): B_res.k_tr[k] - A_res.k_tr[k] for k in range(1, 7)},
         },
         "delta_C1_minus_A": {
+            "t0_tr": C1_res.t0_tr - A_res.t0_tr,
             "t1_tr": C1_res.t1_tr - A_res.t1_tr,
             "k_tr": {int(k): C1_res.k_tr[k] - A_res.k_tr[k] for k in range(1, 7)},
         },
         "delta_C2_minus_B": {
+            "t0_tr": C2_res.t0_tr - B_res.t0_tr,
             "t1_tr": C2_res.t1_tr - B_res.t1_tr,
             "k_tr": {int(k): C2_res.k_tr[k] - B_res.k_tr[k] for k in range(1, 7)},
         },
