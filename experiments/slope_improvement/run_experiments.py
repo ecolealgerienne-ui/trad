@@ -60,8 +60,9 @@ from diagnostics import run_diagnostic, make_plots  # noqa: E402
 
 def _dump_json(path: Path, obj) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w") as f:
-        json.dump(obj, f, indent=2, default=str)
+    # Force UTF-8 to avoid cp1252 UnicodeEncodeError on Windows.
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(obj, f, indent=2, default=str, ensure_ascii=False)
 
 
 def _metrics_both_gt(
@@ -360,7 +361,9 @@ def _write_report(
         for p in plot_paths:
             lines.append(f"- `{p.relative_to(report_path.parent)}`")
         lines.append("")
-    report_path.write_text("\n".join(lines))
+    # Force UTF-8 encoding to handle non-ASCII characters (→, σ, ², etc.)
+    # on systems where default locale is cp1252 (Windows).
+    report_path.write_text("\n".join(lines), encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
