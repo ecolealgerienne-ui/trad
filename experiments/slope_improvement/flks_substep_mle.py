@@ -117,6 +117,92 @@ def _forward_filter_30m(indicator_30m, A, H, Q, R):
     return x_filt, P_filt, x_pred, P_pred, C
 
 
+# ---------------------------------------------------------------------------
+# Forward filter ADAPTIVE (Myers-Tapley AQ-KF) parameterisable
+# ---------------------------------------------------------------------------
+
+def _inv2x2(M):
+    det = M[0, 0] * M[1, 1] - M[0, 1] * M[1, 0]
+    if abs(det) > 1e-15:
+        return np.array([[M[1, 1], -M[0, 1]], [-M[1, 0], M[0, 0]]]) / det
+    return np.linalg.pinv(M)
+
+
+def _is_pos_semidef(M):
+    return M[0, 0] >= 0 and M[1, 1] >= 0 and (M[0, 0] * M[1, 1] - M[0, 1] * M[1, 0]) >= -1e-12
+
+
+def _forward_filter_30m_adaptive(
+    indicator_30m, A, H, R,
+    Q_init, Q_floor, Q_ceil,
+    window: int = 30,
+):
+    """
+    AQ-KF Myers-Tapley — forward filter avec Q adaptatif en ligne.
+
+    Identique à `src/signal_processing/flks_substep_convergence.py:forward_filter_30m_adaptive`
+    mais paramètres (A, H, R, Q_init, Q_floor, Q_ceil, window) injectés.
+
+    Returns (x_filt, P_filt, x_pred, P_pred, C, Q_trace).
+    """
+    n = len(indicator_30m)
+    first_valid_val = indicator_30m[~np.isnan(indicator_30m)][0]
+
+    x_filt = np.zeros((n, 2))
+    P_filt = np.zeros((n, 2, 2))
+    x_pred = np.zeros((n, 2))
+    P_pred = np.zeros((n, 2, 2))
+
+    Q_current = Q_init.copy()
+    innovation_buffer = []
+    Q_trace = np.full((n, 2, 2), np.nan)
+
+    for t in range(n):
+        # 1. Predict
+        if t == 0:
+            x_p = np.array([first_valid_val, 0.0])
+            P_p = np.eye(2)
+        else:
+            x_p = A @ x_filt[t - 1]
+            P_p = A @ P_filt[t - 1] @ A.T + Q_current
+        x_pred[t] = x_p
+        P_pred[t] = P_p
+        Q_trace[t] = Q_current
+
+        # 2. Update
+        if np.isnan(indicator_30m[t]):
+            x_filt[t] = x_p
+            P_filt[t] = P_p
+            continue
+
+        S_t = (H @ P_p @ H.T + R)[0, 0]
+        x_filt[t], P_filt[t] = _kf_update(x_p, P_p, indicator_30m[t], H, R)
+
+        # 3. Innovation
+        v_t = indicator_30m[t] - (H @ x_p)[0]
+        innovation_buffer.append(v_t)
+        if len(innovation_buffer) > window:
+            innovation_buffer.pop(0)
+
+        # 4. Adaptive Q update (Myers-Tapley)
+        if len(innovation_buffer) >= window and t > 0:
+            C_vv = np.mean(np.array(innovation_buffer) ** 2)
+            delta = C_vv - S_t
+            if delta > 0:
+                P_pred_next = A @ P_filt[t] @ A.T + Q_current
+                C_rts = P_filt[t] @ A.T @ _inv2x2(P_pred_next)
+                Q_candidate = delta * (C_rts @ C_rts.T)
+                if _is_pos_semidef(Q_candidate):
+                    Q_current = np.clip(Q_candidate, Q_floor, Q_ceil)
+
+    # Précalcul gains RTS
+    C_gains = np.zeros((n, 2, 2))
+    for t in range(n - 1):
+        C_gains[t] = P_filt[t] @ A.T @ _inv2x2(P_pred[t + 1])
+
+    return x_filt, P_filt, x_pred, P_pred, C_gains, Q_trace
+
+
 def _compute_slopes_test1(x_filt, x_pred, C):
     """Test 1 : FLKS 30min pur. Identique au script historique."""
     n = len(x_filt)
@@ -186,10 +272,14 @@ class CalibrationResult:
     name: str
     sigma2: float
     r_scalar: float
+    mode: str           # 'fixed' | 'adaptive'
     t1_all: float       # sign concordance Test 1, all samples
     t1_tr: float        # sign concordance Test 1, at transitions
     k_all: Dict[int, float]   # concordance Test 2, all, per k (1..6)
     k_tr: Dict[int, float]    # concordance Test 2, at transitions, per k
+    sigma2_mean: float = float("nan")   # For adaptive: mean of σ² trace
+    sigma2_p95: float = float("nan")    # For adaptive: P95 of σ² trace
+    frac_at_ceil: float = float("nan")  # For adaptive: fraction of time at upper bound
 
 
 def run_calibration(
@@ -242,10 +332,93 @@ def run_calibration(
         name=name,
         sigma2=float(sigma2),
         r_scalar=float(r_scalar),
+        mode="fixed",
         t1_all=float(c_t1_all),
         t1_tr=float(c_t1_tr),
         k_all={int(k): float(v) for k, v in k_all_dict.items()},
         k_tr={int(k): float(v) for k, v in k_tr_dict.items()},
+    )
+
+
+def run_calibration_adaptive(
+    name: str,
+    sigma2_init: float,
+    r_scalar: float,
+    q_floor_factor: float,
+    q_ceil_factor: float,
+    window: int,
+    rsi_30m: np.ndarray,
+    rsi_live_pc: List[np.ndarray],
+    slopes_oracle: np.ndarray,
+    trans_mask: np.ndarray,
+    eval_start: int,
+    n30: int,
+) -> CalibrationResult:
+    """Exécute Test 1 + Test 2 en mode AQ-KF (Myers-Tapley adaptive Q)."""
+    print(f"\n  --- {name}  (σ²_init={sigma2_init:.4g}, R={r_scalar:.4g}, "
+          f"clip=[{sigma2_init*q_floor_factor:.4g}, {sigma2_init*q_ceil_factor:.4g}], W={window}) ---")
+
+    A = np.array([[1.0, 1.0], [0.0, 1.0]])
+    H = np.array([[1.0, 0.0]])
+    R = np.array([[r_scalar]])
+    Q_init = np.eye(2) * sigma2_init
+    Q_floor = Q_init * q_floor_factor
+    Q_ceil = Q_init * q_ceil_factor
+    DT_SUB = 1.0 / 6.0
+    A_SUB = np.array([[1.0, DT_SUB], [0.0, 1.0]])
+    # Q_SUB : on utilise Q_final moyenné (approximation) — cohérent avec
+    # l'implémentation du script historique qui fige Q au dernier niveau
+    # adaptatif pour les sous-pas.
+
+    x_filt, P_filt, x_pred, P_pred, C, Q_trace = _forward_filter_30m_adaptive(
+        rsi_30m, A, H, R, Q_init, Q_floor, Q_ceil, window=window,
+    )
+
+    # Stats σ² adaptatif (Q_trace[:, 0, 0] = diagonale)
+    sigma2_series = Q_trace[:, 0, 0]
+    sigma2_series = sigma2_series[np.isfinite(sigma2_series)]
+    sigma2_mean = float(np.mean(sigma2_series)) if len(sigma2_series) > 0 else float("nan")
+    sigma2_p95 = float(np.percentile(sigma2_series, 95)) if len(sigma2_series) > 0 else float("nan")
+    ceil_val = Q_ceil[0, 0]
+    frac_at_ceil = float(np.mean(np.abs(sigma2_series - ceil_val) < 1e-6 * ceil_val)) if len(sigma2_series) > 0 else float("nan")
+    print(f"    σ² adaptatif : mean={sigma2_mean:.4g}, P95={sigma2_p95:.4g}, "
+          f"frac_at_ceil={frac_at_ceil*100:.1f}%")
+
+    # Test 1
+    slopes_t1 = _compute_slopes_test1(x_filt, x_pred, C)
+    c_t1_all, _ = sign_concordance(slopes_t1, slopes_oracle, eval_start, n30)
+    c_t1_tr, _ = sign_concordance_at_transitions(slopes_t1, slopes_oracle, eval_start, n30, trans_mask)
+    print(f"    Test 1 (30m pur)     : all = {c_t1_all:6.2f}%   trans = {c_t1_tr:6.2f}%")
+
+    # Test 2 — pour les sous-pas, on utilise Q_sub = Q_mean_recent * DT_SUB
+    # (approximation raisonnable : le script historique fige aussi Q au dernier niveau)
+    Q_sub = np.eye(2) * sigma2_mean * DT_SUB
+
+    k_all_dict: Dict[int, float] = {}
+    k_tr_dict: Dict[int, float] = {}
+    for k in range(1, 7):
+        slopes_k = _compute_slopes_test2(
+            x_filt, P_filt, x_pred, C, rsi_live_pc, k,
+            A_SUB, Q_sub, H, R,
+        )
+        ck_all, _ = sign_concordance(slopes_k, slopes_oracle, eval_start, n30)
+        ck_tr, _ = sign_concordance_at_transitions(slopes_k, slopes_oracle, eval_start, n30, trans_mask)
+        k_all_dict[k] = ck_all
+        k_tr_dict[k] = ck_tr
+        print(f"    Test 2 k={k} ({k*5:2d}min) : all = {ck_all:6.2f}%   trans = {ck_tr:6.2f}%")
+
+    return CalibrationResult(
+        name=name,
+        sigma2=float(sigma2_init),
+        r_scalar=float(r_scalar),
+        mode="adaptive",
+        t1_all=float(c_t1_all),
+        t1_tr=float(c_t1_tr),
+        k_all={int(k): float(v) for k, v in k_all_dict.items()},
+        k_tr={int(k): float(v) for k, v in k_tr_dict.items()},
+        sigma2_mean=sigma2_mean,
+        sigma2_p95=sigma2_p95,
+        frac_at_ceil=frac_at_ceil,
     )
 
 
@@ -329,12 +502,13 @@ def main() -> int:
     # ---- 5. Run 2 calibrations -------------------------------------------
     print(f"\n[5/5] Test Kalman 2 calibrations ...")
 
-    calibrations = [
-        ("A_historique", 0.01, 0.1),
-        ("B_MLE_fixe",   1.155, 3.27),
+    # --- Calibrations fixed (A + B) ---
+    fixed_calibrations = [
+        ("A_historique",  0.01,  0.1),
+        ("B_MLE_fixe",    1.155, 3.27),
     ]
     results: List[CalibrationResult] = []
-    for name, sigma2, r in calibrations:
+    for name, sigma2, r in fixed_calibrations:
         res = run_calibration(
             name=name, sigma2=sigma2, r_scalar=r,
             rsi_30m=rsi_30m, rsi_live_pc=rsi_live_pc,
@@ -343,18 +517,34 @@ def main() -> int:
         )
         results.append(res)
 
-    # ---- Comparison table -------------------------------------------------
-    print("\n" + "=" * 90)
-    print("TABLEAU COMPARATIF — Concordance de signe vs Oracle (RSI)")
-    print("=" * 90)
+    # --- Calibrations adaptive (C1 historique + C2 unlocked) ---
+    adaptive_calibrations = [
+        # (name, sigma2_init, R, Q_floor_factor, Q_ceil_factor, window)
+        ("C1_AQKF_historique", 0.01, 0.1, 0.1,  10.0,   30),    # clip [0.001, 0.1] (STATUS_v4.0)
+        ("C2_AQKF_unlocked",   0.01, 0.1, 0.1,  1000.0, 30),    # clip [0.001, 10.0] permet adaptation MLE
+    ]
+    for name, s2_init, r, qfloor, qceil, win in adaptive_calibrations:
+        res = run_calibration_adaptive(
+            name=name, sigma2_init=s2_init, r_scalar=r,
+            q_floor_factor=qfloor, q_ceil_factor=qceil, window=win,
+            rsi_30m=rsi_30m, rsi_live_pc=rsi_live_pc,
+            slopes_oracle=slopes_oracle, trans_mask=trans_mask,
+            eval_start=args.eval_start, n30=n30,
+        )
+        results.append(res)
 
-    hdr = f"{'Calibration':<18s} {'Test':<15s}" + "".join(f" {'k='+str(k):>7s}" for k in [0, 1, 2, 3, 4, 5, 6])
+    # ---- Comparison table -------------------------------------------------
+    print("\n" + "=" * 100)
+    print("TABLEAU COMPARATIF — Concordance de signe vs Oracle (RSI)")
+    print("=" * 100)
+
+    hdr = f"{'Calibration':<22s} {'Test':<13s}" + "".join(f" {'k='+str(k):>7s}" for k in [0, 1, 2, 3, 4, 5, 6])
     print(hdr)
     print("-" * len(hdr))
-    # Lignes : all + trans pour A et B
+    # Lignes : all + trans pour chaque calibration
     for res in results:
-        row_all = f"{res.name:<18s} {'all':<15s} {res.t1_all:>7.2f}"
-        row_tr = f"{res.name:<18s} {'transitions':<15s} {res.t1_tr:>7.2f}"
+        row_all = f"{res.name:<22s} {'all':<13s} {res.t1_all:>7.2f}"
+        row_tr = f"{res.name:<22s} {'transitions':<13s} {res.t1_tr:>7.2f}"
         for k in range(1, 7):
             row_all += f" {res.k_all[k]:>7.2f}"
             row_tr += f" {res.k_tr[k]:>7.2f}"
@@ -362,17 +552,39 @@ def main() -> int:
         print(row_tr)
     print("-" * len(hdr))
 
-    # Delta B - A
-    A_res = results[0]
-    B_res = results[1]
-    row_delta_all = f"{'Δ (B − A)':<18s} {'all':<15s} {B_res.t1_all - A_res.t1_all:>+7.2f}"
-    row_delta_tr = f"{'Δ (B − A)':<18s} {'transitions':<15s} {B_res.t1_tr - A_res.t1_tr:>+7.2f}"
+    # Delta B - A (benchmark MLE vs historique)
+    A_res = next(r for r in results if r.name == "A_historique")
+    B_res = next(r for r in results if r.name == "B_MLE_fixe")
+    row_delta_all = f"{'Δ (B − A) MLE vs hist':<22s} {'all':<13s} {B_res.t1_all - A_res.t1_all:>+7.2f}"
+    row_delta_tr = f"{'Δ (B − A) MLE vs hist':<22s} {'transitions':<13s} {B_res.t1_tr - A_res.t1_tr:>+7.2f}"
     for k in range(1, 7):
         row_delta_all += f" {B_res.k_all[k] - A_res.k_all[k]:>+7.2f}"
         row_delta_tr += f" {B_res.k_tr[k] - A_res.k_tr[k]:>+7.2f}"
     print(row_delta_all)
     print(row_delta_tr)
+
+    # Delta C1 - A (AQ-KF vs historique)
+    C1_res = next(r for r in results if r.name == "C1_AQKF_historique")
+    row_delta_c1_tr = f"{'Δ (C1 − A) AQKF vs hist':<22s} {'transitions':<13s} {C1_res.t1_tr - A_res.t1_tr:>+7.2f}"
+    for k in range(1, 7):
+        row_delta_c1_tr += f" {C1_res.k_tr[k] - A_res.k_tr[k]:>+7.2f}"
+    print(row_delta_c1_tr)
+
+    # Delta C2 - B (AQ-KF unlocked vs MLE)
+    C2_res = next(r for r in results if r.name == "C2_AQKF_unlocked")
+    row_delta_c2b_tr = f"{'Δ (C2 − B) unlck vs MLE':<22s} {'transitions':<13s} {C2_res.t1_tr - B_res.t1_tr:>+7.2f}"
+    for k in range(1, 7):
+        row_delta_c2b_tr += f" {C2_res.k_tr[k] - B_res.k_tr[k]:>+7.2f}"
+    print(row_delta_c2b_tr)
+
     print("=" * len(hdr))
+
+    # Adaptive stats
+    print("\n  Stats σ² adaptatif (pour C1, C2) :")
+    for res in results:
+        if res.mode == "adaptive":
+            print(f"    {res.name:<22s} σ²_mean={res.sigma2_mean:.4g}   σ²_P95={res.sigma2_p95:.4g}   "
+                  f"frac_at_ceil={res.frac_at_ceil*100:.1f}%")
 
     # ---- Interprétation ---------------------------------------------------
     print("\n  Lecture :")
@@ -390,7 +602,12 @@ def main() -> int:
             "eval_start": int(args.eval_start),
             "indicator": "RSI",
             "oracle_params": {"sigma2": 0.01, "r": 0.1, "mode": "historical_reference"},
-            "calibrations": [{"name": n, "sigma2": s, "r": r} for n, s, r in calibrations],
+            "fixed_calibrations": [{"name": n, "sigma2": s, "r": r} for n, s, r in fixed_calibrations],
+            "adaptive_calibrations": [
+                {"name": n, "sigma2_init": s, "r": r,
+                 "q_floor_factor": qf, "q_ceil_factor": qc, "window": w}
+                for n, s, r, qf, qc, w in adaptive_calibrations
+            ],
             "n_transitions_oracle": int(n_trans),
             "persistence_oracle": persistence,
         },
@@ -400,6 +617,14 @@ def main() -> int:
             "t1_tr": B_res.t1_tr - A_res.t1_tr,
             "k_all": {int(k): B_res.k_all[k] - A_res.k_all[k] for k in range(1, 7)},
             "k_tr": {int(k): B_res.k_tr[k] - A_res.k_tr[k] for k in range(1, 7)},
+        },
+        "delta_C1_minus_A": {
+            "t1_tr": C1_res.t1_tr - A_res.t1_tr,
+            "k_tr": {int(k): C1_res.k_tr[k] - A_res.k_tr[k] for k in range(1, 7)},
+        },
+        "delta_C2_minus_B": {
+            "t1_tr": C2_res.t1_tr - B_res.t1_tr,
+            "k_tr": {int(k): C2_res.k_tr[k] - B_res.k_tr[k] for k in range(1, 7)},
         },
     }
     json_path = artifacts_dir / "flks_substep_mle_results.json"
