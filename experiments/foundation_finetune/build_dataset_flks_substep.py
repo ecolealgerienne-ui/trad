@@ -1,18 +1,20 @@
 """Build dataset: FLKS progressive slope -> Oracle 30min slope (regression).
 
-Adaptation a RSI + Chronos du pipeline existant deja present dans
+Adaptation a notre infra Chronos du pipeline FLKS deja existant dans
 src/signal_processing/core.py et src/signal_processing/prepare_flks_csv.py.
+Indicator parametrable (macd | rsi | cci, default: macd pour aligner avec
+les references slope_improvement et prepare_flks_csv.py).
 
 Pipeline (entierement reutilise depuis src.signal_processing.core) :
     1. load_csv                         (5min OHLCV)
     2. resample_ohlcv                   (-> 30min)
-    3. prepare_features_and_labels_progressive(indicator='rsi', tf=30)
+    3. prepare_features_and_labels_progressive(indicator, tf=30)
        -> slope_progressive (FLKS @ sous-pas k), step_k, label_continuous, close
     4. split_train_val_test (70/15/15, gap=window)
     5. normalize_features (z-score sur train uniquement)
     6. make_sequences (window=25)
 
-Output : data/foundation/rsi_btc_5min_flks_substep.npz
+Output : data/foundation/<indicator>_btc_5min_flks_substep.npz
     Format compatible avec experiments/foundation_finetune/train.py (mode lora)
     et evaluate.py (extras detecte automatiquement).
 
@@ -46,12 +48,13 @@ from signal_processing.core import (
 
 WINDOW = 25
 TF_MINUTES = 30
-INDICATOR = "rsi"
 
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--csv", default=str(ROOT / "data_trad" / "BTCUSD_all_5m.csv"))
+    p.add_argument("--indicator", default="macd", choices=["macd", "rsi", "cci"],
+                   help="Indicator to use (matches src.signal_processing.core).")
     p.add_argument("--n-candles-30m", type=int, default=0,
                    help="Cap to last N 30min candles (0 = no cap)")
     p.add_argument("--window", type=int, default=WINDOW)
@@ -61,9 +64,13 @@ def parse_args():
                    help="Use AQ-KF (adaptive Q) instead of Standard FLKS")
     p.add_argument("--use-step-k-extra", action="store_true",
                    help="Add step_k as extras feature (else only slope in X)")
-    p.add_argument("--output",
-                   default=str(ROOT / "data" / "foundation" / "rsi_btc_5min_flks_substep.npz"))
-    return p.parse_args()
+    p.add_argument("--output", default=None,
+                   help="Output path. If None: data/foundation/<indicator>_btc_5min_flks_substep.npz")
+    args = p.parse_args()
+    if args.output is None:
+        args.output = str(ROOT / "data" / "foundation"
+                          / f"{args.indicator}_btc_5min_flks_substep.npz")
+    return args
 
 
 def main():
@@ -82,10 +89,10 @@ def main():
 
     # 3. Compute progressive features + labels via core.py
     print(f"[3/6] Computing progressive FLKS slopes + Oracle labels "
-          f"(indicator={INDICATOR}, tf={TF_MINUTES}min, "
+          f"(indicator={args.indicator}, tf={TF_MINUTES}min, "
           f"adaptive={args.adaptive}, trim={args.trim})...")
     df_full = prepare_features_and_labels_progressive(
-        df_30m, df_5m, INDICATOR, TF_MINUTES,
+        df_30m, df_5m, args.indicator, TF_MINUTES,
         trim=args.trim,
         adaptive=args.adaptive,
     )
@@ -145,7 +152,7 @@ def main():
     out_path.parent.mkdir(parents=True, exist_ok=True)
     meta = {
         "csv": args.csv,
-        "indicator": INDICATOR,
+        "indicator": args.indicator,
         "tf_minutes": TF_MINUTES,
         "window": args.window,
         "trim": args.trim,
@@ -158,7 +165,7 @@ def main():
         "n_val": int(out["X_val"].shape[0]),
         "n_test": int(out["X_test"].shape[0]),
         "anti_leakage_rts": True,
-        "kalman_model": "FLKS Standard (or AQ-KF if --adaptive) on RSI 30min",
+        "kalman_model": f"FLKS {'AQ-KF' if args.adaptive else 'Standard'} on {args.indicator.upper()} {TF_MINUTES}min",
     }
     np.savez_compressed(out_path, meta=json.dumps(meta), **out)
     print(f"\nSaved {out_path}  ({out_path.stat().st_size / 1e6:.1f} MB)")
