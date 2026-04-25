@@ -62,8 +62,13 @@ def parse_args():
                    help="Trim N 30min bars at start AND end")
     p.add_argument("--adaptive", action="store_true",
                    help="Use AQ-KF (adaptive Q) instead of Standard FLKS")
+    p.add_argument("--include-slope-extra", action=argparse.BooleanOptionalAction,
+                   default=True,
+                   help="Skip connection: pass slope_progressive[t] (z-scored global) "
+                        "as extras to bypass Chronos tokenizer's local scaling. "
+                        "Required for the model to reproduce FLKS. Default: True.")
     p.add_argument("--use-step-k-extra", action="store_true",
-                   help="Add step_k as extras feature (else only slope in X)")
+                   help="Add step_k as additional extras feature")
     p.add_argument("--output", default=None,
                    help="Output path. If None: data/foundation/<indicator>_btc_5min_flks_substep.npz")
     args = p.parse_args()
@@ -119,6 +124,7 @@ def main():
     # 6. Make sequences
     print(f"\n[6/6] Building sequences (window={args.window})...")
     out = {}
+    extras_descr = []
     for name, df in [("train", df_train_n), ("val", df_val_n), ("test", df_test_n)]:
         seq = make_sequences(df, feature_cols, "label_continuous", window=args.window)
         # seq["X"] shape: (n, window, 1). Chronos = single-channel -> squeeze to (n, window).
@@ -132,20 +138,37 @@ def main():
         step_k_at_end = df["step_k"].values[args.window - 1:].astype(np.int8)
         out[f"step_k_{name}"] = step_k_at_end
 
+        # SKIP CONNECTION : pass last slope value (z-scored global) as extras.
+        # Chronos tokenizer mean-scales each window locally and loses absolute
+        # amplitude. Without this, the model cannot reproduce FLKS at all.
+        # With this, the head can learn at worst the identity yhat ~= alpha * extras.
+        extras_parts = []
+        if args.include_slope_extra:
+            slope_extra = X[:, -1:].copy()  # (n, 1) z-scored slope_progressive[t]
+            extras_parts.append(slope_extra)
+            if name == "train":
+                extras_descr.append("slope_progressive_z[t]")
         if args.use_step_k_extra:
-            extras = (step_k_at_end.astype(np.float32) / 5.0).reshape(-1, 1)
+            step_k_z = ((step_k_at_end.astype(np.float32) - 2.5) /
+                        max(np.std(np.arange(6, dtype=np.float32)), 1e-8))
+            extras_parts.append(step_k_z.reshape(-1, 1))
+            if name == "train":
+                extras_descr.append("step_k_z")
+
+        if extras_parts:
+            extras = np.concatenate(extras_parts, axis=1).astype(np.float32)
             out[f"extras_{name}"] = extras
             extras_summary = (f"  extras_{name}: shape={extras.shape}  "
-                              f"mean={extras.mean():.3f}  std={extras.std():.3f}")
+                              f"mean={extras.mean(0).round(3).tolist()}  "
+                              f"std={extras.std(0).round(3).tolist()}")
         else:
             extras_summary = ""
 
         print(f"  [{name}] X={X.shape} y={y.shape}  step_k={step_k_at_end.shape}  "
               f"(mean y={y.mean():+.5f} std={y.std():.5f})" + extras_summary)
 
-    if args.use_step_k_extra:
-        out["extras_mean"] = np.array([2.5 / 5.0])  # step_k uniform 0..5 -> normalized 0..1
-        out["extras_std"] = np.array([np.std(np.arange(6) / 5.0)])
+    if extras_descr:
+        out["extras_descr"] = np.array(extras_descr, dtype=object)
 
     # 7. Save .npz
     out_path = Path(args.output)
