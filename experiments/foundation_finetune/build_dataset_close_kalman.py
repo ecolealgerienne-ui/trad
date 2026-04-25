@@ -500,8 +500,8 @@ def main():
         "X_std": np.float32(X_std),
         "y_mean": np.float32(y_mean),
         "y_std": np.float32(y_std),
-        # Metadata JSON
-        "metadata": json.dumps(metadata),
+        # Metadata JSON (clé "meta" pour compatibilité train.py / evaluate.py Phase 1-9)
+        "meta": json.dumps(metadata),
     }
     # Métadonnées par split (timestamp, asset_id, regime, scores, close, kalman_close)
     for split_name, mask in [("train", train_mask), ("val", val_mask), ("test", test_mask)]:
