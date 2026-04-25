@@ -108,7 +108,9 @@ def lag_ccf(yhat: np.ndarray, y: np.ndarray, max_lag: int = 5) -> tuple:
 
 def load_dataset(path: str):
     data = np.load(path, allow_pickle=True)
-    meta = json.loads(str(data["meta"]))
+    # Backward compat: accept both "meta" (Phase 1-9) and "metadata" (close_kalman builds)
+    meta_key = "meta" if "meta" in data.files else "metadata"
+    meta = json.loads(str(data[meta_key]))
     return data, meta
 
 
