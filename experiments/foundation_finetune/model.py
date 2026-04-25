@@ -65,12 +65,14 @@ class ChronosRegressor(nn.Module):
         lora_dropout: float = 0.05,
         head_hidden: int = 64,
         head_dropout: float = 0.1,
+        extra_dim: int = 0,
         device: str = "cpu",
     ):
         super().__init__()
         self.model_name = model_name
         self.tokenizer, self.t5, d_model = load_chronos(model_name, device=device)
         self.d_model = d_model
+        self.extra_dim = extra_dim
 
         if use_lora:
             from peft import LoraConfig, get_peft_model
@@ -89,7 +91,7 @@ class ChronosRegressor(nn.Module):
                 p.requires_grad = False
 
         self.head = nn.Sequential(
-            nn.Linear(d_model, head_hidden),
+            nn.Linear(d_model + extra_dim, head_hidden),
             nn.GELU(),
             nn.Dropout(head_dropout),
             nn.Linear(head_hidden, 1),
@@ -120,8 +122,17 @@ class ChronosRegressor(nn.Module):
         ids, attn_mask, state = self.tokenizer.context_input_transform(x_cpu)
         return ids, attn_mask, state
 
-    def forward(self, x_rsi: torch.Tensor) -> torch.Tensor:
-        """x_rsi: (batch, 96) float tensor. Returns: (batch,) predicted slope."""
+    def forward(self, x_rsi: torch.Tensor, extras: torch.Tensor = None) -> torch.Tensor:
+        """Forward.
+
+        Args:
+            x_rsi : (batch, seq_len) float tensor (RSI window, CPU or CUDA).
+            extras: (batch, extra_dim) float tensor or None. Required iff
+                    extra_dim > 0. Concatenated to the pooled T5 embedding
+                    before the regression head.
+        Returns:
+            (batch,) predicted slope scalar.
+        """
         ids, attn_mask, _ = self.tokenize(x_rsi)
         ids = ids.to(self._device())
         attn_mask = attn_mask.to(self._device())
@@ -132,6 +143,17 @@ class ChronosRegressor(nn.Module):
         mask = attn_mask.unsqueeze(-1).to(hidden.dtype)
         pooled = (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
 
+        if self.extra_dim > 0:
+            if extras is None:
+                raise ValueError(
+                    f"This model expects extras of dim {self.extra_dim}, got None."
+                )
+            extras = extras.to(pooled.device, dtype=pooled.dtype)
+            if extras.shape[-1] != self.extra_dim:
+                raise ValueError(
+                    f"extras dim {extras.shape[-1]} != expected {self.extra_dim}"
+                )
+            pooled = torch.cat([pooled, extras], dim=-1)
         return self.head(pooled).squeeze(-1)
 
     def _device(self):
@@ -156,9 +178,11 @@ def main():
     p.add_argument("--mode", default="probing",
                    choices=["probing", "lora", "full"])
     p.add_argument("--lora-rank", type=int, default=8)
+    p.add_argument("--extra-dim", type=int, default=0,
+                   help="If >0, model expects extras tensor of this dim in forward.")
     args = p.parse_args()
 
-    kwargs = dict(model_name=args.model, head_hidden=64)
+    kwargs = dict(model_name=args.model, head_hidden=64, extra_dim=args.extra_dim)
     if args.mode == "probing":
         kwargs.update(freeze_backbone=True, use_lora=False)
     elif args.mode == "lora":
@@ -166,16 +190,18 @@ def main():
     else:
         kwargs.update(freeze_backbone=False, use_lora=False)
 
-    print(f"Loading {args.model} (mode={args.mode})...")
+    print(f"Loading {args.model} (mode={args.mode}, extra_dim={args.extra_dim})...")
     model = ChronosRegressor(**kwargs)
     print(f"  d_model={model.d_model}")
     print(f"  trainable params: {model.count_trainable():,}")
     print(f"  total params:     {model.count_total():,}")
 
     x = torch.rand(args.batch, args.window) * 100.0  # mock RSI [0, 100]
-    print(f"\nForward x: shape={tuple(x.shape)} mean={x.mean():.2f} std={x.std():.2f}")
+    extras = torch.randn(args.batch, args.extra_dim) if args.extra_dim > 0 else None
+    print(f"\nForward x: shape={tuple(x.shape)} mean={x.mean():.2f} std={x.std():.2f}"
+          + (f"  extras: shape={tuple(extras.shape)}" if extras is not None else ""))
     with torch.no_grad():
-        y = model(x)
+        y = model(x, extras) if extras is not None else model(x)
     print(f"Output y: shape={tuple(y.shape)} mean={y.mean():.4f} std={y.std():.4f}")
     print("Smoke test OK.")
 

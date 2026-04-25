@@ -72,25 +72,41 @@ def parse_args():
 
 
 class SlopeDataset(Dataset):
-    def __init__(self, X, y):
+    """Returns (x, y) or (x, extras, y) depending on whether extras is provided."""
+
+    def __init__(self, X, y, extras=None):
         self.X = X.astype(np.float32)
         self.y = y.astype(np.float32)
+        self.extras = extras.astype(np.float32) if extras is not None else None
 
     def __len__(self):
         return len(self.y)
 
     def __getitem__(self, idx):
-        return torch.from_numpy(self.X[idx]), torch.tensor(self.y[idx])
+        x = torch.from_numpy(self.X[idx])
+        y = torch.tensor(self.y[idx])
+        if self.extras is not None:
+            return x, torch.from_numpy(self.extras[idx]), y
+        return x, y
 
 
-def evaluate_split(model, loader, device, criterion):
+def _unpack_batch(batch, device, has_extras):
+    if has_extras:
+        x, extras, y = batch
+        return (x.to(device, non_blocking=True),
+                extras.to(device, non_blocking=True),
+                y.to(device, non_blocking=True))
+    x, y = batch
+    return x.to(device, non_blocking=True), None, y.to(device, non_blocking=True)
+
+
+def evaluate_split(model, loader, device, criterion, has_extras):
     model.eval()
     yhats, ys, losses = [], [], []
     with torch.no_grad():
-        for x, y in loader:
-            x = x.to(device, non_blocking=True)
-            y = y.to(device, non_blocking=True)
-            yhat = model(x)
+        for batch in loader:
+            x, extras, y = _unpack_batch(batch, device, has_extras)
+            yhat = model(x, extras) if has_extras else model(x)
             losses.append(criterion(yhat, y).item())
             yhats.append(yhat.detach().cpu().numpy())
             ys.append(y.detach().cpu().numpy())
@@ -137,26 +153,41 @@ def main():
     X_train, y_train = data["X_train"], data["y_train"]
     X_val, y_val = data["X_val"], data["y_val"]
 
+    has_extras = "extras_train" in data.files
+    if has_extras:
+        extras_train = data["extras_train"]
+        extras_val = data["extras_val"]
+        extra_dim = extras_train.shape[1]
+        print(f"  fusion mode: extras_train.shape={extras_train.shape} (extra_dim={extra_dim})")
+    else:
+        extras_train = extras_val = None
+        extra_dim = 0
+
     if args.max_train:
         X_train, y_train = X_train[:args.max_train], y_train[:args.max_train]
+        if has_extras:
+            extras_train = extras_train[:args.max_train]
     if args.max_val:
         X_val, y_val = X_val[:args.max_val], y_val[:args.max_val]
+        if has_extras:
+            extras_val = extras_val[:args.max_val]
     print(f"  train={len(y_train):,}  val={len(y_val):,}")
 
     train_loader = DataLoader(
-        SlopeDataset(X_train, y_train),
+        SlopeDataset(X_train, y_train, extras_train),
         batch_size=args.batch_size, shuffle=True,
         num_workers=args.num_workers, pin_memory=(device == "cuda"),
     )
     val_loader = DataLoader(
-        SlopeDataset(X_val, y_val),
+        SlopeDataset(X_val, y_val, extras_val),
         batch_size=args.batch_size, shuffle=False,
         num_workers=args.num_workers, pin_memory=(device == "cuda"),
     )
 
     # Model
-    print(f"\nLoading {args.model} (mode={args.mode}) ...")
-    kwargs = dict(model_name=args.model, head_hidden=args.head_hidden, device=device)
+    print(f"\nLoading {args.model} (mode={args.mode}, extra_dim={extra_dim}) ...")
+    kwargs = dict(model_name=args.model, head_hidden=args.head_hidden,
+                  extra_dim=extra_dim, device=device)
     if args.mode == "probing":
         kwargs.update(freeze_backbone=True, use_lora=False)
     elif args.mode == "lora":
@@ -176,6 +207,8 @@ def main():
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     tag = f"{args.model.split('/')[-1]}_{args.mode}"
+    if has_extras:
+        tag += "_fusion"
     ckpt_path = out_dir / f"{tag}.pt"
     history_path = out_dir / f"{tag}_history.json"
 
@@ -191,10 +224,9 @@ def main():
         model.train()
         train_losses = []
         n_batches = len(train_loader)
-        for i, (x, y) in enumerate(train_loader, 1):
-            x = x.to(device, non_blocking=True)
-            y = y.to(device, non_blocking=True)
-            yhat = model(x)
+        for i, batch in enumerate(train_loader, 1):
+            x, extras, y = _unpack_batch(batch, device, has_extras)
+            yhat = model(x, extras) if has_extras else model(x)
             loss = criterion(yhat, y)
             optimizer.zero_grad()
             loss.backward()
@@ -208,7 +240,7 @@ def main():
                       f"running={running:.5f}", flush=True)
 
         train_loss = float(np.mean(train_losses))
-        val = evaluate_split(model, val_loader, device, criterion)
+        val = evaluate_split(model, val_loader, device, criterion, has_extras)
         elapsed = time() - t0
 
         log = {
@@ -233,6 +265,7 @@ def main():
             torch.save({
                 "state_dict": model.state_dict(),
                 "args": vars(args),
+                "extra_dim": extra_dim,
                 "epoch": epoch,
                 "val_metrics": val,
                 "data_meta": meta,

@@ -102,8 +102,9 @@ def lag_ccf(yhat, y, max_lag=5):
 def load_model(ckpt_path: Path, device: str) -> tuple[ChronosRegressor, dict]:
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     args = ckpt["args"]
+    extra_dim = int(ckpt.get("extra_dim", 0))
     kwargs = dict(model_name=args["model"], head_hidden=args.get("head_hidden", 64),
-                  device=device)
+                  extra_dim=extra_dim, device=device)
     mode = args["mode"]
     if mode == "probing":
         kwargs.update(freeze_backbone=True, use_lora=False)
@@ -119,19 +120,28 @@ def load_model(ckpt_path: Path, device: str) -> tuple[ChronosRegressor, dict]:
     return model, ckpt
 
 
-def predict_model(model, X, device, batch_size, num_workers):
-    loader = DataLoader(SlopeDataset(X, np.zeros(len(X), dtype=np.float32)),
-                        batch_size=batch_size, shuffle=False,
+def predict_model(model, X, extras, device, batch_size, num_workers):
+    has_extras = extras is not None and model.extra_dim > 0
+    ds = SlopeDataset(X, np.zeros(len(X), dtype=np.float32),
+                      extras=extras if has_extras else None)
+    loader = DataLoader(ds, batch_size=batch_size, shuffle=False,
                         num_workers=num_workers, pin_memory=(device == "cuda"))
     preds = []
     with torch.no_grad():
-        for x, _ in loader:
-            x = x.to(device, non_blocking=True)
-            preds.append(model(x).cpu().numpy())
+        for batch in loader:
+            if has_extras:
+                x, ex, _ = batch
+                x = x.to(device, non_blocking=True)
+                ex = ex.to(device, non_blocking=True)
+                preds.append(model(x, ex).cpu().numpy())
+            else:
+                x, _ = batch
+                x = x.to(device, non_blocking=True)
+                preds.append(model(x).cpu().numpy())
     return np.concatenate(preds)
 
 
-def collect_predictors(args, models_info, X):
+def collect_predictors(args, models_info, X, extras):
     """Yield (name, yhat) for baselines + each loaded model."""
     yield "identity", predict_identity(X)
     yield "raw_slope", predict_raw_slope(X)
@@ -139,7 +149,8 @@ def collect_predictors(args, models_info, X):
         if K + 1 <= X.shape[1]:
             yield f"ma_slope_{K}", predict_ma_slope(X, K)
     for name, (model, _) in models_info.items():
-        yhat = predict_model(model, X, args._device, args.batch_size, args.num_workers)
+        yhat = predict_model(model, X, extras, args._device,
+                             args.batch_size, args.num_workers)
         yield name, yhat
 
 
@@ -198,17 +209,24 @@ def main():
         print(f"  loaded {tag}: trainable={model.count_trainable():,}  "
               f"epoch={ckpt.get('epoch', '?')}  val_mse={ckpt.get('val_metrics', {}).get('mse', '?')}")
 
+    has_extras_in_data = "extras_train" in data.files
+    if has_extras_in_data:
+        print(f"  dataset has extras (extras_train.shape={data['extras_train'].shape})")
+
     # Evaluate each split
     summary = {"meta": meta, "ckpts": [str(p) for p in ckpt_paths], "splits": {}}
     for split in ("val", "test"):
         X = data[f"X_{split}"]
         y = data[f"y_{split}"]
+        extras = data[f"extras_{split}"] if has_extras_in_data else None
         if args.max_samples:
             X, y = X[:args.max_samples], y[:args.max_samples]
+            if extras is not None:
+                extras = extras[:args.max_samples]
 
         rows_lines = []
         rows_data = {}
-        for name, yhat in collect_predictors(args, models_info, X):
+        for name, yhat in collect_predictors(args, models_info, X, extras):
             m = metrics(yhat, y)
             ccf, best_lag = lag_ccf(yhat, y, max_lag=args.lag_range)
             m["best_lag"] = best_lag
