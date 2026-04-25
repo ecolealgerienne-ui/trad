@@ -121,18 +121,20 @@ def main():
         out[f"y_{name}"] = y
         out[f"closes_{name}"] = seq["closes"].astype(np.float64)
 
+        # Always save step_k aligned with end-of-window (for per-substep eval)
+        step_k_at_end = df["step_k"].values[args.window - 1:].astype(np.int8)
+        out[f"step_k_{name}"] = step_k_at_end
+
         if args.use_step_k_extra:
-            # step_k aligned with end-of-window position (the "now" index)
-            step_k_at_end = df["step_k"].values[args.window - 1:].astype(np.float32)
-            extras = (step_k_at_end / 5.0).reshape(-1, 1).astype(np.float32)
+            extras = (step_k_at_end.astype(np.float32) / 5.0).reshape(-1, 1)
             out[f"extras_{name}"] = extras
             extras_summary = (f"  extras_{name}: shape={extras.shape}  "
                               f"mean={extras.mean():.3f}  std={extras.std():.3f}")
         else:
             extras_summary = ""
 
-        print(f"  [{name}] X={X.shape} y={y.shape} (mean y={y.mean():+.5f} std={y.std():.5f})"
-              + extras_summary)
+        print(f"  [{name}] X={X.shape} y={y.shape}  step_k={step_k_at_end.shape}  "
+              f"(mean y={y.mean():+.5f} std={y.std():.5f})" + extras_summary)
 
     if args.use_step_k_extra:
         out["extras_mean"] = np.array([2.5 / 5.0])  # step_k uniform 0..5 -> normalized 0..1
