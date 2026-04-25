@@ -106,14 +106,18 @@ class ChronosRegressor(nn.Module):
         """Tokenize a batch of RSI windows via Chronos quantile tokenizer.
 
         Args:
-            x_rsi: (batch, seq_len) float tensor.
+            x_rsi: (batch, seq_len) float tensor (CPU or CUDA).
         Returns:
             input_ids       : (batch, seq_len_padded) long
             attention_mask  : (batch, seq_len_padded) bool/long
             tokenizer_state : container with mean/scale used (for unscaling)
+
+        Note: Chronos tokenizer keeps quantile boundaries on CPU, so
+        torch.bucketize requires a CPU input. We force CPU here; the
+        returned ids/mask are moved back to GPU in forward().
         """
-        # ChronosTokenizer.context_input_transform expects a 2D float tensor
-        ids, attn_mask, state = self.tokenizer.context_input_transform(x_rsi)
+        x_cpu = x_rsi.detach().cpu() if x_rsi.is_cuda else x_rsi
+        ids, attn_mask, state = self.tokenizer.context_input_transform(x_cpu)
         return ids, attn_mask, state
 
     def forward(self, x_rsi: torch.Tensor) -> torch.Tensor:
