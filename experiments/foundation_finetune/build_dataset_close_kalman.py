@@ -25,13 +25,18 @@ Réutilise:
     - src/regime_labeler.calculate_regime_labels
     - src/constants.* (RSI_PERIOD, MACD_*, CCI_PERIOD, KALMAN_*, splits)
 
-Usage:
+Usage (défaut: BTC seul, comme Phase 1-9):
     python experiments/foundation_finetune/build_dataset_close_kalman.py --indicator rsi
     python experiments/foundation_finetune/build_dataset_close_kalman.py --indicator macd
     python experiments/foundation_finetune/build_dataset_close_kalman.py --indicator cci
 
+Pour scaler à 5 assets ensuite :
+    python ... --indicator rsi --assets BTC ETH BNB ADA LTC
+
 Output:
-    data/foundation/{indicator}_btc_eth_bnb_ada_ltc_close_kalman_5min.npz
+    data/foundation/{indicator}_{assets_tag}_close_kalman_5min.npz
+    Ex: rsi_btc_close_kalman_5min.npz   (BTC seul)
+        rsi_btc_eth_bnb_ada_ltc_close_kalman_5min.npz   (5 assets)
 """
 
 import argparse
@@ -348,8 +353,8 @@ def main():
     parser.add_argument("--indicator", required=True, choices=["rsi", "macd", "cci"],
                         help="Indicateur à utiliser comme input (1 channel)")
     parser.add_argument("--assets", nargs="+",
-                        default=list(AVAILABLE_ASSETS_5M.keys()),
-                        help="Assets à inclure (défaut: BTC ETH BNB ADA LTC)")
+                        default=["BTC"],
+                        help="Assets à inclure (défaut: BTC seul, étendre via 'BTC ETH BNB ADA LTC')")
     parser.add_argument("--window", type=int, default=WINDOW,
                         help=f"Taille fenêtre sequence (défaut: {WINDOW})")
     parser.add_argument("--process-var", type=float, default=KALMAN_PROCESS_VAR,
