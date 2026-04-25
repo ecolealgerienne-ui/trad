@@ -8632,11 +8632,30 @@ Le `KALMAN_PROCESS_VAR = 0.01` du pipeline est **structurellement trop bas**. Su
 
 **Finding théorique** : Myers-Tapley (method-of-moments) converge à σ² ≈ 0.11, **PAS** à l'optimum MLE (1.155). Même en déverrouillant le clipping à 10 (test C2 : σ²_mean=0.111, σ²_P95=0.173). Deux estimateurs, deux optima.
 
-### Recommandations opérationnelles
+### Quatre régimes σ² complémentaires (raffiné après ajout Test 0)
 
-- **Temps-réel pur (T1, 0 latence)** : AQ-KF Myers-Tapley clip historique `[0.001, 0.1]` — 78% transitions
-- **Avec latence ≥ 15 min acceptable** : FLKS(lag=3) sur 2D MLE fixe (σ²=1.155, R=3.27) — 83-86% transitions
-- **Nouveaux labels ML** : utiliser MLE (σ²=1.155, R=3.27) pour générer les labels Kalman. Évite le régime toxique σ²=0.01 des labels Phase 2.15 actuels. Gap estimé ~2-3pp sur accuracy transitions CNN-LSTM si réentraînement.
+L'analyse à lag=0 STRICT (Test 0, forward pur sans backward smoothing) révèle 4 régimes opérationnels distincts. Chaque calibration a son régime de lag optimal :
+
+| Régime | Latence | Gagnant transitions | σ² effectif |
+|--------|---------|---------------------|-------------|
+| **HFT / signaux instantanés** | 0 min | **C2 — AQ-KF unlocked** (clip [0.001, 10]) | adaptive, mean=0.11, P95=0.17 |
+| Quasi temps-réel | 5-30 min | **C1 — AQ-KF historique** (clip [0.001, 0.1]) | adaptive, ~0.10 |
+| Latence acceptable | 30 min | **C1 ≈ B (MLE)** | équivalents |
+| Latence longue | ≥30 min | **B — MLE fixed** | 1.155 |
+
+Concordance transitions (RSI BTC, 5000 bougies 30min) :
+
+| Calibration | T0 (lag=0) | k=0 (lag~30min) | k=6 (lag~60min) |
+|---|---|---|---|
+| A historique fixe (σ²=0.01) | 55.52% | **45.34% (min)** | 81.52% |
+| B MLE fixed (σ²=1.155) | 64.66% | 71.90% | **85.66%** |
+| C1 AQ-KF historique | 68.97% | **77.93%** | 80.48% |
+| C2 AQ-KF unlocked | **71.72%** | 72.41% | 72.37% |
+
+**Anomalie A (courbe en U)** : `σ²=0.01` produit une concordance transitions **inférieure** à k=0 (45.34%) qu'à T0 (55.52%) — le RTS backward sur un filtre déjà sur-lissé l'amplifie encore. Diagnostic : zone toxique informationnelle.
+
+### Labels ML pour réentraînement
+Utiliser **B — MLE (σ²=1.155, R=3.27)** pour générer les labels Kalman. Évite le régime toxique σ²=0.01 des labels Phase 2.15 actuels. Test agreement OLD vs NEW labels = 90.19% (10% labels différents, surtout sur transitions). Gap PnL/timing > gap accuracy attendu.
 
 ### Pipeline reproductible (séquentiel)
 
