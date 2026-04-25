@@ -304,10 +304,11 @@ def build_sequences_for_asset(
 
     # Construction X (vectorisé via stride/fancy indexing)
     # X[k, j] = indicator[idxs[k] - window + 1 + j]
+    # Shape (n_seq, window) en 2D — convention Phase 1-9 / Chronos univariate
     base = idxs - (window - 1)  # (n_seq,)
     offsets = np.arange(window)  # (window,)
     seq_idx = base[:, None] + offsets[None, :]  # (n_seq, window)
-    X = indicator[seq_idx].astype(np.float32)[:, :, None]  # (n_seq, window, 1)
+    X = indicator[seq_idx].astype(np.float32)  # (n_seq, window) — 2D pour Chronos
 
     # Cibles et metadata alignées sur idxs (point de prédiction)
     y_raw = slope[idxs].astype(np.float32)

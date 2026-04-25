@@ -121,6 +121,10 @@ def load_model(ckpt_path: Path, device: str) -> tuple[ChronosRegressor, dict]:
 
 
 def predict_model(model, X, extras, device, batch_size, num_workers):
+    # Backward compat: squeeze channel dim si X est 3D (batch, seq, 1)
+    # Chronos univariate attend (batch, seq_len) 2D
+    if X.ndim == 3 and X.shape[-1] == 1:
+        X = X.squeeze(-1)
     has_extras = extras is not None and model.extra_dim > 0
     ds = SlopeDataset(X, np.zeros(len(X), dtype=np.float32),
                       extras=extras if has_extras else None)
@@ -223,6 +227,10 @@ def main():
     for split in ("val", "test"):
         X = data[f"X_{split}"]
         y = data[f"y_{split}"]
+        # Backward compat: squeeze channel dim si X est 3D — baselines + Chronos
+        # attendent (batch, seq_len) 2D
+        if X.ndim == 3 and X.shape[-1] == 1:
+            X = X.squeeze(-1)
         extras = data[f"extras_{split}"] if has_extras_in_data else None
         if args.max_samples:
             X, y = X[:args.max_samples], y[:args.max_samples]

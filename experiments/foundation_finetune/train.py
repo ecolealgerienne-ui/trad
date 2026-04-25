@@ -158,6 +158,13 @@ def main():
     X_train, y_train = data["X_train"], data["y_train"]
     X_val, y_val = data["X_val"], data["y_val"]
 
+    # Backward compat: squeeze channel dim si X est 3D (batch, seq, 1)
+    # Chronos univariate attend (batch, seq_len) 2D
+    if X_train.ndim == 3 and X_train.shape[-1] == 1:
+        print(f"  [compat] squeezing X channel dim: {X_train.shape} -> {X_train.shape[:-1]}")
+        X_train = X_train.squeeze(-1)
+        X_val = X_val.squeeze(-1)
+
     has_extras = "extras_train" in data.files
     if has_extras:
         extras_train = data["extras_train"]
