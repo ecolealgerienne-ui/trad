@@ -504,6 +504,66 @@ Même avec des features de bonne qualité (AQ-KF), un modèle ne peut pas excéd
 - **Estimation avec latence ≥ 15 min acceptable** : **FLKS(lag=3) sur 2D MLE fixed** (notre pipeline principal, §1-7) — 83% transitions, monte à 85.7% à lag=∞
 - **Labels pour réentraînement ML** : utiliser **MLE fixed** (σ²=1.155, R=3.27) — élimine le régime toxique σ²=0.01 des labels historiques, attendu gain ~2-3pp sur les accuracies CNN-LSTM
 
+### 8.7 Test 0 — vrai lag=0 strict (forward pur, pas de backward smoothing)
+
+Suite à une question utilisateur, ajout d'un Test 0 pour comparer les 4 calibrations à un **lag d'information = 0 strict**. Calcul :
+```
+slopes_t0[t] = x_filt[t-1, 0] - x_filt[t-2, 0]
+```
+Aucun backward smoothing. La prédiction à t-1 utilise uniquement les observations jusqu'à t-1.
+
+**Résultats T0 (% concordance signe vs Oracle, RSI, transitions)**
+
+| Calibration | T0 trans | k=0 trans | k=6 trans |
+|---|---|---|---|
+| A (historique fixe) | **55.52** | 45.34 | 81.52 |
+| B (MLE fixed) | 64.66 | 71.90 | 85.66 |
+| C1 (AQ-KF clippé) | 68.97 | **77.93** | 80.48 |
+| C2 (AQ-KF unlocked) | **71.72** | 72.41 | 72.37 |
+
+### 8.8 Quatre régimes σ², quatre gagnants
+
+L'analyse par lag révèle que **chaque calibration a son régime de lag optimal** :
+
+| Régime opérationnel | Latence acceptable | Gagnant | σ² effectif |
+|---|---|---|---|
+| **Strict temps-réel** | 0 min | **C2 — AQ-KF unlocked** | adaptive, mean=0.11, P95=0.17 |
+| Quasi temps-réel | 5-30 min | **C1 — AQ-KF historique** | adaptive, clip [0.001, 0.1] |
+| Latence acceptable | 30 min (k=2-3) | **C1 ≈ B** | équivalents |
+| Latence longue | 30-60 min (k≥3) | **B — MLE fixed** | 1.155 |
+
+Les calibrations ne sont **pas équivalentes — elles sont complémentaires**, chacune dominant dans son régime de latence.
+
+### 8.9 Anomalie — courbe en U de A_historique sur transitions
+
+Pour `σ²=0.01` (régime toxique), la concordance transitions présente un **minimum à k=0** (Test 1) :
+
+```
+T0:  55.52  ─┐
+k=0: 45.34  ─┘  ← MIN — pire que lag 0 strict !
+k=1: 61.49
+k=2: 69.60
+k=3: 73.92
+k=6: 81.52  ← MAX
+```
+
+**Mécanisme** : le filtre `σ²=0.01` est déjà sur-lissé. Appliquer un RTS backward au-dessus l'amplifie encore → pire détection des transitions. Il faut k≥1 sous-pas avec **vraies observations futures** pour compenser.
+
+Pour B/C1/C2 (calibrations plus réactives), pas de courbe en U : le smoothing aide ou est neutre. **Seule A souffre de cette pathologie** — diagnostic supplémentaire que `σ²=0.01` est dans une zone toxique au sens informationnel.
+
+### 8.10 Conclusion enrichie
+
+L'analyse à lag=0 strict (Test 0) révèle que **les findings AQ-KF / MLE ne s'opposent pas mais se complètent** sur des régimes de latence distincts. La recommandation finale dépend du **régime opérationnel cible** :
+
+| Régime | Pipeline |
+|---|---|
+| HFT / signaux instantanés (lag=0) | **C2 — AQ-KF unlocked** (`flks_substep_mle.py`) |
+| Real-time avec ≤30 min de latence | **C1 — AQ-KF historique** |
+| Trading avec ≥30 min de latence | **B — MLE fixed** ou **FLKS(lag=3) sur 2D MLE** (§1-7) |
+| Labels pour réentraînement ML | **B — MLE fixed** (σ²=1.155, R=3.27) |
+
+Le projet `slope_improvement` se conclut sur cette synthèse à 4 régimes, validée empiriquement par 8 niveaux de lag testés sur 5000 bougies 30min RSI BTC.
+
 ---
 
 *Fin du rapport final.*
