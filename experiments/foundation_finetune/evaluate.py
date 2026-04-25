@@ -187,8 +187,11 @@ def main():
     print(f"Loading {args.data} ...")
     data = np.load(args.data, allow_pickle=True)
     meta = json.loads(str(data["meta"]))
-    print(f"  meta: window={meta['window']} Q={meta['process_var']} "
-          f"R={meta['measure_var']} rsi_period={meta['rsi_period']}")
+    summary = " ".join(f"{k}={v}" for k, v in meta.items()
+                       if k in ("window", "process_var", "measure_var",
+                                "rsi_period", "indicator", "tf_minutes",
+                                "adaptive"))
+    print(f"  meta: {summary}")
 
     # Resolve checkpoints
     if args.ckpt:
