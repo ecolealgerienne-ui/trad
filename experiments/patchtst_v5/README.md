@@ -115,7 +115,7 @@ Volume estimé d'events : ~500-3000 sur période test (à mesurer en step explor
 | `feature_builder.py` | Calcul des 22 channels depuis CSV BTCUSD | TA-Lib, pandas | ✅ |
 | `event_detector.py` | Scan historique → liste des triggers | feature_builder | ✅ |
 | `pivot_labeler.py` | Triple Barrier ATR-adaptatif par event | OHLC future | ✅ |
-| `dataset_builder.py` | Extraction fenêtres 96×22 + labels → NPZ | feature_builder + pivot_labeler | ⏳ |
+| `dataset_builder.py` | Extraction fenêtres 96×N + labels → NPZ train/val/test | feature_builder + pivot_labeler | ✅ |
 | `model.py` | Architecture PatchTST channel-independent | torch, transformers | ⏳ |
 | `train.py` | Training + early stopping + class weights | model + NPZ | ⏳ |
 | `evaluate.py` | Métriques (precision/recall/AUC top-N%) | trained model + test NPZ | ⏳ |
