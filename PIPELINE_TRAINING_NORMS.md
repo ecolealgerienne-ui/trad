@@ -922,3 +922,315 @@ def pre_training_drift_check(X_train, X_val, X_test):
 ---
 
 **Section 4 fin.** Je continue avec Section 5 (Outliers et valeurs manquantes) au prochain message si tu valides.
+
+---
+
+## Section 5 — Outliers et valeurs manquantes
+
+### Principe général
+
+Les **outliers** (valeurs extrêmes) et les **valeurs manquantes** (NaN, missing) sont les deux pathologies de données les plus fréquentes en ML financier. Leur traitement est **non-trivial** : un outlier peut être un signal critique (flash crash, événement informatif) ou du bruit (erreur de saisie, glitch broker). Une valeur manquante peut être structurelle (marché fermé) ou aléatoire (panne data feed).
+
+📖 **Références** :
+- Hawkins, *Identification of Outliers* (Chapman & Hall, 1980) — référence livre fondateur
+- Little & Rubin, *Statistical Analysis with Missing Data* (Wiley, 2019, 3e éd.) — référence canonique missing data
+- Aggarwal, *Outlier Analysis* (Springer, 2017, 2e éd.)
+
+### Partie A — Outliers
+
+#### 5.1 Définition opérationnelle
+
+Un **outlier** est une observation qui s'écarte significativement de la masse des autres observations selon une métrique choisie. La définition est **toujours relative** à un contexte (univariate vs multivariate, distribution assumée, métrique de distance).
+
+⚠️ **Avertissement crucial** : en finance, **distinguer trois cas** :
+1. **Outlier-erreur** (à corriger) : timestamp dupliqué, prix négatif, decimal erroné. Bug → fix.
+2. **Outlier-événement** (à conserver) : flash crash 2010, COVID mars 2020, FTX nov 2022. Information réelle.
+3. **Outlier-régime** (à reconsidérer) : valeur normale en haute volatilité mais extrême en moyenne. Pas un outlier, juste un changement de régime.
+
+Le piège : winsoriser aveuglément supprime les **événements informatifs** qui sont parfois la cible même du modèle.
+
+#### 5.2 Méthodes de détection — univariées
+
+##### IQR-based (boxplot rule)
+
+```python
+def detect_outliers_iqr(series, multiplier=1.5):
+    """Détecte les valeurs hors [Q1 - k*IQR, Q3 + k*IQR]."""
+    q1, q3 = series.quantile([0.25, 0.75])
+    iqr = q3 - q1
+    lower = q1 - multiplier * iqr
+    upper = q3 + multiplier * iqr
+    return (series < lower) | (series > upper)
+```
+
+✅ **Avantage** : non-paramétrique, robuste, standard.
+❌ **Inconvénient** : assume distribution unimodale. Conservative pour distributions fat-tailed (typique des returns financiers).
+
+##### Z-score (paramétrique)
+
+```python
+def detect_outliers_zscore(series, threshold=3.0):
+    z = (series - series.mean()) / series.std()
+    return np.abs(z) > threshold
+```
+
+❌ **Sensible aux outliers eux-mêmes** : un seul gros outlier tire `mean` et `std`, masquant les autres outliers.
+
+##### Modified Z-score (Iglewicz & Hoaglin)
+
+Utilise médiane et MAD (Median Absolute Deviation) — robuste.
+
+```python
+def detect_outliers_modified_z(series, threshold=3.5):
+    median = series.median()
+    mad = np.median(np.abs(series - median))
+    modified_z = 0.6745 * (series - median) / (mad + 1e-9)
+    return np.abs(modified_z) > threshold
+```
+
+✅ **Recommandé** par défaut pour features unimodales.
+
+#### 5.3 Méthodes de détection — multivariées
+
+##### Mahalanobis distance
+
+Détecte des combinaisons inhabituelles de features.
+
+```python
+from scipy.spatial.distance import mahalanobis
+from scipy.stats import chi2
+
+def detect_outliers_mahalanobis(X, alpha=0.001):
+    """X: (n_samples, n_features). Retourne mask outliers."""
+    mean = np.mean(X, axis=0)
+    cov_inv = np.linalg.pinv(np.cov(X.T))
+    distances = np.array([
+        mahalanobis(x, mean, cov_inv) ** 2 for x in X
+    ])
+    threshold = chi2.ppf(1 - alpha, df=X.shape[1])
+    return distances > threshold
+```
+
+✅ **Avantage** : capture les corrélations entre features.
+❌ **Limites** : sensible aux outliers (matrice covariance), assume distribution gaussienne multivariée.
+
+##### Isolation Forest
+
+Algorithme tree-based qui isole les outliers en peu de splits.
+
+```python
+from sklearn.ensemble import IsolationForest
+
+def detect_outliers_iforest(X, contamination=0.01):
+    clf = IsolationForest(contamination=contamination, random_state=42)
+    return clf.fit_predict(X) == -1
+```
+
+✅ **Recommandé** : non-paramétrique, multivarié, scalable, peu d'hyperparams.
+📖 Liu, Ting, Zhou, *Isolation Forest*, ICDM 2008.
+
+##### Local Outlier Factor (LOF)
+
+Compare la densité locale d'un point à celle de ses voisins.
+
+```python
+from sklearn.neighbors import LocalOutlierFactor
+
+def detect_outliers_lof(X, n_neighbors=20):
+    lof = LocalOutlierFactor(n_neighbors=n_neighbors, contamination='auto')
+    return lof.fit_predict(X) == -1
+```
+
+✅ **Adapté aux clusters** de densité variable.
+📖 Breunig et al., *LOF: Identifying Density-Based Local Outliers*, SIGMOD 2000.
+
+#### 5.4 Stratégies de traitement
+
+| Stratégie | Description | Quand utiliser |
+|---|---|---|
+| **Investigation** | Examiner manuellement les outliers détectés | TOUJOURS d'abord |
+| **Removal** | Supprimer les lignes outliers | Outliers-erreurs confirmés |
+| **Winsorization** | Clip à percentile (ex: P1 et P99) | Distributions fat-tailed, garder l'info "extrême" sans valeur exacte |
+| **Capping** | Clip à seuil fixe (ex: ±5σ) | Bruit gaussien avec pollution |
+| **Log/sqrt transform** | Transformation monotone | Distributions skewed (volume, market cap) |
+| **Robust scaling** | Normaliser par median/IQR (Section 3) | Conserver la richesse des outliers en réduisant leur impact |
+| **Ne rien faire** | Garder tel quel | Outliers-événements informatifs (flash crashes) |
+
+✅ **Pattern recommandé en finance** : **investigate → robust scaling → keep**. La winsorization aveugle est dangereuse car elle détruit les signaux de queue (où se cache souvent l'alpha).
+
+```python
+def winsorize_train_only(series, lower_pct=0.001, upper_pct=0.999):
+    """Winsorize avec stats du train uniquement."""
+    lower = series.quantile(lower_pct)
+    upper = series.quantile(upper_pct)
+    return series.clip(lower=lower, upper=upper)
+```
+
+⚠️ **Attention au leakage** : les seuils de clipping doivent être calculés sur **train uniquement**, jamais sur train+test.
+
+### Partie B — Valeurs manquantes
+
+#### 5.5 Taxonomie de Little & Rubin
+
+| Type | Définition | Exemple en finance |
+|---|---|---|
+| **MCAR** (Missing Completely At Random) | Probabilité de manquant indépendante des données | Panne random data feed sur 0.01% des bars |
+| **MAR** (Missing At Random) | Probabilité dépend des autres features observées | Volume manquant les jours fériés (date est observable) |
+| **MNAR** (Missing Not At Random) | Probabilité dépend de la valeur manquante elle-même | Prix manquants pendant flash crash (extrême a causé halt) |
+
+📖 Little & Rubin distinguent ces trois cas : MCAR/MAR permettent imputation ignorant le mécanisme, MNAR exige modélisation du mécanisme manquant (rarement possible).
+
+#### 5.6 Stratégies d'imputation
+
+##### Pour features tabulaires statiques
+
+| Méthode | Description | Quand utiliser |
+|---|---|---|
+| **Drop rows** | Supprimer toute ligne avec NaN | < 5% missing, MCAR |
+| **Drop columns** | Supprimer la colonne | > 50% missing dans la colonne |
+| **Mean/median imputation** | Remplir par statistique simple | MCAR, baseline |
+| **KNN imputation** | Plus proche voisin selon autres features | MAR, structures locales |
+| **Iterative imputation** (MICE) | Multiple Imputation by Chained Equations | MAR, plusieurs colonnes corrélées |
+| **Indicator + impute** | Ajouter colonne binaire `is_missing` puis imputer | Si manquant porte de l'info (MNAR) |
+
+##### Pour time series
+
+```python
+# 1. Forward fill (LOCF: Last Observation Carried Forward)
+df['feature'].ffill()  # propage dernière valeur connue
+# ✅ OK si la valeur est censée persister (prix de close au repos)
+
+# 2. Interpolation linéaire
+df['feature'].interpolate(method='linear')
+# ⚠️ NON-CAUSAL: utilise futur pour interpoler. INTERDIT comme feature
+# Acceptable uniquement pour reconstruction de labels passés
+
+# 3. Time-aware interpolation
+df['feature'].interpolate(method='time')
+# Idem ⚠️ non-causal
+
+# 4. Constante typée
+df['feature'].fillna(0)  # parfois OK (volume = 0 quand marché fermé)
+```
+
+#### 5.7 Règle d'or causalité pour time series
+
+✅ **CAUSAL** : `ffill()`, fill with constant, fill with rolling mean/median (backward), KNN sur features observées au passé.
+
+❌ **NON-CAUSAL** : `bfill()` (backward fill), `interpolate(method='linear')`, `interpolate(method='time')`, KNN qui peut piocher dans le futur.
+
+```python
+def causal_imputation(series, method='ffill'):
+    """Imputation causale validée."""
+    if method == 'ffill':
+        return series.ffill()
+    elif method == 'rolling_median':
+        return series.fillna(series.rolling(20).median().shift(1))
+    elif method == 'zero':
+        return series.fillna(0)
+    else:
+        raise ValueError(f"Méthode {method} potentiellement non-causale")
+```
+
+⚠️ **Premier élément manquant** : `ffill()` ne peut pas remplir le tout premier NaN (pas de passé). Choix :
+- Drop les premières lignes jusqu'au premier valide
+- Imputer avec une valeur sentinelle (0, mean, etc.) — accepter le biais sur le warmup
+
+#### 5.8 Multiple imputation
+
+Pour des analyses statistiques où l'incertitude de l'imputation est importante, utiliser plusieurs imputations et agréger :
+
+```python
+from sklearn.experimental import enable_iterative_imputer
+from sklearn.impute import IterativeImputer
+
+# m=5 imputations (standard Rubin's rule)
+imputers = [IterativeImputer(random_state=i, max_iter=10) for i in range(5)]
+predictions = [model.predict(imputer.fit_transform(X)) for imputer in imputers]
+final_pred = np.mean(predictions, axis=0)
+final_se = np.std(predictions, axis=0)
+```
+
+⚠️ **Coûteux** : à réserver aux décisions à fort impact. Pour ML production, mean/KNN suffit souvent.
+
+#### 5.9 Indicator de "missingness" comme feature
+
+Si `missing` porte de l'information (MNAR), créer une feature binaire :
+
+```python
+df['volume_was_missing'] = df['volume'].isna().astype(int)
+df['volume'] = df['volume'].fillna(0)  # ou ffill, etc.
+```
+
+Le modèle peut apprendre `missing → comportement spécial`. Standard dans l'industrie credit risk.
+
+### Décision arbre — outliers + missing
+
+```
+Pour chaque feature :
+├── Calculer % missing
+│   ├── < 1% → Imputer (ffill ou mean)
+│   ├── 1-30% → Imputer + ajouter indicator binaire
+│   ├── 30-70% → Réfléchir : la feature est-elle utile ?
+│   │              Si oui : indicator + imputation conservative
+│   │              Si non : drop la colonne
+│   └── > 70% → Drop la colonne (sauf cas exceptionnel)
+│
+├── Détecter outliers (IQR + Modified Z + Mahalanobis multi)
+│   ├── Examiner top 10 outliers manuellement
+│   ├── Outlier-erreur identifiable → drop ou fix
+│   ├── Outlier-événement → ✅ keep (information)
+│   ├── Outlier-régime → vérifier features de régime
+│   └── Bruit non-identifiable → robust scaling (Section 3) plutôt que drop
+│
+└── Pour time series ML : ne JAMAIS interpoler avec lookahead
+```
+
+### Anti-patterns
+
+❌ **Drop tous les NaN sans investiguer** : peut éliminer 30% des données pour un bug pipeline trivial.
+
+❌ **Winsoriser aveuglément à P1/P99** : détruit l'info de queue, où peut se cacher l'alpha en finance.
+
+❌ **Imputer avec interpolate(method='time')** sans vérifier la causalité.
+
+❌ **Calculer mean/median pour imputation sur tout le dataset** : leak du futur.
+
+❌ **Ignorer l'asymétrie missingness train vs test** : si train a 5% missing et test 15%, c'est un drift à investiguer (Section 4).
+
+❌ **Considérer outliers et missing comme bruit interchangeable** : ce sont des phénomènes distincts.
+
+### Test à exécuter sur le dataset avant entraînement
+
+```python
+def audit_outliers_missing(df, max_missing_pct=0.10, mahalanobis_alpha=0.001):
+    """Audit complet outliers + missing values."""
+    report = {}
+    for col in df.select_dtypes(include=np.number).columns:
+        missing_pct = df[col].isna().mean()
+        if missing_pct > max_missing_pct:
+            report[col] = f"⚠️ {missing_pct*100:.1f}% missing"
+
+    n_outliers_iqr = detect_outliers_iqr(df).any(axis=1).sum()
+    n_outliers_maha = detect_outliers_mahalanobis(df.fillna(0)).sum()
+
+    print(f"Outliers IQR: {n_outliers_iqr} ({100*n_outliers_iqr/len(df):.2f}%)")
+    print(f"Outliers Mahalanobis: {n_outliers_maha} ({100*n_outliers_maha/len(df):.2f}%)")
+    print(f"Colonnes problématiques missing:")
+    for col, msg in report.items():
+        print(f"  {col}: {msg}")
+```
+
+### Références complémentaires
+
+📖 Little & Rubin, *Statistical Analysis with Missing Data* (Wiley, 2019, 3e éd.) — référence canonique
+📖 Hawkins, *Identification of Outliers* (Chapman & Hall, 1980)
+📖 Aggarwal, *Outlier Analysis* (Springer, 2e éd. 2017)
+📖 Iglewicz & Hoaglin, *How to Detect and Handle Outliers* (ASQC Quality Press, 1993) — modified Z-score
+📖 Breunig et al., *LOF: Identifying Density-Based Local Outliers*, SIGMOD 2000
+📖 Liu, Ting, Zhou, *Isolation Forest*, ICDM 2008
+📖 van Buuren, *Flexible Imputation of Missing Data* (CRC Press, 2018) — référence MICE
+
+---
+
+**Section 5 fin.** Je continue avec Section 6 (Multicolinéarité) au prochain message si tu valides.
