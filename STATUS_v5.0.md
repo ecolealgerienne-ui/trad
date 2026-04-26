@@ -3,8 +3,8 @@
 **Date** : 2026-04-26
 **Asset** : BTC (single asset, BTCUSD 5min)
 **Branche** : `claude/post-foundation-finetune-v14-PiOSL`
-**Statut global** : 🟡 **v5.1 EN COURS — Contrastive Learning (avis expert externe 2026-04-26)**
-**Conclusion v5.0 phase 1** : Mur OHLCV-only confirmé sur 3 runs (top 1% precision 38.9-40.7%). Avant pivot v6, test piste expert : **Triplet Loss + Hard Negative Mining** pour forcer la séparation latente des hard negatives.
+**Statut global** : ❌ **CLÔTURÉ DÉFINITIVEMENT — ÉCHEC EMPIRIQUEMENT VALIDÉ SUR 4 RUNS + AVIS EXPERT INVALIDÉ**
+**Conclusion finale** : Mur OHLCV-only confirmé sur 4 runs convergents (top 1% precision 33.3-40.7%, dégradation monotone avec sophistication méthodologique). Avis expert (Contrastive Learning Triplet + Hard Negative Mining) testé fidèlement et **invalidé empiriquement** : le triplet loss a aggravé l'anti-prédictivité au sommet. → **Pivot v6 incontestable (données externes orthogonales).**
 **Approche précédente** : v4 = `experiments/foundation_finetune/` (clos Phase 14)
 
 ---
@@ -110,8 +110,55 @@ peut casser le plafond Phase 14. Si non → preuve que BTCUSD OHLCV seul est sat
 | 9 | Décision phase 1 | v5.0 → ÉCHEC, expansion v5.1 décidée par avis expert | ✅ | 2026-04-26 |
 | 10 | `model.py` refactor: expose encoder embedding | Split forward en encode() + classify() | ✅ | 2026-04-26 |
 | 11 | `train_contrastive.py` | Triplet Loss + Hard Negative Mining + BCE multi-task | ✅ | 2026-04-26 |
-| 12 | Run v5.1 + comparaison vs v5.0 | Validation contrastive vs binary classification | ⏳ | — |
-| 13 | Décision finale v5.1 | Si succès → industrialisation. Si échec → pivot v6 définitif | ⏳ | — |
+| 12 | Run v5.1 + comparaison vs v5.0 | Triplet+BCE: top 1% **33.3%** (vs 38.9% v5 run 3) — DÉGRADATION | ✅ | 2026-04-26 |
+| 13 | Décision finale v5.1 | **ÉCHEC : pivot v6 définitif validé, OHLCV-only saturé** | ✅ | 2026-04-26 |
+
+---
+
+## Verdict final consolidé v5 (2026-04-26)
+
+### 4 runs convergents, dégradation monotone
+
+| Run | Configuration | Top 1% precision | Best Sharpe |
+|---|---|---|---|
+| 1 | v5.0 from_signal (24 ch) | 63.0% (faux positif label asymétrique) | -1.08 |
+| 2 | v5.0 from_entry RR 1:1 (22 ch) | 40.7% | -2.50 |
+| 3 | v5.0 + Group E entropy/Hurst/PACF (27 ch) | 38.9% | -4.68 |
+| **4** | **v5.1 Contrastive Triplet + BCE (27 ch)** | **33.3%** | **-5.10** |
+
+**Pattern frappant** : chaque raffinement méthodologique **détériore** le top 1%. Le Contrastive Learning (proposé par expert externe) a amplifié l'anti-prédictivité au sommet de confiance. Signature classique du fait que l'information recherchée **n'existe pas** dans les features — la régularisation ne peut pas créer du signal.
+
+### Diagnostic du Contrastive (run 4)
+
+L'expert proposait de séparer les "look-alikes" Label=1/Label=0 dans l'espace latent via Triplet Loss. Réalité empirique :
+- Il n'y a **pas de différence systématique** entre Label=1 et Label=0 dans les 27 channels OHLCV
+- Forcer la séparation par contraste → mémorisation de bruit train-spécifique
+- Surconfidence sur configurations test différentes
+- Top 1% (= prédictions les plus catégoriques) devient le plus à côté
+
+→ **Preuve que les hard negatives ne sont pas séparables car l'info n'est pas dans les features.**
+
+### Convergence inter-projets (5 paradigmes, 5 plafonds)
+
+| Approche | Architecture | Loss | Top 1% precision |
+|---|---|---|---|
+| Phase 14 foundation_finetune | Chronos T5 + LoRA | Triple Barrier BCE | ~44% |
+| v5 run 2 | PatchTST CI + 22 ch | BCE + RR 1:1 | 40.7% |
+| v5 run 3 | PatchTST CI + 27 ch + Group E | BCE + Entropy | 38.9% |
+| **v5.1 run 4** | **PatchTST CI + 27 ch + Projector** | **Triplet + BCE** | **33.3%** |
+
+5 paradigmes, plafond systémique. **Le mur n'est pas négociable par méthodologie.**
+
+### Pivot v6 — sources d'information orthogonales
+
+Plan de transition (à démarrer prochaine session) :
+- `STATUS_v6.0.md` au root + `experiments/v6_external_data/`
+- Phase 6.1 : `binance_fapi_ingestor.py` — funding rate (8 ans historique gratuit, complet)
+- Phase 6.2 : WebSocket logger forward-only (OI, L/S ratio, liquidations)
+- Phase 6.3 : Coinalyze API pour rapatrier 1-2 ans d'historique liquidations
+- Phase 6.4 : Adaptation feature_builder v5 → ajout 4-5 channels externes
+- Phase 6.5 : Re-run pipeline complet PatchTST (ou meta-classifieur XGBoost) sur features v5 + v6 enrichies
+- **Critère de succès** : si funding_rate seul fait passer top 1% precision de 33% à >55% → orthogonalité validée → continuer enrichissement
 
 ---
 
