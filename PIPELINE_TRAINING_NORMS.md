@@ -379,3 +379,241 @@ def validate_feature_stationarity(features_df, threshold=0.05):
 ---
 
 **Section 2 fin.** Je continue avec Section 3 (Normalisation) au prochain message si tu valides.
+
+---
+
+## Section 3 — Normalisation
+
+### Principe général
+
+La **normalisation** est l'opération de mise à l'échelle des features pour qu'elles soient comparables et que les algorithmes (notamment ceux à base de gradient ou distance) convergent correctement. La distinction critique :
+
+- **Stationarité (Section 2)** : transformer la **forme statistique** d'une série pour qu'elle soit indépendante du temps.
+- **Normalisation (Section 3)** : transformer l'**échelle** d'une série déjà stationnaire pour qu'elle ait un range/distribution comparable à d'autres features.
+
+⚠️ **Erreur fréquente** : croire que la normalisation résout la non-stationnarité. **FAUX**. Diviser par une constante (max global, std globale) **rescale** mais ne change pas la forme de la distribution. Si train et test ont des distributions différentes, les diviser par la même constante les laisse différentes.
+
+📖 **Références** :
+- Goodfellow, Bengio, Courville, *Deep Learning* (MIT Press, 2016), chap. 8.7
+- Hastie, Tibshirani, Friedman, *Elements of Statistical Learning* (Springer, 2009), section 14.5
+- Kim et al., *Reversible Instance Normalization for Accurate Time-Series Forecasting against Distribution Shift*, ICLR 2022
+
+### Règles fondamentales
+
+✅ **Fit sur train uniquement, apply à val/test** : toute statistique de normalisation (mean, std, min, max, median, quantile) **DOIT** être calculée sur les données train uniquement et **appliquée** à val/test.
+
+❌ **Pas de fit global** : `(X_full - X_full.mean()) / X_full.std()` calcule des statistiques sur l'ensemble du dataset → leak temporel.
+
+❌ **Pas de fit per-split** : `train_normalized = (train - train.mean()) / train.std()` ET `val_normalized = (val - val.mean()) / val.std()` → introduit un biais (les distributions sont normalisées différemment, le modèle voit deux représentations distinctes).
+
+✅ **Pattern correct (sklearn convention)** :
+```python
+from sklearn.preprocessing import StandardScaler
+scaler = StandardScaler().fit(X_train)
+X_train_norm = scaler.transform(X_train)
+X_val_norm = scaler.transform(X_val)
+X_test_norm = scaler.transform(X_test)
+```
+
+### Méthodes de normalisation — comparaison
+
+| Méthode | Formule | Output range | Robuste outliers ? | Quand utiliser |
+|---|---|---|---|---|
+| **Z-score** (standardization) | `(x - μ) / σ` | ℝ, ~[-3, 3] | Non | Features approximativement gaussiennes |
+| **Min-Max** | `(x - min) / (max - min)` | [0, 1] | Non (très sensible) | Features bornées par construction |
+| **Robust scaling** | `(x - median) / IQR` | ℝ | Oui | Features avec outliers |
+| **Max-abs** | `x / max(|x|)` | [-1, 1] | Non | Features sparse (signed) |
+| **Quantile transform** | F(x) où F = CDF empirique train | [0, 1] uniforme | Oui | Distribution arbitraire |
+| **Power transform** (Yeo-Johnson, Box-Cox) | transformation monotone vers gaussienne | ℝ | Partiellement | Distributions skewed |
+
+### Méthode 1 — Z-score (standardization)
+
+**Standard pour la plupart des cas**. Formule : `z = (x - μ_train) / σ_train`.
+
+```python
+from sklearn.preprocessing import StandardScaler
+scaler = StandardScaler().fit(X_train)
+```
+
+✅ **Avantages** : simple, rapide, output centré, conserve la forme de la distribution.
+
+❌ **Inconvénients** : sensible aux outliers (un point extrême tire μ et σ).
+
+⚠️ **Subtilité** : si la feature n'est PAS gaussienne (skewed, multi-modale), z-score ne la transforme pas en gaussienne — juste recentre/rescale.
+
+### Méthode 2 — Min-Max scaling
+
+Formule : `x_scaled = (x - min_train) / (max_train - min_train)` → output dans `[0, 1]`.
+
+✅ **Avantage** : préserve la forme exacte de la distribution, output borné (utile pour activations sigmoides).
+
+❌ **Inconvénients catastrophiques** :
+1. **Très sensible aux outliers** : un seul outlier = tout écrasé.
+2. **Out-of-distribution en test** : si test contient une valeur > max_train → output > 1, modèle voit du jamais-vu.
+3. **Ne fixe PAS la non-stationnarité** : si test a une distribution différente de train, min-max les laisse différentes (juste rescalées identiquement).
+
+⚠️ **Démonstration empirique** :
+```
+Train MACD std = 60, Test MACD std = 132 (drift ×2.2)
+Train MACD / max_global = 0.04 std
+Test  MACD / max_global = 0.09 std → ratio TOUJOURS ×2.2 (drift préservé)
+```
+
+✅ **Usage légitime** : uniquement pour features **bornées par construction** où min/max sont stables (RSI, %B, etc.).
+
+### Méthode 3 — Robust scaling
+
+Formule : `x_scaled = (x - median_train) / IQR_train` (IQR = Q75 - Q25).
+
+✅ **Avantages** : insensible aux outliers, output proche de gaussienne pour distributions raisonnables.
+
+✅ **Quand utiliser** : features avec **outliers fréquents** (volume spikes, slippages anormaux, événements de marché extrêmes).
+
+```python
+from sklearn.preprocessing import RobustScaler
+scaler = RobustScaler().fit(X_train)
+```
+
+### Méthode 4 — Rolling normalisation (online)
+
+Pour les features **non-stationnaires** où la distribution évolue dans le temps :
+
+```python
+def rolling_zscore(series, window=500):
+    """Z-score causal sur fenêtre rolling."""
+    s = pd.Series(series)
+    mean = s.rolling(window).mean()
+    std = s.rolling(window).std()
+    return (s - mean) / std.where(std > 1e-9, 1.0)
+```
+
+✅ **Avantages** :
+- Adaptatif aux régimes
+- Causal (utilise uniquement passé récent)
+- Stationnarise des séries non-stationnaires
+
+❌ **Inconvénients** :
+- Perd l'info de niveau absolu
+- Choix du window crucial (trop court = bruit, trop long = pas d'adaptation)
+
+✅ **Choix du window** :
+- Court (50-100) : adaptatif rapide, sensible au bruit
+- Moyen (200-500) : compromis classique
+- Long (1000-5000) : capture régimes long terme
+
+### Méthode 5 — Per-instance normalisation (Reversible Instance Normalization, RevIN)
+
+Pour les transformers/RNN modernes appliqués aux séries temporelles :
+
+```python
+class RevIN(nn.Module):
+    """Normalise chaque sample par ses propres statistiques.
+    Référence: Kim et al., ICLR 2022."""
+    def forward(self, x):  # x: (batch, channels, seq_len)
+        mean = x.mean(dim=-1, keepdim=True)
+        var = x.var(dim=-1, keepdim=True, unbiased=False)
+        x_normed = (x - mean) / torch.sqrt(var + 1e-5)
+        return x_normed
+```
+
+✅ **Avantages** :
+- **Robuste au distribution shift** : chaque fenêtre s'auto-normalise
+- Pas de fit/apply distinction (pas de fuite possible)
+- Standard sur Transformer time-series modernes (PatchTST, Informer, etc.)
+
+❌ **Inconvénients** :
+- **Perd l'info de niveau global** entre fenêtres
+- Pour une fenêtre constante (toutes valeurs identiques), output = 0 (info perdue)
+
+⚠️ **Subtilité** : RevIN ne **remplace pas** la normalisation train/val/test — c'est complémentaire. RevIN s'applique au moment du forward pass, indépendamment du split.
+
+### Décision arbre — choix de la méthode
+
+```
+Quel type d'algorithme ?
+├── Tree-based (XGBoost, RF, LGBM)
+│   → ✅ Souvent pas besoin de normaliser
+│   → Ces algos sont scale-invariant aux features individuelles
+│   → Mais normaliser n'introduit pas d'erreur (juste pas de gain)
+│
+├── Linear / Logistic regression
+│   → ✅ Z-score (standardization) obligatoire
+│   → Permet régularisation L1/L2 cohérente
+│
+├── Neural network classique (MLP, CNN, RNN)
+│   → ✅ Z-score si features approximativement gaussiennes
+│   → ✅ Robust scaling si outliers
+│   → ✅ BatchNorm/LayerNorm dans le réseau (complémentaire)
+│
+├── Transformer time series (PatchTST, Informer, TFT)
+│   → ✅ RevIN (per-instance) au début du modèle
+│   → ✅ Combiné avec rolling z-score sur features hautement non-stationnaires
+│
+└── K-NN / SVM avec kernel RBF / clustering
+    → ✅ Normalisation IMPÉRATIVE (sinon une feature dominante écrase)
+    → Préférer robust scaling si outliers
+```
+
+### Quelle méthode pour quel type de feature
+
+| Type de feature | Méthode recommandée | Pourquoi |
+|---|---|---|
+| Indicateur borné stationnaire (RSI, %B) | Pas de normalisation OU Min-Max | Déjà comparable |
+| Returns log-normaux | Z-score | Approximativement gaussiens |
+| Volume, illiquidité | Robust scaling | Outliers fréquents |
+| Slope/momentum non borné | Rolling z-score si non-stationnaire, sinon Z-score | Adaptation aux régimes |
+| Distance à un niveau (en ATR) | Z-score ou Min-Max | Souvent quasi-borné |
+| Features dérivées de prix non normalisées | **Transformer d'abord** (Section 2), puis normaliser | Prérequis stationnarité |
+
+### Anti-patterns courants
+
+❌ **"Je normalise sur tout le dataset puis je split"** : leakage classique.
+
+❌ **"Min-max global pour rendre stationnaire"** : ne fonctionne pas, c'est juste un rescale.
+
+❌ **"BatchNorm dans le mode eval"** : si stats batch utilisées sans running mean/var → instabilité.
+
+❌ **"Normaliser les labels"** : pour classification binaire, jamais. Pour régression, parfois utile mais penser à dénormaliser à l'inférence.
+
+❌ **"Standardiser des features catégorielles one-hot"** : inutile et contre-productif.
+
+❌ **"Refit le scaler quand on retraine sur train+val"** : si le scaler change, les hyperparams optimisés sur val deviennent invalides. Re-optimiser ou conserver le scaler initial.
+
+### Test de cohérence post-normalisation
+
+✅ **Après normalisation, vérifier sur val/test** :
+
+```python
+def validate_normalization(X_train_norm, X_val_norm, X_test_norm, alpha=0.05):
+    """Vérifie que la normalisation produit des distributions comparables."""
+    from scipy.stats import ks_2samp
+
+    issues = []
+    for col in X_train_norm.columns:
+        # KS test train vs val
+        ks_tv, _ = ks_2samp(X_train_norm[col], X_val_norm[col])
+        # KS test train vs test
+        ks_tt, _ = ks_2samp(X_train_norm[col], X_test_norm[col])
+
+        if ks_tt > 0.20:  # drift critique persistant
+            issues.append((col, ks_tv, ks_tt))
+
+    if issues:
+        print("Features avec drift résiduel post-normalisation:")
+        for col, ks_tv, ks_tt in issues:
+            print(f"  {col}: KS_train_val={ks_tv:.3f}, KS_train_test={ks_tt:.3f}")
+        print("→ Considérer transformation supplémentaire (Section 2)")
+    return len(issues) == 0
+```
+
+### Références complémentaires
+
+📖 Goodfellow et al. *Deep Learning* (2016), chap. 8.7 "Optimization Strategies and Meta-Algorithms"
+📖 Ioffe & Szegedy, *Batch Normalization* (ICML 2015)
+📖 Kim et al., *RevIN* (ICLR 2022) — `arXiv:2204.05257`
+📖 Salinas et al., *DeepAR* (2017) — utilisation de l'instance normalization en time series
+📖 sklearn documentation, *Preprocessing data*
+
+---
+
+**Section 3 fin.** Je continue avec Section 4 (Distribution shift) au prochain message si tu valides.
