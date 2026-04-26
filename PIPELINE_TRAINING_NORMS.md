@@ -617,3 +617,308 @@ def validate_normalization(X_train_norm, X_val_norm, X_test_norm, alpha=0.05):
 ---
 
 **Section 3 fin.** Je continue avec Section 4 (Distribution shift) au prochain message si tu valides.
+
+---
+
+## Section 4 — Distribution shift
+
+### Principe général
+
+Le **distribution shift** désigne tout changement de la distribution conjointe `P(X, y)` entre les données d'entraînement et celles rencontrées à l'inférence (validation, test, production). Sous l'hypothèse standard du machine learning supervisé (i.i.d., identiquement distribuées), un modèle entraîné sur `P_train(X, y)` n'a aucune garantie de performance sur `P_test(X, y) ≠ P_train(X, y)`.
+
+En finance et trading, le distribution shift est **la règle, pas l'exception** : les marchés évoluent, la microstructure change, les régimes alternent. Détecter, mesurer et atténuer ce shift est **critique** pour des modèles déployés en production.
+
+📖 **Références fondatrices** :
+- Quiñonero-Candela, Sugiyama, Schwaighofer, Lawrence (eds.), *Dataset Shift in Machine Learning* (MIT Press, 2009)
+- Sugiyama, Krauledat, Müller, *Covariate Shift Adaptation by Importance Weighted Cross Validation*, JMLR 2007
+- Gama et al., *A survey on concept drift adaptation*, ACM Computing Surveys, 2014
+
+### Taxonomie du distribution shift
+
+| Type | Définition formelle | Exemple en trading |
+|---|---|---|
+| **Covariate shift** | `P(X)` change, `P(y\|X)` reste stable | Volume moyen × 100 entre 2017 et 2024 (échelle change) |
+| **Label shift** (prior shift) | `P(y)` change, `P(X\|y)` reste stable | Plus de trades gagnants en bull vs bear |
+| **Concept drift** | `P(y\|X)` change | Mêmes setups → résultats différents (marché plus efficient, MM sophistiqués) |
+| **Joint shift** | `P(X, y)` change globalement | Combinaison des trois |
+
+⚠️ **Le concept drift est le plus dangereux** : on peut ne rien voir au niveau des features (covariates inchangées) mais le modèle devient inutile car la **règle de décision** sous-jacente a changé.
+
+### Méthodes de détection — par feature
+
+#### 4.1 Test de Kolmogorov-Smirnov (KS)
+
+**Standard simple et robuste** pour comparer deux distributions empiriques 1D.
+
+```python
+from scipy.stats import ks_2samp
+
+def detect_drift_ks(train_values, test_values, alpha=0.05):
+    ks_stat, p_value = ks_2samp(train_values, test_values)
+    drift = ks_stat > 0.10  # heuristique pratique
+    return {
+        'ks_statistic': ks_stat,
+        'p_value': p_value,
+        'drift_detected': drift,
+        'severity': 'critical' if ks_stat > 0.20 else ('moderate' if ks_stat > 0.10 else 'none'),
+    }
+```
+
+**Interprétation des seuils** (heuristiques classiques en finance) :
+- `KS < 0.05` : distributions très proches, pas de drift
+- `KS ∈ [0.05, 0.10]` : drift négligeable
+- `KS ∈ [0.10, 0.20]` : drift modéré, surveiller
+- `KS > 0.20` : drift critique, action requise
+
+✅ **Avantages** : non-paramétrique, sans hypothèse sur la distribution, tests p-values fiables.
+
+❌ **Limites** : 1D uniquement (une feature à la fois), peu sensible aux différences en queue de distribution.
+
+#### 4.2 Population Stability Index (PSI)
+
+**Standard industrie credit/risk modeling**. Mesure le shift entre deux distributions binnées.
+
+```python
+def psi(expected, actual, n_bins=10):
+    """Population Stability Index entre deux distributions."""
+    breakpoints = np.linspace(0, 100, n_bins + 1)
+    expected_pct = np.percentile(expected, breakpoints)
+    expected_freq, _ = np.histogram(expected, bins=expected_pct)
+    actual_freq, _ = np.histogram(actual, bins=expected_pct)
+    expected_pct_freq = expected_freq / len(expected) + 1e-10
+    actual_pct_freq = actual_freq / len(actual) + 1e-10
+    psi_value = np.sum((actual_pct_freq - expected_pct_freq) *
+                       np.log(actual_pct_freq / expected_pct_freq))
+    return psi_value
+```
+
+**Interprétation des seuils** (consensus industrie) :
+- `PSI < 0.10` : pas de shift significatif
+- `PSI ∈ [0.10, 0.25]` : shift modéré, investiguer
+- `PSI > 0.25` : shift critique, retraining nécessaire
+
+✅ **Avantage** : interprétable, seuils standard partagés.
+
+❌ **Limite** : dépend du choix de binning.
+
+#### 4.3 Wasserstein distance (Earth Mover's Distance)
+
+**Métrique géométriquement intuitive** : "coût minimal de transformer une distribution en l'autre".
+
+```python
+from scipy.stats import wasserstein_distance
+
+def drift_wasserstein(train_values, test_values):
+    return wasserstein_distance(train_values, test_values)
+```
+
+✅ **Avantages** : robuste, métrique correcte (vraie distance, inégalité triangulaire), capture mieux les shifts en queue que KS.
+
+❌ **Limites** : moins de seuils standards, calcul plus coûteux que KS.
+
+#### 4.4 Jensen-Shannon divergence
+
+**Symmetrisé KL-divergence**. Robuste aux supports disjoints.
+
+```python
+from scipy.spatial.distance import jensenshannon
+
+def drift_js(train_values, test_values, n_bins=50):
+    bins = np.linspace(min(train_values.min(), test_values.min()),
+                       max(train_values.max(), test_values.max()), n_bins)
+    p, _ = np.histogram(train_values, bins=bins, density=True)
+    q, _ = np.histogram(test_values, bins=bins, density=True)
+    return jensenshannon(p + 1e-10, q + 1e-10)  # ∈ [0, log(2)]
+```
+
+### Méthodes de détection — globales (multivariées)
+
+#### 4.5 Maximum Mean Discrepancy (MMD)
+
+Test multivarié non-paramétrique basé sur kernels. Détecte des shifts conjoints invisibles feature par feature.
+
+```python
+def rbf_mmd(X, Y, sigma=1.0):
+    """MMD avec kernel RBF entre deux ensembles d'observations."""
+    XX = np.exp(-((X[:, None] - X[None, :]) ** 2).sum(-1) / (2 * sigma ** 2))
+    YY = np.exp(-((Y[:, None] - Y[None, :]) ** 2).sum(-1) / (2 * sigma ** 2))
+    XY = np.exp(-((X[:, None] - Y[None, :]) ** 2).sum(-1) / (2 * sigma ** 2))
+    return XX.mean() + YY.mean() - 2 * XY.mean()
+```
+
+📖 Gretton et al., *A Kernel Method for the Two-Sample Problem*, NeurIPS 2007.
+
+#### 4.6 Adversarial validation
+
+**Technique pratique** : entraîner un classifieur (XGBoost ou logistique) à distinguer train de test. Si AUC > 0.7, il y a shift détectable. Les features les plus importantes du classifieur sont celles qui drift le plus.
+
+```python
+def adversarial_validation(X_train, X_test, model_cls=None):
+    """Train un classifieur train_vs_test. AUC > 0.7 = drift détectable."""
+    from sklearn.ensemble import GradientBoostingClassifier
+    from sklearn.metrics import roc_auc_score
+    from sklearn.model_selection import cross_val_score
+
+    X = np.vstack([X_train, X_test])
+    y = np.concatenate([np.zeros(len(X_train)), np.ones(len(X_test))])
+
+    model = model_cls or GradientBoostingClassifier()
+    auc_scores = cross_val_score(model, X, y, cv=5, scoring='roc_auc')
+    return {
+        'mean_auc': auc_scores.mean(),
+        'std_auc': auc_scores.std(),
+        'drift_severity': 'critical' if auc_scores.mean() > 0.80 else (
+                          'moderate' if auc_scores.mean() > 0.65 else 'none'),
+    }
+```
+
+✅ **Très puissant** : détecte des shifts subtils non visibles per-feature.
+
+### Détection du concept drift (label shift conditionnel)
+
+Les méthodes ci-dessus mesurent le shift de `P(X)` (covariate). Pour détecter un shift de `P(y|X)` (concept drift), il faut **comparer les performances** :
+
+```python
+def detect_concept_drift(model, X_train, y_train, X_recent, y_recent):
+    """Compare les performances train vs récent. Drop > 20% = concept drift."""
+    from sklearn.metrics import roc_auc_score
+    auc_train = roc_auc_score(y_train, model.predict_proba(X_train)[:, 1])
+    auc_recent = roc_auc_score(y_recent, model.predict_proba(X_recent)[:, 1])
+    drop = (auc_train - auc_recent) / auc_train
+    return {
+        'auc_train': auc_train,
+        'auc_recent': auc_recent,
+        'relative_drop': drop,
+        'concept_drift_detected': drop > 0.20,
+    }
+```
+
+📖 Gama et al., *A survey on concept drift adaptation*, ACM CSUR 2014, propose une taxonomie : sudden, gradual, incremental, recurring drifts.
+
+### Mitigation — stratégies par type de shift
+
+#### Pour covariate shift (`P(X)` change)
+
+✅ **Importance reweighting** (Sugiyama 2007) : pondérer chaque sample train par `w(x) = P_test(x) / P_train(x)`.
+```python
+def importance_weights(X_train, X_test):
+    """Estimation density ratio P_test(x) / P_train(x) via classification."""
+    # Entraîner classifier train vs test
+    model = LogisticRegression().fit(
+        np.vstack([X_train, X_test]),
+        np.concatenate([np.zeros(len(X_train)), np.ones(len(X_test))])
+    )
+    p_test = model.predict_proba(X_train)[:, 1]
+    p_train = 1 - p_test
+    return p_test / (p_train + 1e-10)
+```
+
+✅ **Domain adaptation** : réseaux adversariaux (DANN, MMD-based) qui apprennent des features invariantes au domain.
+
+✅ **Transformer les features** vers un espace stationnaire (Section 2 — fractional differentiation, ratios).
+
+#### Pour label shift (`P(y)` change)
+
+✅ **Class prior re-balancing** : ajuster les probabilités prédites par les ratios de classe :
+`p_adjusted(y|x) = p_train(y|x) × (P_test(y) / P_train(y))`.
+
+#### Pour concept drift (`P(y|X)` change)
+
+✅ **Online learning / incremental retraining** : retrain régulier sur fenêtre glissante récente.
+
+✅ **Ensemble adaptatif** : combiner modèles entraînés sur fenêtres successives, pondération par performance récente.
+
+✅ **Walk-forward validation** : ne PAS faire un seul split chronologique, mais re-train tous les N mois sur les N derniers mois (Section 11).
+
+### Production monitoring — pattern recommandé
+
+✅ **Baseline drift dashboard** à mettre en place dès le déploiement :
+
+```python
+class DriftMonitor:
+    def __init__(self, X_train_reference):
+        self.reference = X_train_reference  # snapshot stats train
+
+    def daily_check(self, X_yesterday):
+        """Run quotidien sur les données du jour précédent."""
+        alerts = []
+        for col in self.reference.columns:
+            ks_stat, _ = ks_2samp(self.reference[col], X_yesterday[col])
+            psi_val = psi(self.reference[col], X_yesterday[col])
+            if ks_stat > 0.20 or psi_val > 0.25:
+                alerts.append({
+                    'feature': col,
+                    'ks': ks_stat,
+                    'psi': psi_val,
+                    'severity': 'critical',
+                })
+        return alerts
+```
+
+✅ **Métriques business à surveiller** :
+- AUC sur fenêtre récente (degradation > 20% = alerte)
+- Calibration (Brier score, ECE) : modèle devient mal calibré
+- Distribution des prédictions (sortie du modèle vers extrêmes ou vers 0.5)
+- PnL réel vs PnL attendu sur paper trading
+
+### Décision arbre — quand re-entraîner
+
+```
+Drift détecté ?
+├── KS > 0.20 OU PSI > 0.25 sur features importantes
+│   └── ✅ Investiguer cause: changement de marché ? Bug data pipeline ?
+│       ├── Bug pipeline → Fix avant retraining
+│       └── Vrai shift → ✅ Retraining sur fenêtre récente (walk-forward)
+│
+├── Adversarial AUC > 0.70
+│   └── ✅ Drift multivarié → retraining nécessaire
+│
+├── Performance dégrade > 20%
+│   └── 🚨 Concept drift probable → retraining urgent + investigation
+│
+└── Tout stable
+    └── ✅ Pas d'action
+```
+
+### Anti-patterns
+
+❌ **Ignorer le drift** parce que le modèle "marchait à l'entraînement".
+
+❌ **Refit à chaque drift mineur** : crée de l'instabilité, pas robuste.
+
+❌ **Comparer uniquement les moyennes** des features (la moyenne peut rester stable alors que toute la distribution change).
+
+❌ **Penser que normaliser fixe le drift** : la normalisation rescale, ne réaligne pas les distributions (Section 3).
+
+❌ **Tester drift uniquement à la fin du projet** : doit être un test continu pendant le développement, pas une vérification post-hoc.
+
+### Test minimal de drift à exécuter avant chaque entraînement
+
+```python
+def pre_training_drift_check(X_train, X_val, X_test):
+    """Bloque l'entraînement si drift critique détecté."""
+    critical_features = []
+    for col in X_train.columns:
+        ks_tt, _ = ks_2samp(X_train[col], X_test[col])
+        if ks_tt > 0.20:
+            critical_features.append((col, ks_tt))
+    if critical_features:
+        msg = "DRIFT CRITIQUE détecté:\n"
+        for col, ks in sorted(critical_features, key=lambda x: -x[1]):
+            msg += f"  {col}: KS = {ks:.3f}\n"
+        msg += "→ Investiguer normalisation/transformation avant entraînement"
+        raise ValueError(msg)
+```
+
+### Références complémentaires
+
+📖 Quiñonero-Candela et al. (eds.), *Dataset Shift in Machine Learning* (MIT Press, 2009) — référence livre canonique.
+📖 Sugiyama et al., *Covariate Shift Adaptation*, JMLR 2007.
+📖 Gama et al., *A survey on concept drift adaptation*, ACM Computing Surveys 2014.
+📖 Lipton, Wang, Smola, *Detecting and Correcting for Label Shift with Black Box Predictors*, ICML 2018.
+📖 Rabanser, Günnemann, Lipton, *Failing Loudly: An Empirical Study of Methods for Detecting Dataset Shift*, NeurIPS 2019.
+📖 Kelly & Mary, *PSI for credit risk modeling*, banking industry standard (Bureau of Consumer Financial Protection).
+
+---
+
+**Section 4 fin.** Je continue avec Section 5 (Outliers et valeurs manquantes) au prochain message si tu valides.
