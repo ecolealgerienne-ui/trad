@@ -146,7 +146,9 @@ def main():
     # Load dataset
     print(f"Loading {args.data}...")
     data = np.load(args.data, allow_pickle=True)
-    meta = json.loads(str(data["meta"]))
+    # Backward compat: accept both "meta" (Phase 1-9) and "metadata" (close_kalman builds)
+    meta_key = "meta" if "meta" in data.files else "metadata"
+    meta = json.loads(str(data[meta_key]))
     summary = " ".join(f"{k}={v}" for k, v in meta.items()
                        if k in ("window", "process_var", "measure_var",
                                 "rsi_period", "indicator", "tf_minutes",
@@ -155,6 +157,13 @@ def main():
 
     X_train, y_train = data["X_train"], data["y_train"]
     X_val, y_val = data["X_val"], data["y_val"]
+
+    # Backward compat: squeeze channel dim si X est 3D (batch, seq, 1)
+    # Chronos univariate attend (batch, seq_len) 2D
+    if X_train.ndim == 3 and X_train.shape[-1] == 1:
+        print(f"  [compat] squeezing X channel dim: {X_train.shape} -> {X_train.shape[:-1]}")
+        X_train = X_train.squeeze(-1)
+        X_val = X_val.squeeze(-1)
 
     has_extras = "extras_train" in data.files
     if has_extras:
