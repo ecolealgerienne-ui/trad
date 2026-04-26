@@ -77,7 +77,7 @@ Output : score [0, 1] = P(TP touché avant SL avant timeout)
 | **D — Multi-TF** (4) | 19 | trend_1h_slope (regression) | C 1h |
 | | 20 | trend_4h_slope | C 4h |
 | | 21 | vol_1h_zscore | V 1h |
-| | 22 | dist_vwap_daily_norm | OHLC + V daily |
+| | 22 | dist_open_daily_norm | OHLC daily (open de la journée UTC) |
 
 Groupe E (entropie / Hurst / PACF) reporté à itération 2 selon résultats.
 

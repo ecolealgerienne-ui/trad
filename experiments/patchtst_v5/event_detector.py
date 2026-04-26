@@ -69,7 +69,7 @@ def detect_events(
     trigger_patterns: list[str],
     pivot_distance: float,
     volume_threshold: float,
-    warmup_bars: int = 300,
+    warmup_bars: int = 400,
 ) -> pd.DataFrame:
     """Apply trigger logic and return one row per event."""
     n = len(features)
@@ -207,8 +207,10 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
                    help=f"|dist_camarilla_nearest_norm| threshold (default: {DEFAULT_PIVOT_DISTANCE} ATR)")
     p.add_argument("--volume-threshold", type=float, default=DEFAULT_VOLUME_THRESHOLD,
                    help=f"volume_zscore_20p > threshold (default: {DEFAULT_VOLUME_THRESHOLD})")
-    p.add_argument("--warmup-bars", type=int, default=300,
-                   help="Skip first N bars to avoid NaN warmup region (default: 300)")
+    p.add_argument("--warmup-bars", type=int, default=400,
+                   help="Skip first N bars to avoid NaN warmup region (default: 400). "
+                        "Doit couvrir vol_1h_zscore (288) + 96 bars lookback du dataset_builder "
+                        "= 384 minimum pour garantir aucun NaN dans les fenêtres extraites.")
     p.add_argument("--log-level", type=str, default="INFO", choices=["DEBUG", "INFO", "WARNING"])
     return p.parse_args(argv)
 

@@ -337,6 +337,17 @@ def _rolling_slope(series: np.ndarray, window: int) -> np.ndarray:
     return s.rolling(n).apply(_slope, raw=True).values
 
 
+def _daily_open(df: pd.DataFrame) -> np.ndarray:
+    """First Open of each UTC day, broadcasted back to 5min granularity.
+
+    Différent du VWAP session : capture où le prix est par rapport au point
+    d'ouverture quotidien, ancrage utile en intraday scalping.
+    """
+    daily_floor = df["timestamp"].dt.floor("1D")
+    df_tmp = pd.DataFrame({"open": df["open"].values, "day": daily_floor})
+    return df_tmp.groupby("day")["open"].transform("first").values
+
+
 def compute_multitf(df: pd.DataFrame, atr: np.ndarray) -> pd.DataFrame:
     """4 features multi-timeframe (1h et 4h) calculées sur le 5min directement."""
     c = df["close"].values
@@ -352,13 +363,13 @@ def compute_multitf(df: pd.DataFrame, atr: np.ndarray) -> pd.DataFrame:
     vol_1h_std = pd.Series(vol_1h).rolling(lookback_5m).std().values
     vol_1h_z = _safe_div(vol_1h - vol_1h_mean, vol_1h_std)
 
-    vwap_daily = _session_vwap(df, session_freq="1D")  # daily reset = même que session pour 5min crypto
+    daily_open = _daily_open(df)
 
     out = pd.DataFrame({
         "trend_1h_slope": trend_1h,
         "trend_4h_slope": trend_4h,
         "vol_1h_zscore": vol_1h_z,
-        "dist_vwap_daily_norm": _safe_div(c - vwap_daily, atr),
+        "dist_open_daily_norm": _safe_div(c - daily_open, atr),
     })
     return out.astype("float32")
 

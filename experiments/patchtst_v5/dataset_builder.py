@@ -61,7 +61,7 @@ CONTINUOUS_CHANNELS = [
     "dist_vwap_session_norm", "dist_camarilla_nearest_norm",
     "dist_poc_5d_norm", "dist_high_20p_norm", "dist_low_20p_norm",
     # Group D multi-TF (4)
-    "trend_1h_slope", "trend_4h_slope", "vol_1h_zscore", "dist_vwap_daily_norm",
+    "trend_1h_slope", "trend_4h_slope", "vol_1h_zscore", "dist_open_daily_norm",
 ]  # 19 continuous channels
 
 # Pattern channel presets
@@ -184,8 +184,10 @@ def chronological_split(
     # Purge: skip val events whose feature_idx < (last train event feature_idx + purge_bars)
     last_train_fi = feature_idx[train_idx[-1]]
     val_start = n_train_target
+    n_purged_train_val = 0
     while val_start < n and feature_idx[val_start] < last_train_fi + purge_bars:
         val_start += 1
+        n_purged_train_val += 1
 
     val_end = min(val_start + n_val_target, n)
     val_idx = np.arange(val_start, val_end)
@@ -195,13 +197,17 @@ def chronological_split(
 
     last_val_fi = feature_idx[val_idx[-1]]
     test_start = val_end
+    n_purged_val_test = 0
     while test_start < n and feature_idx[test_start] < last_val_fi + purge_bars:
         test_start += 1
+        n_purged_val_test += 1
     test_idx = np.arange(test_start, n)
 
     if len(test_idx) == 0:
         raise RuntimeError("Test split is empty after purge — relax --purge-bars or data too short")
 
+    logger.info("Purge embargo (%d bars): %d events skipped train→val, %d events skipped val→test",
+                purge_bars, n_purged_train_val, n_purged_val_test)
     return train_idx, val_idx, test_idx
 
 
