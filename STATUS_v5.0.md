@@ -3,8 +3,8 @@
 **Date** : 2026-04-26
 **Asset** : BTC (single asset, BTCUSD 5min)
 **Branche** : `claude/post-foundation-finetune-v14-PiOSL`
-**Statut global** : ❌ **CLÔTURÉ — ÉCHEC EMPIRIQUEMENT VALIDÉ**
-**Conclusion** : Mur OHLCV-only public confirmé sur 3 runs indépendants → **pivot v6 (données externes)**
+**Statut global** : 🟡 **v5.1 EN COURS — Contrastive Learning (avis expert externe 2026-04-26)**
+**Conclusion v5.0 phase 1** : Mur OHLCV-only confirmé sur 3 runs (top 1% precision 38.9-40.7%). Avant pivot v6, test piste expert : **Triplet Loss + Hard Negative Mining** pour forcer la séparation latente des hard negatives.
 **Approche précédente** : v4 = `experiments/foundation_finetune/` (clos Phase 14)
 
 ---
@@ -107,7 +107,11 @@ peut casser le plafond Phase 14. Si non → preuve que BTCUSD OHLCV seul est sat
 | 6 | `model.py` + `train.py` | PatchTST CI + boucle entraînement avec early stopping val AUC | ✅ | 2026-04-26 |
 | 7 | `evaluate.py` | Threshold sweep + top-K%% sweep + calibration + per-segment | ✅ | 2026-04-26 |
 | 8 | `backtest_realistic.py` | Backtest event-driven (Sharpe, MaxDD, Calmar, equity curves) | ✅ | 2026-04-26 |
-| 9 | Décision finale | Validation v5 / pivot v6 selon critères de succès | ✅ | 2026-04-26 |
+| 9 | Décision phase 1 | v5.0 → ÉCHEC, expansion v5.1 décidée par avis expert | ✅ | 2026-04-26 |
+| 10 | `model.py` refactor: expose encoder embedding | Split forward en encode() + classify() | ✅ | 2026-04-26 |
+| 11 | `train_contrastive.py` | Triplet Loss + Hard Negative Mining + BCE multi-task | ✅ | 2026-04-26 |
+| 12 | Run v5.1 + comparaison vs v5.0 | Validation contrastive vs binary classification | ⏳ | — |
+| 13 | Décision finale v5.1 | Si succès → industrialisation. Si échec → pivot v6 définitif | ⏳ | — |
 
 ---
 

@@ -137,12 +137,11 @@ class PatchTSTClassifier(nn.Module):
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: (batch, seq_len, n_channels) float32
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward jusqu'à l'embedding (avant classification head).
+
         Returns:
-            logits: (batch,) — apply sigmoid for probability
+            embedding: (batch, n_channels * d_model) — utilisable pour Triplet Loss / contrastive.
         """
         b, t, c = x.shape
         if t != self.seq_len:
@@ -173,9 +172,20 @@ class PatchTSTClassifier(nn.Module):
         x = x.mean(dim=1)
 
         # Reshape back to per-batch concat over channels: (batch, n_channels * d_model)
-        x = x.reshape(b, c * self.d_model)
+        return x.reshape(b, c * self.d_model)
 
-        return self.head(x).squeeze(-1)
+    def classify(self, embedding: torch.Tensor) -> torch.Tensor:
+        """Apply classification head on a precomputed embedding."""
+        return self.head(embedding).squeeze(-1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: (batch, seq_len, n_channels) float32
+        Returns:
+            logits: (batch,) — apply sigmoid for probability
+        """
+        return self.classify(self.encode(x))
 
 
 # ---------------------------------------------------------------------------
