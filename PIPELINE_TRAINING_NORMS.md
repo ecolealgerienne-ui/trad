@@ -1234,3 +1234,323 @@ def audit_outliers_missing(df, max_missing_pct=0.10, mahalanobis_alpha=0.001):
 ---
 
 **Section 5 fin.** Je continue avec Section 6 (Multicolinéarité) au prochain message si tu valides.
+
+---
+
+## Section 6 — Multicolinéarité
+
+### Principe général
+
+La **multicolinéarité** désigne la situation où une ou plusieurs features peuvent être prédites linéairement (ou approximativement) par les autres. Formellement, sur la matrice de design `X`, il existe une combinaison linéaire `Xβ ≈ 0` avec `β ≠ 0`.
+
+**Conséquences principales** :
+- **Modèles linéaires (OLS, Ridge, Logistic)** : les coefficients deviennent instables, sensibles à de petites variations des données, avec standard errors gonflés. L'interprétation devient impossible.
+- **Réseaux de neurones et transformers** : la capacité du modèle est gaspillée à modéliser de la redondance, le gradient signal est dilué, l'overfitting est facilité.
+- **Tree-based (XGBoost, RF)** : moins sensible à la multicolinéarité directe, mais les splits sont gaspillés sur des features quasi-redondantes, et le feature importance devient difficile à interpréter.
+
+📖 **Références** :
+- Belsley, Kuh, Welsch, *Regression Diagnostics: Identifying Influential Data and Sources of Collinearity* (Wiley, 1980) — référence canonique
+- Hastie, Tibshirani, Friedman, *Elements of Statistical Learning* (Springer, 2009), chap. 3 et 18
+- James, Witten, Hastie, Tibshirani, *Introduction to Statistical Learning* (Springer, 2013), chap. 3.3.3
+
+### Distinction importante : corrélation vs dépendance
+
+⚠️ **Corrélation linéaire (Pearson) capture seulement les dépendances linéaires**. Deux features peuvent être :
+- Indépendantes en Pearson mais fortement dépendantes (ex: `y = x²`)
+- Quasi-orthogonales en Pearson mais redondantes via une transformation simple (ex: `y = ln(x)`)
+
+✅ **Best practice** : utiliser conjointement Pearson **et** Spearman (rank-based) **et** mutual information pour capturer non-linéarités.
+
+### Méthodes de détection
+
+#### 6.1 Matrice de corrélation
+
+```python
+import pandas as pd
+
+corr_pearson = X.corr(method='pearson')   # linéaire
+corr_spearman = X.corr(method='spearman') # rank-based, capture monotones non-linéaires
+
+# Identifier paires redondantes
+def find_correlated_pairs(corr_matrix, threshold=0.95):
+    pairs = []
+    for i in range(len(corr_matrix)):
+        for j in range(i+1, len(corr_matrix)):
+            if abs(corr_matrix.iloc[i, j]) > threshold:
+                pairs.append((corr_matrix.columns[i], corr_matrix.columns[j],
+                              corr_matrix.iloc[i, j]))
+    return pairs
+```
+
+**Seuils heuristiques** :
+- `|r| < 0.7` : OK
+- `|r| ∈ [0.7, 0.9]` : à surveiller, problème pour modèles linéaires
+- `|r| > 0.9` : redondance, considérer drop ou regularisation forte
+
+#### 6.2 Variance Inflation Factor (VIF)
+
+Le VIF d'une feature `j` mesure combien sa variance est gonflée par sa corrélation avec les autres features :
+`VIF_j = 1 / (1 - R²_j)` où `R²_j` est le R² de la régression de `X_j` sur toutes les autres features.
+
+```python
+from statsmodels.stats.outliers_influence import variance_inflation_factor
+import numpy as np
+
+def compute_vif(X):
+    """X: DataFrame de features. Retourne VIF par colonne."""
+    vif = pd.Series(
+        [variance_inflation_factor(X.values, i) for i in range(X.shape[1])],
+        index=X.columns
+    )
+    return vif.sort_values(ascending=False)
+```
+
+**Seuils canoniques** :
+- `VIF < 5` : OK
+- `VIF ∈ [5, 10]` : multicolinéarité modérée, surveiller
+- `VIF > 10` : multicolinéarité sévère, action requise
+- `VIF = ∞` : redondance parfaite (colonne combinaison linéaire exacte)
+
+✅ **Avantage** : détecte la multicolinéarité **multivariée** (groupes de features collectivement redondantes), pas juste les paires.
+
+❌ **Limite** : coûteux (régression OLS pour chaque feature), à appliquer après filtrage initial.
+
+#### 6.3 Condition number
+
+```python
+import numpy as np
+
+def condition_number(X):
+    """Condition number de X^T X (sur features standardisées)."""
+    X_std = (X - X.mean()) / X.std()
+    eigenvalues = np.linalg.eigvalsh(X_std.cov())
+    return np.sqrt(eigenvalues.max() / eigenvalues.min())
+```
+
+**Seuils** (Belsley) :
+- `κ < 30` : OK
+- `κ ∈ [30, 100]` : multicolinéarité modérée
+- `κ > 100` : multicolinéarité forte, instabilité numérique
+
+#### 6.4 Mutual Information (non-linéaire)
+
+```python
+from sklearn.feature_selection import mutual_info_regression
+
+def mutual_info_pairs(X):
+    """Matrice de mutual information par paire (capture dépendances non-linéaires)."""
+    n = X.shape[1]
+    mi = np.zeros((n, n))
+    for i in range(n):
+        mi[i, :] = mutual_info_regression(X.values, X.iloc[:, i])
+    return pd.DataFrame(mi, index=X.columns, columns=X.columns)
+```
+
+✅ **Capture non-linéarités** que Pearson rate.
+❌ **Coûteux** sur grands datasets.
+
+#### 6.5 Hierarchical clustering of features
+
+Pour visualiser des **groupes** de features redondantes :
+
+```python
+from scipy.cluster.hierarchy import linkage, fcluster
+from scipy.spatial.distance import squareform
+
+def cluster_features(X, threshold=0.3):
+    """Clustering hiérarchique basé sur 1-|corr|."""
+    corr = X.corr().abs()
+    distance_matrix = 1 - corr
+    condensed = squareform(distance_matrix.values, checks=False)
+    Z = linkage(condensed, method='average')
+    clusters = fcluster(Z, t=threshold, criterion='distance')
+    return pd.Series(clusters, index=X.columns)
+```
+
+✅ **Pratique** : visualiser dendrogramme pour identifier groupes redondants.
+
+### Mitigation — stratégies
+
+#### 6.6 Selection / dropping
+
+✅ **Stratégie la plus simple** : dans chaque paire fortement corrélée, garder la feature **plus interprétable** ou **plus stable temporellement** (Sections 2 et 4).
+
+```python
+def drop_correlated(X, threshold=0.95, priority='variance'):
+    """Drop une feature de chaque paire avec |corr| > threshold.
+    Garde celle de plus grande variance par défaut."""
+    corr = X.corr().abs()
+    upper = corr.where(np.triu(np.ones(corr.shape), k=1).astype(bool))
+    to_drop = set()
+    for col in upper.columns:
+        for row in upper.index:
+            if upper.loc[row, col] > threshold:
+                # Drop la feature avec moins de variance
+                if X[row].var() < X[col].var():
+                    to_drop.add(row)
+                else:
+                    to_drop.add(col)
+    return X.drop(columns=list(to_drop))
+```
+
+#### 6.7 PCA (Principal Component Analysis)
+
+Crée des composantes orthogonales par construction.
+
+```python
+from sklearn.decomposition import PCA
+
+def reduce_with_pca(X_train, X_test, n_components=None, variance_threshold=0.95):
+    """PCA fitted on train only, applied to test."""
+    pca = PCA(n_components=n_components or variance_threshold)
+    X_train_pca = pca.fit_transform(X_train)
+    X_test_pca = pca.transform(X_test)
+    return X_train_pca, X_test_pca, pca
+```
+
+✅ **Avantage** : élimine totalement la multicolinéarité par construction.
+❌ **Inconvénients** :
+- Perte d'**interprétabilité** (composantes = combinaisons linéaires)
+- Hypothèse de linéarité (variantes : kernel PCA pour non-linéaire)
+- Sensible à la normalisation préalable (PCA SANS standardisation = dominée par features à grande variance)
+
+#### 6.8 Regularization L1 (Lasso) — sélection automatique
+
+La régularisation L1 met à zéro les coefficients des features redondantes/non-informatives.
+
+```python
+from sklearn.linear_model import LassoCV
+
+lasso = LassoCV(cv=5).fit(X_train, y_train)
+selected = X_train.columns[lasso.coef_ != 0]
+```
+
+✅ **Avantage** : sélection automatique parcimonieuse.
+❌ **Limite** : pour des features fortement corrélées, Lasso choisit **arbitrairement** une seule (la sélection est instable).
+
+#### 6.9 Regularization L2 (Ridge) — stabilise sans éliminer
+
+```python
+from sklearn.linear_model import RidgeCV
+
+ridge = RidgeCV(alphas=np.logspace(-3, 3, 20)).fit(X_train, y_train)
+```
+
+✅ **Avantage** : garde toutes les features mais réduit l'instabilité des coefficients due à la multicolinéarité.
+✅ **Recommandé** quand toutes les features sont théoriquement informatives.
+
+#### 6.10 Elastic Net — compromis L1+L2
+
+```python
+from sklearn.linear_model import ElasticNetCV
+
+en = ElasticNetCV(cv=5, l1_ratio=[0.1, 0.5, 0.7, 0.9, 0.95]).fit(X_train, y_train)
+```
+
+✅ **Sélection groupée** : si plusieurs features corrélées sont importantes, Elastic Net les garde toutes (contrairement à Lasso qui choisit une seule).
+
+📖 Zou & Hastie, *Regularization and variable selection via the elastic net*, JRSS B 2005.
+
+### Décision arbre — par type d'algorithme
+
+```
+Quel modèle utilises-tu ?
+├── Tree-based (XGBoost, RF, LGBM)
+│   ├── Multicolinéarité MODÉRÉMENT problématique
+│   ├── ✅ Détecter pour interprétation des feature importance
+│   ├── ✅ Drop redondances pour économiser splits
+│   └── ❌ Pas de PCA (perte interprétabilité, peu de gain)
+│
+├── Modèles linéaires (OLS, Logistic, Ridge, Lasso)
+│   ├── 🚨 CRITIQUE
+│   ├── ✅ VIF systématique avant entraînement
+│   ├── ✅ Drop si VIF > 10 OU regularization Ridge/ElasticNet
+│   └── ❌ Lasso seul si features corrélées importantes (sélection instable)
+│
+├── Neural network classique (MLP, CNN, RNN)
+│   ├── Modérément problématique (BatchNorm aide)
+│   ├── ✅ Drop redondances évidentes (|r| > 0.95)
+│   └── ✅ Dropout + L2 weight decay
+│
+├── Transformer time series
+│   ├── ⚠️ Channel-independent (PatchTST) : sensible si trop de channels redondants
+│   ├── ⚠️ Attention complète : moins sensible mais coûteux
+│   ├── ✅ Drop redondances avant patching
+│   └── ✅ RevIN aide pour la stabilité
+│
+└── K-NN / SVM RBF
+    ├── 🚨 CRITIQUE (distance dominée par features corrélées)
+    └── ✅ PCA recommandé OU drop systématique
+```
+
+### Cas spécifique en finance — alerte
+
+⚠️ **Piège classique en finance** : plusieurs indicateurs techniques (RSI, Stochastic, Williams %R, etc.) sont mathématiquement des transformations différentes du même signal de momentum sous-jacent.
+
+Pearson entre RSI et Stoch sur returns crypto/forex est typiquement `0.85-0.95`. Les inclure tous comme features distinctes est **trompeur** : on ne fait qu'amplifier le bruit autour d'un signal latent unique.
+
+✅ **Best practice** : avant de stacker des indicateurs, calculer la matrice de corrélation et appliquer **clustering hiérarchique**. Souvent, 3-4 clusters distincts émergent (momentum, volatility, volume, structure). Garder un représentant par cluster.
+
+### Anti-patterns
+
+❌ **Ne pas mesurer la multicolinéarité** "parce que tree-based n'est pas sensible" : même tree-based bénéficie d'un dataset propre.
+
+❌ **Drop arbitraire dans une paire corrélée** sans considérer stationnarité (Section 2) ou drift (Section 4).
+
+❌ **PCA sur features non-standardisées** : dominée par la feature de plus grande variance.
+
+❌ **Calculer VIF / corrélation sur tout le dataset** sans split train-only : leakage subtil.
+
+❌ **Lasso sur features très corrélées** sans warning utilisateur : sélection arbitraire et instable.
+
+❌ **Croire que la multicolinéarité = corrélation Pearson** : Pearson rate les dépendances non-linéaires, utiliser aussi Spearman / MI.
+
+### Test automatique avant entraînement
+
+```python
+def audit_multicollinearity(X_train, vif_threshold=10, corr_threshold=0.95,
+                             condition_threshold=100):
+    """Audit complet multicolinéarité train-only."""
+    issues = []
+
+    # 1. Corrélations fortes
+    corr_pairs = find_correlated_pairs(X_train.corr(), threshold=corr_threshold)
+    if corr_pairs:
+        issues.append(f"Paires |r|>{corr_threshold}: {len(corr_pairs)}")
+
+    # 2. VIF
+    vif = compute_vif(X_train)
+    high_vif = vif[vif > vif_threshold]
+    if len(high_vif):
+        issues.append(f"Features VIF > {vif_threshold}: {high_vif.to_dict()}")
+
+    # 3. Condition number
+    cn = condition_number(X_train)
+    if cn > condition_threshold:
+        issues.append(f"Condition number = {cn:.1f} > {condition_threshold}")
+
+    if issues:
+        print("⚠️ MULTICOLINÉARITÉ DÉTECTÉE:")
+        for issue in issues:
+            print(f"  - {issue}")
+        print("→ Reconsidérer la sélection de features (Section 6)")
+    return len(issues) == 0
+```
+
+### Références complémentaires
+
+📖 Belsley, Kuh, Welsch, *Regression Diagnostics* (Wiley, 1980) — référence livre canonique
+📖 Hastie, Tibshirani, Friedman, *Elements of Statistical Learning* (Springer, 2009), chap. 3.4 sur shrinkage
+📖 James et al., *Introduction to Statistical Learning* (Springer, 2013), chap. 3.3.3
+📖 Zou & Hastie, *Regularization and variable selection via the elastic net*, JRSS B 67, 2005
+📖 Stone, *Cross-validatory choice and assessment of statistical predictions*, JRSS B 36, 1974 — sélection par CV
+📖 Tibshirani, *Regression Shrinkage and Selection via the Lasso*, JRSS B 58, 1996
+
+---
+
+**Section 6 fin** — Partie I (Données) terminée.
+
+Je continue avec **Partie II — Labels** au prochain message si tu valides :
+- Section 7 : Engineering des labels
+- Section 8 : Cost-sensitive labeling
+- Section 9 : Class imbalance
