@@ -104,8 +104,8 @@ peut casser le plafond Phase 14. Si non → preuve que BTCUSD OHLCV seul est sat
 | 4 | `pivot_labeler.py` | Triple Barrier ATR-adaptatif (TP/SL/timeout) sur chaque event | ✅ | 2026-04-26 |
 | 5 | `dataset_builder.py` | Extraction fenêtres 96×N par event → NPZ train/val/test | ✅ | 2026-04-26 |
 | 6 | `model.py` + `train.py` | PatchTST CI + boucle entraînement avec early stopping val AUC | ✅ | 2026-04-26 |
-| 7 | `evaluate.py` | Métriques (precision/recall/AUC top-N%) + comparaison Phase 14 | ⏳ | — |
-| 8 | `backtest_realistic.py` | Backtest event-driven (taker fees, slippage, sizing) | ⏳ | — |
+| 7 | `evaluate.py` | Threshold sweep + top-K%% sweep + calibration + per-segment | ✅ | 2026-04-26 |
+| 8 | `backtest_realistic.py` | Backtest event-driven (Sharpe, MaxDD, Calmar, equity curves) | ✅ | 2026-04-26 |
 | 9 | Décision finale | Validation v5 / pivot v6 selon critères de succès | ⏳ | — |
 
 Légende : ⏳ Pending — 🔄 In progress — ✅ Done — ❌ Blocked

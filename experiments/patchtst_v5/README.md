@@ -118,8 +118,8 @@ Volume estimé d'events : ~500-3000 sur période test (à mesurer en step explor
 | `dataset_builder.py` | Extraction fenêtres 96×N + labels → NPZ train/val/test | feature_builder + pivot_labeler | ✅ |
 | `model.py` | Architecture PatchTST channel-independent (RevIN + transformer encoder) | torch | ✅ |
 | `train.py` | Training + early stopping val AUC + class weights + AMP | model + NPZ | ✅ |
-| `evaluate.py` | Métriques (precision/recall/AUC top-N%) | trained model + test NPZ | ⏳ |
-| `backtest_realistic.py` | Backtest event-driven avec frais/slippage | predictions + OHLC future | ⏳ |
+| `evaluate.py` | Threshold sweep + top-K%% sweep + calibration + per-segment | predictions_test.npz | ✅ |
+| `backtest_realistic.py` | Backtest event-driven (Sharpe, MaxDD, Calmar, equity curves) | predictions_test.npz | ✅ |
 
 ---
 
