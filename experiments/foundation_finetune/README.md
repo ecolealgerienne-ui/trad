@@ -186,16 +186,112 @@ Le test "Chronos bat ou égale FLKS" est donc déjà non-trivial dans ce setup. 
 | 11 | Eval per sub-step k=0..5 | | ⚠️ | révèle baseline biaisé |
 | 12 | Switch indicator → MACD | | ⚠️ | Pearson 0.802, sous FLKS de 17 pp |
 | **13** | **Skip connection bypass tokenizer** | | ✅ **WINNER** | **Chronos ≥ FLKS, gain à k=0/1** |
+| **14** | **Pivot Kalman(close) + meta-labeling** | 2026-04 | ⚠️ **CLÔTURÉ** | **Wall confirmé : OHLC-derived insuffisant pour transition detection** |
 
 ---
 
-## Pour aller plus loin
+## Phase 14 (post-clôture) — Pivot Kalman(close) + Meta-Labeling
 
-- **Cible vraiment prédictive** : remplacer `label_continuous` par les returns futurs `(close[t+30] - close[t]) / close[t]` → vrai test de prédiction au-delà du Kalman
-- **AQ-KF (Q adaptatif)** : `--adaptive` testé, à comparer avec Standard FLKS
-- **Multi-indicateur dans X** : MOIRAI ou architecture custom dual-encoder pour multi-channel input
-- **Chronos plus gros** : `chronos-t5-small` (46M, 5× plus gros) — gain marginal probable, plafond Pareto
-- **Sortie probabiliste** : récupérer la distribution Student-t de Chronos au lieu d'une régression scalaire — utile pour la quantification d'incertitude
+**Date** : 2026-04-26
+**Statut** : ⚠️ **PROJET CLOS — Plafond structurel confirmé (5e validation projet)**
+**Branche** : `claude/resume-foundation-finetuning-PRT1w`
+
+### Reformulation et setup
+
+Pivot vers **γ partiel** : changer la cible de `Kalman(indicateur)` → `Kalman(close)`. Hypothèse : forcer le modèle à reconstruire le close depuis l'indicateur brise la tautologie.
+
+3 spécialistes Chronos T5-tiny + LoRA entraînés indépendamment (BTC 5min, fenêtre 96, 5 epochs) :
+- RSI(22) → Kalman_RTS(close) slope : **Val Pearson 0.595**
+- MACD-hist(8/42/9) → idem : **Val Pearson 0.594**
+- CCI(32) → idem : **Val Pearson 0.545**
+
+**Anti-leakage RTS** : Kalman calculé per-split (train, train+val, full).
+
+### Mesure d'accord inter-modèle (test set 131k)
+
+| Paire | Pearson(yhat) | Sign Agreement | Error Jaccard | Complémentarité |
+|---|---|---|---|---|
+| RSI vs MACD | **0.859** | 0.877 | 0.574 | 0.123 |
+| RSI vs CCI | **0.883** | 0.894 | 0.618 | 0.106 |
+| MACD vs CCI | **0.826** | 0.879 | 0.591 | 0.121 |
+
+**Vote majoritaire DirMatch = 77.94%** vs **mean individual = 77.15%** → **gain +0.79%**.
+TREND uniquement : +1.40%. RANGE_LOW_VOL : +0.73%.
+
+→ Les 3 indicateurs capturent le même ~60% du signal, gain de fusion marginal.
+
+### Meta-labeling Triple Barrier (López de Prado)
+
+22 features engineerées :
+- **Primaires per-modèle** (9) : yhat, |yhat|, accel = yhat[t]−yhat[t−1]
+- **Cross-modèle dérivées** (6) : confidence_spread/min/max/mean, n_models_agree, time_since_flip
+- **Orthogonales** (3) : volume_ratio, volume_spike, atr_normalized
+- **Régime** (4) : ts_score, vc_score, regime_0/1/2 one-hot
+
+Triple Barrier : TP=0.5%, SL=0.2%, T_max=6 bars. Direction = sign(mean(yhat)).
+
+### Résultats meta-classifieur (test 131k)
+
+**Logistic Regression** (top 1% / 5% / 10%) :
+- Precision 37.0% / 28.8% / 25.0%
+- Coefficient dominant : **`atr_normalized` +1.077** (5× le suivant)
+- Ordre top 6 : ATR, vc_score, mag_rsi, volume_spike, confidence_min, regime_1
+
+**XGBoost** (mêmes valeurs) :
+- Precision 30.8% / 25.7% / 22.3% — **bat pas Logistic** (signal essentiellement linéaire)
+- Importance gain top 5 : ATR (212), vc_score (139), volume_ratio (43), mag_rsi (43), volume_spike (39)
+
+**v2 (TP=0.8%/SL=0.4%/T=12)** : précision quasi-identique (31.5% / 24.0% / 20.4%). Plafond confirmé.
+
+### Stratification par régime
+
+| Régime | % du test | Top 10% selected | Precision |
+|---|---|---|---|
+| RANGE_LOW_VOL | 71.5% | 5% (~700) | **6.7-9.2%** (≈ baseline aléatoire) |
+| RANGE_HIGH_VOL | 26.1% | 89% (~11k) | 22-25% |
+| TREND | 2.5% | 50% (~1.7k) | 24-28% |
+
+→ Le modèle **ignore RANGE_LOW_VOL**, concentre tout sur RANGE_HIGH_VOL + TREND.
+
+### Le mur (5e confirmation projet)
+
+Précision plafonne à **30-37% top 1%** quel que soit le tuning. Break-even taker = 86% (TP=0.5/SL=0.2), maker = 57%. **Inaccessible avec ce signal.**
+
+**Findings empiriques** :
+
+| # | Finding | Cohérence avec phases projet |
+|---|---|---|
+| 1 | ATR/volatilité = feature DOMINANTE pour transition detection | Nouveau (sur ce setup) |
+| 2 | Sorties Chronos LoRA des 3 indicateurs quasi-équivalentes (XGBoost gain ~35 pour toutes) | Phase 2.13 confirmé (5e fois) |
+| 3 | best_lag = +1 sur les 3 → autocorr 0.93 plafond | Phase 1-9, 2.10 confirmé |
+| 4 | XGBoost ne bat pas Logistic → pas d'interactions cachées | Phase 2.18 confirmé |
+| 5 | Volume/ATR features > yhat des indicateurs | Phase 2.7 confirmé |
+
+Citation Phase 2.18 (toujours valide) :
+> *"Pipeline scientifiquement correct, signal primary lacks alpha. Pearson 0.5 / Precision 44% est ce que la prédiction directionnelle d'indicateurs techniques peut donner sur crypto. Documenté depuis 20 ans en littérature."*
+
+### Verdict de clôture
+
+Le projet `foundation_finetune` est **scientifiquement validé** comme démonstration empirique rigoureuse de la limite des indicateurs OHLC-derived pour la prédiction directionnelle crypto 5min. Le pivot Kalman(close) + meta-labeling n'a **pas brisé le mur** documenté depuis Phase 2.13.
+
+**Vrai gain de cette phase** : démonstration empirique propre que **ATR + features volume > yhat des indicateurs** pour cette tâche. Validation que les leviers d'amélioration ne sont PAS dans l'architecture (Chronos, XGBoost, etc.) mais dans **les données orthogonales** non-dérivées du close.
+
+### Livrables Phase 14
+
+| Fichier | Rôle |
+|---|---|
+| `build_dataset_close_kalman.py` | Build datasets indicator → Kalman(close) slope, anti-leakage per-split |
+| `analyze_specialists_close_kalman.py` | Analyse comparative inter-modèles (pairwise + triple agreement) |
+| `build_meta_dataset.py` | Triple Barrier labels + 22 features engineerées |
+| `train_meta_classifier.py` | Logistic + XGBoost meta + coverage-precision tables |
+
+### Pourquoi ne pas continuer ce projet
+
+1. ✋ **Tunings restants** (filtrer RANGE_LOW_VOL, autres TP/SL) : gain attendu marginal (+5-10%), toujours sous break-even
+2. ✋ **Architectures alternatives** (PatchTST, iTransformer, Crossformer) : XGBoost a déjà confirmé pas d'interactions cachées
+3. ✋ **Fusion embedding** (3×256-dim Chronos → MLP) : Pearson 0.86 entre prédictions = redondance déjà mesurée
+
+Toutes ces options coûteraient du temps pour confirmer le même résultat. **Le mur est dans les données, pas dans le modèle.**
 
 ---
 

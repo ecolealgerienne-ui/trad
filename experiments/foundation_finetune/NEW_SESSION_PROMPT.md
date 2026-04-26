@@ -1,211 +1,170 @@
-# Prompt d'ouverture — Nouvelle session post-foundation_finetune
+# NEW SESSION PROMPT — Post-Foundation-Finetune (clôture v14)
 
-## Contexte du projet
+**Branche précédente clôturée** : `claude/resume-foundation-finetuning-PRT1w`
+**Dernière mise à jour** : 2026-04-26
+**Statut projet `foundation_finetune`** : ✅ **CLÔTURÉ** (Phase 14, mur documenté)
 
-Tu reprends une session après le projet `experiments/foundation_finetune/`
-(branche `claude/merge-and-prepare-session-KkpbU`). Ce projet a testé
-**Chronos LoRA** comme modèle de fondation séries temporelles pour
-reconstruire en causal la pente Oracle Kalman du RSI/MACD.
+---
 
-## Contraintes héritées (toujours valides)
+## TL;DR de ce que tu reprends
 
-- **Lecture seule absolue** sur :
-  - `src/`
-  - `experiments/slope_improvement/` (projet clos précédent)
-- **Toute extension** va dans `experiments/foundation_finetune/` ou un
-  nouveau module dédié
-- **Réutiliser l'existant** : il y a beaucoup de fonctions dans
-  `src/signal_processing/core.py` (FLKS, Kalman 30min, sub-step,
-  prepare_features_and_labels_progressive, etc.) — toujours auditer
-  avant de coder
+Le projet `experiments/foundation_finetune/` est **clos**. 14 phases ont rigoureusement démontré que **les indicateurs OHLC-derived (RSI/MACD/CCI) ne suffisent pas** pour la prédiction directionnelle crypto 5min, quel que soit le modèle (Chronos LoRA, XGBoost, Logistic), la cible (Kalman indicateur ou Kalman close), ou la formulation (régression Pearson ou méta-labeling Triple Barrier).
 
-## Findings principaux à connaître
+**Le mur est dans les données, pas dans l'architecture.**
 
-### 1. Le RSI 5min seul plafonne à Pearson 0.78 / lag=-1 contre Oracle Kalman 5min
+Voir `experiments/foundation_finetune/README.md` Phase 14 pour le détail empirique de la dernière clôture.
 
-- Autocorr lag-1 de la pente Oracle = **0.93** → tout modèle causal qui
-  reproduit le passé proche est borné à Pearson ≤ 0.93
-- Enrichir avec MACD/CCI (Phase 6) ou Volume/ATR (Phase 8) → **0 gain**
-- Cible décalée Oracle[t+1] (Phase 7) → Pearson chute à 0.54 → **proxy
-  learning confirmé**
+---
 
-### 2. FLKS sub-step + skip connection = pipeline gagnant (Phase 13)
+## Findings empiriques exploitables pour la suite
 
-Architecture finale Chronos LoRA :
+| Finding | Référence | Implication |
+|---|---|---|
+| RSI/CCI/MACD = 3 projections du même signal latent (Pearson 0.86 inter-modèles) | Phase 2.13, Phase 14 | Pas la peine d'en mettre 3, 1 suffit |
+| ATR + volume_spike + vc_score >> yhat indicateurs (XGBoost gain 212 vs 35) | Phase 14 | **Volume/volatilité = vrais signaux exploitables** |
+| best_lag = +1 systémique = plafond autocorr 0.93 | Phase 1-9, 2.10, 14 | Pearson causal plafonne ~0.6-0.7 quel que soit le modèle |
+| Précision méta-labeling sur indicateurs plafonne 30-44% top 1% | Phase 2.18, 14 | **Inaccessible pour trading sans changement structurel** |
+| RANGE_LOW_VOL (71% du test crypto récent) non-tradable | Phase 14 | 71% des données diluent les métriques |
+| FLKS sub-step + skip connection = winner pour reconstruction Kalman | Phase 13 | Setup gardé en référence si on revient sur tâche similaire |
+
+---
+
+## Direction recommandée pour la prochaine session
+
+### **Option A — Données vraiment orthogonales (priorité haute)**
+
+C'est la **SEULE direction non encore testée** par le projet. Les 5 confirmations du mur viennent toutes de l'utilisation de signaux **dérivés du close 5min** (RSI/MACD/CCI, volume spike, ATR — ces 2 derniers étant partiellement dérivés). Pour casser le mur, il faut des signaux **vraiment indépendants** :
+
+| Signal | Source | Difficulté d'accès | Pourquoi orthogonal |
+|---|---|---|---|
+| **Funding rate** Binance perpétuels | API Binance gratuite | ★ facile | Reflète positionnement net longs/shorts (pas dans OHLCV) |
+| **Open Interest** | API Binance/Bybit | ★ facile | Volume notional ouvert (pas dans OHLCV) |
+| **Liquidations** (long/short) | Coinglass / Hyperdash | ★★ moyen | Évènements forcés, pas d'overlap OHLC |
+| **OBV** (On-Balance Volume) | Calculable depuis volume | ★ trivial | Cumul volume signé, partiellement orthogonal |
+| **Bid-Ask Spread** | Données tick-level Binance | ★★★ difficile | Microstructure pure |
+| **Order Book Depth** | Snapshots WebSocket | ★★★ difficile | Pression d'achat/vente directe |
+| **Sentiment social** | LunarCrush / Santiment | ★★ moyen + payant | Externe au marché |
+
+**Recommandation pragmatique** : commencer par **funding rate + OBV** (gratuits, faciles). Setup proposé :
+- Récupérer funding rate BTCUSDT-PERP (8h granularité, interpoler à 5min)
+- Calculer OBV depuis le volume du CSV existant
+- Refaire un mini-pipeline meta-labeling avec uniquement ces features (PAS les indicateurs)
+- Test : ces 2 features seules battent-elles les 22 features de Phase 14 ?
+
+Si OUI → on a une vraie direction.
+Si NON → confirme que crypto 5min n'a pas l'alpha exploitable dans ces signaux gratuits.
+
+### Option B — Changement de timeframe (15min, 30min, 1h)
+
+Le projet a tout fait en 5min. Les indicateurs sont peut-être trop bruyants à cette résolution. Tester les mêmes setups en 30min ou 1h pourrait :
+- Réduire le bruit microstructurel
+- Augmenter le signal-to-noise
+- Naturellement réduire le nombre de trades
+
+**Mais** : ne casse pas la redondance fondamentale RSI/MACD/CCI. Probablement plafond à un Pearson légèrement supérieur, mais même mur structurel.
+
+**Coût** : faible (rebuild datasets + relance training). **Gain attendu** : marginal mais réel.
+
+### Option C — Pivot vers détection de régime + stratégie conditionnelle
+
+Au lieu de prédire direction/transition, classifier le **régime de marché** et avoir des stratégies différentes par régime. Le projet a déjà un classifieur régime (CNN-LSTM, 83% accuracy 2026-01-14, voir CLAUDE.md). On peut :
+- Construire une stratégie qui ne trade qu'en TREND (où la précision est meilleure : 28%)
+- Backtester avec maker fees + frais réalistes
+- Voir si même un signal faible peut être profitable avec bonne sélection de timing
+
+**Pas un nouveau modèle** : exploitation des findings existants.
+
+### Option D — Backtest réaliste du signal actuel
+
+Le projet n'a JAMAIS backtesté de manière rigoureuse :
+- Maker fees (0.02% Binance) au lieu de taker (0.04%)
+- Slippage réaliste
+- Position sizing dynamique par confiance
+- Stop dynamique adaptatif (pas TP/SL fixes)
+
+Avec Phase 14 top 10% à precision 25%, est-ce qu'avec une excellente exécution ça peut être positif ? **Inconnu** car jamais simulé proprement.
+
+---
+
+## Architecture du repo (lecture seule absolue sur certains modules)
 
 ```
-slope_progressive[t-24:t+1]  ──→ Chronos T5 (perd amplitude par mean-scaling local)
-                                                                  │
-slope_progressive[t] z-score global (skip connection)  ──→ extras │
-                                                                  ▼
-                                                       cat → MLP → ŷ
+trad/
+├── src/                              ← LECTURE SEULE (indicateurs, filtres, data utils)
+├── experiments/
+│   ├── slope_improvement/            ← LECTURE SEULE (projet AQ-KF clos)
+│   └── foundation_finetune/          ← LECTURE SEULE (clos Phase 14)
+│       ├── README.md                 ← Référence complète des 14 phases
+│       └── ...
+└── data_trad/                        ← Données CSV BTCUSD_all_5m.csv etc.
 ```
 
-**Sans skip connection** : Chronos atteint Pearson 0.80 sur MACD (sous
-FLKS pur 0.98 de 17 pp).
-**Avec skip connection** : Chronos atteint Pearson 0.96-0.99 par k,
-**bat FLKS pur aux premiers sous-pas (k=0, k=1)**, égale aux derniers.
+**Tout nouveau projet** : créer `experiments/<nom_nouveau>/` avec son propre README.
 
-### 3. Bug architectural Chronos (à connaître pour tout futur backbone TS)
+---
 
-Le tokenizer Chronos applique un mean-scaling **local par séquence**
-avant binning quantile → **l'amplitude absolue est perdue**. Pour
-reproduire un estimateur paramétrique amplitude-dépendant (Kalman
-smoothed), il faut **passer la valeur brute en skip connection** au
-MLP head, pas seulement via le backbone.
+## Données disponibles
 
-Cela vaut pour Chronos, Lag-Llama, et probablement aussi MOIRAI/TimesFM
-(à vérifier selon backbone choisi).
+| Asset | Fichier | Période | Granularité |
+|---|---|---|---|
+| BTC | `data_trad/BTCUSD_all_5m.csv` | 2017-08 → 2026-01 | 5min |
+| ETH | `data_trad/ETHUSD_all_5m.csv` | idem | 5min |
+| BNB | `data_trad/BNBUSD_all_5m.csv` | idem | 5min |
+| ADA | `data_trad/ADAUSD_all_5m.csv` | idem | 5min |
+| LTC | `data_trad/LTCUSD_all_5m.csv` | idem | 5min |
 
-### 4. Caveat « FLKS auto-prédit »
+Datasets Foundation Finetune (laissés en place pour référence) :
+- `data/foundation/{rsi,macd,cci}_btc_close_kalman_5min.npz` (~26 MB chacun)
+- `data/foundation/meta_btc_close_kalman.npz` (~50 MB, 22 features + Triple Barrier labels)
 
-Le baseline `slope_progressive[t]` dé-normalisé atteint Pearson 0.94-0.99
-contre `label_continuous` parce que :
-- La cible **est** l'Oracle Kalman RTS smoothed
-- FLKS converge vers RTS smoothed quand lag → ∞
-- → corrélation quasi-tautologique par construction
+Modèles entraînés (laissés en place) :
+- `models/specialist_{rsi,macd,cci}/chronos-t5-tiny_lora.pt`
+- `models/meta_classifier/{logistic_regression.pkl,xgboost.json}`
 
-Pour vraiment tester un pouvoir prédictif au-delà du Kalman, il faut
-une **cible indépendante de Kalman** : returns futurs, prix futurs,
-PnL trading.
+---
 
-## Architecture du module foundation_finetune
+## Question d'amorçage pour la nouvelle session
 
-```
-experiments/foundation_finetune/
-├── README.md                              # synthèse complète
-├── NEW_SESSION_PROMPT.md                  # ce fichier
-├── __init__.py
-│
-├── build_dataset.py                       # RSI 5min brut → slope past
-├── build_dataset_fusion.py                # + MACD/CCI slopes (rejected)
-├── build_dataset_volume_atr.py            # + Volume/ATR (rejected)
-├── build_dataset_future.py                # cible Oracle[t+1]-Oracle[t]
-├── build_dataset_flks_substep.py          # FLKS sub-step (FINAL, --indicator)
-│
-├── baselines.py                           # identity, raw_slope, ma_slope_K
-├── model.py                               # ChronosRegressor + LoRA + extras
-├── train.py                               # MSE loss + early stopping
-├── evaluate.py                            # comparison vs baselines + lag CCF
-├── evaluate_per_substep.py                # décompose par step_k=0..5
-```
+Avant de coder quoi que ce soit, l'utilisateur doit choisir parmi :
 
-### Réutilisation projet (lecture seule)
+1. **(A) Funding rate + OBV** : ajouter données vraiment orthogonales et tester si elles débloquent la précision méta-labeling
+2. **(B) Timeframe 30min/1h** : refaire le pipeline existant à granularité plus large
+3. **(C) Régime conditionnel** : backtester avec stratégie TREND-only
+4. **(D) Backtest réaliste** : simulation propre du signal Phase 14 avec maker fees + slippage
+5. **(E) Autre direction** : que l'utilisateur précise
 
-| Module | Fonctions clés |
-|---|---|
-| `src/data_utils.py` | `load_crypto_data` |
-| `src/indicators.py` | `calculate_rsi`, `calculate_macd`, `calculate_cci`, `calculate_atr` |
-| `src/filters.py` | `kalman_filter` (RTS) |
-| `src/signal_processing/core.py` | `load_csv`, `resample_ohlcv`, `prepare_features_and_labels_progressive`, `compute_progressive_slopes`, `forward_filter_30m`, `compute_slopes_test1/2`, `split_train_val_test`, `normalize_features`, `make_sequences` |
-| `src/constants.py` | constantes du projet (RSI_PERIOD, KALMAN_*, etc.) |
+**Ne pas commencer à coder avant que l'utilisateur ait tranché.**
 
-## Pipeline reproductible final
+---
 
-```bash
-# Setup deps (Python 3.13 + CUDA 12.4 testé sur RTX 4070 SUPER)
-pip install chronos-forecasting peft pykalman
+## Conventions à respecter (héritées du projet)
 
-# 1. Build dataset MACD 30min FLKS sub-step + skip connection (~5 min)
-python experiments/foundation_finetune/build_dataset_flks_substep.py --indicator macd
+1. **Per-asset processing** pour calcul indicateurs (CLAUDE.md règle stricte)
+2. **Anti-leakage per-split** pour cibles non-causales (Kalman RTS, etc.)
+3. **Méthodologie Logistic baseline OBLIGATOIRE** avant XGBoost/MLP/PatchTST (Phase 2.17)
+4. **Stratification par régime** dans toutes les analyses (CNN-LSTM régime classifier disponible)
+5. **Walk-forward validation** ou purge/embargo si chevauchement temporel des labels
+6. **Lecture seule absolue** sur `src/` et `experiments/{slope_improvement,foundation_finetune}/`
+7. **Conventions commit** : message clair + `https://claude.ai/code/session_<id>` à la fin
+8. **Stop hook** : commit + push à chaque ajout de fichier
 
-# 2. Train Chronos LoRA + extras (~6 min GPU)
-python experiments/foundation_finetune/train.py \
-    --mode lora --epochs 5 --batch-size 256 --num-workers 4 \
-    --data data/foundation/macd_btc_5min_flks_substep.npz \
-    --output-dir models/foundation_finetune_macd_flks_v2
+---
 
-# 3. Eval per sub-step Chronos vs FLKS pur
-python experiments/foundation_finetune/evaluate_per_substep.py \
-    --data data/foundation/macd_btc_5min_flks_substep.npz \
-    --ckpt models/foundation_finetune_macd_flks_v2/chronos-t5-tiny_lora_fusion.pt
-```
+## Si l'utilisateur reste indécis
 
-Durée totale : ~15-20 min GPU.
+Recommandation par défaut : **Option A — Funding rate + OBV**.
 
-## Résultats finaux à mémoriser
+Raison : c'est la **SEULE des 4 options qui peut RÉELLEMENT casser le mur des 5 confirmations**. Les options B, C, D ne font qu'exploiter ou contourner le signal existant — elles ne ramènent pas de nouvelle information dans le système.
 
-**MACD 30min, test set, 131,753 samples, Chronos-t5-tiny LoRA r=8 + skip connection** :
+Si A ne casse pas le mur (precision toujours plafonnée à 30-40% top 1%), alors le verdict définitif est : **les données crypto disponibles publiquement (OHLCV + funding + OI + OBV) ne contiennent pas l'alpha pour cette tâche**. Et là il faudra accepter, soit pivoter vers exécution (option D) soit changer fondamentalement de problème (autre asset class, autre horizon, autre KPI).
 
-| k | Chronos sc% | Chronos Pearson | FLKS sc% | FLKS Pearson | Δ Pearson |
-|---|---|---|---|---|---|
-| 0 | **90.55%** | **0.9571** | 89.92% | 0.9503 | **+0.0068** |
-| 1 | **93.63%** | **0.9792** | 93.34% | 0.9772 | **+0.0020** |
-| 2 | 94.13% | 0.9828 | 94.21% | 0.9827 | +0.0001 |
-| 3 | 94.62% | 0.9848 | 94.64% | 0.9851 | -0.0003 |
-| 4 | 95.00% | 0.9868 | 95.03% | 0.9871 | -0.0003 |
-| 5 | 95.40% | 0.9888 | 95.41% | 0.9891 | -0.0003 |
+---
 
-→ **Chronos bat FLKS aux 2 premiers sous-pas, égale aux 4 derniers.**
+## Contexte cumulé du projet (pour brief expert)
 
-## Pistes non explorées (documentées dans README §"Pour aller plus loin")
+Le projet est mature : 14 phases sur `foundation_finetune` + multiples phases en amont (1-9, 2.x avec sous-phases jusqu'à 2.18). **Aucune des architectures** (CNN-LSTM, Chronos LoRA, XGBoost, Random Forest, Logistic) n'a réussi à dépasser **~44% precision top 1%** sur prédiction directionnelle / transition detection à partir d'OHLC-derived features uniquement.
 
-- **Cible vraiment prédictive** (returns futurs, prix futurs, PnL)
-- **AQ-KF Q adaptatif** : `--adaptive` (testé partiellement)
-- **Architecture multi-channel** : dual-encoder (Chronos + small CNN/Transformer pour features auxiliaires)
-- **Chronos-t5-small** (46M, 5× plus gros) ou autre backbone (TimesFM, MOIRAI)
-- **Sortie probabiliste** (Student-t native de Chronos) au lieu de régression scalaire
+Citation finale Phase 2.18 (validée par expert finance, toujours valide en Phase 14) :
+> *"Le pipeline est scientifiquement correct mais le signal primaire des indicateurs techniques manque d'alpha exploitable. Documenté depuis 20 ans dans la littérature académique (Zohren 2019, Krauss 2017, López de Prado 2018)."*
 
-## Si la nouvelle session porte sur...
-
-### Tester un nouveau modèle de fondation TS
-
-L'infra `model.py` / `train.py` / `evaluate.py` est conçue spécifiquement
-pour Chronos. Pour un autre backbone :
-- Si HuggingFace transformers compatible (TimesFM, certaines variantes Lag-Llama)
-  → adapter `model.py` (`ChronosRegressor` → `<New>Regressor`) en gardant la
-  même interface (forward `(x_rsi, extras=None)`, `extra_dim` paramètre)
-- **Vérifier d'abord** si le tokenizer du nouveau modèle préserve l'amplitude
-  ou pas (test simple : passer une fenêtre constante × 2 et voir si la sortie
-  varie). Si non préservée, **garder la skip connection** comme dans Chronos
-  Phase 13.
-- Réutiliser `train.py` / `evaluate.py` / `evaluate_per_substep.py` tels quels
-  (formats de checkpoint et dataset compatibles)
-
-### Tester une nouvelle cible
-
-- Modifier `build_dataset_flks_substep.py` pour générer `y_<split>` à partir
-  d'une cible custom (returns futurs, PnL, etc.)
-- L'infra `train.py` / `evaluate.py` reste compatible
-- Comparer vs FLKS pur (qui n'aurait plus de baseline biaisé sur cible
-  indépendante du Kalman)
-
-### Migrer en production
-
-- Utiliser le ckpt `models/foundation_finetune_macd_flks_v2/chronos-t5-tiny_lora_fusion.pt`
-- Pour l'inférence live : il faut maintenir le pipeline FLKS sub-step en
-  temps réel + le ckpt Chronos
-- Latence : ~10-20 ms par prédiction sur GPU, davantage sur CPU
-
-### Nouveau projet sans rapport
-
-- Garder cette branche close, démarrer sur une nouvelle branche
-  `claude/<nom-nouveau-projet>`
-- Référencer `README.md` et ce prompt comme contexte hérité
-
-## Instructions de continuité
-
-1. **Lire d'abord** `experiments/foundation_finetune/README.md` (synthèse 13 phases)
-2. **Si nouveau test sur ce module** : ajouter à `experiments/foundation_finetune/`,
-   ne JAMAIS toucher `src/` ou `experiments/slope_improvement/`
-3. **Convention de commit** : message clair, `https://claude.ai/code/session_<id>` à la fin
-4. **Stop hook** : commit + push à chaque ajout de fichier
-5. **Auditer avant de coder** : utiliser `Agent` (Explore) pour inventorier
-   les scripts/fonctions existants
-
-## Question à clarifier au début de la nouvelle session
-
-L'utilisateur précisera son intention. Reformuler explicitement :
-
-- **(a) Tester un nouveau backbone TS** sur la même tâche FLKS sub-step
-  → quel backbone, quel critère de succès ?
-- **(b) Tester une nouvelle cible** (cible vraiment prédictive)
-  → laquelle, sur quelles données ?
-- **(c) Architecture multi-channel** (multi-feature input)
-  → quelles features, quel backbone ?
-- **(d) Migration production** (utiliser ckpt existant en live)
-  → quel use case ?
-- **(e) Autre projet** (foundation_finetune comme contexte uniquement)
-  → quel objectif ?
-
-Ne pas commencer à coder avant que l'objectif soit clair.
+Le **vrai débat** pour la suite : faut-il chercher l'alpha dans des **données nouvelles** (orthogonales) ou accepter que l'alpha disponible publiquement n'est pas suffisant pour cette stratégie et **pivoter vers une autre stratégie** (stat arb, market making, mean reversion court-terme avec exécution maker, etc.) ?
