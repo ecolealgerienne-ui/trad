@@ -65,12 +65,13 @@ peut casser le plafond Phase 14. Si non → preuve que BTCUSD OHLCV seul est sat
 - Patches : **8 patches × 12 bougies** chacun (1h)
 
 ### Label
-- **Triple Barrier Method** adaptée pivots :
-  - **TP** : Camarilla `H1` (long) / `L1` (short) — niveaux 0.3-0.7% typiques en 5min crypto
-  - **SL** : `bas_signal − 0.5×ATR` (long) ou symétrique
+- **Triple Barrier Method ATR-adaptatif** :
+  - **TP** : `entry ± 1.0 × ATR` (long/short) — adapte à la volatilité du moment, contrairement à Camarilla qui produit des labels incohérents par régime
+  - **SL** : `bas_signal − 0.5×ATR` (long) ou `haut_signal + 0.5×ATR` (short)
   - **Time barrier** : 24 bougies (2h max)
   - **Label = 1** si TP touché avant SL et avant timeout
-  - **Label = 0** sinon
+  - **Label = 0** sinon (SL ou timeout négatif)
+  - Camarilla reste comme **feature input** (`dist_camarilla_nearest_norm`), le modèle peut l'utiliser pour décider
 - Cible binaire (pas régression)
 
 ### Sampling
@@ -100,7 +101,7 @@ peut casser le plafond Phase 14. Si non → preuve que BTCUSD OHLCV seul est sat
 | 1 | `experiments/patchtst_v5/README.md` | Création structure + README projet | ✅ | 2026-04-26 |
 | 2 | `feature_builder.py` | Calcul des 22 channels (A+B+C+D) depuis CSV BTCUSD | ✅ | 2026-04-26 |
 | 3 | `event_detector.py` | Détection des triggers (pattern + niveau + volume) | ✅ | 2026-04-26 |
-| 4 | `pivot_labeler.py` | Calcul Camarilla pivots + Triple Barrier sur chaque event | ⏳ | — |
+| 4 | `pivot_labeler.py` | Triple Barrier ATR-adaptatif (TP/SL/timeout) sur chaque event | ✅ | 2026-04-26 |
 | 5 | `dataset_builder.py` | Extraction fenêtres 96×22 par event → NPZ | ⏳ | — |
 | 6 | `train_patchtst.py` | Entraînement PatchTST CI + classifieur binaire | ⏳ | — |
 | 7 | `evaluate.py` | Métriques (precision/recall/AUC top-N%) + comparaison Phase 14 | ⏳ | — |
@@ -164,6 +165,9 @@ Acquis empiriques validés sur 14 phases. v5.0 ne doit pas les retester :
 | 2026-04-26 | Cible binaire TP-vs-non plutôt que régression | Aligné scalping pratique : "ce trade est-il profitable ?" |
 | 2026-04-26 | Camarilla pivots préférés à Classic/Fibonacci | Niveaux plus serrés (H1/L1 typique 0.3-0.7%) adaptés 5min |
 | 2026-04-26 | Aucune feature continue type RSI/MACD/CCI | Phase 2.13 prouve la redondance, ROI nul |
+| 2026-04-26 | Drop CDLDOJI du trigger event_detector | Pattern non-directionnel (13.84% bars), signal s'auto-annule en somme signée |
+| 2026-04-26 | Drop volume_zscore filter (option C) | Le modèle apprend à filtrer les trades parasites via prediction confidence — pas un filtre dur |
+| 2026-04-26 | Triple Barrier ATR-adaptatif au lieu de Camarilla H1/L1 | Camarilla pur produit labels incohérents par régime de volatilité (trop tight en bull, trop loose en range). ATR adapte par construction. Camarilla reste comme **input feature** |
 
 ---
 

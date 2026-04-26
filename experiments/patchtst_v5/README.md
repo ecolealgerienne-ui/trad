@@ -81,16 +81,19 @@ Output : score [0, 1] = P(TP touché avant SL avant timeout)
 
 Groupe E (entropie / Hurst / PACF) reporté à itération 2 selon résultats.
 
-### Triple Barrier
+### Triple Barrier (ATR-adaptatif)
 
 | Paramètre | Valeur | Justification |
 |---|---|---|
-| TP (long) | Camarilla H1 | Niveau classique scalping, ~0.3-0.7% en 5min crypto |
-| TP (short) | Camarilla L1 | Symétrique |
+| TP (long) | `entry + 1.0 × ATR` | Adapte à vol du moment (Camarilla pur produit labels incohérents par régime) |
+| TP (short) | `entry − 1.0 × ATR` | Symétrique |
 | SL (long) | `bas_signal − 0.5×ATR` | Stop sous swing low + buffer ATR |
 | SL (short) | `haut_signal + 0.5×ATR` | Symétrique |
 | Time barrier | 24 bougies (2h) | Horizon scalping classique |
+| RR ratio | ~2:1 | Win rate breakeven ~36% incluant frais 0.04% × 2 |
 | Label | binaire | 1 si TP avant SL avant timeout, sinon 0 |
+
+Camarilla reste comme **feature input** (`dist_camarilla_nearest_norm`), pas comme target.
 
 ### Trigger (event detector)
 
@@ -111,7 +114,7 @@ Volume estimé d'events : ~500-3000 sur période test (à mesurer en step explor
 | `README.md` | Documentation projet (ce fichier) | — | ✅ |
 | `feature_builder.py` | Calcul des 22 channels depuis CSV BTCUSD | TA-Lib, pandas | ✅ |
 | `event_detector.py` | Scan historique → liste des triggers | feature_builder | ✅ |
-| `pivot_labeler.py` | Camarilla pivots + Triple Barrier par event | OHLC future | ⏳ |
+| `pivot_labeler.py` | Triple Barrier ATR-adaptatif par event | OHLC future | ✅ |
 | `dataset_builder.py` | Extraction fenêtres 96×22 + labels → NPZ | feature_builder + pivot_labeler | ⏳ |
 | `model.py` | Architecture PatchTST channel-independent | torch, transformers | ⏳ |
 | `train.py` | Training + early stopping + class weights | model + NPZ | ⏳ |
