@@ -45,6 +45,15 @@ def load_split(npz_path: Path) -> dict:
     }
 
 
+def filter_by_direction(data: dict, direction_filter: str) -> dict:
+    """Filter all arrays in data dict by direction (long=+1, short=-1, both=no filter)."""
+    if direction_filter == "both":
+        return data
+    target = 1 if direction_filter == "long" else -1
+    mask = data["direction"] == target
+    return {k: v[mask] for k, v in data.items()}
+
+
 def build_features(X: np.ndarray, mode: str, agg_window: int = 24) -> np.ndarray:
     """X shape (n, T, C). Retourne (n, F) features 2D."""
     n, T, C = X.shape
@@ -93,6 +102,9 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     p.add_argument("--feature-mode", type=str, default="last-plus-aggs",
                    choices=["last-only", "last-plus-aggs"])
     p.add_argument("--agg-window", type=int, default=24)
+    p.add_argument("--direction-filter", type=str, default="both",
+                   choices=["long", "short", "both"],
+                   help="Filter events by direction (long=+1, short=-1, both=no filter)")
     p.add_argument("--n-estimators", type=int, default=500)
     p.add_argument("--max-depth", type=int, default=4)
     p.add_argument("--learning-rate", type=float, default=0.05)
@@ -117,6 +129,18 @@ def main(argv: Iterable[str] | None = None) -> int:
     train = load_split(args.train)
     val = load_split(args.val)
     test = load_split(args.test)
+
+    if args.direction_filter != "both":
+        n_train0, n_val0, n_test0 = len(train["y"]), len(val["y"]), len(test["y"])
+        train = filter_by_direction(train, args.direction_filter)
+        val = filter_by_direction(val, args.direction_filter)
+        test = filter_by_direction(test, args.direction_filter)
+        logger.info("Direction filter: %s | train %d → %d | val %d → %d | test %d → %d",
+                    args.direction_filter,
+                    n_train0, len(train["y"]),
+                    n_val0, len(val["y"]),
+                    n_test0, len(test["y"]))
+
     logger.info("Train: %d (Class1=%.1f%%) | Val: %d | Test: %d",
                 len(train["y"]), 100 * train["y"].mean(), len(val["y"]), len(test["y"]))
 

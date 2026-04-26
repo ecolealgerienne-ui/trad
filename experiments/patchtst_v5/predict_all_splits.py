@@ -32,7 +32,7 @@ from typing import Iterable
 import numpy as np
 import xgboost as xgb
 
-from .train_xgboost import load_split, build_features, feature_names
+from .train_xgboost import load_split, build_features, feature_names, filter_by_direction
 
 logger = logging.getLogger("patchtst_v5.predict_all_splits")
 
@@ -48,6 +48,9 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     p.add_argument("--feature-mode", type=str, default="last-plus-aggs",
                    choices=["last-only", "last-plus-aggs"])
     p.add_argument("--agg-window", type=int, default=24)
+    p.add_argument("--direction-filter", type=str, default="both",
+                   choices=["long", "short", "both"],
+                   help="Filter events by direction (long=+1, short=-1, both=no filter)")
     p.add_argument("--log-level", type=str, default="INFO", choices=["DEBUG", "INFO", "WARNING"])
     return p.parse_args(argv)
 
@@ -70,6 +73,11 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     for split_name, npz_path in [("train", args.train), ("val", args.val), ("test", args.test)]:
         data = load_split(npz_path)
+        if args.direction_filter != "both":
+            n0 = len(data["y"])
+            data = filter_by_direction(data, args.direction_filter)
+            logger.info("Direction filter %s on %s: %d → %d",
+                        args.direction_filter, split_name, n0, len(data["y"]))
         X = build_features(data["X"], args.feature_mode, args.agg_window)
         d = xgb.DMatrix(X, feature_names=fnames)
         scores = booster.predict(d, iteration_range=(0, booster.best_iteration + 1))
