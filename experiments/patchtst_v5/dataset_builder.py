@@ -52,28 +52,29 @@ DEFAULT_WINDOW = 96  # 96 × 5min = 8h lookback (PatchTST plan: 8 patches × 12 
 # Channel presets — selectable via CLI --channel-preset
 
 # v5.0 hybrid: bar shape + microstructure + levels + multi-TF + statistical
+# v5.4 fix: features price-scale normalisées /close ; vol features z-scorées rolling
 HYBRID_CHANNELS = [
     # Group A continuous (5)
     "body_ratio", "upper_wick_ratio", "lower_wick_ratio",
     "close_location_value", "gap_norm",
-    # Group B microstructure (5)
-    "corwin_schultz_spread", "garman_klass_vol", "yang_zhang_vol",
+    # Group B microstructure (5) — vols z-scorées (stationnaires)
+    "corwin_schultz_spread_z", "garman_klass_vol_z", "yang_zhang_vol_z",
     "amihud_illiq", "volume_zscore_20p",
     # Group C levels (5)
     "dist_vwap_session_norm", "dist_camarilla_nearest_norm",
     "dist_poc_5d_norm", "dist_high_20p_norm", "dist_low_20p_norm",
-    # Group D multi-TF (4)
-    "trend_1h_slope", "trend_4h_slope", "vol_1h_zscore", "dist_open_daily_norm",
+    # Group D multi-TF (4) — slopes en % du prix (stationnaires)
+    "trend_1h_slope_pct", "trend_4h_slope_pct", "vol_1h_zscore", "dist_open_daily_norm",
     # Group E statistical signatures (3)
     "permutation_entropy_50p", "hurst_dfa_100p", "pacf_lag5",
-]  # 22 channels (v5.0 paradigm)
+]  # 22 channels (v5.0 paradigm + drift fixes)
 
 # v5.2 indicators-only: pure classical indicators TA-Lib + statistical
 INDICATORS_ONLY_CHANNELS = [
     # Group I momentum multi-horizon (3)
     "rsi_7", "rsi_14", "rsi_21",
-    # Group I MACD (2)
-    "macd_line", "macd_signal_line",
+    # Group I MACD (2) — normalisés /close (% du prix)
+    "macd_line_pct", "macd_signal_pct",
     # Group I CCI (1)
     "cci_20",
     # Group I Stochastic (2)
@@ -82,15 +83,15 @@ INDICATORS_ONLY_CHANNELS = [
     "williams_r_14",
     # Group I Trend strength (3)
     "adx_14", "di_plus_14", "di_minus_14",
-    # Group I Volatility (2)
-    "atr_14_norm", "bbands_pct_b_20",
-    # Group I Volume (2)
-    "obv_slope_20", "mfi_14",
+    # Group I Volatility (2) — atr z-scoré rolling
+    "atr_14_norm_z", "bbands_pct_b_20",
+    # Group I Volume (2) — obv slope z-scoré
+    "obv_slope_z", "mfi_14",
     # Group E statistical (2 — Hurst/Entropy comme indicateurs avancés)
     "hurst_dfa_100p", "permutation_entropy_50p",
     # Group B volume z-score (1 — réutilisé depuis microstructure)
     "volume_zscore_20p",
-]  # 19 channels (v5.2 paradigm)
+]  # 19 channels (v5.2 paradigm + drift fixes)
 
 CHANNEL_PRESETS = {
     "v5_hybrid": HYBRID_CHANNELS,

@@ -45,6 +45,10 @@ TREND_1H_BARS = 12   # 12 × 5min = 1h
 TREND_4H_BARS = 48   # 48 × 5min = 4h
 VOL_1H_LOOKBACK_HOURS = 24
 
+# Rolling z-score window pour rendre stationnaires les features de volatilité
+# (capturé sur ~1.7 jour de 5min ; assez long pour capturer plusieurs régimes intra-fenêtre)
+ROLLING_ZSCORE_WINDOW = 500
+
 # Group E — Statistical signatures
 PERM_ENTROPY_WINDOW = 50
 PERM_ENTROPY_M = 3       # Bandt-Pompe order (6 patterns)
@@ -92,6 +96,15 @@ def load_ohlcv_csv(path: Path) -> pd.DataFrame:
 def _safe_div(num: np.ndarray, den: np.ndarray) -> np.ndarray:
     """Division with denominator clipped to EPS to avoid Inf/NaN."""
     return num / np.where(np.abs(den) < EPS, EPS, den)
+
+
+def _rolling_zscore(series: np.ndarray, window: int) -> np.ndarray:
+    """Z-score sur fenêtre rolling. Stationarise des features non-stationnaires
+    (volatilité absolue qui drift entre régimes de marché)."""
+    s = pd.Series(series)
+    mean = s.rolling(window).mean().values
+    std = s.rolling(window).std().values
+    return _safe_div(series - mean, std)
 
 
 def compute_atr(df: pd.DataFrame, window: int = ATR_WINDOW) -> np.ndarray:
@@ -202,6 +215,11 @@ def compute_microstructure(df: pd.DataFrame) -> pd.DataFrame:
 
     yz_vol = _yang_zhang(o, h, l, c, YANG_ZHANG_WINDOW)
 
+    # Z-score rolling pour stationariser (vols absolues drift entre régimes)
+    gk_vol_z = _rolling_zscore(gk_vol, ROLLING_ZSCORE_WINDOW)
+    yz_vol_z = _rolling_zscore(yz_vol, ROLLING_ZSCORE_WINDOW)
+    cs_spread_z = _rolling_zscore(cs_spread, ROLLING_ZSCORE_WINDOW)
+
     with np.errstate(divide="ignore", invalid="ignore"):
         ret = np.abs(np.log(_safe_div(c, prev_c)))
     dollar_vol = c * v
@@ -212,9 +230,9 @@ def compute_microstructure(df: pd.DataFrame) -> pd.DataFrame:
     vol_z = _safe_div(v - vol_mean, vol_std)
 
     out = pd.DataFrame({
-        "corwin_schultz_spread": cs_spread,
-        "garman_klass_vol": gk_vol,
-        "yang_zhang_vol": yz_vol,
+        "corwin_schultz_spread_z": cs_spread_z,
+        "garman_klass_vol_z": gk_vol_z,
+        "yang_zhang_vol_z": yz_vol_z,
         "amihud_illiq": amihud,
         "volume_zscore_20p": vol_z,
     })
@@ -487,6 +505,10 @@ def compute_multitf(df: pd.DataFrame, atr: np.ndarray) -> pd.DataFrame:
     trend_1h = _rolling_slope(c, TREND_1H_BARS)
     trend_4h = _rolling_slope(c, TREND_4H_BARS)
 
+    # Normalisation par close → slope en % du prix (stationnaire entre régimes)
+    trend_1h_pct = _safe_div(trend_1h, c) * 100.0
+    trend_4h_pct = _safe_div(trend_4h, c) * 100.0
+
     # Volume horaire = somme glissante 12 bougies, z-scored sur 24h (288 bougies 5min)
     vol_1h = pd.Series(v).rolling(TREND_1H_BARS).sum().values
     lookback_5m = VOL_1H_LOOKBACK_HOURS * TREND_1H_BARS  # 288
@@ -497,8 +519,8 @@ def compute_multitf(df: pd.DataFrame, atr: np.ndarray) -> pd.DataFrame:
     daily_open = _daily_open(df)
 
     out = pd.DataFrame({
-        "trend_1h_slope": trend_1h,
-        "trend_4h_slope": trend_4h,
+        "trend_1h_slope_pct": trend_1h_pct,
+        "trend_4h_slope_pct": trend_4h_pct,
         "vol_1h_zscore": vol_1h_z,
         "dist_open_daily_norm": _safe_div(c - daily_open, atr),
     })
@@ -531,8 +553,10 @@ def compute_pure_indicators(df: pd.DataFrame, atr: np.ndarray) -> pd.DataFrame:
     rsi_14 = talib.RSI(c, timeperiod=14)
     rsi_21 = talib.RSI(c, timeperiod=21)
 
-    # MACD (2 channels: line + signal)
+    # MACD (2 channels: line + signal) — normalisés par close (% du prix, stationnaires)
     macd_line, macd_signal, _ = talib.MACD(c, fastperiod=12, slowperiod=26, signalperiod=9)
+    macd_line_pct = _safe_div(macd_line, c) * 100.0
+    macd_signal_pct = _safe_div(macd_signal, c) * 100.0
 
     # CCI (1)
     cci_20 = talib.CCI(h, l, c, timeperiod=20)
@@ -548,28 +572,30 @@ def compute_pure_indicators(df: pd.DataFrame, atr: np.ndarray) -> pd.DataFrame:
     di_plus = talib.PLUS_DI(h, l, c, timeperiod=14)
     di_minus = talib.MINUS_DI(h, l, c, timeperiod=14)
 
-    # ATR normalisé (1) — adimensionnel ATR/Close (différent de atr_14 raw du parquet)
+    # ATR normalisé puis z-scoré rolling (vol relative au passé récent, stationnaire)
     atr_norm = _safe_div(atr, c)
+    atr_norm_z = _rolling_zscore(atr_norm, ROLLING_ZSCORE_WINDOW)
 
-    # Bollinger Bands %B (1) — position relative dans les bandes
+    # Bollinger Bands %B (1) — position relative dans les bandes (déjà borné [0,1])
     bb_upper, bb_middle, bb_lower = talib.BBANDS(c, timeperiod=20, nbdevup=2.0, nbdevdn=2.0)
     bb_pct_b = _safe_div(c - bb_lower, bb_upper - bb_lower)
 
-    # On-Balance Volume slope (1) — OBV est cumulatif, on prend la pente sur 20 bars
+    # On-Balance Volume slope (1) — z-scoré pour stationarité (cumulatif → drift d'échelle)
     obv = talib.OBV(c, v)
     obv_slope_20 = _rolling_slope(obv, 20)
+    obv_slope_z = _rolling_zscore(obv_slope_20, ROLLING_ZSCORE_WINDOW)
 
-    # Money Flow Index (1)
+    # Money Flow Index (1) — déjà borné 0-100, OK
     mfi_14 = talib.MFI(h, l, c, v, timeperiod=14)
 
     out = pd.DataFrame({
-        # Momentum multi-horizon (3)
+        # Momentum multi-horizon (3) — déjà bornés 0-100
         "rsi_7": rsi_7,
         "rsi_14": rsi_14,
         "rsi_21": rsi_21,
-        # MACD (2)
-        "macd_line": macd_line,
-        "macd_signal_line": macd_signal,
+        # MACD (2) — normalisés en % du prix
+        "macd_line_pct": macd_line_pct,
+        "macd_signal_pct": macd_signal_pct,
         # CCI (1)
         "cci_20": cci_20,
         # Stoch (2)
@@ -581,11 +607,11 @@ def compute_pure_indicators(df: pd.DataFrame, atr: np.ndarray) -> pd.DataFrame:
         "adx_14": adx_14,
         "di_plus_14": di_plus,
         "di_minus_14": di_minus,
-        # Volatility (2)
-        "atr_14_norm": atr_norm,
+        # Volatility (2) — atr z-scoré pour stationnarité
+        "atr_14_norm_z": atr_norm_z,
         "bbands_pct_b_20": bb_pct_b,
-        # Volume (2)
-        "obv_slope_20": obv_slope_20,
+        # Volume (2) — obv slope z-scoré
+        "obv_slope_z": obv_slope_z,
         "mfi_14": mfi_14,
     })
     return out.astype("float32")
