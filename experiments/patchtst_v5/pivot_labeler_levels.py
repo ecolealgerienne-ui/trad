@@ -35,6 +35,33 @@ logger = logging.getLogger("patchtst_v5.pivot_labeler_levels")
 PIVOT_COLS = ["h1", "h2", "h3", "h4", "l1", "l2", "l3", "l4"]
 
 
+def compute_camarilla_5min(timestamp: pd.Series, high: np.ndarray,
+                            low: np.ndarray, close: np.ndarray) -> pd.DataFrame:
+    """Recalcule les 8 niveaux Camarilla causaux et les broadcast au 5min."""
+    df = pd.DataFrame({
+        "timestamp": pd.to_datetime(timestamp, utc=True, errors="coerce"),
+        "high": high, "low": low, "close": close,
+    }).dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+
+    daily = df.set_index("timestamp")[["high", "low", "close"]].resample("1D").agg(
+        {"high": "max", "low": "min", "close": "last"}
+    )
+    rng = daily["high"] - daily["low"]
+    prev_close = daily["close"].shift(1)
+    prev_rng = rng.shift(1)
+    levels = pd.DataFrame({
+        "h1": prev_close + prev_rng * 1.1 / 12,
+        "h2": prev_close + prev_rng * 1.1 / 6,
+        "h3": prev_close + prev_rng * 1.1 / 4,
+        "h4": prev_close + prev_rng * 1.1 / 2,
+        "l1": prev_close - prev_rng * 1.1 / 12,
+        "l2": prev_close - prev_rng * 1.1 / 6,
+        "l3": prev_close - prev_rng * 1.1 / 4,
+        "l4": prev_close - prev_rng * 1.1 / 2,
+    })
+    return levels.reindex(df.set_index("timestamp").index, method="ffill").reset_index(drop=True)
+
+
 def find_neighbor_levels(entry: float, levels: np.ndarray) -> tuple[float, float]:
     """Trouve niveau immédiatement au-dessus et en-dessous de entry."""
     valid = levels[~np.isnan(levels)]
@@ -243,11 +270,13 @@ def main(argv: Iterable[str] | None = None) -> int:
                         datefmt="%H:%M:%S")
 
     logger.info("Loading features: %s", args.features)
-    cols = ["high", "low", "close"] + PIVOT_COLS
-    features = pd.read_parquet(args.features, columns=cols)
+    features = pd.read_parquet(args.features, columns=["timestamp", "high", "low", "close"])
     high = features["high"].values.astype("float64")
     low = features["low"].values.astype("float64")
     close = features["close"].values.astype("float64")
+    logger.info("Computing Camarilla pivots (causal, prev day H/L/C → ffill 5min) ...")
+    pivot_levels = compute_camarilla_5min(features["timestamp"], high, low, close)
+    features = pd.concat([features.reset_index(drop=True), pivot_levels], axis=1)
 
     logger.info("Loading events: %s", args.events)
     events = pd.read_parquet(args.events)
