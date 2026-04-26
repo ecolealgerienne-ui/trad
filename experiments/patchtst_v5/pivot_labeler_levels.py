@@ -62,20 +62,34 @@ def compute_camarilla_5min(timestamp: pd.Series, high: np.ndarray,
     return levels.reindex(df.set_index("timestamp").index, method="ffill").reset_index(drop=True)
 
 
-def find_neighbor_levels(entry: float, levels: np.ndarray) -> tuple[float, float]:
-    """Trouve niveau immédiatement au-dessus et en-dessous de entry."""
-    valid = levels[~np.isnan(levels)]
-    above_mask = valid > entry
-    below_mask = valid < entry
-    above = valid[above_mask].min() if above_mask.any() else np.nan
-    below = valid[below_mask].max() if below_mask.any() else np.nan
-    return above, below
+def find_neighbor_levels(entry: float, levels: np.ndarray) -> tuple[float, float, float, float]:
+    """Trouve les 4 niveaux pertinents autour de entry:
+      - above: niveau immédiatement au-dessus (1er resistance)
+      - below: niveau immédiatement en-dessous (1er support)
+      - beyond_above: niveau suivant au-dessus de 'above' (2e resistance)
+      - beyond_below: niveau suivant en-dessous de 'below' (2e support)
+    """
+    valid = np.sort(levels[~np.isnan(levels)])
+    above_levels = valid[valid > entry]
+    below_levels = valid[valid < entry]
+
+    above = above_levels[0] if len(above_levels) >= 1 else np.nan
+    below = below_levels[-1] if len(below_levels) >= 1 else np.nan
+    beyond_above = above_levels[1] if len(above_levels) >= 2 else np.nan
+    beyond_below = below_levels[-2] if len(below_levels) >= 2 else np.nan
+    return above, below, beyond_above, beyond_below
 
 
 def label_events(events: pd.DataFrame, features: pd.DataFrame,
                  high: np.ndarray, low: np.ndarray, close: np.ndarray,
-                 time_barrier: int, sl_buffer_atr: float, fees_pct: float) -> pd.DataFrame:
-    """Triple Barrier avec niveaux Camarilla comme TP/SL dynamiques."""
+                 time_barrier: int, sl_mode: str, sl_buffer_atr: float,
+                 fees_pct: float) -> pd.DataFrame:
+    """Triple Barrier avec niveaux Camarilla comme TP/SL dynamiques.
+
+    sl_mode:
+      - 'immediate-with-buffer': SL = pivot immédiat ± sl_buffer_atr × ATR (mix)
+      - 'beyond': SL = niveau Camarilla SUIVANT au-delà du pivot immédiat (pur pivot)
+    """
     n_events = len(events)
     n_bars = len(high)
     direction_arr = events["direction"].values.astype("int8")
@@ -110,29 +124,43 @@ def label_events(events: pd.DataFrame, features: pd.DataFrame,
         entry = signal_close[k]
         atr_t = signal_atr[k]
 
-        above, below = find_neighbor_levels(entry, levels_at_event[k])
+        above, below, beyond_above, beyond_below = find_neighbor_levels(entry, levels_at_event[k])
 
-        # Direction LONG → TP au-dessus, SL en dessous
-        # Direction SHORT → TP en-dessous, SL au-dessus
+        # TP toujours = pivot immédiat dans la direction du trade (pure pivot)
         if direction > 0:
-            tp_lvl = above
-            sl_lvl = below
+            tp = above
         else:
-            tp_lvl = below
-            sl_lvl = above
+            tp = below
 
-        if np.isnan(tp_lvl) or np.isnan(sl_lvl):
+        if np.isnan(tp):
             n_skipped_no_target += 1
             skipped_reason[k] = "NO_PIVOT_TARGET"
             continue
 
-        # SL avec buffer optionnel (en éloignement du level pour anti stop hunt)
-        if direction > 0:
-            sl = sl_lvl - sl_buffer_atr * atr_t
-            tp = tp_lvl
-        else:
-            sl = sl_lvl + sl_buffer_atr * atr_t
-            tp = tp_lvl
+        # SL selon sl_mode
+        if sl_mode == "beyond":
+            # Pure pivot: SL = niveau Camarilla SUIVANT au-delà du support/résistance immédiat
+            if direction > 0:
+                sl = beyond_below
+            else:
+                sl = beyond_above
+            if np.isnan(sl):
+                n_skipped_no_target += 1
+                skipped_reason[k] = "NO_BEYOND_PIVOT"
+                continue
+        else:  # immediate-with-buffer
+            if direction > 0:
+                sl_lvl = below
+            else:
+                sl_lvl = above
+            if np.isnan(sl_lvl):
+                n_skipped_no_target += 1
+                skipped_reason[k] = "NO_PIVOT_TARGET"
+                continue
+            if direction > 0:
+                sl = sl_lvl - sl_buffer_atr * atr_t
+            else:
+                sl = sl_lvl + sl_buffer_atr * atr_t
 
         tp_price[k] = tp
         sl_price[k] = sl
@@ -256,8 +284,12 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     p.add_argument("--events", type=Path, default=Path("data/patchtst_v5/events_btc.parquet"))
     p.add_argument("--output", type=Path, default=Path("data/patchtst_v5/labels_btc_pivot_levels.parquet"))
     p.add_argument("--time-barrier", type=int, default=24, help="Bars max (24 = 2h)")
+    p.add_argument("--sl-mode", type=str, default="beyond",
+                   choices=["beyond", "immediate-with-buffer"],
+                   help="'beyond' = SL au pivot suivant (pure pivot, no ATR). "
+                        "'immediate-with-buffer' = SL au pivot immédiat - buffer×ATR")
     p.add_argument("--sl-buffer-atr", type=float, default=0.0,
-                   help="Buffer ATR au-delà du niveau pivot pour le SL (0=strict, 0.3=anti stop hunt)")
+                   help="(immediate-with-buffer mode only) buffer ATR au-delà du niveau immédiat")
     p.add_argument("--fees-pct", type=float, default=0.02, help="One-way fee %% (0.02 = maker)")
     p.add_argument("--log-level", type=str, default="INFO", choices=["DEBUG", "INFO", "WARNING"])
     return p.parse_args(argv)
@@ -282,11 +314,15 @@ def main(argv: Iterable[str] | None = None) -> int:
     events = pd.read_parquet(args.events)
     logger.info("Events: %d", len(events))
     logger.info("Time barrier: %d bars (~%d min)", args.time_barrier, args.time_barrier * 5)
-    logger.info("SL buffer: %.2f × ATR au-delà du level", args.sl_buffer_atr)
+    if args.sl_mode == "beyond":
+        logger.info("SL mode: BEYOND (pure pivot — SL = niveau Camarilla suivant)")
+    else:
+        logger.info("SL mode: IMMEDIATE-WITH-BUFFER (SL = pivot immédiat - %.2f × ATR)",
+                    args.sl_buffer_atr)
     logger.info("Fees: %.3f%% one-way (round-trip = %.3f%%)", args.fees_pct, 2 * args.fees_pct)
 
     labeled = label_events(events, features, high, low, close,
-                           args.time_barrier, args.sl_buffer_atr, args.fees_pct)
+                           args.time_barrier, args.sl_mode, args.sl_buffer_atr, args.fees_pct)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     labeled.to_parquet(args.output, compression="snappy", index=False)
     logger.info("Output: %s (%d events)", args.output, len(labeled))
