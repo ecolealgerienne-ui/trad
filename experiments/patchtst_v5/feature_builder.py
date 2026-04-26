@@ -18,6 +18,7 @@ Voir STATUS_v5.0.md et experiments/patchtst_v5/README.md pour le contexte.
 from __future__ import annotations
 
 import argparse
+import itertools
 import logging
 import sys
 import time
@@ -43,6 +44,15 @@ POC_BINS = 50
 TREND_1H_BARS = 12   # 12 × 5min = 1h
 TREND_4H_BARS = 48   # 48 × 5min = 4h
 VOL_1H_LOOKBACK_HOURS = 24
+
+# Group E — Statistical signatures
+PERM_ENTROPY_WINDOW = 50
+PERM_ENTROPY_M = 3       # Bandt-Pompe order (6 patterns)
+HURST_WINDOW = 100
+HURST_LAGS = (4, 8, 16, 32)
+PACF_WINDOW = 50
+PACF_LAG = 5
+
 EPS = 1e-12
 
 
@@ -348,6 +358,127 @@ def _daily_open(df: pd.DataFrame) -> np.ndarray:
     return df_tmp.groupby("day")["open"].transform("first").values
 
 
+# ---------------------------------------------------------------------------
+# Group E — Statistical signatures (3 channels)
+# ---------------------------------------------------------------------------
+
+def _perm_entropy_window(window_arr: np.ndarray, m: int, perms_dict: dict) -> float:
+    """Bandt-Pompe permutation entropy on one window. Normalized by log(m!)."""
+    n = len(window_arr)
+    if n < m:
+        return np.nan
+    n_perms = len(perms_dict)
+    counts = np.zeros(n_perms, dtype="int32")
+    for i in range(n - m + 1):
+        sub = window_arr[i:i + m]
+        ranks = tuple(np.argsort(sub).argsort())
+        counts[perms_dict[ranks]] += 1
+    total = counts.sum()
+    if total == 0:
+        return np.nan
+    probs = counts[counts > 0] / total
+    return float(-np.sum(probs * np.log(probs)) / np.log(n_perms))
+
+
+def _permutation_entropy_rolling(series: np.ndarray, window: int, m: int) -> np.ndarray:
+    """Rolling permutation entropy. O(N × W × m) via pandas rolling.apply."""
+    perms = list(itertools.permutations(range(m)))
+    perms_dict = {p: i for i, p in enumerate(perms)}
+    return pd.Series(series).rolling(window).apply(
+        lambda x: _perm_entropy_window(x, m, perms_dict), raw=True
+    ).values
+
+
+def _hurst_rs_window(window_arr: np.ndarray, lags: tuple[int, ...]) -> float:
+    """Hurst exponent via R/S analysis on one window. Slope of log(R/S) vs log(lag)."""
+    n = len(window_arr)
+    rs_values: list[tuple[float, float]] = []
+    for lag in lags:
+        if lag >= n:
+            continue
+        chunks = n // lag
+        if chunks < 1:
+            continue
+        rs_lag: list[float] = []
+        for i in range(chunks):
+            chunk = window_arr[i * lag: (i + 1) * lag]
+            mean_c = chunk.mean()
+            std_c = chunk.std(ddof=1) if len(chunk) > 1 else 0.0
+            if std_c < EPS:
+                continue
+            cumdev = np.cumsum(chunk - mean_c)
+            R = cumdev.max() - cumdev.min()
+            rs_lag.append(R / std_c)
+        if not rs_lag:
+            continue
+        rs_values.append((np.log(lag), np.log(np.mean(rs_lag))))
+    if len(rs_values) < 2:
+        return np.nan
+    log_lags, log_rs = zip(*rs_values)
+    return float(np.polyfit(log_lags, log_rs, 1)[0])
+
+
+def _hurst_rolling(series: np.ndarray, window: int, lags: tuple[int, ...]) -> np.ndarray:
+    """Rolling Hurst exponent via R/S."""
+    return pd.Series(series).rolling(window).apply(
+        lambda x: _hurst_rs_window(x, lags), raw=True
+    ).values
+
+
+def _pacf_yw_window(window_arr: np.ndarray, lag: int) -> float:
+    """Partial autocorrelation at given lag via Yule-Walker (Toeplitz solve)."""
+    n = len(window_arr)
+    if n <= 2 * lag:
+        return np.nan
+    arr = window_arr - window_arr.mean()
+    var = float(np.dot(arr, arr) / n)
+    if var < EPS:
+        return np.nan
+    gammas = np.empty(lag + 1, dtype="float64")
+    gammas[0] = var
+    for k in range(1, lag + 1):
+        gammas[k] = float(np.dot(arr[:-k], arr[k:]) / n)
+    R_mat = np.array([[gammas[abs(i - j)] for j in range(lag)] for i in range(lag)])
+    rhs = gammas[1:lag + 1]
+    try:
+        phi = np.linalg.solve(R_mat, rhs)
+    except np.linalg.LinAlgError:
+        return np.nan
+    return float(phi[-1])
+
+
+def _pacf_lag_rolling(series: np.ndarray, window: int, lag: int) -> np.ndarray:
+    """Rolling PACF at fixed lag via Yule-Walker."""
+    return pd.Series(series).rolling(window).apply(
+        lambda x: _pacf_yw_window(x, lag), raw=True
+    ).values
+
+
+def compute_statistical_signatures(df: pd.DataFrame) -> pd.DataFrame:
+    """3 statistical features capturant la signature stochastique du log-return série.
+
+    - permutation_entropy_50p : Bandt-Pompe entropy (m=3, window=50). Mesure la complexité
+      ordinale. Valeurs ~1 = aléatoire, valeurs basses = structurel.
+    - hurst_dfa_100p          : Hurst exponent via R/S (window=100). >0.5 = persistance,
+      <0.5 = mean-reverting, =0.5 = random walk.
+    - pacf_lag5               : Partial autocorrelation lag-5 via Yule-Walker (window=50).
+      Capture la dépendance résiduelle à 5 bars après contrôle des lags 1-4.
+    """
+    c = df["close"].values.astype("float64")
+    log_returns = np.diff(np.log(np.maximum(c, EPS)), prepend=np.log(max(c[0], EPS)))
+
+    perm_ent = _permutation_entropy_rolling(log_returns, PERM_ENTROPY_WINDOW, PERM_ENTROPY_M)
+    hurst = _hurst_rolling(log_returns, HURST_WINDOW, HURST_LAGS)
+    pacf5 = _pacf_lag_rolling(log_returns, PACF_WINDOW, PACF_LAG)
+
+    out = pd.DataFrame({
+        "permutation_entropy_50p": perm_ent,
+        "hurst_dfa_100p": hurst,
+        "pacf_lag5": pacf5,
+    })
+    return out.astype("float32")
+
+
 def compute_multitf(df: pd.DataFrame, atr: np.ndarray) -> pd.DataFrame:
     """4 features multi-timeframe (1h et 4h) calculées sur le 5min directement."""
     c = df["close"].values
@@ -404,6 +535,10 @@ def build_features(df: pd.DataFrame, asset: str) -> pd.DataFrame:
     mtf = compute_multitf(df, atr)
     logger.info("Group D multi-TF (4)           done in %.1fs", time.time() - t0)
 
+    t0 = time.time()
+    stat = compute_statistical_signatures(df)
+    logger.info("Group E stat signatures (3)    done in %.1fs", time.time() - t0)
+
     out = pd.DataFrame({
         "timestamp": df["timestamp"].values,
         "asset": np.full(n, asset, dtype="object"),
@@ -414,7 +549,7 @@ def build_features(df: pd.DataFrame, asset: str) -> pd.DataFrame:
         "volume": df["volume"].astype("float32").values,
         "atr_14": atr.astype("float32"),
     })
-    out = pd.concat([out, cont, patterns, micro, levels, mtf], axis=1)
+    out = pd.concat([out, cont, patterns, micro, levels, mtf, stat], axis=1)
     return out
 
 

@@ -62,7 +62,9 @@ CONTINUOUS_CHANNELS = [
     "dist_poc_5d_norm", "dist_high_20p_norm", "dist_low_20p_norm",
     # Group D multi-TF (4)
     "trend_1h_slope", "trend_4h_slope", "vol_1h_zscore", "dist_open_daily_norm",
-]  # 19 continuous channels
+    # Group E statistical signatures (3)
+    "permutation_entropy_50p", "hurst_dfa_100p", "pacf_lag5",
+]  # 22 continuous channels
 
 # Pattern channel presets
 PATTERN_PRESETS: dict[str, list[str]] = {

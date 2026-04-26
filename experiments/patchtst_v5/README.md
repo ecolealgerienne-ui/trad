@@ -79,7 +79,12 @@ Output : score [0, 1] = P(TP touché avant SL avant timeout)
 | | 21 | vol_1h_zscore | V 1h |
 | | 22 | dist_open_daily_norm | OHLC daily (open de la journée UTC) |
 
-Groupe E (entropie / Hurst / PACF) reporté à itération 2 selon résultats.
+**Groupe E (3 channels)** — activé par défaut depuis 2026-04-26 :
+- `permutation_entropy_50p` : Bandt-Pompe entropy (m=3, window=50). Complexité ordinale, 1≈aléatoire, bas=structurel.
+- `hurst_dfa_100p` : Hurst exponent via R/S (window=100, lags 4/8/16/32). >0.5 persistance, <0.5 mean-reverting.
+- `pacf_lag5` : Partial autocorrelation lag 5 via Yule-Walker (window=50).
+
+Total channels avec preset `top5` : 22 continus + 5 patterns = **27**.
 
 ### Triple Barrier (ATR-adaptatif)
 
