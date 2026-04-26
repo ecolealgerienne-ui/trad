@@ -49,8 +49,10 @@ logger = logging.getLogger("patchtst_v5.dataset_builder")
 
 DEFAULT_WINDOW = 96  # 96 × 5min = 8h lookback (PatchTST plan: 8 patches × 12 bars)
 
-# Continuous feature channels (always included)
-CONTINUOUS_CHANNELS = [
+# Channel presets — selectable via CLI --channel-preset
+
+# v5.0 hybrid: bar shape + microstructure + levels + multi-TF + statistical
+HYBRID_CHANNELS = [
     # Group A continuous (5)
     "body_ratio", "upper_wick_ratio", "lower_wick_ratio",
     "close_location_value", "gap_norm",
@@ -64,7 +66,39 @@ CONTINUOUS_CHANNELS = [
     "trend_1h_slope", "trend_4h_slope", "vol_1h_zscore", "dist_open_daily_norm",
     # Group E statistical signatures (3)
     "permutation_entropy_50p", "hurst_dfa_100p", "pacf_lag5",
-]  # 22 continuous channels
+]  # 22 channels (v5.0 paradigm)
+
+# v5.2 indicators-only: pure classical indicators TA-Lib + statistical
+INDICATORS_ONLY_CHANNELS = [
+    # Group I momentum multi-horizon (3)
+    "rsi_7", "rsi_14", "rsi_21",
+    # Group I MACD (2)
+    "macd_line", "macd_signal_line",
+    # Group I CCI (1)
+    "cci_20",
+    # Group I Stochastic (2)
+    "stoch_k_14", "stoch_d_14",
+    # Group I Williams (1)
+    "williams_r_14",
+    # Group I Trend strength (3)
+    "adx_14", "di_plus_14", "di_minus_14",
+    # Group I Volatility (2)
+    "atr_14_norm", "bbands_pct_b_20",
+    # Group I Volume (2)
+    "obv_slope_20", "mfi_14",
+    # Group E statistical (2 — Hurst/Entropy comme indicateurs avancés)
+    "hurst_dfa_100p", "permutation_entropy_50p",
+    # Group B volume z-score (1 — réutilisé depuis microstructure)
+    "volume_zscore_20p",
+]  # 19 channels (v5.2 paradigm)
+
+CHANNEL_PRESETS = {
+    "v5_hybrid": HYBRID_CHANNELS,
+    "v5_indicators_only": INDICATORS_ONLY_CHANNELS,
+}
+
+# Default kept for backward compatibility (used if --channel-preset not specified)
+CONTINUOUS_CHANNELS = HYBRID_CHANNELS
 
 # Pattern channel presets
 PATTERN_PRESETS: dict[str, list[str]] = {
@@ -103,10 +137,13 @@ def resolve_pattern_channels(spec: str, features_cols: list[str]) -> list[str]:
     return [c.strip() for c in spec.split(",") if c.strip()]
 
 
-def select_channels(features_cols: list[str], pattern_channels: list[str]) -> list[str]:
+def select_channels(features_cols: list[str], pattern_channels: list[str],
+                    continuous_channels: list[str] | None = None) -> list[str]:
     """Build the final ordered list of channels (continuous first, then patterns)."""
+    if continuous_channels is None:
+        continuous_channels = CONTINUOUS_CHANNELS
     chosen: list[str] = []
-    for col in CONTINUOUS_CHANNELS:
+    for col in continuous_channels:
         if col not in features_cols:
             raise ValueError(f"Required continuous channel missing in features: {col}")
         chosen.append(col)
@@ -267,8 +304,13 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     p.add_argument("--features", type=Path, default=Path("data/patchtst_v5/features_btc.parquet"))
     p.add_argument("--labels", type=Path, default=Path("data/patchtst_v5/labels_btc.parquet"))
     p.add_argument("--output-dir", type=Path, default=Path("data/patchtst_v5/"))
+    p.add_argument("--channel-preset", type=str, default="v5_hybrid",
+                   choices=list(CHANNEL_PRESETS.keys()),
+                   help="Continuous channels preset: 'v5_hybrid' (22 ch v5.0 paradigm) "
+                        "ou 'v5_indicators_only' (19 ch v5.2 paradigm — pure indicators TA-Lib + Hurst/Entropy/volume_zscore, NO bar shape, NO patterns)")
     p.add_argument("--patterns", type=str, default="top5",
-                   help="Pattern channels: 'top5' | 'directional10' | 'all' | 'none' | comma-separated CDL* names (default: top5)")
+                   help="Pattern channels: 'top5' | 'directional10' | 'all' | 'none' | comma-separated CDL* names "
+                        "(default: top5; force to 'none' if --channel-preset=v5_indicators_only)")
     p.add_argument("--window", type=int, default=DEFAULT_WINDOW,
                    help=f"Lookback window in bars (default: {DEFAULT_WINDOW})")
     p.add_argument("--train-ratio", type=float, default=DEFAULT_TRAIN_RATIO)
@@ -293,11 +335,17 @@ def main(argv: Iterable[str] | None = None) -> int:
                 len(features), features.shape[1], len(labels))
 
     # Resolve channels
-    pattern_channels = resolve_pattern_channels(args.patterns, list(features.columns))
-    channels = select_channels(list(features.columns), pattern_channels)
-    logger.info("Selected %d channels (%d continuous + %d patterns)",
-                len(channels), len(CONTINUOUS_CHANNELS), len(pattern_channels))
-    logger.info("  Continuous: %s", CONTINUOUS_CHANNELS)
+    continuous_channels = CHANNEL_PRESETS[args.channel_preset]
+    if args.channel_preset == "v5_indicators_only" and args.patterns != "none":
+        logger.info("--channel-preset=v5_indicators_only → forcing --patterns=none "
+                    "(pure indicators paradigm, no candlestick patterns)")
+        pattern_channels: list[str] = []
+    else:
+        pattern_channels = resolve_pattern_channels(args.patterns, list(features.columns))
+    channels = select_channels(list(features.columns), pattern_channels, continuous_channels)
+    logger.info("Channel preset: %s (%d continuous + %d patterns = %d total)",
+                args.channel_preset, len(continuous_channels), len(pattern_channels), len(channels))
+    logger.info("  Continuous: %s", continuous_channels)
     logger.info("  Patterns:   %s", pattern_channels if pattern_channels else "(none)")
 
     # Build (n_events, window, n_channels)
@@ -329,6 +377,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         "n_val": int(len(val_idx)),
         "n_test": int(len(test_idx)),
         "purge_bars": args.purge_bars,
+        "channel_preset": args.channel_preset,
         "patterns_spec": args.patterns,
         "patterns_resolved": pattern_channels,
     }

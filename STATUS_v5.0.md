@@ -3,8 +3,8 @@
 **Date** : 2026-04-26
 **Asset** : BTC (single asset, BTCUSD 5min)
 **Branche** : `claude/post-foundation-finetune-v14-PiOSL`
-**Statut global** : ❌ **CLÔTURÉ DÉFINITIVEMENT — ÉCHEC EMPIRIQUEMENT VALIDÉ SUR 4 RUNS + AVIS EXPERT INVALIDÉ**
-**Conclusion finale** : Mur OHLCV-only confirmé sur 4 runs convergents (top 1% precision 33.3-40.7%, dégradation monotone avec sophistication méthodologique). Avis expert (Contrastive Learning Triplet + Hard Negative Mining) testé fidèlement et **invalidé empiriquement** : le triplet loss a aggravé l'anti-prédictivité au sommet. → **Pivot v6 incontestable (données externes orthogonales).**
+**Statut global** : 🟡 **v5.2 EN COURS — Indicators-only paradigm**
+**Note** : v5.0 phase 1 et v5.1 (Contrastive) ont échoué sur paradigme "OHLC bar shape + microstructure + niveaux + multi-TF + Group E". Avant pivot v6, test paradigme distinct **v5.2 = pure indicators classiques** (RSI multi-horizon, MACD, CCI, Stoch, Williams, ADX, ATR_norm, Bollinger %B, OBV slope, MFI + Hurst/Entropy/volume_zscore). NO bar shape, NO patterns, NO microstructure proxies, NO levels. Trader-aligned representation.
 **Approche précédente** : v4 = `experiments/foundation_finetune/` (clos Phase 14)
 
 ---
@@ -112,6 +112,9 @@ peut casser le plafond Phase 14. Si non → preuve que BTCUSD OHLCV seul est sat
 | 11 | `train_contrastive.py` | Triplet Loss + Hard Negative Mining + BCE multi-task | ✅ | 2026-04-26 |
 | 12 | Run v5.1 + comparaison vs v5.0 | Triplet+BCE: top 1% **33.3%** (vs 38.9% v5 run 3) — DÉGRADATION | ✅ | 2026-04-26 |
 | 13 | Décision finale v5.1 | **ÉCHEC : pivot v6 définitif validé, OHLCV-only saturé** | ✅ | 2026-04-26 |
+| 14 | v5.2 — Pure indicators paradigm | feature_builder Group I (16 indicateurs TA-Lib) + dataset_builder preset `v5_indicators_only` (19 ch total) | ✅ | 2026-04-26 |
+| 15 | Run v5.2 BCE + Contrastive | Test si paradigme indicators-only casse le mur (vs v5.0/v5.1 hybrid) | ⏳ | — |
+| 16 | Décision v5.2 | Si succès → industrialisation. Si échec → pivot v6 définitif définitif | ⏳ | — |
 
 ---
 

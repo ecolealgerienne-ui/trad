@@ -509,6 +509,88 @@ def compute_multitf(df: pd.DataFrame, atr: np.ndarray) -> pd.DataFrame:
 # Pipeline orchestration
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Group I — Pure Indicators (paradigme v5.2 indicators-only)
+# ---------------------------------------------------------------------------
+
+def compute_pure_indicators(df: pd.DataFrame, atr: np.ndarray) -> pd.DataFrame:
+    """Indicateurs techniques classiques calculés via TA-Lib.
+
+    Paradigme v5.2 indicators-only : on alimente PatchTST avec UNIQUEMENT des
+    indicateurs (pas de raw OHLC, pas de bar shape, pas de microstructure).
+    Ces 16 channels représentent les abstractions trader classiques.
+    """
+    o = df["open"].values.astype("float64")
+    h = df["high"].values.astype("float64")
+    l = df["low"].values.astype("float64")
+    c = df["close"].values.astype("float64")
+    v = df["volume"].values.astype("float64")
+
+    # Multi-horizon RSI (3)
+    rsi_7 = talib.RSI(c, timeperiod=7)
+    rsi_14 = talib.RSI(c, timeperiod=14)
+    rsi_21 = talib.RSI(c, timeperiod=21)
+
+    # MACD (2 channels: line + signal)
+    macd_line, macd_signal, _ = talib.MACD(c, fastperiod=12, slowperiod=26, signalperiod=9)
+
+    # CCI (1)
+    cci_20 = talib.CCI(h, l, c, timeperiod=20)
+
+    # Stochastic Oscillator (2: %K et %D)
+    stoch_k, stoch_d = talib.STOCH(h, l, c, fastk_period=14, slowk_period=3, slowd_period=3)
+
+    # Williams %R (1)
+    williams_r = talib.WILLR(h, l, c, timeperiod=14)
+
+    # ADX + DI+ / DI- (3)
+    adx_14 = talib.ADX(h, l, c, timeperiod=14)
+    di_plus = talib.PLUS_DI(h, l, c, timeperiod=14)
+    di_minus = talib.MINUS_DI(h, l, c, timeperiod=14)
+
+    # ATR normalisé (1) — adimensionnel ATR/Close (différent de atr_14 raw du parquet)
+    atr_norm = _safe_div(atr, c)
+
+    # Bollinger Bands %B (1) — position relative dans les bandes
+    bb_upper, bb_middle, bb_lower = talib.BBANDS(c, timeperiod=20, nbdevup=2.0, nbdevdn=2.0)
+    bb_pct_b = _safe_div(c - bb_lower, bb_upper - bb_lower)
+
+    # On-Balance Volume slope (1) — OBV est cumulatif, on prend la pente sur 20 bars
+    obv = talib.OBV(c, v)
+    obv_slope_20 = _rolling_slope(obv, 20)
+
+    # Money Flow Index (1)
+    mfi_14 = talib.MFI(h, l, c, v, timeperiod=14)
+
+    out = pd.DataFrame({
+        # Momentum multi-horizon (3)
+        "rsi_7": rsi_7,
+        "rsi_14": rsi_14,
+        "rsi_21": rsi_21,
+        # MACD (2)
+        "macd_line": macd_line,
+        "macd_signal_line": macd_signal,
+        # CCI (1)
+        "cci_20": cci_20,
+        # Stoch (2)
+        "stoch_k_14": stoch_k,
+        "stoch_d_14": stoch_d,
+        # Williams (1)
+        "williams_r_14": williams_r,
+        # Trend strength (3)
+        "adx_14": adx_14,
+        "di_plus_14": di_plus,
+        "di_minus_14": di_minus,
+        # Volatility (2)
+        "atr_14_norm": atr_norm,
+        "bbands_pct_b_20": bb_pct_b,
+        # Volume (2)
+        "obv_slope_20": obv_slope_20,
+        "mfi_14": mfi_14,
+    })
+    return out.astype("float32")
+
+
 def build_features(df: pd.DataFrame, asset: str) -> pd.DataFrame:
     """Compute all 4 groups + 60 patterns and return a single dense DataFrame."""
     n = len(df)
@@ -539,6 +621,10 @@ def build_features(df: pd.DataFrame, asset: str) -> pd.DataFrame:
     stat = compute_statistical_signatures(df)
     logger.info("Group E stat signatures (3)    done in %.1fs", time.time() - t0)
 
+    t0 = time.time()
+    indi = compute_pure_indicators(df, atr)
+    logger.info("Group I pure indicators (%d)  done in %.1fs", indi.shape[1], time.time() - t0)
+
     out = pd.DataFrame({
         "timestamp": df["timestamp"].values,
         "asset": np.full(n, asset, dtype="object"),
@@ -549,7 +635,7 @@ def build_features(df: pd.DataFrame, asset: str) -> pd.DataFrame:
         "volume": df["volume"].astype("float32").values,
         "atr_14": atr.astype("float32"),
     })
-    out = pd.concat([out, cont, patterns, micro, levels, mtf, stat], axis=1)
+    out = pd.concat([out, cont, patterns, micro, levels, mtf, stat, indi], axis=1)
     return out
 
 
