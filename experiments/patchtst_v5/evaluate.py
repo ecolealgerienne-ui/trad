@@ -70,7 +70,8 @@ def threshold_sweep(scores: np.ndarray, y: np.ndarray, pnl: np.ndarray) -> list[
         if n == 0:
             rows.append({"threshold": t, "n_trades": 0, "wr": float("nan"),
                          "precision": float("nan"), "recall": float("nan"),
-                         "f1": float("nan"), "mean_pnl_net": float("nan")})
+                         "f1": float("nan"), "mean_pnl_net": float("nan"),
+                         "cumul_pnl_net": float("nan")})
             continue
         y_sel = y[mask]
         pnl_sel = pnl[mask]
@@ -182,8 +183,15 @@ def print_table(title: str, rows: list[dict], cols: list[str], fmt: dict[str, st
     header = "  ".join(f"{c:>14}" for c in cols)
     logger.info(header)
     for r in rows:
-        line = "  ".join(fmt.get(c, "{:>14}").format(r.get(c, "")) for c in cols)
-        logger.info(line)
+        cells = []
+        for c in cols:
+            val = r.get(c, float("nan"))
+            spec = fmt.get(c, "{:>14}")
+            try:
+                cells.append(spec.format(val))
+            except (ValueError, TypeError):
+                cells.append(f"{str(val):>14}")
+        logger.info("  ".join(cells))
     logger.info("-" * 80)
 
 
