@@ -97,7 +97,7 @@ peut casser le plafond Phase 14. Si non → preuve que BTCUSD OHLCV seul est sat
 | # | Module | Description | Statut | Date |
 |---|--------|-------------|--------|------|
 | 0 | `STATUS_v5.0.md` | Document de suivi (ce fichier) | ✅ | 2026-04-26 |
-| 1 | `experiments/patchtst_v5/README.md` | Création structure + README projet | ⏳ | — |
+| 1 | `experiments/patchtst_v5/README.md` | Création structure + README projet | ✅ | 2026-04-26 |
 | 2 | `feature_builder.py` | Calcul des 22 channels (A+B+C+D) depuis CSV BTCUSD | ⏳ | — |
 | 3 | `event_detector.py` | Détection des triggers (pattern + niveau + volume) | ⏳ | — |
 | 4 | `pivot_labeler.py` | Calcul Camarilla pivots + Triple Barrier sur chaque event | ⏳ | — |
