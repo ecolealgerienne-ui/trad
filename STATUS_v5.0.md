@@ -168,6 +168,7 @@ Acquis empiriques validés sur 14 phases. v5.0 ne doit pas les retester :
 | 2026-04-26 | Drop CDLDOJI du trigger event_detector | Pattern non-directionnel (13.84% bars), signal s'auto-annule en somme signée |
 | 2026-04-26 | Drop volume_zscore filter (option C) | Le modèle apprend à filtrer les trades parasites via prediction confidence — pas un filtre dur |
 | 2026-04-26 | Triple Barrier ATR-adaptatif au lieu de Camarilla H1/L1 | Camarilla pur produit labels incohérents par régime de volatilité (trop tight en bull, trop loose en range). ATR adapte par construction. Camarilla reste comme **input feature** |
+| 2026-04-26 | SL `from_entry` (symétrique) au lieu de `from_signal` (low/high) | Premier run avec SL=signal_low−0.5×ATR donnait WR top 1% = 63% mais PnL net négatif. Diagnostic: pour Engulfing patterns (73% events), bar large → signal_low loin de close → SL effective ≈ 1.5-2×ATR vs TP 1×ATR (asymétrie défavorable). `from_entry` impose RR 1:1 contrôlé, breakeven WR ≈ 50% (au lieu de ~58%) |
 
 ---
 

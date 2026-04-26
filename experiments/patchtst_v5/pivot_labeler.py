@@ -3,15 +3,23 @@ pivot_labeler.py — Triple Barrier Method ATR-adaptatif (étape 4 v5.0).
 
 Pour chaque event détecté par event_detector.py, calcule:
   - TP = entry ± tp_atr × ATR (long/short)
-  - SL = signal_low/high ∓ sl_atr × ATR (long/short)
+  - SL selon --sl-mode:
+      * from_entry  (default): SL = entry ∓ sl_atr × ATR (symétrique)
+      * from_signal:           SL = signal_low/high ∓ sl_atr × ATR
   - Time barrier = 24 bougies (2h)
 
 Walk forward through OHLC bars and detect which barrier hits first.
   - Label = 1 si TP touché avant SL avant timeout
   - Label = 0 sinon (SL ou timeout négatif)
 
-ATR-adaptatif: les barrières s'ajustent automatiquement à la volatilité du moment,
-contrairement à Camarilla H1/L1 qui produisent des labels incohérents par régime.
+ATR-adaptatif: les barrières s'ajustent automatiquement à la volatilité du moment.
+
+sl_mode=from_entry vs from_signal:
+  Pour les events Engulfing (73% des cas), la bougie de signal est large et
+  signal_low se trouve loin du close. Le mode from_signal produisait alors une
+  asymétrie SL/TP défavorable (SL ~1.5-2.0×ATR vs TP 1.0×ATR), neutralisant
+  l'edge même avec WR 63% au top 1%. Le mode from_entry impose une symétrie
+  TP/SL contrôlée et donne un breakeven net WR ≈ 50% (au lieu de ~58%).
 
 Usage:
     python -m experiments.patchtst_v5.pivot_labeler \\
@@ -39,7 +47,8 @@ logger = logging.getLogger("patchtst_v5.pivot_labeler")
 # ---------------------------------------------------------------------------
 
 DEFAULT_TP_ATR = 1.0       # TP = entry ± 1.0 × ATR
-DEFAULT_SL_ATR = 0.5       # SL = signal_low/high ∓ 0.5 × ATR
+DEFAULT_SL_ATR = 1.0       # SL distance in ATR (interprétation selon --sl-mode)
+DEFAULT_SL_MODE = "from_entry"  # 'from_entry' (symétrique) ou 'from_signal'
 DEFAULT_TIME_BARRIER = 24  # 24 bougies × 5min = 2h
 DEFAULT_FEES_PCT = 0.04    # 0.04% taker fee (Binance) — applied 2× round trip
 
@@ -56,6 +65,7 @@ def label_events(
     atr: np.ndarray,
     tp_atr: float,
     sl_atr: float,
+    sl_mode: str,
     time_barrier: int,
     fees_pct: float,
 ) -> pd.DataFrame:
@@ -66,11 +76,17 @@ def label_events(
     Implementation: Python loop over events (~36k rows). Inner loop is vectorized
     on the time_barrier window via numpy. Total cost ~1-2s.
     """
+    if sl_mode not in ("from_entry", "from_signal"):
+        raise ValueError(f"sl_mode must be 'from_entry' or 'from_signal', got {sl_mode!r}")
+
     n_events = len(events)
     n_bars = len(high)
     logger.info("Labeling %d events on %d bars of OHLC", n_events, n_bars)
     logger.info("TP = entry ± %.2f × ATR", tp_atr)
-    logger.info("SL = signal_low/high ∓ %.2f × ATR", sl_atr)
+    if sl_mode == "from_entry":
+        logger.info("SL = entry ∓ %.2f × ATR (mode: from_entry, symétrique)", sl_atr)
+    else:
+        logger.info("SL = signal_low/high ∓ %.2f × ATR (mode: from_signal)", sl_atr)
     logger.info("Time barrier = %d bars (~%d min)", time_barrier, time_barrier * 5)
     logger.info("Round-trip fees = 2 × %.3f%% = %.3f%%", fees_pct, 2 * fees_pct)
 
@@ -108,10 +124,16 @@ def label_events(
 
         if direction > 0:  # long
             tp = entry + tp_atr * atr_t
-            sl = signal_low[k] - sl_atr * atr_t
+            if sl_mode == "from_entry":
+                sl = entry - sl_atr * atr_t
+            else:  # from_signal
+                sl = signal_low[k] - sl_atr * atr_t
         else:              # short
             tp = entry - tp_atr * atr_t
-            sl = signal_high[k] + sl_atr * atr_t
+            if sl_mode == "from_entry":
+                sl = entry + sl_atr * atr_t
+            else:  # from_signal
+                sl = signal_high[k] + sl_atr * atr_t
 
         tp_price_out[k] = tp
         sl_price_out[k] = sl
@@ -263,7 +285,12 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     p.add_argument("--tp-atr", type=float, default=DEFAULT_TP_ATR,
                    help=f"TP distance in ATR multiples (default: {DEFAULT_TP_ATR})")
     p.add_argument("--sl-atr", type=float, default=DEFAULT_SL_ATR,
-                   help=f"SL buffer below signal_low (long) / above signal_high (short), in ATR (default: {DEFAULT_SL_ATR})")
+                   help=f"SL distance in ATR (default: {DEFAULT_SL_ATR}). "
+                        f"With from_entry: symétrique entry ∓ sl_atr × ATR. "
+                        f"With from_signal: signal_low/high ∓ sl_atr × ATR.")
+    p.add_argument("--sl-mode", type=str, default=DEFAULT_SL_MODE,
+                   choices=["from_entry", "from_signal"],
+                   help=f"SL anchor: 'from_entry' (symétrique avec TP, default) ou 'from_signal' (depuis swing low/high)")
     p.add_argument("--time-barrier", type=int, default=DEFAULT_TIME_BARRIER,
                    help=f"Max bars to hold before timeout (default: {DEFAULT_TIME_BARRIER})")
     p.add_argument("--fees-pct", type=float, default=DEFAULT_FEES_PCT,
@@ -296,6 +323,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         high=high, low=low, close=close, atr=atr,
         tp_atr=args.tp_atr,
         sl_atr=args.sl_atr,
+        sl_mode=args.sl_mode,
         time_barrier=args.time_barrier,
         fees_pct=args.fees_pct,
     )
