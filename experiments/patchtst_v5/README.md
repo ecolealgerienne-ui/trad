@@ -110,7 +110,7 @@ Volume estimé d'events : ~500-3000 sur période test (à mesurer en step explor
 | `__init__.py` | Module Python | — | ✅ |
 | `README.md` | Documentation projet (ce fichier) | — | ✅ |
 | `feature_builder.py` | Calcul des 22 channels depuis CSV BTCUSD | TA-Lib, pandas | ✅ |
-| `event_detector.py` | Scan historique → liste des triggers | feature_builder | ⏳ |
+| `event_detector.py` | Scan historique → liste des triggers | feature_builder | ✅ |
 | `pivot_labeler.py` | Camarilla pivots + Triple Barrier par event | OHLC future | ⏳ |
 | `dataset_builder.py` | Extraction fenêtres 96×22 + labels → NPZ | feature_builder + pivot_labeler | ⏳ |
 | `model.py` | Architecture PatchTST channel-independent | torch, transformers | ⏳ |
