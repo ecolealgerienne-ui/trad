@@ -3,7 +3,8 @@
 **Date** : 2026-04-26
 **Asset** : BTC (single asset, BTCUSD 5min)
 **Branche** : `claude/post-foundation-finetune-v14-PiOSL`
-**Statut global** : 🟡 Planification — implémentation non commencée
+**Statut global** : ❌ **CLÔTURÉ — ÉCHEC EMPIRIQUEMENT VALIDÉ**
+**Conclusion** : Mur OHLCV-only public confirmé sur 3 runs indépendants → **pivot v6 (données externes)**
 **Approche précédente** : v4 = `experiments/foundation_finetune/` (clos Phase 14)
 
 ---
@@ -106,7 +107,55 @@ peut casser le plafond Phase 14. Si non → preuve que BTCUSD OHLCV seul est sat
 | 6 | `model.py` + `train.py` | PatchTST CI + boucle entraînement avec early stopping val AUC | ✅ | 2026-04-26 |
 | 7 | `evaluate.py` | Threshold sweep + top-K%% sweep + calibration + per-segment | ✅ | 2026-04-26 |
 | 8 | `backtest_realistic.py` | Backtest event-driven (Sharpe, MaxDD, Calmar, equity curves) | ✅ | 2026-04-26 |
-| 9 | Décision finale | Validation v5 / pivot v6 selon critères de succès | ⏳ | — |
+| 9 | Décision finale | Validation v5 / pivot v6 selon critères de succès | ✅ | 2026-04-26 |
+
+---
+
+## Verdict final v5.0 (2026-04-26)
+
+### ❌ ÉCHEC empiriquement validé sur 3 runs indépendants
+
+| Run | Configuration | Top 1% precision | Best Sharpe | Verdict |
+|---|---|---|---|---|
+| 1 | sl_mode=from_signal, 24 ch | 63% (faux positif label asymétrique) | -1.08 | Trompeur |
+| 2 | sl_mode=from_entry RR 1:1, 22 ch | **40.7%** (anti-prédictif au sommet) | -2.50 | Mur exposé |
+| **3** | **+ Group E (entropy/Hurst/PACF), 27 ch** | **38.9%** (output collapse <0.55) | **-4.68** | **Mur renforcé** |
+
+### Convergence avec Phase 14 du foundation_finetune
+
+| Approche | Top 1% precision |
+|---|---|
+| Chronos LoRA + 22 features + Triple Barrier (Phase 14) | ~44% |
+| PatchTST CI + 22 channels + RR 1:1 (v5 run 2) | 40.7% |
+| PatchTST CI + 27 channels + Group E (v5 run 3) | 38.9% |
+
+3 architectures, 3 formulations, 3 jeux de features → convergence systémique. **Le plafond est dans l'information, pas dans le modèle.**
+
+### Ce qui a été éliminé comme cause possible (audits indépendants)
+
+- ✅ Architecture PatchTST CI fidèle paper (audit 1)
+- ✅ Formules numériques correctes (audit 2 — 85% confidence)
+- ✅ Aucune fuite, splits propres, purge OK (audit 3 — 96% confidence)
+- ✅ Triple Barrier walk-forward défensif (`np.argmax` guardé par `.any()`)
+- ✅ RevIN per-sample, no cross-sample leakage
+- ✅ Class balance, BCE pos_weight, AdamW + scheduler tous corrects
+- ✅ 27 channels couvrant 5 axes informationnels (catégoriels, microstructure, niveaux, multi-TF, statistique)
+
+### Décision : pivot v6 — données externes orthogonales
+
+L'élimination par v5.0 de l'hypothèse OHLCV-only ouvre la voie à v6 avec sources d'information **vraiment orthogonales** :
+
+| Source | API | Coût |
+|---|---|---|
+| Funding rate Binance perpétuels | binance.com/api/v3/funding-rate | Gratuit |
+| Open Interest + ΔOI | binance.com/api/v3/futures-data | Gratuit |
+| Long/Short ratio (top traders + global) | binance.com/api/v3/futures-data/topLongShortAccountRatio | Gratuit |
+| Liquidations | Coinglass / Binance liquidation stream | Partiel gratuit |
+| Premium index (futures - spot) | Binance | Gratuit |
+
+Ces signaux sont structurellement absents d'OHLCV (positionnement, sentiment dérivés, événements forcés). Ils ont une vraie probabilité de casser le mur.
+
+**Prochaine session** : créer `STATUS_v6.0.md` + `experiments/v6_external_data/` avec le pipeline d'ingestion + intégration au framework PatchTST existant.
 
 Légende : ⏳ Pending — 🔄 In progress — ✅ Done — ❌ Blocked
 
