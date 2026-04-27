@@ -109,6 +109,13 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     p.add_argument("--max-depth", type=int, default=4)
     p.add_argument("--learning-rate", type=float, default=0.05)
     p.add_argument("--early-stopping-rounds", type=int, default=20)
+    p.add_argument("--no-early-stopping", action="store_true",
+                   help="Disable early stopping (let model fit train fully)")
+    p.add_argument("--min-child-weight", type=float, default=5.0)
+    p.add_argument("--subsample", type=float, default=0.8)
+    p.add_argument("--colsample-bytree", type=float, default=0.8)
+    p.add_argument("--reg-alpha", type=float, default=0.0)
+    p.add_argument("--reg-lambda", type=float, default=1.0)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--log-level", type=str, default="INFO", choices=["DEBUG", "INFO", "WARNING"])
     return p.parse_args(argv)
@@ -164,24 +171,29 @@ def main(argv: Iterable[str] | None = None) -> int:
         "max_depth": args.max_depth,
         "learning_rate": args.learning_rate,
         "scale_pos_weight": scale_pos_weight,
-        "min_child_weight": 5,
-        "subsample": 0.8,
-        "colsample_bytree": 0.8,
-        "reg_alpha": 0.0,
-        "reg_lambda": 1.0,
+        "min_child_weight": args.min_child_weight,
+        "subsample": args.subsample,
+        "colsample_bytree": args.colsample_bytree,
+        "reg_alpha": args.reg_alpha,
+        "reg_lambda": args.reg_lambda,
         "seed": args.seed,
         "verbosity": 1,
         "tree_method": "hist",
     }
 
-    logger.info("Training XGBoost (n_estimators=%d, max_depth=%d, lr=%.3f) ...",
-                args.n_estimators, args.max_depth, args.learning_rate)
+    logger.info("Training XGBoost (n_estimators=%d, max_depth=%d, lr=%.3f, "
+                "min_child_weight=%.1f, subsample=%.2f, colsample=%.2f, "
+                "reg_alpha=%.2f, reg_lambda=%.2f) ...",
+                args.n_estimators, args.max_depth, args.learning_rate,
+                args.min_child_weight, args.subsample, args.colsample_bytree,
+                args.reg_alpha, args.reg_lambda)
+    early_stop = None if args.no_early_stopping else args.early_stopping_rounds
     booster = xgb.train(
         params, dtrain,
         num_boost_round=args.n_estimators,
-        evals=[(dtrain, "train"), (dval, "val")],
-        early_stopping_rounds=args.early_stopping_rounds,
-        verbose_eval=20,
+        evals=[(dval, "val"), (dtrain, "train")],
+        early_stopping_rounds=early_stop,
+        verbose_eval=50,
     )
     best_iter = booster.best_iteration
     logger.info("Best iteration: %d (val AUC = %.4f)", best_iter, booster.best_score)
