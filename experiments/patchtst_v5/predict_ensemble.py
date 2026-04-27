@@ -169,6 +169,8 @@ def main(argv: Iterable[str] | None = None) -> int:
         )
         if "feature_idx" in data:
             save_kwargs["feature_idx"] = data["feature_idx"]
+        if "asset_id" in data:
+            save_kwargs["asset_id"] = data["asset_id"]
         out_path = args.output_dir / f"predictions_{split_name}.npz"
         np.savez_compressed(out_path, **save_kwargs)
         logger.info("Saved %s: %s (n=%d, %d-model ensemble, scores [%.3f, %.3f])",

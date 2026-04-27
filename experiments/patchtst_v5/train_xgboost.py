@@ -48,6 +48,8 @@ def load_split(npz_path: Path) -> dict:
     }
     if "feature_idx" in data.files:
         out["feature_idx"] = data["feature_idx"]
+    if "asset_id" in data.files:
+        out["asset_id"] = data["asset_id"]
     return out
 
 
