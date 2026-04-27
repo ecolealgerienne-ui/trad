@@ -84,7 +84,18 @@ def simulate_trailing(
     time_barrier: int,
     fees_pct: float,
 ) -> dict:
-    """Simule un trade avec trailing Camarilla 4 niveaux + time-stop H1."""
+    """Simule un trade avec trailing Camarilla + time-stop H1.
+
+    Trailing rules (option A : ne trailer qu'après H2 atteint) :
+      - SL initial = pivot 4 opposé (sl_pool[3])
+      - Atteinte H1/L1 : pas de trail (laisser respirer), cible H2/L2
+      - Atteinte H2/L2 : SL trail à H1/L1, cible H3/L3
+      - Atteinte H3/L3 : SL trail à H2/L2, cible H4/L4
+      - Atteinte du dernier target disponible (H4 ou moins) : TP_FINAL exit
+
+    Tolère 1, 2, 3 ou 4 targets dans la direction du trade (dépend de la
+    position de l'entry dans la structure pivot du jour).
+    """
     above, below = _sorted_pivots_around(entry_price, pivots_at_entry)
 
     if direction > 0:
@@ -94,15 +105,17 @@ def simulate_trailing(
         targets = below        # SHORT : on vise les pivots EN-DESSOUS
         sl_pool = above        # SL en cas de mouvement contraire (au-dessus)
 
-    # Need at least 4 targets in trade direction AND 4 sl_pool to set initial SL=4th opposé
-    if len(targets) < 4 or len(sl_pool) < 4:
+    # Need at least 1 target dans la direction et 4 dans l'opposé (pour SL beyond=4).
+    # Le label sl_level=4 garantit déjà 4 pivots opposés ; on tolère 1-4 targets.
+    if len(targets) < 1 or len(sl_pool) < 4:
         return {
             "pnl_net": np.nan, "exit_bars": -1,
             "exit_reason": "SKIP_NOT_ENOUGH_PIVOTS",
             "exit_price": np.nan, "trail_level": -1,
         }
 
-    sl = sl_pool[3]                # L4 (LONG) ou H4 (SHORT)
+    n_targets = len(targets)
+    sl = sl_pool[3]                # 4ème pivot opposé (L4 LONG / H4 SHORT)
     target_idx = 0                  # current target index dans `targets`
     h1_reached = False
     n_bars = len(high)
@@ -117,24 +130,31 @@ def simulate_trailing(
         # 1) Check SL hit (priorité, vérifié AVANT TP par convention conservative)
         sl_hit = (direction > 0 and bar_l <= sl) or (direction < 0 and bar_h >= sl)
         if sl_hit:
-            reason = "SL_TRAIL" if h1_reached else "SL_INIT"
+            reason = "SL_TRAIL" if target_idx >= 2 else "SL_INIT"
             return _exit(direction, entry_price, sl, k + 1, reason, fees_pct,
                          trail_level=target_idx)
 
         # 2) Check TP cascade (peut traverser plusieurs niveaux dans la même bar)
-        while target_idx < 4:
+        while target_idx < n_targets:
             tgt = targets[target_idx]
             tp_hit = (direction > 0 and bar_h >= tgt) or (direction < 0 and bar_l <= tgt)
             if not tp_hit:
                 break
-            if target_idx == 3:
-                # Niveau 4 = TP final, exit
+
+            if target_idx == n_targets - 1:
+                # Dernier target disponible = TP final (H4 ou moins selon position entry)
                 return _exit(direction, entry_price, tgt, k + 1, "TP_FINAL",
-                             fees_pct, trail_level=4)
-            # Trail SL au niveau précédent (entry pour target_idx=0)
-            sl = entry_price if target_idx == 0 else targets[target_idx - 1]
+                             fees_pct, trail_level=target_idx + 1)
+
+            # Pas le dernier target : on poursuit
+            # Correction option A : ne trailer SL qu'à partir de H2 (target_idx >= 1)
+            # Pourquoi : trail à entry après H1 sortait trop souvent au breakeven
+            if target_idx >= 1:
+                sl = targets[target_idx - 1]   # trail à H1, H2... selon niveau
+
             if target_idx == 0:
                 h1_reached = True
+
             target_idx += 1
 
         # 3) Time-stop conditionnel : si pas d'atteinte H1/L1 après time_to_h1 bars → exit close
