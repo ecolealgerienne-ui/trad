@@ -976,3 +976,129 @@ models/patchtst_v5_pivot_sl4_xgb_long_multi_ensemble_bagging/
 | `6108b2f` | feat: `combine_directional_predictions` pour dual portfolio LONG+SHORT |
 | `dcaee99` | feat: `train_ensemble.py` + `predict_ensemble.py` multi-seed |
 | `c5b5f34` | feat: `last-plus-multi-aggs` mode (304 features) |
+
+---
+
+# v5.5 — Quantification distances Camarilla & économie par trade (2026-04-27)
+
+**Statut** : ✅ **Distances pivot caractérisées empiriquement** (36 318 events BTC 5min). Données prêtes pour la conception de la couche 2.
+
+## Script créé
+
+`experiments/patchtst_v5/analyze_pivot_distances.py` (commit `f19b20c`) :
+- Pour chaque event, calcule la distance signée en % du prix entry vers chaque pivot Camarilla (H1-H4 résistances, L1-L4 supports)
+- Agrège statistiques (mean, std, min, q25, median, q75, max) par level
+- Calcule l'économie par trade selon (direction, sl_level) : TP, SL, R/R, breakeven WR théorique
+- Output console + JSON (`data/patchtst_v5/pivot_distances_report.json`)
+
+## Tableau 1 — Distances brutes par level (signed, % du prix entry)
+
+Distances calculées sur les 36 318 events.
+
+| Level | Mean | Median | q25 | q75 | std | Lecture |
+|---|---|---|---|---|---|---|
+| **H1** | +0.49% | **+0.29%** | -0.21% | +1.04% | 1.43% | Résistance immédiate |
+| **H2** | +0.93% | **+0.62%** | +0.03% | +1.45% | 1.56% | ~2× H1 |
+| **H3** | +1.36% | **+0.96%** | +0.35% | +1.90% | 1.75% | ~3× H1 |
+| **H4** | +2.67% | **+2.01%** | +1.17% | +3.37% | 2.53% | ~7× H1 |
+| **L1** | -0.38% | **-0.05%** | -0.99% | +0.29% | 1.40% | Support immédiat |
+| **L2** | -0.81% | **-0.51%** | -1.38% | -0.00% | 1.52% | ~2× L1 |
+| **L3** | -1.25% | **-0.86%** | -1.82% | -0.29% | 1.69% | ~3× L1 |
+| **L4** | -2.55% | **-1.92%** | -3.30% | -1.07% | 2.45% | ~7× L1 |
+
+**Note** : les valeurs négatives en q25 de H1/H2 et positives en q75 de L1/L2 reflètent les events où le prix est déjà au-delà du pivot du jour (Camarilla fixé au previous-day H/L/C).
+
+## Tableau 2 — Économie effective par trade (direction × sl_level)
+
+Calculé via `find_neighbor_levels` qui sélectionne le pivot immédiat dans la direction du trade et le N-ième pivot opposé.
+
+| Setup | Events valides | Skip (no pivot) | TP % (mean) | SL % (mean) | R/R | **Breakeven WR théorique** |
+|---|---|---|---|---|---|---|
+| LONG sl=2 | 16 611 | 2 517 (13%) | +0.33% | -0.94% | 0.59 | **73.8%** |
+| LONG sl=3 | 14 052 | 5 076 (27%) | +0.33% | -1.55% | 0.32 | **82.3%** |
+| **LONG sl=4** | **10 811** | **8 317 (43%)** | **+0.33%** | **-2.21%** | **0.21** | **86.9%** |
+| SHORT sl=2 | 15 146 | 2 044 (12%) | +0.33% | -0.95% | 0.59 | 74.1% |
+| SHORT sl=3 | 13 086 | 4 104 (24%) | +0.33% | -1.55% | 0.32 | 82.3% |
+| **SHORT sl=4** | **10 381** | **6 809 (40%)** | **+0.33%** | **-2.19%** | **0.20** | **86.8%** |
+
+**Constants** :
+- TP **toujours +0.33%** (= mean H1 distance dans la direction du trade)
+- TP/SL et breakeven sont quasi-symétriques entre LONG et SHORT (cohérent avec Camarilla par construction)
+
+## Breakeven théorique (87%) ≠ breakeven empirique (79.5%) — explication
+
+Le label sl_level=4 affiche un breakeven **empirique** de **79.5%**, alors que le calcul théorique donne **86.9%**. La différence vient des **32.9% TIMEOUTs** :
+
+| Calcul | Valeur | Méthode |
+|---|---|---|
+| **Théorique** | 86.9% | Suppose tout trade touche TP=H1 (+0.33%) ou SL=L4 (-2.21%) |
+| **Empirique (label report)** | 79.5% | Inclut 33% TIMEOUTs avec PnL ≈ 0 → dilue mean win et mean loss |
+
+**Implication** : la 24-bars time-barrier joue un rôle d'**amortisseur** qui rend sl_level=4 plus exploitable que son R/R brut (1:5) le suggère. C'est une caractéristique structurelle du label, pas un défaut.
+
+## Comparaison avec les frais (0.04% round-trip maker)
+
+| Niveau | Distance médiane | Multiple des frais |
+|---|---|---|
+| H1 / L1 | 0.29% / 0.05% | 1× à 7× |
+| H2 / L2 | 0.62% / 0.51% | **13-15×** |
+| H3 / L3 | 0.96% / 0.86% | **21-24×** |
+| H4 / L4 | 2.01% / 1.92% | **48-50×** |
+
+→ Tous les niveaux H1+ sont **largement** au-dessus du seuil de rentabilité. H1 est juste-à-la-limite (1× sur le median), H2+ offrent une marge confortable.
+
+## Implications pour la couche 2 (trading method)
+
+Ces distances permettent de quantifier une stratégie de trailing à 4 niveaux :
+
+| Étape | Action | Target | Risk si retracement |
+|---|---|---|---|
+| Atteinte H1 | Lock break-even, viser H2 | +0.62% (médian) | -0.05% (BE - frais) |
+| Atteinte H2 | Trail SL au H1, viser H3 | +0.96% (médian) | +0.29% (lock H1) |
+| Atteinte H3 | Trail SL au H2, viser H4 | +2.01% (médian) | +0.62% (lock H2) |
+| Atteinte H4 | Sortir | +2.01%+ (médian) | +0.96% (lock H3) |
+
+### Estimation préliminaire avec trailing à 3 niveaux
+
+Hypothèses (à valider empiriquement) :
+- WR top 10% combiné = 96% (mesuré)
+- 96% des winners atteignent H1 (label confirmé)
+- 50% poursuivent à H2, 25% à H3, 10% à H4
+
+Calcul AvgNet/trade :
+```
+Wins (96%):
+  50% × 0.62% (H2)  = 0.31%
+  25% × 0.96% (H3)  = 0.24%
+  10% × 2.01% (H4)  = 0.20%
+  11% × 0.29% (H1 only retracement) = 0.03%
+  → 0.78% par win
+
+Losses (4%):
+  -2.21% (SL au L4)
+  → -0.088% pondéré
+
+AvgNet ≈ 0.96 × 0.78 - 0.04 × 2.21 = +0.66% / trade
+```
+
+→ Avec trailing 3 niveaux et WR 96%, l'**AvgNet/trade passe de -0.04% (label fixe) à +0.66% (estimation trailing)** — soit ×16 d'amélioration.
+
+Pour 21 trades/mois × 0.66% = ~14%/mois ≈ **+168%/an** (estimation grossière, à valider en backtest historique).
+
+## Données clés à mémoriser pour la couche 2
+
+| Constante | Valeur (médiane) | Usage |
+|---|---|---|
+| H1 / L1 distance | **0.29% / 0.05%** | Niveau 1 trail (TP de base) |
+| H2 / L2 distance | **0.62% / 0.51%** | Niveau 2 trail (objectif premier) |
+| H3 / L3 distance | **0.96% / 0.86%** | Niveau 3 trail (gros gain) |
+| H4 / L4 distance | **2.01% / 1.92%** | Niveau 4 trail (sortie max) |
+| Frais round-trip maker | 0.04% | Seuil minimal de rentabilité |
+| TP fixe label sl_level=4 | 0.33% | À remplacer par trailing en prod |
+| SL fixe label sl_level=4 | 2.21% | Garde-fou final couche 2 |
+
+## Commits associés v5.5
+
+| Commit | Description |
+|---|---|
+| `f19b20c` | feat: `analyze_pivot_distances.py` — quantification distances et économie par trade |
