@@ -6,8 +6,11 @@ simple sur les features event-time uniquement devrait mieux capturer le signal
 modeste détecté par le diagnostic de séparabilité.
 
 Features modes:
-  --feature-mode last-only       : 19 features (event-time uniquement)
-  --feature-mode last-plus-aggs  : 19 × 4 = 76 features (last + mean/std/first sur 24 bars)
+  --feature-mode last-only                : 19 features (event-time uniquement)
+  --feature-mode last-plus-aggs           : 19 × 4 = 76 features (last + mean/std/first sur 24 bars)
+  --feature-mode last-plus-multi-aggs     : 19 × (1 + 5w × 3stats) = 304 features (5 windows × mean/std/first)
+  --feature-mode last-plus-multi-aggs-rich: 19 × (1 + 5w × 9stats) = 874 features
+                                            stats = mean,std,first,median,q25,q75,min,max,skew
 
 Usage:
     python -m experiments.patchtst_v5.train_xgboost \\
@@ -58,11 +61,22 @@ def filter_by_direction(data: dict, direction_filter: str) -> dict:
 
 
 DEFAULT_MULTI_AGG_WINDOWS = [6, 12, 24, 48, 96]
+RICH_AGG_STATS = ["mean", "std", "first", "median", "q25", "q75", "min", "max", "skew"]
 
 
 def parse_multi_windows(spec: str) -> list[int]:
     """Parse comma-separated windows like '6,12,24,48,96' → [6,12,24,48,96]."""
     return [int(w.strip()) for w in spec.split(",") if w.strip()]
+
+
+def _skew(arr: np.ndarray, axis: int = 1) -> np.ndarray:
+    """Skewness (Fisher) along axis. Returns 0 where std==0."""
+    mean = arr.mean(axis=axis, keepdims=True)
+    std = arr.std(axis=axis, keepdims=True)
+    centered = arr - mean
+    m3 = (centered ** 3).mean(axis=axis)
+    s3 = (std.squeeze(axis=axis)) ** 3
+    return np.where(s3 > 1e-12, m3 / s3, 0.0).astype("float32")
 
 
 def build_features(X: np.ndarray, mode: str, agg_window: int = 24,
@@ -90,6 +104,24 @@ def build_features(X: np.ndarray, mode: str, agg_window: int = 24,
             parts.append(sub.std(axis=1))
             parts.append(X[:, -w, :])                        # first
         return np.concatenate(parts, axis=1)
+    elif mode == "last-plus-multi-aggs-rich":
+        # 9 stats per window: mean, std, first, median, q25, q75, min, max, skew
+        parts = [X[:, -1, :]]                                # last (n, C)
+        for w in multi_windows:
+            if w > T:
+                continue
+            sub = X[:, -w:, :]                               # (n, w, C)
+            parts.append(sub.mean(axis=1))                   # mean
+            parts.append(sub.std(axis=1))                    # std
+            parts.append(X[:, -w, :])                        # first
+            parts.append(np.median(sub, axis=1))             # median
+            q25, q75 = np.quantile(sub, [0.25, 0.75], axis=1)
+            parts.append(q25)                                # q25
+            parts.append(q75)                                # q75
+            parts.append(sub.min(axis=1))                    # min
+            parts.append(sub.max(axis=1))                    # max
+            parts.append(_skew(sub, axis=1))                 # skew
+        return np.concatenate(parts, axis=1)
     raise ValueError(f"Unknown mode: {mode}")
 
 
@@ -112,6 +144,14 @@ def feature_names(channels: list[str], mode: str, seq_len: int = 96,
             names += [f"{c}_mean{w}" for c in channels]
             names += [f"{c}_std{w}" for c in channels]
             names += [f"{c}_first{w}" for c in channels]
+        return names
+    if mode == "last-plus-multi-aggs-rich":
+        names = [f"{c}_last" for c in channels]
+        for w in multi_windows:
+            if w > seq_len:
+                continue
+            for stat in RICH_AGG_STATS:
+                names += [f"{c}_{stat}{w}" for c in channels]
         return names
     raise ValueError(f"Unknown mode: {mode}")
 
@@ -139,7 +179,8 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     p.add_argument("--metadata", type=Path, default=None,
                    help="dataset_metadata.json (default: <train>/.../dataset_metadata.json)")
     p.add_argument("--feature-mode", type=str, default="last-plus-aggs",
-                   choices=["last-only", "last-plus-aggs", "last-plus-multi-aggs"])
+                   choices=["last-only", "last-plus-aggs", "last-plus-multi-aggs",
+                            "last-plus-multi-aggs-rich"])
     p.add_argument("--agg-window", type=int, default=24)
     p.add_argument("--multi-agg-windows", type=str, default="6,12,24,48,96",
                    help="Comma-separated windows for last-plus-multi-aggs mode (default: 6,12,24,48,96)")

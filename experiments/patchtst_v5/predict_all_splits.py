@@ -49,7 +49,8 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     p.add_argument("--output-dir", type=Path, required=True)
     p.add_argument("--metadata", type=Path, default=None)
     p.add_argument("--feature-mode", type=str, default=None,
-                   choices=["last-only", "last-plus-aggs", "last-plus-multi-aggs"],
+                   choices=["last-only", "last-plus-aggs", "last-plus-multi-aggs",
+                            "last-plus-multi-aggs-rich"],
                    help="Override model's stored feature_mode (default: read from model attrs)")
     p.add_argument("--agg-window", type=int, default=None,
                    help="Override model's stored agg_window (default: read from model attrs)")

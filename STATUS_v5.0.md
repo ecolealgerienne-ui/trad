@@ -577,3 +577,98 @@ v5.3 montre que **le levier n'avait pas été exploité** :
 - Le mur n'était pas dans l'information OHLCV mais dans l'**inadéquation entre l'architecture (PatchTST attention sur séquence) et la vraie structure du signal (interactions multi-échelle entre indicateurs agrégés)**
 
 → **Pivot v6 (données externes funding/OI) suspendu**. On continue à pousser v5.3 (ensemble, walk-forward, LONG, etc.) avant d'envisager des sources externes.
+
+---
+
+# v5.3.1 — Ensemble multi-seed (étape A) — 2026-04-27
+
+**Statut** : ✅ **Signal confirmé robuste mais val 87% révélé comme outlier single-seed**.
+
+## Setup ensemble
+
+- 5 modèles XGBoost entraînés avec seeds `[42, 7, 13, 100, 999]`
+- Hyperparamètres identiques au pushed multi-aggs (max_depth=10, n_est=3000, lr=0.03, no_early_stop)
+- Scripts : `train_ensemble.py` + `predict_ensemble.py` (commits `dcaee99`)
+
+## Première tentative (subsample=1.0, colsample=1.0) — ÉCHEC silencieux
+
+Avec sampling complet, **les 5 modèles étaient bit-identiques** :
+- Toutes les val-AUC identiques à chaque itération [0, 50, 100, ..., 2999]
+- TEST top 1% = 79.2% pour les 5 (= single seed)
+- Ensemble = single (aucune variance à réduire)
+
+**Cause** : avec `subsample=1.0`, `colsample_bytree=1.0`, `tree_method=hist`, XGBoost est entièrement déterministe (le seed ne sert qu'au tie-breaking sur splits égaux, rare avec 11k events × 304 features).
+
+**Leçon** : pour qu'un ensemble XGBoost ait du sens, il **faut** activer le sampling de lignes ET de colonnes (< 1.0).
+
+## Deuxième tentative (subsample=0.8, colsample_bytree=0.8) — RÉUSSI
+
+Bagging + feature subsampling activé → diversité réelle entre seeds.
+
+### Per-seed metrics
+
+| Seed | TRAIN AUC | VAL top 1% | VAL top 5% | TEST top 1% | TEST top 5% |
+|------|-----------|------------|------------|-------------|-------------|
+| 42 | 1.000 | 78.3% | 63.0% | **62.5%** | 62.3% |
+| 7 | 1.000 | 73.9% | 61.3% | **79.2%** | 56.6% |
+| 13 | 1.000 | 69.6% | 59.7% | **66.7%** | 67.2% |
+| 100 | 1.000 | 73.9% | 58.8% | **83.3%** | 65.6% |
+| 999 | 1.000 | 73.9% | 62.2% | **87.5%** | 65.6% |
+| **mean** | — | **73.9%** | **61.0%** | **75.8%** | **63.5%** |
+| **range** | — | 69.6 - 78.3 | 58.8 - 63.0 | **62.5 - 87.5** | 56.6 - 67.2 |
+
+→ **Variance énorme** sur TEST top 1% (62-88%) à cause des seulement 24 trades par split.
+
+### Ensemble (moyenne des 5 scores)
+
+| Métrique | Single pushed (seed 42) | **Ensemble (5 seeds)** | Delta |
+|---|---|---|---|
+| TEST top 1% WR | 79.2% | **79.2%** | 0 |
+| TEST top 1% AvgNet | +0.078% | +0.050% | -0.028 |
+| TEST top 1% AnnRet | +1.51% | **+0.97%** | -0.54 |
+| TEST top 1% Sharpe | 0.86 | **0.56** | -0.30 |
+| TEST top 1% MaxDD | -0.88% | -0.52% | meilleur |
+| TEST top 5% WR | 61.5% | **63.9%** | +2.4pp |
+| TEST top 2% WR | 64.6% | **68.8%** | +4.2pp |
+| **VAL top 1% WR** | **87.0%** | **73.9%** | **-13.1pp** |
+| VAL top 1% AnnRet | -0.18% | -0.51% | -0.33 |
+
+## Découvertes critiques
+
+1. **Le 87% VAL top 1% du single était un coup de chance** — l'ensemble redonne **73.9%** = exactement la moyenne des 5 seeds. C'est la **vraie** valeur attendue du modèle sur val.
+2. **Le 79.2% TEST top 1% est confirmé robuste** — l'ensemble retombe sur la même valeur (avec PnL légèrement réduit).
+3. **Top 5% test légèrement amélioré** (+2.4pp) grâce au moyennage.
+4. **MaxDD réduit** (-0.88% → -0.52%) — l'ensemble est moins volatile.
+
+## Estimation honnête du modèle (post-ensemble)
+
+| Niveau | TEST | VAL | Lecture |
+|---|---|---|---|
+| top 1% WR | **~79%** | **~74%** | +20pp / +16pp vs baseline 58.7% — signal réel |
+| top 5% WR | ~64% | ~62% | +5pp / +3pp — signal marginal |
+| AnnRet top 1% | +0.97% | -0.51% | Asymétrie test/val gênante |
+| Sharpe top 1% | 0.56 | -0.67 | Test positif, val légèrement négative |
+
+## Limite atteinte avec le label actuel
+
+- Train AUC = 1.000 (capacité d'extraction saturée)
+- Top 1% val/test plafonne à ~74-79% WR
+- Breakeven WR structural pour `pivot beyond` ≈ 73-75% → on est juste à la limite, marge insuffisante pour PnL significatif
+- L'ensemble ne crée pas de signal nouveau, il stabilise seulement
+
+## Commits ensemble étape A
+
+| Commit | Description |
+|---|---|
+| `dcaee99` | feat: train_ensemble.py + predict_ensemble.py (multi-seed XGBoost averaging) |
+
+## Décision : passage à étape B (plus de features)
+
+L'ensemble a fait son job (variance réduite, signal confirmé). Pour aller plus loin sur le WR, il faut **enrichir les features** :
+
+- **Option 1 (priorité)** : ajouter `median, q25, q75, min, max, skew` aux 5 windows actuelles
+  → 19 ch × (1 last + 5 windows × 9 stats) = **874 features** (au lieu de 304)
+- **Option 2** : ratios cross-window (ex : `rsi_mean6 / rsi_mean48`)
+- **Option 3** : ratios cross-channel (ex : `rsi_14 - rsi_7`, divergences)
+
+Étape B en cours : implémentation Option 1.
