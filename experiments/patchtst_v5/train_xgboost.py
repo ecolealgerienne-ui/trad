@@ -54,28 +54,52 @@ def filter_by_direction(data: dict, direction_filter: str) -> dict:
     return {k: v[mask] for k, v in data.items()}
 
 
+MULTI_AGG_WINDOWS = [6, 12, 24, 48, 96]
+
+
 def build_features(X: np.ndarray, mode: str, agg_window: int = 24) -> np.ndarray:
     """X shape (n, T, C). Retourne (n, F) features 2D."""
     n, T, C = X.shape
     if mode == "last-only":
         return X[:, -1, :]
     elif mode == "last-plus-aggs":
-        sub = X[:, -agg_window:, :]                          # (n, 24, C)
+        sub = X[:, -agg_window:, :]                          # (n, w, C)
         last = X[:, -1, :]                                   # (n, C)
         mean = sub.mean(axis=1)                              # (n, C)
         std = sub.std(axis=1)                                # (n, C)
         first = X[:, -agg_window, :]                         # (n, C)
         return np.concatenate([last, mean, std, first], axis=1)  # (n, 4C)
+    elif mode == "last-plus-multi-aggs":
+        parts = [X[:, -1, :]]                                # last (n, C)
+        for w in MULTI_AGG_WINDOWS:
+            if w > T:
+                continue
+            sub = X[:, -w:, :]
+            parts.append(sub.mean(axis=1))
+            parts.append(sub.std(axis=1))
+            parts.append(X[:, -w, :])                        # first
+        return np.concatenate(parts, axis=1)
     raise ValueError(f"Unknown mode: {mode}")
 
 
-def feature_names(channels: list[str], mode: str) -> list[str]:
+def feature_names(channels: list[str], mode: str, seq_len: int = 96) -> list[str]:
     if mode == "last-only":
         return [f"{c}_last" for c in channels]
-    return [f"{c}_last" for c in channels] + \
-           [f"{c}_mean24" for c in channels] + \
-           [f"{c}_std24" for c in channels] + \
-           [f"{c}_first24" for c in channels]
+    if mode == "last-plus-aggs":
+        return [f"{c}_last" for c in channels] + \
+               [f"{c}_mean24" for c in channels] + \
+               [f"{c}_std24" for c in channels] + \
+               [f"{c}_first24" for c in channels]
+    if mode == "last-plus-multi-aggs":
+        names = [f"{c}_last" for c in channels]
+        for w in MULTI_AGG_WINDOWS:
+            if w > seq_len:
+                continue
+            names += [f"{c}_mean{w}" for c in channels]
+            names += [f"{c}_std{w}" for c in channels]
+            names += [f"{c}_first{w}" for c in channels]
+        return names
+    raise ValueError(f"Unknown mode: {mode}")
 
 
 def compute_metrics(y_true: np.ndarray, scores: np.ndarray) -> dict:
@@ -100,7 +124,7 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     p.add_argument("--metadata", type=Path, default=None,
                    help="dataset_metadata.json (default: <train>/.../dataset_metadata.json)")
     p.add_argument("--feature-mode", type=str, default="last-plus-aggs",
-                   choices=["last-only", "last-plus-aggs"])
+                   choices=["last-only", "last-plus-aggs", "last-plus-multi-aggs"])
     p.add_argument("--agg-window", type=int, default=24)
     p.add_argument("--direction-filter", type=str, default="both",
                    choices=["long", "short", "both"],
@@ -151,11 +175,13 @@ def main(argv: Iterable[str] | None = None) -> int:
     logger.info("Train: %d (Class1=%.1f%%) | Val: %d | Test: %d",
                 len(train["y"]), 100 * train["y"].mean(), len(val["y"]), len(test["y"]))
 
+    seq_len = train["X"].shape[1]
     X_train = build_features(train["X"], args.feature_mode, args.agg_window)
     X_val = build_features(val["X"], args.feature_mode, args.agg_window)
     X_test = build_features(test["X"], args.feature_mode, args.agg_window)
-    fnames = feature_names(channels, args.feature_mode)
-    logger.info("Feature mode: %s → %d features", args.feature_mode, X_train.shape[1])
+    fnames = feature_names(channels, args.feature_mode, seq_len)
+    logger.info("Feature mode: %s → %d features (seq_len=%d)",
+                args.feature_mode, X_train.shape[1], seq_len)
 
     pos_train = train["y"].mean()
     scale_pos_weight = (1 - pos_train) / max(pos_train, 1e-6)

@@ -46,7 +46,7 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     p.add_argument("--output-dir", type=Path, required=True)
     p.add_argument("--metadata", type=Path, default=None)
     p.add_argument("--feature-mode", type=str, default="last-plus-aggs",
-                   choices=["last-only", "last-plus-aggs"])
+                   choices=["last-only", "last-plus-aggs", "last-plus-multi-aggs"])
     p.add_argument("--agg-window", type=int, default=24)
     p.add_argument("--direction-filter", type=str, default="both",
                    choices=["long", "short", "both"],
@@ -65,7 +65,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     metadata_path = args.metadata or (args.train.parent / "dataset_metadata.json")
     metadata = json.loads(metadata_path.read_text())
     channels = metadata["channels"]
-    fnames = feature_names(channels, args.feature_mode)
+    seq_len = int(metadata.get("window", 96))
+    fnames = feature_names(channels, args.feature_mode, seq_len)
 
     booster = xgb.Booster()
     booster.load_model(str(args.model))
