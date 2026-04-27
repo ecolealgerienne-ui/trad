@@ -36,13 +36,16 @@ TOP_K_PERCENTS = [1, 2, 5, 10, 25]
 
 def load_split(npz_path: Path) -> dict:
     data = np.load(npz_path, allow_pickle=False)
-    return {
+    out = {
         "X": data["X"].astype("float32"),
         "y": data["y"].astype("int8"),
         "direction": data["direction"],
         "timestamp": data["timestamp"],
         "pnl_after_fees_pct": data["pnl_after_fees_pct"],
     }
+    if "feature_idx" in data.files:
+        out["feature_idx"] = data["feature_idx"]
+    return out
 
 
 def filter_by_direction(data: dict, direction_filter: str) -> dict:
@@ -54,12 +57,20 @@ def filter_by_direction(data: dict, direction_filter: str) -> dict:
     return {k: v[mask] for k, v in data.items()}
 
 
-MULTI_AGG_WINDOWS = [6, 12, 24, 48, 96]
+DEFAULT_MULTI_AGG_WINDOWS = [6, 12, 24, 48, 96]
 
 
-def build_features(X: np.ndarray, mode: str, agg_window: int = 24) -> np.ndarray:
+def parse_multi_windows(spec: str) -> list[int]:
+    """Parse comma-separated windows like '6,12,24,48,96' → [6,12,24,48,96]."""
+    return [int(w.strip()) for w in spec.split(",") if w.strip()]
+
+
+def build_features(X: np.ndarray, mode: str, agg_window: int = 24,
+                   multi_windows: list[int] | None = None) -> np.ndarray:
     """X shape (n, T, C). Retourne (n, F) features 2D."""
     n, T, C = X.shape
+    if multi_windows is None:
+        multi_windows = DEFAULT_MULTI_AGG_WINDOWS
     if mode == "last-only":
         return X[:, -1, :]
     elif mode == "last-plus-aggs":
@@ -71,7 +82,7 @@ def build_features(X: np.ndarray, mode: str, agg_window: int = 24) -> np.ndarray
         return np.concatenate([last, mean, std, first], axis=1)  # (n, 4C)
     elif mode == "last-plus-multi-aggs":
         parts = [X[:, -1, :]]                                # last (n, C)
-        for w in MULTI_AGG_WINDOWS:
+        for w in multi_windows:
             if w > T:
                 continue
             sub = X[:, -w:, :]
@@ -82,7 +93,10 @@ def build_features(X: np.ndarray, mode: str, agg_window: int = 24) -> np.ndarray
     raise ValueError(f"Unknown mode: {mode}")
 
 
-def feature_names(channels: list[str], mode: str, seq_len: int = 96) -> list[str]:
+def feature_names(channels: list[str], mode: str, seq_len: int = 96,
+                  multi_windows: list[int] | None = None) -> list[str]:
+    if multi_windows is None:
+        multi_windows = DEFAULT_MULTI_AGG_WINDOWS
     if mode == "last-only":
         return [f"{c}_last" for c in channels]
     if mode == "last-plus-aggs":
@@ -92,7 +106,7 @@ def feature_names(channels: list[str], mode: str, seq_len: int = 96) -> list[str
                [f"{c}_first24" for c in channels]
     if mode == "last-plus-multi-aggs":
         names = [f"{c}_last" for c in channels]
-        for w in MULTI_AGG_WINDOWS:
+        for w in multi_windows:
             if w > seq_len:
                 continue
             names += [f"{c}_mean{w}" for c in channels]
@@ -103,7 +117,8 @@ def feature_names(channels: list[str], mode: str, seq_len: int = 96) -> list[str
 
 
 def compute_metrics(y_true: np.ndarray, scores: np.ndarray) -> dict:
-    metrics = {"accuracy": float((scores >= 0.5).astype(int).__eq__(y_true).mean())}
+    preds = (scores >= 0.5).astype("int8")
+    metrics = {"accuracy": float((preds == y_true).mean())}
     if len(np.unique(y_true)) > 1:
         metrics["roc_auc"] = float(roc_auc_score(y_true, scores))
         metrics["pr_auc"] = float(average_precision_score(y_true, scores))
@@ -126,6 +141,8 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     p.add_argument("--feature-mode", type=str, default="last-plus-aggs",
                    choices=["last-only", "last-plus-aggs", "last-plus-multi-aggs"])
     p.add_argument("--agg-window", type=int, default=24)
+    p.add_argument("--multi-agg-windows", type=str, default="6,12,24,48,96",
+                   help="Comma-separated windows for last-plus-multi-aggs mode (default: 6,12,24,48,96)")
     p.add_argument("--direction-filter", type=str, default="both",
                    choices=["long", "short", "both"],
                    help="Filter events by direction (long=+1, short=-1, both=no filter)")
@@ -176,12 +193,16 @@ def main(argv: Iterable[str] | None = None) -> int:
                 len(train["y"]), 100 * train["y"].mean(), len(val["y"]), len(test["y"]))
 
     seq_len = train["X"].shape[1]
-    X_train = build_features(train["X"], args.feature_mode, args.agg_window)
-    X_val = build_features(val["X"], args.feature_mode, args.agg_window)
-    X_test = build_features(test["X"], args.feature_mode, args.agg_window)
-    fnames = feature_names(channels, args.feature_mode, seq_len)
-    logger.info("Feature mode: %s → %d features (seq_len=%d)",
-                args.feature_mode, X_train.shape[1], seq_len)
+    multi_windows = parse_multi_windows(args.multi_agg_windows)
+    X_train = build_features(train["X"], args.feature_mode, args.agg_window, multi_windows)
+    X_val = build_features(val["X"], args.feature_mode, args.agg_window, multi_windows)
+    X_test = build_features(test["X"], args.feature_mode, args.agg_window, multi_windows)
+    fnames = feature_names(channels, args.feature_mode, seq_len, multi_windows)
+    if X_train.shape[1] != len(fnames):
+        raise RuntimeError(f"Feature count mismatch: build_features={X_train.shape[1]} vs "
+                           f"feature_names={len(fnames)} — bug dans build/feature_names")
+    logger.info("Feature mode: %s → %d features (seq_len=%d, multi_windows=%s)",
+                args.feature_mode, X_train.shape[1], seq_len, multi_windows)
 
     pos_train = train["y"].mean()
     scale_pos_weight = (1 - pos_train) / max(pos_train, 1e-6)
@@ -214,10 +235,17 @@ def main(argv: Iterable[str] | None = None) -> int:
                 args.min_child_weight, args.subsample, args.colsample_bytree,
                 args.reg_alpha, args.reg_lambda)
     early_stop = None if args.no_early_stopping else args.early_stopping_rounds
+    # XGBoost early-stop watches the LAST eval. To keep --early-stopping-rounds operational
+    # by default (watch val), put val LAST. When --no-early-stopping, swap so train logs
+    # appear last (cosmétique).
+    if args.no_early_stopping:
+        evals = [(dval, "val"), (dtrain, "train")]
+    else:
+        evals = [(dtrain, "train"), (dval, "val")]
     booster = xgb.train(
         params, dtrain,
         num_boost_round=args.n_estimators,
-        evals=[(dval, "val"), (dtrain, "train")],
+        evals=evals,
         early_stopping_rounds=early_stop,
         verbose_eval=50,
     )
@@ -259,7 +287,14 @@ def main(argv: Iterable[str] | None = None) -> int:
         logger.info("  %-40s %.2f", name, gain)
     logger.info("=" * 110)
 
-    # Save
+    # Persist training config inside the model artifact (booster attributes survive save_model).
+    # predict_all_splits.py uses these to reconstruct the same feature pipeline.
+    booster.set_attr(feature_mode=args.feature_mode)
+    booster.set_attr(agg_window=str(args.agg_window))
+    booster.set_attr(multi_agg_windows=args.multi_agg_windows)
+    booster.set_attr(direction_filter=args.direction_filter)
+    booster.set_attr(n_features=str(X_train.shape[1]))
+    booster.set_attr(seq_len=str(seq_len))
     booster.save_model(str(args.output_dir / "xgboost_model.json"))
 
     np.savez_compressed(
