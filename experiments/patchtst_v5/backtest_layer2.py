@@ -323,6 +323,10 @@ def main(argv: Iterable[str] | None = None) -> int:
             res["timestamp"] = pred["timestamp"][k_idx]
             res["entry_price"] = entry_price
             res["y_true"] = int(pred["y_true"][k_idx]) if "y_true" in pred else -1
+            # Sanity-check : pnl du label (calculé par pivot_labeler_levels avec
+            # exactement la même logique strict-H1) doit matcher notre pnl_net.
+            res["label_pnl_net"] = (float(pred["pnl_after_fees_pct"][k_idx])
+                                    if "pnl_after_fees_pct" in pred else np.nan)
             rows.append(res)
         df = pd.DataFrame(rows)
         m = report_results(df, span_days)
@@ -355,6 +359,34 @@ def main(argv: Iterable[str] | None = None) -> int:
         logger.info("  level %d (%s) : %d (%.1f%%)",
                     level, labels.get(level, "?"), count,
                     100 * count / max(main_metrics["n_trades"], 1))
+
+    # ------------------------------------------------------------------
+    # Sanity check : compare backtest pnl_net vs label pnl_after_fees_pct
+    # Le label couche-1 (pivot_labeler_levels sl_level=4) calcule exactement
+    # la même chose. Toute divergence > seuil ⇒ bug dans le backtest.
+    # ------------------------------------------------------------------
+    if "label_pnl_net" in main_df.columns and main_df["label_pnl_net"].notna().any():
+        cmp = main_df.dropna(subset=["pnl_net", "label_pnl_net"]).copy()
+        cmp["delta"] = cmp["pnl_net"] - cmp["label_pnl_net"]
+        n_cmp = len(cmp)
+        n_match = int((cmp["delta"].abs() < 1e-4).sum())
+        logger.info("Sanity check vs label pnl_after_fees_pct  (n=%d) : "
+                    "match=%d (%.1f%%)  mean|Δ|=%.4f%%  max|Δ|=%.4f%%  "
+                    "label_WR=%.3f  backtest_WR=%.3f",
+                    n_cmp, n_match, 100 * n_match / max(n_cmp, 1),
+                    float(cmp["delta"].abs().mean()),
+                    float(cmp["delta"].abs().max()),
+                    float((cmp["label_pnl_net"] > 0).mean()),
+                    float((cmp["pnl_net"] > 0).mean()))
+        # Échantillon des divergences les plus grandes pour debug
+        if (cmp["delta"].abs() >= 1e-4).any():
+            worst = cmp.assign(abs_delta=cmp["delta"].abs())\
+                       .nlargest(5, "abs_delta")\
+                       [["timestamp", "direction", "entry_price",
+                         "exit_price", "exit_reason", "pnl_net",
+                         "label_pnl_net", "delta", "y_true"]]
+            logger.warning("Top 5 divergences (premier signe de bug) :\n%s",
+                           worst.to_string(index=False))
 
     # ------------------------------------------------------------------
     # Optional sweep
