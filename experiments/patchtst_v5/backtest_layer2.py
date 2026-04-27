@@ -1,18 +1,23 @@
 """
-backtest_layer2.py — Couche 2 trading method : TP adaptatif au premier pivot rentable.
+backtest_layer2.py — Couche 2 trading method : TP adaptatif + trail break-even.
 
 Pour chaque event sélectionné (top-K% par score modèle), simule bar-par-bar
-un trade avec TP adaptatif :
+un trade :
 
   - TP = premier pivot dans la direction tel que |tp − entry|/entry ≥ min_edge_pct
          (ex: H1 si déjà à ≥0.10%, sinon H2, sinon H3, sinon H4)
-  - SL = pivot rang 4 opposé (L4 pour LONG, H4 pour SHORT) — inchangé vs label
+  - SL initial = pivot rang 4 opposé (L4 LONG / H4 SHORT) — inchangé vs label
+  - Trail break-even : si le pivot immédiat (H1 LONG / L1 SHORT) est touché
+    avant TP/SL, SL passe à entry_price → exit ≈ break-even si renversement
   - Walk-forward sur high/low entre idx+1 et idx+time_barrier
   - Tie-break same-bar TP+SL → SL (conservateur)
   - SKIP_NO_PROFITABLE_TP si aucun pivot ne dépasse min_edge_pct avant L4/H4
 
-Avec --min-edge-pct 0.0 → comportement strict-H1 (réplique du label sl_level=4).
-Avec --min-edge-pct 0.10 → grimpe les pivots pour garantir profit > fees+edge.
+Exit reasons : TP_RANK0..3 (rang TP atteint), SL_INIT (full loss),
+SL_BE (break-even après confirmation H1), TIMEOUT, AMBIGUOUS.
+
+Avec --min-edge-pct 0.0 + --no-breakeven-trail → strict-H1 (réplique label).
+Défaut : --min-edge-pct 0.10 + trail ON.
 
   Time barrier :
     - --time-barrier (default 24) bars max
@@ -78,6 +83,7 @@ def simulate_adaptive_tp(
     time_barrier: int,
     fees_pct: float,
     min_edge_pct: float,
+    breakeven_trail: bool = True,
 ) -> dict:
     """Simule un trade avec TP adaptatif au premier pivot rentable.
 
@@ -86,6 +92,11 @@ def simulate_adaptive_tp(
     SL = sl_pool[3] (L4 LONG / H4 SHORT) — inchangé vs label sl_level=4
     Walk-forward bar par bar sur [entry_idx+1, entry_idx+time_barrier].
     Tie-break (same-bar TP+SL) → SL conservateur (identique label).
+
+    breakeven_trail=True : si le pivot immédiat (H1 LONG / L1 SHORT) est touché
+    avant TP/SL, on déplace SL à entry_price (break-even). Évite les renversements
+    catastrophiques sur les trades qui ont confirmé la direction sans atteindre TP.
+    Nouvelles exit reasons : SL_BE (break-even hit après H1 touché).
 
     Avec min_edge_pct=0.0 → comportement identique au strict H1 du label.
     Avec min_edge_pct>0 → grimpe les pivots jusqu'à dépasser le seuil.
@@ -116,48 +127,60 @@ def simulate_adaptive_tp(
             break
 
     if tp is None:
-        # Aucun pivot dans la direction n'a une distance suffisante avant L4/H4
         return {
             "pnl_net": np.nan, "exit_bars": -1,
             "exit_reason": "SKIP_NO_PROFITABLE_TP",
             "exit_price": np.nan, "trail_level": -1,
         }
 
-    sl = float(sl_pool[3])
+    sl_init = float(sl_pool[3])
+    sl = sl_init
+    h1_pivot = float(targets[0])         # pivot immédiat (peut être == tp si tp_rank=0)
+    h1_touched = False                    # devient True quand on a confirmé la direction
 
     n_bars = len(high)
     end = min(entry_idx + 1 + time_barrier, n_bars)
-    sub_high = high[entry_idx + 1: end]
-    sub_low = low[entry_idx + 1: end]
-    horizon = sub_high.size
+    horizon = end - (entry_idx + 1)
 
-    if horizon == 0:
+    if horizon <= 0:
         return {
             "pnl_net": np.nan, "exit_bars": -1,
             "exit_reason": "OUT_OF_DATA",
             "exit_price": np.nan, "trail_level": -1,
         }
 
-    if direction > 0:
-        tp_hit = sub_high >= tp
-        sl_hit = sub_low <= sl
-    else:
-        tp_hit = sub_low <= tp
-        sl_hit = sub_high >= sl
+    # Bar-by-bar : nécessaire pour gérer le trail break-even
+    for k in range(horizon):
+        bar = entry_idx + 1 + k
+        bar_h = high[bar]
+        bar_l = low[bar]
 
-    first_tp = int(np.argmax(tp_hit)) if tp_hit.any() else horizon
-    first_sl = int(np.argmax(sl_hit)) if sl_hit.any() else horizon
+        if direction > 0:
+            sl_hit = bar_l <= sl
+            tp_hit = bar_h >= tp
+            h1_now = bar_h >= h1_pivot
+        else:
+            sl_hit = bar_h >= sl
+            tp_hit = bar_l <= tp
+            h1_now = bar_l <= h1_pivot
 
-    # tp_rank stocké dans trail_level pour debug : 0=H1, 1=H2, 2=H3, 3=H4
-    if first_tp < first_sl:
-        return _exit(direction, entry_price, tp, first_tp + 1,
-                     f"TP_RANK{tp_rank}", fees_pct, trail_level=tp_rank)
-    if first_sl < first_tp:
-        return _exit(direction, entry_price, sl, first_sl + 1, "SL_INIT",
-                     fees_pct, trail_level=-2)
-    if first_tp == first_sl and first_tp < horizon:
-        return _exit(direction, entry_price, sl, first_tp + 1, "AMBIGUOUS",
-                     fees_pct, trail_level=-2)
+        # Tie-break conservateur : SL prioritaire si même bar
+        if sl_hit:
+            if h1_touched:
+                # SL trail à entry → exit ≈ break-even (perte ≈ fees seulement)
+                return _exit(direction, entry_price, sl, k + 1, "SL_BE",
+                             fees_pct, trail_level=-3)
+            # Sinon SL initial = perte pleine
+            return _exit(direction, entry_price, sl, k + 1, "SL_INIT",
+                         fees_pct, trail_level=-2)
+        if tp_hit:
+            return _exit(direction, entry_price, tp, k + 1,
+                         f"TP_RANK{tp_rank}", fees_pct, trail_level=tp_rank)
+
+        # Pas d'exit cette bar : si H1 touché et trail activé, déplacer SL à entry
+        if breakeven_trail and h1_now and not h1_touched:
+            h1_touched = True
+            sl = entry_price
 
     last_close = float(close[end - 1])
     return _exit(direction, entry_price, last_close, horizon, "TIMEOUT",
@@ -294,6 +317,11 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
                         "viser le premier pivot rentable. Recommandé : "
                         "2*fees + edge_min (ex: 0.10 pour fees=0.02). "
                         "Mettre 0.0 pour comportement strict-H1.")
+    p.add_argument("--no-breakeven-trail", action="store_true",
+                   help="Désactive le trail SL→entry après touche du pivot immédiat. "
+                        "Par défaut le trail est activé : si H1 (LONG) ou L1 (SHORT) "
+                        "est touché avant TP/SL, SL passe à entry → exit break-even "
+                        "au lieu de SL_INIT en cas de renversement.")
     p.add_argument("--output-dir", type=Path, required=True)
     p.add_argument("--also-sweep-topk", action="store_true",
                    help="Also report results for several top-K%% (1, 2, 5, 10, 25, 50)")
@@ -324,8 +352,9 @@ def main(argv: Iterable[str] | None = None) -> int:
     logger.info("Total events available: %d  | span: %.1f days (%.2f years)",
                 n_total, span_days, span_days / 365.25)
     logger.info("Adaptive-TP config: time_barrier=%d bars  fees=%.3f%% one-way  "
-                "min_edge_pct=%.3f%%",
-                args.time_barrier, args.fees_pct, args.min_edge_pct)
+                "min_edge_pct=%.3f%%  breakeven_trail=%s",
+                args.time_barrier, args.fees_pct, args.min_edge_pct,
+                "OFF" if args.no_breakeven_trail else "ON")
 
     # ------------------------------------------------------------------
     # Helper to run sim for a given top-K%% threshold
@@ -346,6 +375,7 @@ def main(argv: Iterable[str] | None = None) -> int:
                 high, low, close, piv,
                 args.time_barrier, args.fees_pct,
                 args.min_edge_pct,
+                breakeven_trail=not args.no_breakeven_trail,
             )
             res["score"] = float(pred["scores"][k_idx])
             res["direction"] = direction
@@ -384,7 +414,8 @@ def main(argv: Iterable[str] | None = None) -> int:
                     reason, count, 100 * count / max(main_metrics["n_trades"], 1))
 
     logger.info("TP rank distribution (rang du pivot atteint à l'exit) :")
-    rank_labels = {-2: "loss/timeout/ambig", -1: "skipped",
+    rank_labels = {-3: "SL_BE (break-even)", -2: "SL_INIT/TIMEOUT/AMBIG",
+                   -1: "skipped",
                    0: "TP_H1 (rang 1)", 1: "TP_H2 (rang 2)",
                    2: "TP_H3 (rang 3)", 3: "TP_H4 (rang 4)"}
     for level, count in sorted(main_metrics.get("trail_level_distribution", {}).items()):
@@ -470,6 +501,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             "time_barrier": args.time_barrier,
             "fees_pct": args.fees_pct,
             "min_edge_pct": args.min_edge_pct,
+            "breakeven_trail": not args.no_breakeven_trail,
             "mode": "adaptive_tp",
         },
         "n_total_events": int(n_total),
