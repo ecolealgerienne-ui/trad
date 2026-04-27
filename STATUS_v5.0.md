@@ -672,3 +672,95 @@ L'ensemble a fait son job (variance réduite, signal confirmé). Pour aller plus
 - **Option 3** : ratios cross-channel (ex : `rsi_14 - rsi_7`, divergences)
 
 Étape B en cours : implémentation Option 1.
+
+---
+
+# v5.3.2 — Étape B (option 1 rich features) ÉCHEC + retour modèle unifié — 2026-04-27
+
+## Étape B option 1 : `last-plus-multi-aggs-rich` (874 features)
+
+Ajout de 6 stats (median, q25, q75, min, max, skew) aux 5 windows existantes : 19 channels × (1 last + 5 windows × 9 stats) = **874 features** au lieu de 304.
+
+### Single rich pushed (subsample=1.0)
+
+| Métrique | Multi-aggs (304 feat) | **Rich (874 feat)** | Delta |
+|---|---|---|---|
+| TRAIN AUC | 1.000 | 1.000 | 0 |
+| **VAL top 1%** | 78.3% | **56.5%** | **-21.8pp** ❌ |
+| **TEST top 1%** | 83.3% | **58.3%** | **-25.0pp** ❌ |
+| TEST top 5% | 68.0% | 61.5% | -6.5 |
+
+### Ensemble bagging rich (subsample=0.8)
+
+| Métrique | Multi-aggs ensemble | **Rich ensemble** | Delta |
+|---|---|---|---|
+| **TEST top 1% WR** | **79.2%** | 70.8% | -8.3pp ❌ |
+| TEST top 1% AnnRet | +0.97% | -0.83% | -1.80% ❌ |
+| TEST top 1% Sharpe | +0.56 | -2.31 | -2.87 ❌ |
+| **VAL top 1% WR** | 73.9% | 60.9% | -13.0pp ❌ |
+
+### Diagnostic option 1
+
+L'ajout des stats `median/q25/q75/min/max/skew` :
+- **Disperse le signal** : top features passent de `atr_mean6/rsi_mean24` à `atr_q75, hurst_median, williams_max` → modèle ne se concentre plus sur la queue extrême
+- **N'apporte pas d'info nouvelle** : quantiles, min, max sont des fonctions des mêmes séries déjà résumées par mean/std
+- **Ratio features/samples 1:13** : memorisation parfaite mais signal généralisable dilué
+
+→ **Option 1 abandonnée**. Confirmation empirique que sur ce dataset, **plus de features dérivées ≠ mieux**.
+
+## Étape B suite : test LONG-only ensemble bagging
+
+Avant de passer à option 2, j'ai testé LONG-only avec la config multi-aggs ensemble bagging pour mesurer une éventuelle asymétrie SHORT vs LONG.
+
+| Métrique | SHORT (référence) | **LONG (nouveau)** |
+|---|---|---|
+| TEST top 1% WR | **79.2%** | 70.4% |
+| TEST top 1% AnnRet | **+0.97%** ✅ | -1.33% ❌ |
+| TEST top 1% Sharpe | **+0.56** | -1.64 |
+| **VAL top 1% WR** | 73.9% | **92.6%** (25/27 wins) |
+| **VAL top 1% AnnRet** | -0.51% | **+0.30%** ✅ |
+| VAL top 1% Sharpe | -0.67 | **+0.42** |
+| **VAL top 2% WR** | 72.3% | **85.5%** (47/55 wins) |
+| VAL top 2% AnnRet | +0.22% | **+0.99%** ✅ |
+
+### Découverte : asymétrie INVERSÉE val/test entre LONG et SHORT
+
+- **SHORT** : val négatif (-0.51%), test positif (+0.97%)
+- **LONG** : val positif (+0.30%), test négatif (-1.33%)
+
+Les deux modèles montrent du signal **sur des splits différents**. Pattern classique de variance haute sur petits échantillons (24-27 trades par direction par split). Aucune direction n'est strictement meilleure.
+
+## Décision stratégique : retour à un modèle UNIFIÉ (`--direction-filter both`)
+
+**Constat** : la séparation LONG/SHORT initiée pour « éviter la pollution » au début de la session n'a pas montré d'avantage robuste — chaque direction a son split lucky différent.
+
+**Décision** : passer à **un seul modèle entraîné sur les 24 175 events combinés** (LONG + SHORT). Le modèle peut apprendre lui-même les divergences via les features.
+
+### Bénéfices attendus
+- **2× plus de données train** (24 175 vs 11 491) → ensemble potentiellement plus stable
+- **Couverture complète** des 5 175 events test (vs 2 441 pour SHORT-only)
+- **Simplicité opérationnelle** : 1 modèle, 1 backtest, pas de combinaison à gérer
+
+### Risques connus
+- Le modèle pourrait diluer les signaux directionnels en mélangeant LONG/SHORT
+- La direction (`+1`/`-1`) est dans les features ? **Non** — la direction n'est PAS un input du modèle (c'est une étiquette annexe utilisée seulement pour le backtest). Le modèle voit uniquement les 304 features dérivées des 19 indicateurs OHLCV.
+
+### Configuration de référence pour étape B+
+
+```bash
+# Train unifié ensemble bagging
+python -m experiments.patchtst_v5.train_ensemble \
+    --train data/patchtst_v5_pivot_buf05/train.npz \
+    --val   data/patchtst_v5_pivot_buf05/val.npz \
+    --test  data/patchtst_v5_pivot_buf05/test.npz \
+    --output-dir models/patchtst_v5_pivot_buf05_xgb_both_multi_ensemble_bagging/ \
+    --seeds 42,7,13,100,999 \
+    --feature-mode last-plus-multi-aggs \
+    --direction-filter both \
+    --max-depth 10 --learning-rate 0.03 --n-estimators 3000 \
+    --min-child-weight 1 \
+    --subsample 0.8 --colsample-bytree 0.8 \
+    --reg-lambda 0.0 --reg-alpha 0.0 --no-early-stopping
+```
+
+C'est la nouvelle baseline à partir de laquelle on poursuit l'exploration features.
