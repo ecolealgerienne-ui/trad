@@ -2,22 +2,25 @@
 pivot_labeler_levels.py — Triple Barrier avec niveaux pivot Camarilla comme TP/SL.
 
 Pour chaque event:
-  - Trouve le niveau pivot Camarilla IMMÉDIATEMENT au-dessus et IMMÉDIATEMENT
-    en-dessous de l'entry close.
-  - LONG: TP = level_above, SL = level_below
-  - SHORT: TP = level_below, SL = level_above
-  - Skip events où il n'y a pas de niveau dans la direction (extrêmes hors structure)
+  - Trouve les pivots Camarilla autour de l'entry close
+  - LONG : TP = pivot Camarilla immédiat au-dessus
+            SL = pivot Camarilla rang `sl_level` en-dessous (défaut 2)
+  - SHORT: TP = pivot Camarilla immédiat en-dessous
+            SL = pivot Camarilla rang `sl_level` au-dessus (défaut 2)
+  - Skip events où le niveau de SL demandé n'existe pas (ex : sl_level=3 mais
+    seulement 2 pivots au-dessus de l'entry → NO_PIVOT_LEVEL_3)
   - Time barrier configurable (default 24 bars = 2h)
 
-Distances TP/SL varient naturellement selon position du trade dans la structure.
-RR effectif varie par trade.
+Distances TP/SL varient naturellement selon position du trade et `sl_level`.
+RR effectif varie par trade : plus `sl_level` est grand, plus le SL est lointain
+(R/R plus défavorable mais moins de stop hunts).
 
 Usage:
     python -m experiments.patchtst_v5.pivot_labeler_levels \\
         --features data/patchtst_v5/features_btc.parquet \\
         --events data/patchtst_v5/events_btc.parquet \\
-        --output data/patchtst_v5/labels_btc_pivot_levels.parquet \\
-        --time-barrier 24 --fees-pct 0.02
+        --output data/patchtst_v5/labels_btc_pivot_levels_sl3.parquet \\
+        --sl-mode beyond --sl-level 3 --time-barrier 24 --fees-pct 0.02
 """
 from __future__ import annotations
 
@@ -62,12 +65,14 @@ def compute_camarilla_5min(timestamp: pd.Series, high: np.ndarray,
     return levels.reindex(df.set_index("timestamp").index, method="ffill").reset_index(drop=True)
 
 
-def find_neighbor_levels(entry: float, levels: np.ndarray) -> tuple[float, float, float, float]:
+def find_neighbor_levels(entry: float, levels: np.ndarray,
+                          n_beyond: int = 2) -> tuple[float, float, float, float]:
     """Trouve les 4 niveaux pertinents autour de entry:
       - above: niveau immédiatement au-dessus (1er resistance)
       - below: niveau immédiatement en-dessous (1er support)
-      - beyond_above: niveau suivant au-dessus de 'above' (2e resistance)
-      - beyond_below: niveau suivant en-dessous de 'below' (2e support)
+      - beyond_above: nième niveau au-dessus (n_beyond=2 → 2e résistance,
+                       n_beyond=3 → 3e résistance, etc.)
+      - beyond_below: nième niveau en-dessous (idem, n_beyond=2 par défaut)
     """
     valid = np.sort(levels[~np.isnan(levels)])
     above_levels = valid[valid > entry]
@@ -75,20 +80,21 @@ def find_neighbor_levels(entry: float, levels: np.ndarray) -> tuple[float, float
 
     above = above_levels[0] if len(above_levels) >= 1 else np.nan
     below = below_levels[-1] if len(below_levels) >= 1 else np.nan
-    beyond_above = above_levels[1] if len(above_levels) >= 2 else np.nan
-    beyond_below = below_levels[-2] if len(below_levels) >= 2 else np.nan
+    beyond_above = above_levels[n_beyond - 1] if len(above_levels) >= n_beyond else np.nan
+    beyond_below = below_levels[-n_beyond] if len(below_levels) >= n_beyond else np.nan
     return above, below, beyond_above, beyond_below
 
 
 def label_events(events: pd.DataFrame, features: pd.DataFrame,
                  high: np.ndarray, low: np.ndarray, close: np.ndarray,
                  time_barrier: int, sl_mode: str, sl_buffer_atr: float,
-                 fees_pct: float) -> pd.DataFrame:
+                 fees_pct: float, sl_level: int = 2) -> pd.DataFrame:
     """Triple Barrier avec niveaux Camarilla comme TP/SL dynamiques.
 
     sl_mode:
       - 'immediate-with-buffer': SL = pivot immédiat ± sl_buffer_atr × ATR (mix)
-      - 'beyond': SL = niveau Camarilla SUIVANT au-delà du pivot immédiat (pur pivot)
+      - 'beyond': SL = niveau Camarilla au n-ième rang opposé (pur pivot)
+        n contrôlé par sl_level (défaut 2 = 2e pivot opposé, configurable 2..4)
     """
     n_events = len(events)
     n_bars = len(high)
@@ -124,7 +130,8 @@ def label_events(events: pd.DataFrame, features: pd.DataFrame,
         entry = signal_close[k]
         atr_t = signal_atr[k]
 
-        above, below, beyond_above, beyond_below = find_neighbor_levels(entry, levels_at_event[k])
+        above, below, beyond_above, beyond_below = find_neighbor_levels(
+            entry, levels_at_event[k], n_beyond=sl_level)
 
         # TP toujours = pivot immédiat dans la direction du trade (pure pivot)
         if direction > 0:
@@ -146,7 +153,7 @@ def label_events(events: pd.DataFrame, features: pd.DataFrame,
                 sl = beyond_above
             if np.isnan(sl):
                 n_skipped_no_target += 1
-                skipped_reason[k] = "NO_BEYOND_PIVOT"
+                skipped_reason[k] = f"NO_PIVOT_LEVEL_{sl_level}"
                 continue
         else:  # immediate-with-buffer
             if direction > 0:
@@ -286,8 +293,13 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     p.add_argument("--time-barrier", type=int, default=24, help="Bars max (24 = 2h)")
     p.add_argument("--sl-mode", type=str, default="beyond",
                    choices=["beyond", "immediate-with-buffer"],
-                   help="'beyond' = SL au pivot suivant (pure pivot, no ATR). "
+                   help="'beyond' = SL au n-ième pivot opposé (pure pivot, no ATR). "
                         "'immediate-with-buffer' = SL au pivot immédiat - buffer×ATR")
+    p.add_argument("--sl-level", type=int, default=2,
+                   help="(beyond mode only) profondeur du SL. 2 = 2e pivot opposé "
+                        "(défaut), 3 = 3e pivot, 4 = 4e pivot. Camarilla a 4 pivots "
+                        "par côté donc max=4. Plus la valeur est haute, plus le SL "
+                        "est lointain (R/R plus défavorable mais moins de stop hunts).")
     p.add_argument("--sl-buffer-atr", type=float, default=0.0,
                    help="(immediate-with-buffer mode only) buffer ATR au-delà du niveau immédiat")
     p.add_argument("--fees-pct", type=float, default=0.02, help="One-way fee %% (0.02 = maker)")
@@ -315,14 +327,17 @@ def main(argv: Iterable[str] | None = None) -> int:
     logger.info("Events: %d", len(events))
     logger.info("Time barrier: %d bars (~%d min)", args.time_barrier, args.time_barrier * 5)
     if args.sl_mode == "beyond":
-        logger.info("SL mode: BEYOND (pure pivot — SL = niveau Camarilla suivant)")
+        if args.sl_level < 2:
+            raise SystemExit("--sl-level must be >= 2 (1 = immediate pivot, use immediate-with-buffer mode for that)")
+        logger.info("SL mode: BEYOND (pure pivot — SL = pivot Camarilla rang %d opposé)", args.sl_level)
     else:
         logger.info("SL mode: IMMEDIATE-WITH-BUFFER (SL = pivot immédiat - %.2f × ATR)",
                     args.sl_buffer_atr)
     logger.info("Fees: %.3f%% one-way (round-trip = %.3f%%)", args.fees_pct, 2 * args.fees_pct)
 
     labeled = label_events(events, features, high, low, close,
-                           args.time_barrier, args.sl_mode, args.sl_buffer_atr, args.fees_pct)
+                           args.time_barrier, args.sl_mode, args.sl_buffer_atr,
+                           args.fees_pct, sl_level=args.sl_level)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     labeled.to_parquet(args.output, compression="snappy", index=False)
     logger.info("Output: %s (%d events)", args.output, len(labeled))
