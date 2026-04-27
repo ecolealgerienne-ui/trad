@@ -1102,3 +1102,153 @@ Pour 21 trades/mois × 0.66% = ~14%/mois ≈ **+168%/an** (estimation grossière
 | Commit | Description |
 |---|---|
 | `f19b20c` | feat: `analyze_pivot_distances.py` — quantification distances et économie par trade |
+
+---
+
+# v5.6 — Test timeframe 30min : ÉCHEC validé empiriquement (2026-04-27)
+
+**Statut** : ❌ **Test 30min abandonné** — volume d'events trop faible (×26 moins qu'attendu), statistique inutilisable. Baseline 5min reste verrouillée.
+
+## Motivation
+
+Hypothèse : passer de 5min à 30min pourrait :
+- Augmenter la stabilité des signaux (moins de bruit haute fréquence)
+- Élargir les distances Camarilla (R/R potentiellement meilleur)
+- Permettre une fréquence de trades acceptable au top 25%
+
+**Décision** : tester sans modification du pipeline (juste fournir un CSV 30min en entrée).
+
+## Méthode
+
+Création d'un script `make_30min_csv.py` (commit `acb2c4f`) qui resample un CSV 5min en 30min via la fonction `resample_ohlcv` de `src/signal_processing/core.py` (cohérence avec le reste du codebase). Output : `data_trad/BTCUSD_all_30m.csv`.
+
+Pipeline complet identique à 5min :
+1. `make_30min_csv` (CSV 5min → 30min)
+2. `feature_builder` sur le 30min CSV
+3. `event_detector` (mêmes seuils)
+4. `pivot_labeler_levels --sl-level 4 --time-barrier 24`
+5. `dataset_builder --window 96`
+6. `train_ensemble` SHORT puis LONG (multi-aggs, bagging 0.8/0.8, 5 seeds)
+7. `predict_ensemble` + `backtest_realistic`
+
+## Résultat label (étape 4)
+
+| Métrique label | 5min sl=4 (baseline) | **30min sl=4** | Delta |
+|---|---|---|---|
+| Bars total | ~880k | ~147k | ÷6 (attendu) |
+| Events labellisés | 21 191 | **807** | **÷26** (catastrophique) |
+| Events/an | ~2 535 | **~97** | ×26 moins |
+| Class1 baseline | 73.6% | 82.2% | Plus déséquilibré |
+| Exit TP | 63.9% | 80.8% | Plus de TP atteints |
+| Exit SL | 3.2% | 12.3% | 4× plus de SL hits |
+| Exit TIMEOUT | 32.9% | 6.2% | Time-barrier 12h résout presque tout |
+| Mean RR | 0.20 | 0.19 | Similaire |
+| Mean win net | +0.169% | +0.238% | +40% |
+| Mean loss net | -0.656% | **-1.596%** | 2.4× plus gros |
+| **Breakeven WR** | 79.5% | **87.0%** | Plus haut, moins de marge |
+| **Oracle annualisé** | **+314%/an** | **+18.9%/an** | **×16 moins de signal** |
+
+→ **Le passage 5min → 30min divise les events par 26 et le signal annualisé par 16.**
+
+### Pourquoi ÷26 et pas ÷6 ?
+
+`event_detector` filtre par : pattern bougie + proximité pivot Camarilla (< 0.3 ATR) + volume z-score > 1.5. Sur 30min :
+- Patterns bougies plus rares (moins de retournements purs)
+- Volume z-score plus stable (moins de spikes)
+- ATR 30min plus large → zone "proche pivot" plus restrictive en absolu
+
+→ Cumul des filtres → ~75% des events qui auraient été détectés (en agrégeant 5min) sont éliminés.
+
+## Résultat modèle (étapes 5-7)
+
+Splits chronologiques 70/15/15 :
+
+| Split | Total | SHORT events | LONG events |
+|---|---|---|---|
+| Train | 562 | 279 | 283 |
+| Val | 120 | 63 | 57 |
+| **Test** | **122** | **61** | **61** |
+
+→ Top-K test traduit en trades :
+- top 1% test = **1 trade** (variance pure)
+- top 5% test = 3 trades
+- top 10% test = 6 trades
+- top 25% test = 15 trades
+
+### Métriques modèle (multi-aggs ensemble bagging)
+
+| Métrique | SHORT 30min | LONG 30min |
+|---|---|---|
+| Train AUC | 1.000 (memorize) | 1.000 |
+| Val AUC | 0.66 | 0.57 |
+| Test AUC | 0.71 | 0.61 |
+| Top 1% TEST WR | 100% (1 trade) | **0%** (1 trade) ❌ |
+| Top 5% TEST WR | 100% (3) | 33% (3) ❌ |
+| Top 10% TEST WR | **100%** (6) | 66.7% (6) |
+| Top 25% TEST WR | 93.3% (15) | 80.0% (15) |
+| Top 10% TEST AnnRet | +0.12% | -1.50% |
+| Top 25% TEST AnnRet | -0.47% | -2.30% |
+
+### Trois problèmes critiques
+
+**1. Sample size catastrophique** : top 1-5% sur 1-3 trades = **aucune signification statistique**. Un trade gagnant ou perdant change tout.
+
+**2. AUC trompeuse** : test AUC 0.71 SHORT semble bonne, mais avec n=61 events, l'**IC 95% est ±0.15** → l'AUC réelle pourrait être entre 0.56 et 0.86. Inutilisable.
+
+**3. Asymétrie LONG/SHORT extrême et instable** :
+- SHORT TEST top 1% = 100% WR (sur 1 trade)
+- LONG TEST top 1% = 0% WR (sur 1 trade)
+- VAL inverse les écarts → pure variance
+
+## Comparaison décisive vs 5min
+
+| Critère | 5min sl=4 (baseline) | **30min sl=4** | Verdict |
+|---|---|---|---|
+| Events totaux | 21 191 | 807 | ❌ ×26 moins |
+| Trades top 10% test | 168 (LONG+SHORT) | **12** (LONG+SHORT) | ❌ ×14 moins |
+| Trades/mois top 10% combiné | ~21 ✅ | **~0.8** ❌ | Inutilisable |
+| WR top 25% test | 95-96% | 80-93% | Dégradé |
+| Cohérence test/val | excellente (1-3pp) | LONG cassé (0% test vs 100% val) | Régression |
+| Signal Oracle | +314%/an | +18.9%/an | ÷16 |
+| Ratio features/samples | 1:38 | **1:1.9** | Overfit garanti |
+
+→ **Le 30min n'apporte aucun bénéfice et aggrave tous les problèmes**.
+
+## Diagnostic structurel
+
+Le 30min ne fonctionne pas parce que :
+
+1. **Compression temporelle agressive** : 6× moins de bars → 6× moins d'opportunités d'événements. Combiné aux filtres de l'event_detector (qui demandent un pattern + un pivot proche + un volume spike), les conditions se cumulent et ÷26 le volume final.
+
+2. **Camarilla est calibré sur les bougies daily** : les niveaux journaliers sont identiques quel que soit le TF intraday. Mais sur 30min, on a moins d'opportunités d'approcher ces niveaux dans les conditions filtrées.
+
+3. **Training trop petit** : 562 events × 304 features = **ratio 1.85:1**. XGBoost mémorise parfaitement le train (AUC=1.0) mais ne peut généraliser sur 121 events test.
+
+4. **Time-barrier 24×30min = 12h** : résout presque tous les trades (TIMEOUT seulement 6.2%) au lieu d'agir comme amortisseur. Le label est plus binaire (TP ou SL) → breakeven WR remonte à 87%.
+
+## Verdict final
+
+❌ **30min abandonné définitivement pour ce setup.** Les arguments sont solides empiriquement et structurellement.
+
+✅ **Baseline 5min sl=4 LONG+SHORT séparés (v5.4) reste la couche 1 verrouillée.**
+
+## Prochain levier réel : multi-asset 5min
+
+Pour atteindre les **20+ trades/mois à WR 95%+**, le vrai levier reste **multi-asset 5min** :
+
+| Setup | Events 5min sl=4 | Trades/mois top 10% combiné LONG+SHORT |
+|---|---|---|
+| BTC seul (baseline actuelle) | 21 191 | ~21 ✅ |
+| BTC + ETH | ~42 000 | **~42** |
+| BTC + ETH + SOL | ~63 000 | **~63** |
+| BTC + ETH + SOL + BNB + ADA | ~105 000 | **~105** |
+
+Les features sont asset-agnostiques (cf. v5.4) → transfer naturel possible. À tester par :
+1. Train zero-shot sur autres assets (modèle BTC appliqué à ETH directement)
+2. Si dégradation → train multi-asset combiné
+
+## Commits associés v5.6
+
+| Commit | Description |
+|---|---|
+| `acb2c4f` | feat: `make_30min_csv.py` — resample 5min CSV vers 30min OHLCV |
