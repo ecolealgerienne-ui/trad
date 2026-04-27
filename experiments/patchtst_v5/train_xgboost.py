@@ -250,7 +250,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         "feature_mode": args.feature_mode,
         "n_features": X_train.shape[1],
         "best_iteration": best_iter,
-        "best_val_auc": float(booster.best_score),
+        "best_val_auc": None if args.no_early_stopping else float(booster.best_score),
         "train_metrics": train_m,
         "val_metrics": val_m,
         "test_metrics": test_m,
