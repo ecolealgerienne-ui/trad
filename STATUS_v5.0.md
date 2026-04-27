@@ -333,6 +333,125 @@ Acquis empiriques validés sur 14 phases. v5.0 ne doit pas les retester :
 | Test events | 2 441 (15%) |
 | Class1 baseline | ~58.7% (WR si on prend tout) |
 
+## Spécification exacte des inputs du modèle XGBoost
+
+> **Important** : XGBoost ne voit PAS la séquence brute. Il voit un vecteur 1D de **304 features dérivées** par event. Aucune donnée externe, aucun prix brut, aucun timestamp.
+
+### Pipeline complet input → modèle
+
+```
+BTCUSD 5min CSV (OHLCV brut)
+         │
+         ▼
+[feature_builder.py]  → calcule 19 indicateurs par bougie
+         │
+         ▼
+features parquet : (~880k bougies × 19 indicateurs)
+         │
+         ▼
+[event_detector.py]  → garde un sous-ensemble (~32k events triggers)
+         │
+         ▼
+[pivot_labeler_levels.py]  → pour chaque event : label 0/1 + direction ±1
+         │                    (Triple Barrier, TP=pivot Camarilla immédiat,
+         │                     SL=pivot Camarilla suivant beyond, time=24 bars)
+         ▼
+[dataset_builder.py]  → pour chaque event : extrait fenêtre 96 bars × 19 channels
+         │                purge embargo 24 bars entre splits chronologiques
+         ▼
+NPZ : X (n_events, 96, 19), y, direction, timestamp, pnl_after_fees_pct
+         │
+         ▼
+[train_xgboost.py / build_features]  → aplatit (96, 19) → vecteur 1D 304 features
+         │
+         ▼
+XGBoost input : (n_events, 304) float32   ← CE QUE VOIT LE MODÈLE
+```
+
+### Les 19 indicateurs (canaux d'entrée)
+
+Tous calculés via TA-Lib sur OHLCV brut, par bougie 5min, dans `feature_builder.py`. Preset `v5_indicators_only` :
+
+| Groupe | # | Channels |
+|---|---|---|
+| Momentum multi-horizon | 3 | `rsi_7`, `rsi_14`, `rsi_21` |
+| MACD (% du prix, stationnaire) | 2 | `macd_line_pct`, `macd_signal_pct` |
+| Oscillateur déviation | 1 | `cci_20` |
+| Stochastique | 2 | `stoch_k_14`, `stoch_d_14` |
+| Williams | 1 | `williams_r_14` |
+| Trend strength | 3 | `adx_14`, `di_plus_14`, `di_minus_14` |
+| Volatilité | 2 | `atr_14_norm_z` (z-score rolling causal), `bbands_pct_b_20` |
+| Volume | 2 | `obv_slope_z` (z-score rolling), `mfi_14` |
+| Statistique | 2 | `hurst_dfa_100p`, `permutation_entropy_50p` |
+| Volume relatif | 1 | `volume_zscore_20p` |
+
+**Total : 19 channels.** Ce sont des indicateurs **classiques** dérivés de OHLCV. Aucune donnée externe (pas de funding rate, pas d'order book, pas d'on-chain).
+
+### Pour chaque event : (96, 19) → vecteur 1D 304 features
+
+Mode utilisé : `last-plus-multi-aggs` avec `MULTI_AGG_WINDOWS = [6, 12, 24, 48, 96]` :
+
+```
+Pour 1 event = 1 vecteur de 304 nombres :
+
+  19 × 1 = 19   _last           valeur ACTUELLE de chaque indicateur (timestep -1)
+
+Puis pour chaque fenêtre w ∈ [6, 12, 24, 48, 96] bars :
+  19 × 1 = 19   _mean{w}        moyenne sur les w dernières bougies
+  19 × 1 = 19   _std{w}         écart-type sur les w dernières bougies
+  19 × 1 = 19   _first{w}       valeur il y a w bougies (timestep -w)
+
+Total : 19 + 5 × 3 × 19 = 19 + 285 = 304 features
+```
+
+### Exemple concret pour 1 event SHORT
+
+Pour un event à T=12h00, le modèle reçoit 304 nombres qui décrivent :
+
+- **`_last` (19 nombres)** : où en est chaque indicateur juste avant l'entrée. Ex : `rsi_14_last = 72.3` (surachat), `atr_14_norm_z_last = 1.8` (vol élevée).
+- **`_mean6` (19 nombres)** : niveau moyen sur les 30 dernières min. Ex : `rsi_14_mean6 = 68.5`.
+- **`_std6` (19 nombres)** : volatilité de chaque indicateur sur 30 min. Ex : `rsi_14_std6 = 4.2`.
+- **`_first6` (19 nombres)** : valeur il y a 30 min. Ex : `rsi_14_first6 = 55` (RSI est monté 55 → 72 en 30 min).
+- Idem pour windows 12 (1h), 24 (2h), 48 (4h), 96 (8h) → vue **multi-échelle**.
+
+### Ce que le modèle NE voit PAS
+
+- ❌ **Aucun prix brut** (close, high, low, open, volume)
+- ❌ **Aucun ratio direct prix / pivot** (la position du prix dans la structure n'est pas une feature)
+- ❌ **Aucune feature catégorielle** (patterns bougies, jour, heure, session)
+- ❌ **Aucune donnée externe** (funding, OI, sentiment, on-chain, order book)
+- ❌ **Aucune information sur le label** (TP, SL, RR, exit_reason — utilisés uniquement pour calculer y)
+- ❌ **Aucun timestamp** (le modèle ignore la date)
+- ❌ **Aucune sortie de PatchTST** (XGBoost remplace PatchTST, pas en-dessus)
+
+### Ce que le modèle reçoit en plus du vecteur 304
+
+- La **cible** `y ∈ {0, 1}` dérivée du Triple Barrier
+- Le **`scale_pos_weight`** ajusté sur la prévalence Class1 du train (ratio ~58.7% → poids ~0.703)
+
+### Dimensions finales
+
+```
+TRAIN : X (11 491, 304) float32   y (11 491,) int8
+VAL   : X (2 397, 304)  float32   y (2 397,) int8
+TEST  : X (2 441, 304)  float32   y (2 441,) int8
+```
+
+C'est un **gradient boosting tabulaire classique** sur 304 features dérivées d'indicateurs techniques, target Triple Barrier sur pivots Camarilla. Pas de séquence, pas d'attention, pas de récurrence — juste 304 nombres par event.
+
+### Garanties anti-leakage sur ces inputs
+
+| Niveau | Garantie | Source |
+|---|---|---|
+| Indicateurs | Calcul rolling causal par bougie (TA-Lib + z-scores rolling) | `feature_builder.py` v5.4 fix drift |
+| Pivots Camarilla | `prev_close = daily.close.shift(1)`, `prev_rng = rng.shift(1)` | `pivot_labeler_levels.py:50-51` |
+| Window extraction | `block = feat_arr[start: idx + 1]` — pas de bar future | `dataset_builder.py:191` |
+| Walk-forward exit | `sub_high = high[idx + 1: end]` — démarre APRÈS la bar du signal | `pivot_labeler_levels.py:178-179` |
+| Splits | Chronologique strict + purge 24 bars d'embargo | `dataset_builder.py:207-251` |
+| Aggregations | `X[:, -w:, :]` — uniquement les w dernières bars de la fenêtre | `train_xgboost.py:77` |
+| XGBoost | Tree-based → invariant aux échelles, aucune normalisation cross-split | par construction |
+| Persistance config | `feature_mode`, `agg_window`, `multi_agg_windows`, `direction_filter`, `n_features` sauvés dans `xgboost_model.json` via `booster.set_attr()` ; predict_all_splits les lit pour éviter mismatch silencieux | `train_xgboost.py:294-299` + `predict_all_splits.py:85-128` |
+
 ## Diagnostic préalable (`diagnose_label_separability`)
 
 | Métrique (sur train) | Valeur | Lecture |
@@ -458,3 +577,190 @@ v5.3 montre que **le levier n'avait pas été exploité** :
 - Le mur n'était pas dans l'information OHLCV mais dans l'**inadéquation entre l'architecture (PatchTST attention sur séquence) et la vraie structure du signal (interactions multi-échelle entre indicateurs agrégés)**
 
 → **Pivot v6 (données externes funding/OI) suspendu**. On continue à pousser v5.3 (ensemble, walk-forward, LONG, etc.) avant d'envisager des sources externes.
+
+---
+
+# v5.3.1 — Ensemble multi-seed (étape A) — 2026-04-27
+
+**Statut** : ✅ **Signal confirmé robuste mais val 87% révélé comme outlier single-seed**.
+
+## Setup ensemble
+
+- 5 modèles XGBoost entraînés avec seeds `[42, 7, 13, 100, 999]`
+- Hyperparamètres identiques au pushed multi-aggs (max_depth=10, n_est=3000, lr=0.03, no_early_stop)
+- Scripts : `train_ensemble.py` + `predict_ensemble.py` (commits `dcaee99`)
+
+## Première tentative (subsample=1.0, colsample=1.0) — ÉCHEC silencieux
+
+Avec sampling complet, **les 5 modèles étaient bit-identiques** :
+- Toutes les val-AUC identiques à chaque itération [0, 50, 100, ..., 2999]
+- TEST top 1% = 79.2% pour les 5 (= single seed)
+- Ensemble = single (aucune variance à réduire)
+
+**Cause** : avec `subsample=1.0`, `colsample_bytree=1.0`, `tree_method=hist`, XGBoost est entièrement déterministe (le seed ne sert qu'au tie-breaking sur splits égaux, rare avec 11k events × 304 features).
+
+**Leçon** : pour qu'un ensemble XGBoost ait du sens, il **faut** activer le sampling de lignes ET de colonnes (< 1.0).
+
+## Deuxième tentative (subsample=0.8, colsample_bytree=0.8) — RÉUSSI
+
+Bagging + feature subsampling activé → diversité réelle entre seeds.
+
+### Per-seed metrics
+
+| Seed | TRAIN AUC | VAL top 1% | VAL top 5% | TEST top 1% | TEST top 5% |
+|------|-----------|------------|------------|-------------|-------------|
+| 42 | 1.000 | 78.3% | 63.0% | **62.5%** | 62.3% |
+| 7 | 1.000 | 73.9% | 61.3% | **79.2%** | 56.6% |
+| 13 | 1.000 | 69.6% | 59.7% | **66.7%** | 67.2% |
+| 100 | 1.000 | 73.9% | 58.8% | **83.3%** | 65.6% |
+| 999 | 1.000 | 73.9% | 62.2% | **87.5%** | 65.6% |
+| **mean** | — | **73.9%** | **61.0%** | **75.8%** | **63.5%** |
+| **range** | — | 69.6 - 78.3 | 58.8 - 63.0 | **62.5 - 87.5** | 56.6 - 67.2 |
+
+→ **Variance énorme** sur TEST top 1% (62-88%) à cause des seulement 24 trades par split.
+
+### Ensemble (moyenne des 5 scores)
+
+| Métrique | Single pushed (seed 42) | **Ensemble (5 seeds)** | Delta |
+|---|---|---|---|
+| TEST top 1% WR | 79.2% | **79.2%** | 0 |
+| TEST top 1% AvgNet | +0.078% | +0.050% | -0.028 |
+| TEST top 1% AnnRet | +1.51% | **+0.97%** | -0.54 |
+| TEST top 1% Sharpe | 0.86 | **0.56** | -0.30 |
+| TEST top 1% MaxDD | -0.88% | -0.52% | meilleur |
+| TEST top 5% WR | 61.5% | **63.9%** | +2.4pp |
+| TEST top 2% WR | 64.6% | **68.8%** | +4.2pp |
+| **VAL top 1% WR** | **87.0%** | **73.9%** | **-13.1pp** |
+| VAL top 1% AnnRet | -0.18% | -0.51% | -0.33 |
+
+## Découvertes critiques
+
+1. **Le 87% VAL top 1% du single était un coup de chance** — l'ensemble redonne **73.9%** = exactement la moyenne des 5 seeds. C'est la **vraie** valeur attendue du modèle sur val.
+2. **Le 79.2% TEST top 1% est confirmé robuste** — l'ensemble retombe sur la même valeur (avec PnL légèrement réduit).
+3. **Top 5% test légèrement amélioré** (+2.4pp) grâce au moyennage.
+4. **MaxDD réduit** (-0.88% → -0.52%) — l'ensemble est moins volatile.
+
+## Estimation honnête du modèle (post-ensemble)
+
+| Niveau | TEST | VAL | Lecture |
+|---|---|---|---|
+| top 1% WR | **~79%** | **~74%** | +20pp / +16pp vs baseline 58.7% — signal réel |
+| top 5% WR | ~64% | ~62% | +5pp / +3pp — signal marginal |
+| AnnRet top 1% | +0.97% | -0.51% | Asymétrie test/val gênante |
+| Sharpe top 1% | 0.56 | -0.67 | Test positif, val légèrement négative |
+
+## Limite atteinte avec le label actuel
+
+- Train AUC = 1.000 (capacité d'extraction saturée)
+- Top 1% val/test plafonne à ~74-79% WR
+- Breakeven WR structural pour `pivot beyond` ≈ 73-75% → on est juste à la limite, marge insuffisante pour PnL significatif
+- L'ensemble ne crée pas de signal nouveau, il stabilise seulement
+
+## Commits ensemble étape A
+
+| Commit | Description |
+|---|---|
+| `dcaee99` | feat: train_ensemble.py + predict_ensemble.py (multi-seed XGBoost averaging) |
+
+## Décision : passage à étape B (plus de features)
+
+L'ensemble a fait son job (variance réduite, signal confirmé). Pour aller plus loin sur le WR, il faut **enrichir les features** :
+
+- **Option 1 (priorité)** : ajouter `median, q25, q75, min, max, skew` aux 5 windows actuelles
+  → 19 ch × (1 last + 5 windows × 9 stats) = **874 features** (au lieu de 304)
+- **Option 2** : ratios cross-window (ex : `rsi_mean6 / rsi_mean48`)
+- **Option 3** : ratios cross-channel (ex : `rsi_14 - rsi_7`, divergences)
+
+Étape B en cours : implémentation Option 1.
+
+---
+
+# v5.3.2 — Étape B (option 1 rich features) ÉCHEC + retour modèle unifié — 2026-04-27
+
+## Étape B option 1 : `last-plus-multi-aggs-rich` (874 features)
+
+Ajout de 6 stats (median, q25, q75, min, max, skew) aux 5 windows existantes : 19 channels × (1 last + 5 windows × 9 stats) = **874 features** au lieu de 304.
+
+### Single rich pushed (subsample=1.0)
+
+| Métrique | Multi-aggs (304 feat) | **Rich (874 feat)** | Delta |
+|---|---|---|---|
+| TRAIN AUC | 1.000 | 1.000 | 0 |
+| **VAL top 1%** | 78.3% | **56.5%** | **-21.8pp** ❌ |
+| **TEST top 1%** | 83.3% | **58.3%** | **-25.0pp** ❌ |
+| TEST top 5% | 68.0% | 61.5% | -6.5 |
+
+### Ensemble bagging rich (subsample=0.8)
+
+| Métrique | Multi-aggs ensemble | **Rich ensemble** | Delta |
+|---|---|---|---|
+| **TEST top 1% WR** | **79.2%** | 70.8% | -8.3pp ❌ |
+| TEST top 1% AnnRet | +0.97% | -0.83% | -1.80% ❌ |
+| TEST top 1% Sharpe | +0.56 | -2.31 | -2.87 ❌ |
+| **VAL top 1% WR** | 73.9% | 60.9% | -13.0pp ❌ |
+
+### Diagnostic option 1
+
+L'ajout des stats `median/q25/q75/min/max/skew` :
+- **Disperse le signal** : top features passent de `atr_mean6/rsi_mean24` à `atr_q75, hurst_median, williams_max` → modèle ne se concentre plus sur la queue extrême
+- **N'apporte pas d'info nouvelle** : quantiles, min, max sont des fonctions des mêmes séries déjà résumées par mean/std
+- **Ratio features/samples 1:13** : memorisation parfaite mais signal généralisable dilué
+
+→ **Option 1 abandonnée**. Confirmation empirique que sur ce dataset, **plus de features dérivées ≠ mieux**.
+
+## Étape B suite : test LONG-only ensemble bagging
+
+Avant de passer à option 2, j'ai testé LONG-only avec la config multi-aggs ensemble bagging pour mesurer une éventuelle asymétrie SHORT vs LONG.
+
+| Métrique | SHORT (référence) | **LONG (nouveau)** |
+|---|---|---|
+| TEST top 1% WR | **79.2%** | 70.4% |
+| TEST top 1% AnnRet | **+0.97%** ✅ | -1.33% ❌ |
+| TEST top 1% Sharpe | **+0.56** | -1.64 |
+| **VAL top 1% WR** | 73.9% | **92.6%** (25/27 wins) |
+| **VAL top 1% AnnRet** | -0.51% | **+0.30%** ✅ |
+| VAL top 1% Sharpe | -0.67 | **+0.42** |
+| **VAL top 2% WR** | 72.3% | **85.5%** (47/55 wins) |
+| VAL top 2% AnnRet | +0.22% | **+0.99%** ✅ |
+
+### Découverte : asymétrie INVERSÉE val/test entre LONG et SHORT
+
+- **SHORT** : val négatif (-0.51%), test positif (+0.97%)
+- **LONG** : val positif (+0.30%), test négatif (-1.33%)
+
+Les deux modèles montrent du signal **sur des splits différents**. Pattern classique de variance haute sur petits échantillons (24-27 trades par direction par split). Aucune direction n'est strictement meilleure.
+
+## Décision stratégique : retour à un modèle UNIFIÉ (`--direction-filter both`)
+
+**Constat** : la séparation LONG/SHORT initiée pour « éviter la pollution » au début de la session n'a pas montré d'avantage robuste — chaque direction a son split lucky différent.
+
+**Décision** : passer à **un seul modèle entraîné sur les 24 175 events combinés** (LONG + SHORT). Le modèle peut apprendre lui-même les divergences via les features.
+
+### Bénéfices attendus
+- **2× plus de données train** (24 175 vs 11 491) → ensemble potentiellement plus stable
+- **Couverture complète** des 5 175 events test (vs 2 441 pour SHORT-only)
+- **Simplicité opérationnelle** : 1 modèle, 1 backtest, pas de combinaison à gérer
+
+### Risques connus
+- Le modèle pourrait diluer les signaux directionnels en mélangeant LONG/SHORT
+- La direction (`+1`/`-1`) est dans les features ? **Non** — la direction n'est PAS un input du modèle (c'est une étiquette annexe utilisée seulement pour le backtest). Le modèle voit uniquement les 304 features dérivées des 19 indicateurs OHLCV.
+
+### Configuration de référence pour étape B+
+
+```bash
+# Train unifié ensemble bagging
+python -m experiments.patchtst_v5.train_ensemble \
+    --train data/patchtst_v5_pivot_buf05/train.npz \
+    --val   data/patchtst_v5_pivot_buf05/val.npz \
+    --test  data/patchtst_v5_pivot_buf05/test.npz \
+    --output-dir models/patchtst_v5_pivot_buf05_xgb_both_multi_ensemble_bagging/ \
+    --seeds 42,7,13,100,999 \
+    --feature-mode last-plus-multi-aggs \
+    --direction-filter both \
+    --max-depth 10 --learning-rate 0.03 --n-estimators 3000 \
+    --min-child-weight 1 \
+    --subsample 0.8 --colsample-bytree 0.8 \
+    --reg-lambda 0.0 --reg-alpha 0.0 --no-early-stopping
+```
+
+C'est la nouvelle baseline à partir de laquelle on poursuit l'exploration features.
