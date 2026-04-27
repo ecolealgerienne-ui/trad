@@ -1,26 +1,20 @@
 """
-backtest_layer2.py — Couche 2 trading method : trailing Camarilla 4 niveaux + time-stop H1.
+backtest_layer2.py — Couche 2 trading method : strict close at H1 (réplique label sl_level=4).
 
-Pour chaque event sélectionné (top-K% par score modèle), simule bar-par-bar un
-trade avec gestion dynamique du stop-loss :
+Pour chaque event sélectionné (top-K% par score modèle), simule bar-par-bar
+exactement la même logique que pivot_labeler_levels.label_events() avec
+sl_level=4 :
 
-  Initial state:
-    - SL initial = pivot Camarilla rang 4 opposé (L4 pour LONG, H4 pour SHORT)
-    - Cible = pivot 1 dans la direction (H1 LONG, L1 SHORT)
+  - TP = pivot rang 1 dans la direction (H1 pour LONG, L1 pour SHORT)
+  - SL = pivot rang 4 opposé (L4 pour LONG, H4 pour SHORT)
+  - Walk-forward sur high/low entre idx+1 et idx+time_barrier
+  - argmax tie-break : si TP et SL touchés dans la même bar → AMBIGUOUS → SL
+    (conservateur, identique au label)
+  - Sinon : premier touché gagne (TP_H1 ou SL_INIT)
+  - Aucun touch sur l'horizon → TIMEOUT (exit au last_close)
 
-  Trailing rules:
-    - Atteinte H1 (LONG) ou L1 (SHORT) : SL → entry_price (lock break-even),
-      cible suivante = H2/L2
-    - Atteinte H2/L2 : SL → H1/L1, cible = H3/L3
-    - Atteinte H3/L3 : SL → H2/L2, cible = H4/L4
-    - Atteinte H4/L4 : exit
-
-  Time-stop conditionnel (Idée 3 user) :
-    - Si après --time-to-h1 bars (default 8), H1 toujours pas atteint → exit au close
-    - Sinon le trade continue jusqu'à TP/SL/timeout
-
-  Time barrier final :
-    - --time-barrier (default 24) bars max → exit au close si rien ne s'est passé
+  Time barrier :
+    - --time-barrier (default 24) bars max
 
 Inputs:
     --predictions  : NPZ from predict_ensemble (scores, direction, feature_idx, timestamp)
@@ -72,7 +66,7 @@ def _sorted_pivots_around(entry: float, pivots: np.ndarray) -> tuple[np.ndarray,
     return above, below
 
 
-def simulate_trailing(
+def simulate_strict_h1(
     direction: int,
     entry_idx: int,
     entry_price: float,
@@ -80,33 +74,24 @@ def simulate_trailing(
     low: np.ndarray,
     close: np.ndarray,
     pivots_at_entry: np.ndarray,    # 8 Camarilla pivots [h1,h2,h3,h4,l1,l2,l3,l4]
-    time_to_h1: int,
     time_barrier: int,
     fees_pct: float,
 ) -> dict:
-    """Simule un trade avec trailing Camarilla + time-stop H1.
+    """Simule un trade strict H1 (réplique label sl_level=4).
 
-    Trailing rules (option A : ne trailer qu'après H2 atteint) :
-      - SL initial = pivot 4 opposé (sl_pool[3])
-      - Atteinte H1/L1 : pas de trail (laisser respirer), cible H2/L2
-      - Atteinte H2/L2 : SL trail à H1/L1, cible H3/L3
-      - Atteinte H3/L3 : SL trail à H2/L2, cible H4/L4
-      - Atteinte du dernier target disponible (H4 ou moins) : TP_FINAL exit
-
-    Tolère 1, 2, 3 ou 4 targets dans la direction du trade (dépend de la
-    position de l'entry dans la structure pivot du jour).
+    TP = targets[0] (H1 LONG / L1 SHORT)
+    SL = sl_pool[3] (L4 LONG / H4 SHORT)
+    Walk-forward bar par bar sur [entry_idx+1, entry_idx+time_barrier].
+    Convention tie-break identique au label : same-bar TP+SL → AMBIGUOUS=SL.
     """
     above, below = _sorted_pivots_around(entry_price, pivots_at_entry)
-
     if direction > 0:
-        targets = above        # [pivot_immediat, ..., pivot_lointain]
-        sl_pool = below        # [pivot_immediat sous, ..., pivot lointain sous]
+        targets = above
+        sl_pool = below
     else:
-        targets = below        # SHORT : on vise les pivots EN-DESSOUS
-        sl_pool = above        # SL en cas de mouvement contraire (au-dessus)
+        targets = below
+        sl_pool = above
 
-    # Need at least 1 target dans la direction et 4 dans l'opposé (pour SL beyond=4).
-    # Le label sl_level=4 garantit déjà 4 pivots opposés ; on tolère 1-4 targets.
     if len(targets) < 1 or len(sl_pool) < 4:
         return {
             "pnl_net": np.nan, "exit_bars": -1,
@@ -114,58 +99,47 @@ def simulate_trailing(
             "exit_price": np.nan, "trail_level": -1,
         }
 
-    n_targets = len(targets)
-    sl = sl_pool[3]                # 4ème pivot opposé (L4 LONG / H4 SHORT)
-    target_idx = 0                  # current target index dans `targets`
-    h1_reached = False
+    tp = float(targets[0])
+    sl = float(sl_pool[3])
+
     n_bars = len(high)
+    end = min(entry_idx + 1 + time_barrier, n_bars)
+    sub_high = high[entry_idx + 1: end]
+    sub_low = low[entry_idx + 1: end]
+    horizon = sub_high.size
 
-    for k in range(time_barrier):
-        bar = entry_idx + 1 + k
-        if bar >= n_bars:
-            break
+    if horizon == 0:
+        return {
+            "pnl_net": np.nan, "exit_bars": -1,
+            "exit_reason": "OUT_OF_DATA",
+            "exit_price": np.nan, "trail_level": -1,
+        }
 
-        bar_h, bar_l, bar_c = high[bar], low[bar], close[bar]
+    if direction > 0:
+        tp_hit = sub_high >= tp
+        sl_hit = sub_low <= sl
+    else:
+        tp_hit = sub_low <= tp
+        sl_hit = sub_high >= sl
 
-        # 1) Check SL hit (priorité, vérifié AVANT TP par convention conservative)
-        sl_hit = (direction > 0 and bar_l <= sl) or (direction < 0 and bar_h >= sl)
-        if sl_hit:
-            reason = "SL_TRAIL" if target_idx >= 2 else "SL_INIT"
-            return _exit(direction, entry_price, sl, k + 1, reason, fees_pct,
-                         trail_level=target_idx)
+    first_tp = int(np.argmax(tp_hit)) if tp_hit.any() else horizon
+    first_sl = int(np.argmax(sl_hit)) if sl_hit.any() else horizon
 
-        # 2) Check TP cascade (peut traverser plusieurs niveaux dans la même bar)
-        while target_idx < n_targets:
-            tgt = targets[target_idx]
-            tp_hit = (direction > 0 and bar_h >= tgt) or (direction < 0 and bar_l <= tgt)
-            if not tp_hit:
-                break
+    if first_tp < first_sl:
+        return _exit(direction, entry_price, tp, first_tp + 1, "TP_H1",
+                     fees_pct, trail_level=1)
+    if first_sl < first_tp:
+        return _exit(direction, entry_price, sl, first_sl + 1, "SL_INIT",
+                     fees_pct, trail_level=0)
+    if first_tp == first_sl and first_tp < horizon:
+        # Convention conservative identique au label : same-bar tie → SL
+        return _exit(direction, entry_price, sl, first_tp + 1, "AMBIGUOUS",
+                     fees_pct, trail_level=0)
 
-            if target_idx == n_targets - 1:
-                # Dernier target disponible = TP final (H4 ou moins selon position entry)
-                return _exit(direction, entry_price, tgt, k + 1, "TP_FINAL",
-                             fees_pct, trail_level=target_idx + 1)
-
-            # Pas le dernier target : on poursuit
-            # Correction option A : ne trailer SL qu'à partir de H2 (target_idx >= 1)
-            # Pourquoi : trail à entry après H1 sortait trop souvent au breakeven
-            if target_idx >= 1:
-                sl = targets[target_idx - 1]   # trail à H1, H2... selon niveau
-
-            if target_idx == 0:
-                h1_reached = True
-
-            target_idx += 1
-
-        # 3) Time-stop conditionnel : si pas d'atteinte H1/L1 après time_to_h1 bars → exit close
-        if (k + 1) == time_to_h1 and not h1_reached:
-            return _exit(direction, entry_price, bar_c, k + 1, "TIMESTOP_H1",
-                         fees_pct, trail_level=0)
-
-    # Time barrier full
-    last_bar = min(entry_idx + time_barrier, n_bars - 1)
-    return _exit(direction, entry_price, close[last_bar], time_barrier, "TIMEOUT",
-                 fees_pct, trail_level=target_idx)
+    # TIMEOUT : exit au last close
+    last_close = float(close[end - 1])
+    return _exit(direction, entry_price, last_close, horizon, "TIMEOUT",
+                 fees_pct, trail_level=0)
 
 
 def _exit(direction: int, entry: float, exit_p: float, bars: int,
@@ -289,8 +263,6 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
                    help="Features parquet for OHLC + Camarilla recomputation")
     p.add_argument("--top-k-pct", type=float, default=10.0,
                    help="Select top X%% events by score (default: 10)")
-    p.add_argument("--time-to-h1", type=int, default=8,
-                   help="Bars before conditional time-stop if H1/L1 not reached (default: 8)")
     p.add_argument("--time-barrier", type=int, default=24,
                    help="Max bars per trade (default: 24)")
     p.add_argument("--fees-pct", type=float, default=0.02,
@@ -324,8 +296,8 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     logger.info("Total events available: %d  | span: %.1f days (%.2f years)",
                 n_total, span_days, span_days / 365.25)
-    logger.info("Trailing config: time_to_h1=%d bars  time_barrier=%d bars  fees=%.3f%% one-way",
-                args.time_to_h1, args.time_barrier, args.fees_pct)
+    logger.info("Strict-H1 config: time_barrier=%d bars  fees=%.3f%% one-way",
+                args.time_barrier, args.fees_pct)
 
     # ------------------------------------------------------------------
     # Helper to run sim for a given top-K%% threshold
@@ -341,10 +313,10 @@ def main(argv: Iterable[str] | None = None) -> int:
             direction = int(pred["direction"][k_idx])
             entry_price = float(close[entry_idx])
             piv = pivots_8col[entry_idx]
-            res = simulate_trailing(
+            res = simulate_strict_h1(
                 direction, entry_idx, entry_price,
                 high, low, close, piv,
-                args.time_to_h1, args.time_barrier, args.fees_pct,
+                args.time_barrier, args.fees_pct,
             )
             res["score"] = float(pred["scores"][k_idx])
             res["direction"] = direction
@@ -377,10 +349,9 @@ def main(argv: Iterable[str] | None = None) -> int:
         logger.info("  %-20s : %5d (%.1f%%)",
                     reason, count, 100 * count / max(main_metrics["n_trades"], 1))
 
-    logger.info("Trail level reached distribution:")
+    logger.info("Outcome distribution:")
     for level, count in sorted(main_metrics.get("trail_level_distribution", {}).items()):
-        labels = {0: "no H1", 1: "H1 reached", 2: "H2 reached",
-                  3: "H3 reached", 4: "H4 final TP"}
+        labels = {-1: "skipped", 0: "loss/timeout/ambig", 1: "TP_H1 win"}
         logger.info("  level %d (%s) : %d (%.1f%%)",
                     level, labels.get(level, "?"), count,
                     100 * count / max(main_metrics["n_trades"], 1))
@@ -406,9 +377,9 @@ def main(argv: Iterable[str] | None = None) -> int:
             "predictions": str(args.predictions),
             "features": str(args.features),
             "top_k_pct": args.top_k_pct,
-            "time_to_h1": args.time_to_h1,
             "time_barrier": args.time_barrier,
             "fees_pct": args.fees_pct,
+            "mode": "strict_h1",
         },
         "n_total_events": int(n_total),
         "span_days": float(span_days),
