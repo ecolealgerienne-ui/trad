@@ -361,6 +361,41 @@ def main(argv: Iterable[str] | None = None) -> int:
                     100 * count / max(main_metrics["n_trades"], 1))
 
     # ------------------------------------------------------------------
+    # Distribution distance TP/SL → entry (en %), pour comprendre si la
+    # rentabilité dépend de la proximité du pivot cible.
+    # ------------------------------------------------------------------
+    if "entry_price" in main_df.columns and "exit_price" in main_df.columns:
+        # Recompute tp/sl distances depuis les pivots à l'entry (independent de exit_p)
+        tp_dist_pct = []
+        sl_dist_pct = []
+        for _, r in main_df.iterrows():
+            if r["exit_reason"] in ("SKIP_NOT_ENOUGH_PIVOTS", "OUT_OF_DATA"):
+                continue
+            entry_idx = None
+            # Find the matching feature_idx via timestamp (cheap proxy)
+            ts = r["timestamp"]
+            entry_p = r["entry_price"]
+            d = int(r["direction"])
+            # use the saved label tp/sl computation: we don't have direct access,
+            # so recompute via pivots_at_entry
+            # (timestamp lookup is costly, instead we just report from exit_price for TP_H1)
+            if r["exit_reason"] == "TP_H1":
+                if d > 0:
+                    tp_dist_pct.append(100 * (r["exit_price"] - entry_p) / entry_p)
+                else:
+                    tp_dist_pct.append(100 * (entry_p - r["exit_price"]) / entry_p)
+        if tp_dist_pct:
+            arr = np.array(tp_dist_pct)
+            logger.info("TP_H1 distance entry→TP : n=%d  mean=%.4f%%  median=%.4f%%  "
+                        "P10=%.4f%%  P90=%.4f%%  min=%.4f%%  max=%.4f%%",
+                        len(arr), arr.mean(), np.median(arr),
+                        np.percentile(arr, 10), np.percentile(arr, 90),
+                        arr.min(), arr.max())
+            logger.info("Fraction TP_H1 avec distance > 2×fees (%.3f%%) : %.1f%%",
+                        2 * args.fees_pct,
+                        100 * (arr > 2 * args.fees_pct).mean())
+
+    # ------------------------------------------------------------------
     # Sanity check : compare backtest pnl_net vs label pnl_after_fees_pct
     # Le label couche-1 (pivot_labeler_levels sl_level=4) calcule exactement
     # la même chose. Toute divergence > seuil ⇒ bug dans le backtest.
