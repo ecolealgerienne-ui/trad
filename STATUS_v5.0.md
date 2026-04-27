@@ -333,6 +333,125 @@ Acquis empiriques validés sur 14 phases. v5.0 ne doit pas les retester :
 | Test events | 2 441 (15%) |
 | Class1 baseline | ~58.7% (WR si on prend tout) |
 
+## Spécification exacte des inputs du modèle XGBoost
+
+> **Important** : XGBoost ne voit PAS la séquence brute. Il voit un vecteur 1D de **304 features dérivées** par event. Aucune donnée externe, aucun prix brut, aucun timestamp.
+
+### Pipeline complet input → modèle
+
+```
+BTCUSD 5min CSV (OHLCV brut)
+         │
+         ▼
+[feature_builder.py]  → calcule 19 indicateurs par bougie
+         │
+         ▼
+features parquet : (~880k bougies × 19 indicateurs)
+         │
+         ▼
+[event_detector.py]  → garde un sous-ensemble (~32k events triggers)
+         │
+         ▼
+[pivot_labeler_levels.py]  → pour chaque event : label 0/1 + direction ±1
+         │                    (Triple Barrier, TP=pivot Camarilla immédiat,
+         │                     SL=pivot Camarilla suivant beyond, time=24 bars)
+         ▼
+[dataset_builder.py]  → pour chaque event : extrait fenêtre 96 bars × 19 channels
+         │                purge embargo 24 bars entre splits chronologiques
+         ▼
+NPZ : X (n_events, 96, 19), y, direction, timestamp, pnl_after_fees_pct
+         │
+         ▼
+[train_xgboost.py / build_features]  → aplatit (96, 19) → vecteur 1D 304 features
+         │
+         ▼
+XGBoost input : (n_events, 304) float32   ← CE QUE VOIT LE MODÈLE
+```
+
+### Les 19 indicateurs (canaux d'entrée)
+
+Tous calculés via TA-Lib sur OHLCV brut, par bougie 5min, dans `feature_builder.py`. Preset `v5_indicators_only` :
+
+| Groupe | # | Channels |
+|---|---|---|
+| Momentum multi-horizon | 3 | `rsi_7`, `rsi_14`, `rsi_21` |
+| MACD (% du prix, stationnaire) | 2 | `macd_line_pct`, `macd_signal_pct` |
+| Oscillateur déviation | 1 | `cci_20` |
+| Stochastique | 2 | `stoch_k_14`, `stoch_d_14` |
+| Williams | 1 | `williams_r_14` |
+| Trend strength | 3 | `adx_14`, `di_plus_14`, `di_minus_14` |
+| Volatilité | 2 | `atr_14_norm_z` (z-score rolling causal), `bbands_pct_b_20` |
+| Volume | 2 | `obv_slope_z` (z-score rolling), `mfi_14` |
+| Statistique | 2 | `hurst_dfa_100p`, `permutation_entropy_50p` |
+| Volume relatif | 1 | `volume_zscore_20p` |
+
+**Total : 19 channels.** Ce sont des indicateurs **classiques** dérivés de OHLCV. Aucune donnée externe (pas de funding rate, pas d'order book, pas d'on-chain).
+
+### Pour chaque event : (96, 19) → vecteur 1D 304 features
+
+Mode utilisé : `last-plus-multi-aggs` avec `MULTI_AGG_WINDOWS = [6, 12, 24, 48, 96]` :
+
+```
+Pour 1 event = 1 vecteur de 304 nombres :
+
+  19 × 1 = 19   _last           valeur ACTUELLE de chaque indicateur (timestep -1)
+
+Puis pour chaque fenêtre w ∈ [6, 12, 24, 48, 96] bars :
+  19 × 1 = 19   _mean{w}        moyenne sur les w dernières bougies
+  19 × 1 = 19   _std{w}         écart-type sur les w dernières bougies
+  19 × 1 = 19   _first{w}       valeur il y a w bougies (timestep -w)
+
+Total : 19 + 5 × 3 × 19 = 19 + 285 = 304 features
+```
+
+### Exemple concret pour 1 event SHORT
+
+Pour un event à T=12h00, le modèle reçoit 304 nombres qui décrivent :
+
+- **`_last` (19 nombres)** : où en est chaque indicateur juste avant l'entrée. Ex : `rsi_14_last = 72.3` (surachat), `atr_14_norm_z_last = 1.8` (vol élevée).
+- **`_mean6` (19 nombres)** : niveau moyen sur les 30 dernières min. Ex : `rsi_14_mean6 = 68.5`.
+- **`_std6` (19 nombres)** : volatilité de chaque indicateur sur 30 min. Ex : `rsi_14_std6 = 4.2`.
+- **`_first6` (19 nombres)** : valeur il y a 30 min. Ex : `rsi_14_first6 = 55` (RSI est monté 55 → 72 en 30 min).
+- Idem pour windows 12 (1h), 24 (2h), 48 (4h), 96 (8h) → vue **multi-échelle**.
+
+### Ce que le modèle NE voit PAS
+
+- ❌ **Aucun prix brut** (close, high, low, open, volume)
+- ❌ **Aucun ratio direct prix / pivot** (la position du prix dans la structure n'est pas une feature)
+- ❌ **Aucune feature catégorielle** (patterns bougies, jour, heure, session)
+- ❌ **Aucune donnée externe** (funding, OI, sentiment, on-chain, order book)
+- ❌ **Aucune information sur le label** (TP, SL, RR, exit_reason — utilisés uniquement pour calculer y)
+- ❌ **Aucun timestamp** (le modèle ignore la date)
+- ❌ **Aucune sortie de PatchTST** (XGBoost remplace PatchTST, pas en-dessus)
+
+### Ce que le modèle reçoit en plus du vecteur 304
+
+- La **cible** `y ∈ {0, 1}` dérivée du Triple Barrier
+- Le **`scale_pos_weight`** ajusté sur la prévalence Class1 du train (ratio ~58.7% → poids ~0.703)
+
+### Dimensions finales
+
+```
+TRAIN : X (11 491, 304) float32   y (11 491,) int8
+VAL   : X (2 397, 304)  float32   y (2 397,) int8
+TEST  : X (2 441, 304)  float32   y (2 441,) int8
+```
+
+C'est un **gradient boosting tabulaire classique** sur 304 features dérivées d'indicateurs techniques, target Triple Barrier sur pivots Camarilla. Pas de séquence, pas d'attention, pas de récurrence — juste 304 nombres par event.
+
+### Garanties anti-leakage sur ces inputs
+
+| Niveau | Garantie | Source |
+|---|---|---|
+| Indicateurs | Calcul rolling causal par bougie (TA-Lib + z-scores rolling) | `feature_builder.py` v5.4 fix drift |
+| Pivots Camarilla | `prev_close = daily.close.shift(1)`, `prev_rng = rng.shift(1)` | `pivot_labeler_levels.py:50-51` |
+| Window extraction | `block = feat_arr[start: idx + 1]` — pas de bar future | `dataset_builder.py:191` |
+| Walk-forward exit | `sub_high = high[idx + 1: end]` — démarre APRÈS la bar du signal | `pivot_labeler_levels.py:178-179` |
+| Splits | Chronologique strict + purge 24 bars d'embargo | `dataset_builder.py:207-251` |
+| Aggregations | `X[:, -w:, :]` — uniquement les w dernières bars de la fenêtre | `train_xgboost.py:77` |
+| XGBoost | Tree-based → invariant aux échelles, aucune normalisation cross-split | par construction |
+| Persistance config | `feature_mode`, `agg_window`, `multi_agg_windows`, `direction_filter`, `n_features` sauvés dans `xgboost_model.json` via `booster.set_attr()` ; predict_all_splits les lit pour éviter mismatch silencieux | `train_xgboost.py:294-299` + `predict_all_splits.py:85-128` |
+
 ## Diagnostic préalable (`diagnose_label_separability`)
 
 | Métrique (sur train) | Valeur | Lecture |
