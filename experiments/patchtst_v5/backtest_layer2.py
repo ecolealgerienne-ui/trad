@@ -1,17 +1,18 @@
 """
-backtest_layer2.py — Couche 2 trading method : strict close at H1 (réplique label sl_level=4).
+backtest_layer2.py — Couche 2 trading method : TP adaptatif au premier pivot rentable.
 
 Pour chaque event sélectionné (top-K% par score modèle), simule bar-par-bar
-exactement la même logique que pivot_labeler_levels.label_events() avec
-sl_level=4 :
+un trade avec TP adaptatif :
 
-  - TP = pivot rang 1 dans la direction (H1 pour LONG, L1 pour SHORT)
-  - SL = pivot rang 4 opposé (L4 pour LONG, H4 pour SHORT)
+  - TP = premier pivot dans la direction tel que |tp − entry|/entry ≥ min_edge_pct
+         (ex: H1 si déjà à ≥0.10%, sinon H2, sinon H3, sinon H4)
+  - SL = pivot rang 4 opposé (L4 pour LONG, H4 pour SHORT) — inchangé vs label
   - Walk-forward sur high/low entre idx+1 et idx+time_barrier
-  - argmax tie-break : si TP et SL touchés dans la même bar → AMBIGUOUS → SL
-    (conservateur, identique au label)
-  - Sinon : premier touché gagne (TP_H1 ou SL_INIT)
-  - Aucun touch sur l'horizon → TIMEOUT (exit au last_close)
+  - Tie-break same-bar TP+SL → SL (conservateur)
+  - SKIP_NO_PROFITABLE_TP si aucun pivot ne dépasse min_edge_pct avant L4/H4
+
+Avec --min-edge-pct 0.0 → comportement strict-H1 (réplique du label sl_level=4).
+Avec --min-edge-pct 0.10 → grimpe les pivots pour garantir profit > fees+edge.
 
   Time barrier :
     - --time-barrier (default 24) bars max
@@ -66,7 +67,7 @@ def _sorted_pivots_around(entry: float, pivots: np.ndarray) -> tuple[np.ndarray,
     return above, below
 
 
-def simulate_strict_h1(
+def simulate_adaptive_tp(
     direction: int,
     entry_idx: int,
     entry_price: float,
@@ -76,13 +77,18 @@ def simulate_strict_h1(
     pivots_at_entry: np.ndarray,    # 8 Camarilla pivots [h1,h2,h3,h4,l1,l2,l3,l4]
     time_barrier: int,
     fees_pct: float,
+    min_edge_pct: float,
 ) -> dict:
-    """Simule un trade strict H1 (réplique label sl_level=4).
+    """Simule un trade avec TP adaptatif au premier pivot rentable.
 
-    TP = targets[0] (H1 LONG / L1 SHORT)
-    SL = sl_pool[3] (L4 LONG / H4 SHORT)
+    TP = premier pivot dans la direction tel que |tp − entry|/entry ≥ min_edge_pct
+         (ex: H1 si distance ≥ 0.10%, sinon H2, sinon H3, sinon H4)
+    SL = sl_pool[3] (L4 LONG / H4 SHORT) — inchangé vs label sl_level=4
     Walk-forward bar par bar sur [entry_idx+1, entry_idx+time_barrier].
-    Convention tie-break identique au label : same-bar TP+SL → AMBIGUOUS=SL.
+    Tie-break (same-bar TP+SL) → SL conservateur (identique label).
+
+    Avec min_edge_pct=0.0 → comportement identique au strict H1 du label.
+    Avec min_edge_pct>0 → grimpe les pivots jusqu'à dépasser le seuil.
     """
     above, below = _sorted_pivots_around(entry_price, pivots_at_entry)
     if direction > 0:
@@ -99,7 +105,24 @@ def simulate_strict_h1(
             "exit_price": np.nan, "trail_level": -1,
         }
 
-    tp = float(targets[0])
+    # Choix du TP : premier target dont la distance dépasse min_edge_pct
+    tp = None
+    tp_rank = -1
+    for rank, candidate in enumerate(targets):
+        dist_pct = 100.0 * abs(float(candidate) - entry_price) / entry_price
+        if dist_pct >= min_edge_pct:
+            tp = float(candidate)
+            tp_rank = rank
+            break
+
+    if tp is None:
+        # Aucun pivot dans la direction n'a une distance suffisante avant L4/H4
+        return {
+            "pnl_net": np.nan, "exit_bars": -1,
+            "exit_reason": "SKIP_NO_PROFITABLE_TP",
+            "exit_price": np.nan, "trail_level": -1,
+        }
+
     sl = float(sl_pool[3])
 
     n_bars = len(high)
@@ -125,21 +148,20 @@ def simulate_strict_h1(
     first_tp = int(np.argmax(tp_hit)) if tp_hit.any() else horizon
     first_sl = int(np.argmax(sl_hit)) if sl_hit.any() else horizon
 
+    # tp_rank stocké dans trail_level pour debug : 0=H1, 1=H2, 2=H3, 3=H4
     if first_tp < first_sl:
-        return _exit(direction, entry_price, tp, first_tp + 1, "TP_H1",
-                     fees_pct, trail_level=1)
+        return _exit(direction, entry_price, tp, first_tp + 1,
+                     f"TP_RANK{tp_rank}", fees_pct, trail_level=tp_rank)
     if first_sl < first_tp:
         return _exit(direction, entry_price, sl, first_sl + 1, "SL_INIT",
-                     fees_pct, trail_level=0)
+                     fees_pct, trail_level=-2)
     if first_tp == first_sl and first_tp < horizon:
-        # Convention conservative identique au label : same-bar tie → SL
         return _exit(direction, entry_price, sl, first_tp + 1, "AMBIGUOUS",
-                     fees_pct, trail_level=0)
+                     fees_pct, trail_level=-2)
 
-    # TIMEOUT : exit au last close
     last_close = float(close[end - 1])
     return _exit(direction, entry_price, last_close, horizon, "TIMEOUT",
-                 fees_pct, trail_level=0)
+                 fees_pct, trail_level=-2)
 
 
 def _exit(direction: int, entry: float, exit_p: float, bars: int,
@@ -267,6 +289,11 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
                    help="Max bars per trade (default: 24)")
     p.add_argument("--fees-pct", type=float, default=0.02,
                    help="One-way fee %% (default: 0.02 = maker)")
+    p.add_argument("--min-edge-pct", type=float, default=0.10,
+                   help="TP adaptatif : skip pivots dont distance < min-edge-pct, "
+                        "viser le premier pivot rentable. Recommandé : "
+                        "2*fees + edge_min (ex: 0.10 pour fees=0.02). "
+                        "Mettre 0.0 pour comportement strict-H1.")
     p.add_argument("--output-dir", type=Path, required=True)
     p.add_argument("--also-sweep-topk", action="store_true",
                    help="Also report results for several top-K%% (1, 2, 5, 10, 25, 50)")
@@ -296,8 +323,9 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     logger.info("Total events available: %d  | span: %.1f days (%.2f years)",
                 n_total, span_days, span_days / 365.25)
-    logger.info("Strict-H1 config: time_barrier=%d bars  fees=%.3f%% one-way",
-                args.time_barrier, args.fees_pct)
+    logger.info("Adaptive-TP config: time_barrier=%d bars  fees=%.3f%% one-way  "
+                "min_edge_pct=%.3f%%",
+                args.time_barrier, args.fees_pct, args.min_edge_pct)
 
     # ------------------------------------------------------------------
     # Helper to run sim for a given top-K%% threshold
@@ -313,10 +341,11 @@ def main(argv: Iterable[str] | None = None) -> int:
             direction = int(pred["direction"][k_idx])
             entry_price = float(close[entry_idx])
             piv = pivots_8col[entry_idx]
-            res = simulate_strict_h1(
+            res = simulate_adaptive_tp(
                 direction, entry_idx, entry_price,
                 high, low, close, piv,
                 args.time_barrier, args.fees_pct,
+                args.min_edge_pct,
             )
             res["score"] = float(pred["scores"][k_idx])
             res["direction"] = direction
@@ -336,7 +365,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     # Main run @ requested top-K
     # ------------------------------------------------------------------
     logger.info("=" * 110)
-    logger.info("TRAILING BACKTEST  (top %.1f%%)", args.top_k_pct)
+    logger.info("ADAPTIVE-TP BACKTEST  (top %.1f%%, min_edge=%.3f%%)",
+                args.top_k_pct, args.min_edge_pct)
     logger.info("=" * 110)
     main_df, main_metrics = run_for_topk(args.top_k_pct)
     log_summary(f"top_{args.top_k_pct:.0f}pct", main_metrics)
@@ -353,47 +383,40 @@ def main(argv: Iterable[str] | None = None) -> int:
         logger.info("  %-20s : %5d (%.1f%%)",
                     reason, count, 100 * count / max(main_metrics["n_trades"], 1))
 
-    logger.info("Outcome distribution:")
+    logger.info("TP rank distribution (rang du pivot atteint à l'exit) :")
+    rank_labels = {-2: "loss/timeout/ambig", -1: "skipped",
+                   0: "TP_H1 (rang 1)", 1: "TP_H2 (rang 2)",
+                   2: "TP_H3 (rang 3)", 3: "TP_H4 (rang 4)"}
     for level, count in sorted(main_metrics.get("trail_level_distribution", {}).items()):
-        labels = {-1: "skipped", 0: "loss/timeout/ambig", 1: "TP_H1 win"}
-        logger.info("  level %d (%s) : %d (%.1f%%)",
-                    level, labels.get(level, "?"), count,
+        logger.info("  rank %3d (%s) : %d (%.1f%%)",
+                    level, rank_labels.get(level, "?"), count,
                     100 * count / max(main_metrics["n_trades"], 1))
 
     # ------------------------------------------------------------------
-    # Distribution distance TP/SL → entry (en %), pour comprendre si la
-    # rentabilité dépend de la proximité du pivot cible.
+    # Distribution distance entry→TP (sur les exits TP_RANK*) : utile pour
+    # vérifier que le min_edge_pct fait son travail.
     # ------------------------------------------------------------------
     if "entry_price" in main_df.columns and "exit_price" in main_df.columns:
-        # Recompute tp/sl distances depuis les pivots à l'entry (independent de exit_p)
         tp_dist_pct = []
-        sl_dist_pct = []
         for _, r in main_df.iterrows():
-            if r["exit_reason"] in ("SKIP_NOT_ENOUGH_PIVOTS", "OUT_OF_DATA"):
+            if not str(r["exit_reason"]).startswith("TP_RANK"):
                 continue
-            entry_idx = None
-            # Find the matching feature_idx via timestamp (cheap proxy)
-            ts = r["timestamp"]
             entry_p = r["entry_price"]
             d = int(r["direction"])
-            # use the saved label tp/sl computation: we don't have direct access,
-            # so recompute via pivots_at_entry
-            # (timestamp lookup is costly, instead we just report from exit_price for TP_H1)
-            if r["exit_reason"] == "TP_H1":
-                if d > 0:
-                    tp_dist_pct.append(100 * (r["exit_price"] - entry_p) / entry_p)
-                else:
-                    tp_dist_pct.append(100 * (entry_p - r["exit_price"]) / entry_p)
+            if d > 0:
+                tp_dist_pct.append(100 * (r["exit_price"] - entry_p) / entry_p)
+            else:
+                tp_dist_pct.append(100 * (entry_p - r["exit_price"]) / entry_p)
         if tp_dist_pct:
             arr = np.array(tp_dist_pct)
-            logger.info("TP_H1 distance entry→TP : n=%d  mean=%.4f%%  median=%.4f%%  "
+            logger.info("TP exit distance entry→TP : n=%d  mean=%.4f%%  median=%.4f%%  "
                         "P10=%.4f%%  P90=%.4f%%  min=%.4f%%  max=%.4f%%",
                         len(arr), arr.mean(), np.median(arr),
                         np.percentile(arr, 10), np.percentile(arr, 90),
                         arr.min(), arr.max())
-            logger.info("Fraction TP_H1 avec distance > 2×fees (%.3f%%) : %.1f%%",
-                        2 * args.fees_pct,
-                        100 * (arr > 2 * args.fees_pct).mean())
+            logger.info("Fraction TP exits au-dessus de min_edge_pct (%.3f%%) : %.1f%%",
+                        args.min_edge_pct,
+                        100 * (arr >= args.min_edge_pct).mean())
 
     # ------------------------------------------------------------------
     # Sanity check : compare backtest pnl_net vs label pnl_after_fees_pct
@@ -446,7 +469,8 @@ def main(argv: Iterable[str] | None = None) -> int:
             "top_k_pct": args.top_k_pct,
             "time_barrier": args.time_barrier,
             "fees_pct": args.fees_pct,
-            "mode": "strict_h1",
+            "min_edge_pct": args.min_edge_pct,
+            "mode": "adaptive_tp",
         },
         "n_total_events": int(n_total),
         "span_days": float(span_days),
