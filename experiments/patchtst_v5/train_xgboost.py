@@ -195,8 +195,12 @@ def main(argv: Iterable[str] | None = None) -> int:
         early_stopping_rounds=early_stop,
         verbose_eval=50,
     )
-    best_iter = booster.best_iteration
-    logger.info("Best iteration: %d (val AUC = %.4f)", best_iter, booster.best_score)
+    if args.no_early_stopping:
+        best_iter = args.n_estimators - 1
+        logger.info("No early stopping: using full %d iterations", args.n_estimators)
+    else:
+        best_iter = booster.best_iteration
+        logger.info("Best iteration: %d (val AUC = %.4f)", best_iter, booster.best_score)
 
     # Predict on all splits
     train_scores = booster.predict(dtrain, iteration_range=(0, best_iter + 1))
