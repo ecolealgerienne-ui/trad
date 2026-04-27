@@ -1252,3 +1252,167 @@ Les features sont asset-agnostiques (cf. v5.4) → transfer naturel possible. À
 | Commit | Description |
 |---|---|
 | `acb2c4f` | feat: `make_30min_csv.py` — resample 5min CSV vers 30min OHLCV |
+
+---
+
+# v5.7 — Pipeline multi-asset DÉFINITIF + correction erreurs procédurales (2026-04-27)
+
+**Statut** : ✅ **Procédure multi-asset documentée**. Corrige 2 erreurs procédurales découvertes lors du test multi-asset initial.
+
+## Erreurs procédurales identifiées et corrigées
+
+### Erreur 1 : `--volume-threshold -999` indispensable
+
+L'event_detector a 2 défauts qui filtrent agressivement :
+- `--pivot-distance 0.3 ATR` (default)
+- `--volume-threshold 1.5` (default)
+
+La **baseline v5.4 BTC (36 318 events bruts)** a été générée avec `--volume-threshold -999` (filtre volume désactivé). Sans cette option, on obtient seulement ~2 800 events bruts par asset (×13 moins).
+
+→ **Toujours passer `--volume-threshold -999` à `event_detector`** pour reproduire la baseline.
+
+### Erreur 2 : `dataset_builder` doit utiliser les défauts (PAS `--channel-preset v5_indicators_only`)
+
+La baseline v5.4 BTC sl_level=4 (TEST top 1% 92.9%, top 25% 95.2%) a été générée avec **les défauts du dataset_builder** :
+- `--channel-preset v5_hybrid` (default) → 22 channels continus
+- `--patterns top5` (default) → 5 patterns CDL* directionnels (ENGULFING, HAMMER, INVERTEDHAMMER, SHOOTINGSTAR, HANGINGMAN)
+- = **27 channels au total**
+
+J'avais à tort suggéré d'utiliser `--channel-preset v5_indicators_only --patterns none` (= 19 channels) lors du multi-asset, ce qui produit un dataset **différent de la baseline** et un modèle qui ne peut atteindre que ~78.6% top 1% test (au lieu de 92.9%).
+
+→ **Toujours laisser les défauts du dataset_builder** pour reproduire v5.4. Ne PAS spécifier `--channel-preset` ou `--patterns`.
+
+## Procédure multi-asset DÉFINITIVE (5 assets, sl_level=4)
+
+### Étape 1 — Pipeline par asset (5× avec mêmes paramètres)
+
+```bash
+declare -A CSV_PATHS=(
+    [BTC]="data_trad/BTCUSD_all_5m.csv"
+    [ETH]="data_trad/ETHUSD_all_5m.csv"
+    [BNB]="data_trad/BNBUSD_all_5m.csv"
+    [ADA]="data_trad/ADAUSD_all_5m.csv"
+    [LTC]="data_trad/LTCUSD_all_5m.csv"
+)
+
+for asset in BTC ETH BNB ADA LTC; do
+    echo "===== Pipeline pour $asset ====="
+    csv="${CSV_PATHS[$asset]}"
+    asset_lower=$(echo $asset | tr '[:upper:]' '[:lower:]')
+
+    # 1. Features (identique à v5.4)
+    python -m experiments.patchtst_v5.feature_builder \
+        --csv $csv \
+        --output data/patchtst_v5/features_${asset_lower}.parquet
+
+    # 2. Events (CRITIQUE : --volume-threshold -999 pour matcher v5.4)
+    python -m experiments.patchtst_v5.event_detector \
+        --features data/patchtst_v5/features_${asset_lower}.parquet \
+        --output data/patchtst_v5/events_${asset_lower}.parquet \
+        --volume-threshold -999
+
+    # 3. Labels sl_level=4 (baseline couche 1)
+    python -m experiments.patchtst_v5.pivot_labeler_levels \
+        --features data/patchtst_v5/features_${asset_lower}.parquet \
+        --events data/patchtst_v5/events_${asset_lower}.parquet \
+        --output data/patchtst_v5/labels_${asset_lower}_pivot_sl4.parquet \
+        --sl-mode beyond --sl-level 4 \
+        --time-barrier 24 --fees-pct 0.02
+
+    # 4. Dataset (CRITIQUE : NE PAS spécifier --channel-preset ni --patterns
+    #    pour utiliser les défauts v5_hybrid + top5 = 27 channels = baseline v5.4)
+    python -m experiments.patchtst_v5.dataset_builder \
+        --features data/patchtst_v5/features_${asset_lower}.parquet \
+        --labels   data/patchtst_v5/labels_${asset_lower}_pivot_sl4.parquet \
+        --output-dir data/patchtst_v5_pivot_sl4_${asset_lower}/ \
+        --window 96
+done
+```
+
+### Étape 2 — Combiner les 5 datasets en 1
+
+```bash
+python -m experiments.patchtst_v5.combine_multi_asset_datasets \
+    --input-dirs \
+        data/patchtst_v5_pivot_sl4_btc/ \
+        data/patchtst_v5_pivot_sl4_eth/ \
+        data/patchtst_v5_pivot_sl4_bnb/ \
+        data/patchtst_v5_pivot_sl4_ada/ \
+        data/patchtst_v5_pivot_sl4_ltc/ \
+    --asset-names BTC ETH BNB ADA LTC \
+    --output-dir data/patchtst_v5_pivot_sl4_multi/
+```
+
+→ Devrait produire ~21 000 events × 5 assets ≈ **~105 000 events combinés**.
+
+### Étape 3 — Train SHORT + LONG ensemble bagging multi-aggs
+
+```bash
+for direction in short long; do
+  python -m experiments.patchtst_v5.train_ensemble \
+      --train data/patchtst_v5_pivot_sl4_multi/train.npz \
+      --val   data/patchtst_v5_pivot_sl4_multi/val.npz \
+      --test  data/patchtst_v5_pivot_sl4_multi/test.npz \
+      --output-dir models/patchtst_v5_pivot_sl4_multi_xgb_${direction}_ensemble/ \
+      --seeds 42,7,13,100,999 \
+      --feature-mode last-plus-multi-aggs \
+      --direction-filter ${direction} \
+      --max-depth 10 --learning-rate 0.03 --n-estimators 3000 \
+      --min-child-weight 1 \
+      --subsample 0.8 --colsample-bytree 0.8 \
+      --reg-lambda 0.0 --reg-alpha 0.0 --no-early-stopping
+done
+```
+
+### Étape 4 — Predict + backtest
+
+```bash
+for direction in short long; do
+  python -m experiments.patchtst_v5.predict_ensemble \
+      --ensemble-dir models/patchtst_v5_pivot_sl4_multi_xgb_${direction}_ensemble/ \
+      --train data/patchtst_v5_pivot_sl4_multi/train.npz \
+      --val   data/patchtst_v5_pivot_sl4_multi/val.npz \
+      --test  data/patchtst_v5_pivot_sl4_multi/test.npz \
+      --output-dir models/patchtst_v5_pivot_sl4_multi_xgb_${direction}_ensemble/
+
+  python -m experiments.patchtst_v5.backtest_realistic \
+      --predictions models/patchtst_v5_pivot_sl4_multi_xgb_${direction}_ensemble/predictions_test.npz \
+      --output-dir  models/patchtst_v5_pivot_sl4_multi_xgb_${direction}_ensemble/backtest_test/
+
+  python -m experiments.patchtst_v5.backtest_realistic \
+      --predictions models/patchtst_v5_pivot_sl4_multi_xgb_${direction}_ensemble/predictions_val.npz \
+      --output-dir  models/patchtst_v5_pivot_sl4_multi_xgb_${direction}_ensemble/backtest_val/
+done
+```
+
+## Caractéristiques attendues du dataset par asset (sl_level=4, 27 channels)
+
+| Étape | Sortie attendue (BTC) |
+|---|---|
+| Events bruts (event_detector) | ~36 318 |
+| Labels (pivot_labeler sl=4) | ~21 191 (Class1 ~73.6%) |
+| Dataset shape (X) | (21 187, 96, 27) |
+| Splits 70/15/15 | Train ~14 830 / Val ~3 178 / Test ~3 176 |
+
+Pour les autres assets (ETH/BNB/ADA/LTC), proportions similaires (events bruts varient selon période disponible).
+
+## Vérifications avant chaque run
+
+| Check | Commande |
+|---|---|
+| Compter events bruts | `python -c "import pandas as pd; print(len(pd.read_parquet('data/patchtst_v5/events_btc.parquet')))"` |
+| Compter labels | `python -c "import pandas as pd; print(len(pd.read_parquet('data/patchtst_v5/labels_btc_pivot_sl4.parquet')))"` |
+| Vérifier nb channels dataset | `cat data/patchtst_v5_pivot_sl4_btc/dataset_metadata.json \| python -m json.tool \| grep n_channels` |
+| Vérifier attrs modèle | `python -c "import xgboost as xgb; b=xgb.Booster(); b.load_model('<path>'); print('n_features:', b.attr('n_features'), 'feature_mode:', b.attr('feature_mode'))"` |
+
+## Points d'attention pour la baseline reproduction
+
+1. ✅ **`--volume-threshold -999`** dans event_detector
+2. ✅ **PAS de `--channel-preset`** dans dataset_builder (utilise défaut v5_hybrid)
+3. ✅ **PAS de `--patterns`** dans dataset_builder (utilise défaut top5)
+4. ✅ `--sl-level 4` dans pivot_labeler_levels
+5. ✅ `--feature-mode last-plus-multi-aggs` dans train_ensemble
+6. ✅ `--no-early-stopping` + ensemble bagging (5 seeds, subsample 0.8, colsample 0.8)
+7. ✅ Hyperparams XGBoost : max_depth=10, lr=0.03, n_estimators=3000, min_child_weight=1, reg_alpha/lambda=0
+
+Le respect strict de ces 7 points est nécessaire pour matcher la baseline v5.4 (TEST top 10% WR 96-98%).
