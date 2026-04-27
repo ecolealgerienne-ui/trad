@@ -69,7 +69,14 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     booster = xgb.Booster()
     booster.load_model(str(args.model))
-    logger.info("Loaded model: %s (best iter=%d)", args.model, booster.best_iteration)
+    try:
+        end_iter = booster.best_iteration + 1
+        logger.info("Loaded model: %s (best iter=%d, using %d trees)",
+                    args.model, booster.best_iteration, end_iter)
+    except AttributeError:
+        end_iter = booster.num_boosted_rounds()
+        logger.info("Loaded model: %s (no early stopping, using all %d trees)",
+                    args.model, end_iter)
 
     for split_name, npz_path in [("train", args.train), ("val", args.val), ("test", args.test)]:
         data = load_split(npz_path)
@@ -80,7 +87,7 @@ def main(argv: Iterable[str] | None = None) -> int:
                         args.direction_filter, split_name, n0, len(data["y"]))
         X = build_features(data["X"], args.feature_mode, args.agg_window)
         d = xgb.DMatrix(X, feature_names=fnames)
-        scores = booster.predict(d, iteration_range=(0, booster.best_iteration + 1))
+        scores = booster.predict(d, iteration_range=(0, end_iter))
 
         out_path = args.output_dir / f"predictions_{split_name}.npz"
         np.savez_compressed(
