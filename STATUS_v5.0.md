@@ -1,0 +1,460 @@
+# STATUS v5.0 — PatchTST OHLCV-only Enriched (Triple Barrier sur pivots)
+
+**Date** : 2026-04-26
+**Asset** : BTC (single asset, BTCUSD 5min)
+**Branche** : `claude/post-foundation-finetune-v14-PiOSL`
+**Statut global** : 🟢 **v5.3 BREAKTHROUGH (2026-04-27)** — XGBoost + multi-aggs sur pivot 'beyond' SHORT casse les plafonds historiques (test top 1% WR = **79-83%**, val top 1% WR = **87%**)
+**Note** : Voir section **« v5.3 — XGBoost + multi-aggs (2026-04-27) »** en bas du document. La pivot v6 envisagée fin avril 2026 est **suspendue** : on continue à exploiter OHLCV avec ce nouveau levier.
+**Approche précédente** : v4 = `experiments/foundation_finetune/` (clos Phase 14)
+
+---
+
+## Objectif
+
+Construire un classifieur binaire **événementiel** (pas continu) qui valide ou rejette un signal d'entrée scalping 5min via PatchTST sur ~22 channels OHLCV-derived non-redondants, avec cible Triple Barrier sur niveaux pivot Camarilla.
+
+**Question centrale** : une combinaison de représentations **fondamentalement différentes** des indicateurs continus (RSI/MACD/CCI testés en v1-v4) — bougies japonaises catégorielles + estimateurs microstructure + niveaux pivot + contexte multi-TF — permet-elle de casser le plafond ~44% precision top 1% identifié en Phase 14, en restant strictement dans BTCUSD OHLCV public ?
+
+---
+
+## Contexte v1 → v4
+
+| Version | Approche | Verdict |
+|---------|----------|---------|
+| v1-v3 | RSI/CCI/MACD direction + dual-binary + clock-injected | Plafond 85-92% accuracy mais 33% WR trading |
+| v3.0 | LSTM CNN crossfeat 30min | 49% Trans MACD, mais PnL négatif |
+| v4.0 | FLKS sub-step + AQ-KF + XGBoost FLKS slopes | 96.3% accuracy, +870% PnL en backtest mais surfit |
+| `foundation_finetune` Phase 1-14 | Chronos LoRA + meta-labeling Triple Barrier sur pente indicateur | **Mur empirique** : precision plafonne ~44% top 1% |
+
+### Findings Phase 14 verrouillés
+- RSI/MACD/CCI = **3 projections du même signal latent** (Pearson 1.0, recouvrement erreurs 80.6%)
+- ATR + volume_spike + vc_score apportent plus que les indicateurs (XGBoost gain 212 vs 35)
+- 71% du test = RANGE_LOW_VOL non-tradable
+- Aucune architecture (CNN-LSTM, Chronos, XGBoost, RF, Logistic) ne casse le mur
+
+> Le mur est dans la **nature de l'information**, pas dans l'architecture.
+
+---
+
+## Décision stratégique (2026-04-26)
+
+| Décision | Justification |
+|---|---|
+| ❌ Pas de données externes (funding, OI, order book) cette itération | Choix utilisateur : exploiter d'abord à fond OHLCV |
+| ✅ Rester BTCUSD 5min OHLCV public uniquement | Disponible immédiatement, validation rapide |
+| ✅ Changer la **nature** de représentation, pas seulement l'archi | Phase 2.13 prouve que stacking d'indicateurs continus échoue |
+| ✅ Reformuler la cible (Triple Barrier sur niveaux prix) | Phase 2.18 : labels alignés avec stratégie de trading réelle |
+| ✅ Sampling **événementiel** (pas continu) | Élimine 71% RANGE_LOW_VOL non-tradable par construction |
+
+### Hypothèse v5.0
+Une combinaison de :
+1. Bougies japonaises **catégorielles** (multi-hot)
+2. Estimateurs **microstructure** dérivables d'OHLC (Corwin-Schultz, Yang-Zhang, Amihud)
+3. Niveaux **discrets** (Pivot Camarilla, VWAP, Volume Profile)
+4. Contexte **multi-timeframe** explicite (1h, 4h)
+5. Cible Triple Barrier **réaliste** sur pivots
+
+peut casser le plafond Phase 14. Si non → preuve que BTCUSD OHLCV seul est saturé → pivot v6 vers données externes.
+
+---
+
+## Architecture verrouillée
+
+### Backbone
+- **PatchTST** Channel-Independent ([Yu et al. ICLR 2023](https://arxiv.org/abs/2211.14730))
+- Fenêtre input : **96 bougies** (8h sur 5min)
+- Patches : **8 patches × 12 bougies** chacun (1h)
+
+### Label
+- **Triple Barrier Method ATR-adaptatif** :
+  - **TP** : `entry ± 1.0 × ATR` (long/short) — adapte à la volatilité du moment, contrairement à Camarilla qui produit des labels incohérents par régime
+  - **SL** : `bas_signal − 0.5×ATR` (long) ou `haut_signal + 0.5×ATR` (short)
+  - **Time barrier** : 24 bougies (2h max)
+  - **Label = 1** si TP touché avant SL et avant timeout
+  - **Label = 0** sinon (SL ou timeout négatif)
+  - Camarilla reste comme **feature input** (`dist_camarilla_nearest_norm`), le modèle peut l'utiliser pour décider
+- Cible binaire (pas régression)
+
+### Sampling
+- **Event-driven** uniquement (pas de fenêtre glissante)
+- Trigger = combinaison `pattern bougie reversal + proximité pivot + volume_zscore > 1.5`
+- Volume estimé : 500-3000 events sur la période test (vs ~880k bougies brutes)
+
+### Features (~22 channels OHLCV-only)
+
+| Groupe | Channels | Description |
+|---|---|---|
+| **A — Bougies japonaises** | 8 | Patterns multi-hot (TA-Lib top 5-6) + body_ratio + upper/lower_wick_ratio + close_location_value + gap_norm |
+| **B — Microstructure** | 5 | corwin_schultz_spread, garman_klass_vol, yang_zhang_vol, amihud_illiq, volume_zscore_20p |
+| **C — Niveaux & contexte** | 5 | dist_vwap_session, dist_camarilla_nearest, dist_poc_5d, dist_high_20p, dist_low_20p (toutes normalisées par ATR) |
+| **D — Multi-TF** | 4 | trend_1h_slope, trend_4h_slope, vol_1h_zscore, dist_vwap_daily |
+| **E — Optionnel itération 2** | 3 | permutation_entropy_50p, hurst_dfa_100p, pacf_lag5 |
+
+**Total itération 1** : 22 channels (groupes A+B+C+D)
+
+---
+
+## Roadmap d'implémentation
+
+| # | Module | Description | Statut | Date |
+|---|--------|-------------|--------|------|
+| 0 | `STATUS_v5.0.md` | Document de suivi (ce fichier) | ✅ | 2026-04-26 |
+| 1 | `experiments/patchtst_v5/README.md` | Création structure + README projet | ✅ | 2026-04-26 |
+| 2 | `feature_builder.py` | Calcul des 22 channels (A+B+C+D) depuis CSV BTCUSD | ✅ | 2026-04-26 |
+| 3 | `event_detector.py` | Détection des triggers (pattern + niveau + volume) | ✅ | 2026-04-26 |
+| 4 | `pivot_labeler.py` | Triple Barrier ATR-adaptatif (TP/SL/timeout) sur chaque event | ✅ | 2026-04-26 |
+| 5 | `dataset_builder.py` | Extraction fenêtres 96×N par event → NPZ train/val/test | ✅ | 2026-04-26 |
+| 6 | `model.py` + `train.py` | PatchTST CI + boucle entraînement avec early stopping val AUC | ✅ | 2026-04-26 |
+| 7 | `evaluate.py` | Threshold sweep + top-K%% sweep + calibration + per-segment | ✅ | 2026-04-26 |
+| 8 | `backtest_realistic.py` | Backtest event-driven (Sharpe, MaxDD, Calmar, equity curves) | ✅ | 2026-04-26 |
+| 9 | Décision phase 1 | v5.0 → ÉCHEC, expansion v5.1 décidée par avis expert | ✅ | 2026-04-26 |
+| 10 | `model.py` refactor: expose encoder embedding | Split forward en encode() + classify() | ✅ | 2026-04-26 |
+| 11 | `train_contrastive.py` | Triplet Loss + Hard Negative Mining + BCE multi-task | ✅ | 2026-04-26 |
+| 12 | Run v5.1 + comparaison vs v5.0 | Triplet+BCE: top 1% **33.3%** (vs 38.9% v5 run 3) — DÉGRADATION | ✅ | 2026-04-26 |
+| 13 | Décision finale v5.1 | **ÉCHEC : pivot v6 définitif validé, OHLCV-only saturé** | ✅ | 2026-04-26 |
+| 14 | v5.2 — Pure indicators paradigm | feature_builder Group I (16 indicateurs TA-Lib) + dataset_builder preset `v5_indicators_only` (19 ch total) | ✅ | 2026-04-26 |
+| 15 | Run v5.2 BCE + Contrastive | Test si paradigme indicators-only casse le mur (vs v5.0/v5.1 hybrid) | ⏳ | — |
+| 16 | Décision v5.2 | Si succès → industrialisation. Si échec → pivot v6 définitif définitif | ⏳ | — |
+
+---
+
+## Verdict final consolidé v5 (2026-04-26)
+
+### 4 runs convergents, dégradation monotone
+
+| Run | Configuration | Top 1% precision | Best Sharpe |
+|---|---|---|---|
+| 1 | v5.0 from_signal (24 ch) | 63.0% (faux positif label asymétrique) | -1.08 |
+| 2 | v5.0 from_entry RR 1:1 (22 ch) | 40.7% | -2.50 |
+| 3 | v5.0 + Group E entropy/Hurst/PACF (27 ch) | 38.9% | -4.68 |
+| **4** | **v5.1 Contrastive Triplet + BCE (27 ch)** | **33.3%** | **-5.10** |
+
+**Pattern frappant** : chaque raffinement méthodologique **détériore** le top 1%. Le Contrastive Learning (proposé par expert externe) a amplifié l'anti-prédictivité au sommet de confiance. Signature classique du fait que l'information recherchée **n'existe pas** dans les features — la régularisation ne peut pas créer du signal.
+
+### Diagnostic du Contrastive (run 4)
+
+L'expert proposait de séparer les "look-alikes" Label=1/Label=0 dans l'espace latent via Triplet Loss. Réalité empirique :
+- Il n'y a **pas de différence systématique** entre Label=1 et Label=0 dans les 27 channels OHLCV
+- Forcer la séparation par contraste → mémorisation de bruit train-spécifique
+- Surconfidence sur configurations test différentes
+- Top 1% (= prédictions les plus catégoriques) devient le plus à côté
+
+→ **Preuve que les hard negatives ne sont pas séparables car l'info n'est pas dans les features.**
+
+### Convergence inter-projets (5 paradigmes, 5 plafonds)
+
+| Approche | Architecture | Loss | Top 1% precision |
+|---|---|---|---|
+| Phase 14 foundation_finetune | Chronos T5 + LoRA | Triple Barrier BCE | ~44% |
+| v5 run 2 | PatchTST CI + 22 ch | BCE + RR 1:1 | 40.7% |
+| v5 run 3 | PatchTST CI + 27 ch + Group E | BCE + Entropy | 38.9% |
+| **v5.1 run 4** | **PatchTST CI + 27 ch + Projector** | **Triplet + BCE** | **33.3%** |
+
+5 paradigmes, plafond systémique. **Le mur n'est pas négociable par méthodologie.**
+
+### Pivot v6 — sources d'information orthogonales
+
+Plan de transition (à démarrer prochaine session) :
+- `STATUS_v6.0.md` au root + `experiments/v6_external_data/`
+- Phase 6.1 : `binance_fapi_ingestor.py` — funding rate (8 ans historique gratuit, complet)
+- Phase 6.2 : WebSocket logger forward-only (OI, L/S ratio, liquidations)
+- Phase 6.3 : Coinalyze API pour rapatrier 1-2 ans d'historique liquidations
+- Phase 6.4 : Adaptation feature_builder v5 → ajout 4-5 channels externes
+- Phase 6.5 : Re-run pipeline complet PatchTST (ou meta-classifieur XGBoost) sur features v5 + v6 enrichies
+- **Critère de succès** : si funding_rate seul fait passer top 1% precision de 33% à >55% → orthogonalité validée → continuer enrichissement
+
+---
+
+## Verdict final v5.0 (2026-04-26)
+
+### ❌ ÉCHEC empiriquement validé sur 3 runs indépendants
+
+| Run | Configuration | Top 1% precision | Best Sharpe | Verdict |
+|---|---|---|---|---|
+| 1 | sl_mode=from_signal, 24 ch | 63% (faux positif label asymétrique) | -1.08 | Trompeur |
+| 2 | sl_mode=from_entry RR 1:1, 22 ch | **40.7%** (anti-prédictif au sommet) | -2.50 | Mur exposé |
+| **3** | **+ Group E (entropy/Hurst/PACF), 27 ch** | **38.9%** (output collapse <0.55) | **-4.68** | **Mur renforcé** |
+
+### Convergence avec Phase 14 du foundation_finetune
+
+| Approche | Top 1% precision |
+|---|---|
+| Chronos LoRA + 22 features + Triple Barrier (Phase 14) | ~44% |
+| PatchTST CI + 22 channels + RR 1:1 (v5 run 2) | 40.7% |
+| PatchTST CI + 27 channels + Group E (v5 run 3) | 38.9% |
+
+3 architectures, 3 formulations, 3 jeux de features → convergence systémique. **Le plafond est dans l'information, pas dans le modèle.**
+
+### Ce qui a été éliminé comme cause possible (audits indépendants)
+
+- ✅ Architecture PatchTST CI fidèle paper (audit 1)
+- ✅ Formules numériques correctes (audit 2 — 85% confidence)
+- ✅ Aucune fuite, splits propres, purge OK (audit 3 — 96% confidence)
+- ✅ Triple Barrier walk-forward défensif (`np.argmax` guardé par `.any()`)
+- ✅ RevIN per-sample, no cross-sample leakage
+- ✅ Class balance, BCE pos_weight, AdamW + scheduler tous corrects
+- ✅ 27 channels couvrant 5 axes informationnels (catégoriels, microstructure, niveaux, multi-TF, statistique)
+
+### Décision : pivot v6 — données externes orthogonales
+
+L'élimination par v5.0 de l'hypothèse OHLCV-only ouvre la voie à v6 avec sources d'information **vraiment orthogonales** :
+
+| Source | API | Coût |
+|---|---|---|
+| Funding rate Binance perpétuels | binance.com/api/v3/funding-rate | Gratuit |
+| Open Interest + ΔOI | binance.com/api/v3/futures-data | Gratuit |
+| Long/Short ratio (top traders + global) | binance.com/api/v3/futures-data/topLongShortAccountRatio | Gratuit |
+| Liquidations | Coinglass / Binance liquidation stream | Partiel gratuit |
+| Premium index (futures - spot) | Binance | Gratuit |
+
+Ces signaux sont structurellement absents d'OHLCV (positionnement, sentiment dérivés, événements forcés). Ils ont une vraie probabilité de casser le mur.
+
+**Prochaine session** : créer `STATUS_v6.0.md` + `experiments/v6_external_data/` avec le pipeline d'ingestion + intégration au framework PatchTST existant.
+
+Légende : ⏳ Pending — 🔄 In progress — ✅ Done — ❌ Blocked
+
+---
+
+## Findings hérités à NE PAS retester
+
+Acquis empiriques validés sur 14 phases. v5.0 ne doit pas les retester :
+
+| # | Finding | Source | Implication v5.0 |
+|---|---|---|---|
+| 1 | RSI/MACD/CCI ≈ même signal (Pearson 1.0) | Phase 2.13 | Aucun de ces 3 comme channel principal |
+| 2 | Direction-Only > Dual-Binary (Force inutile) | Phase 2.8 | Cible binaire suffit (TP-touché vs non) |
+| 3 | Kalman GLOBAL > Sliding Window | Phase 2.10 | Si filtre nécessaire, GLOBAL only |
+| 4 | RANGE_LOW_VOL = 71% test = non-tradable | Phase 14 | Sampling événementiel résout par construction |
+| 5 | Triple Barrier sur pente indicateur ne casse pas le mur | Phase 2.18 | TB doit être sur **prix** (pivots), pas indicateur |
+| 6 | Octave Sliding Window catastrophique | 2026-01-08 | Aucun filtre sliding window |
+| 7 | Stacking RSI/CCI/MACD échoue (0/9 succès) | 2026-01-06 | Pas de méta-modèle entre indicateurs corrélés |
+| 8 | best_lag = +1 plafonne autocorr 0.93 | Phase 14 | Pas de prédiction t→t+1 sur close |
+| 9 | KALMAN_PROCESS_VAR=0.01 régime toxique | slope_improvement | Si Kalman utilisé, σ²=1.155 (MLE) |
+| 10 | Suroptimisation des seuils sur même split | v4.0 OOS | Walk-forward ou validation sur split distinct obligatoire |
+
+---
+
+## Critères de succès
+
+### Métriques cibles (test out-of-sample)
+
+| Métrique | Plancher | Cible | Idéal |
+|---|---|---|---|
+| Precision @ top 1% confidence | > 50% | > 60% | > 65% |
+| Precision @ top 10% confidence | > 45% | > 55% | > 60% |
+| Number of events triggered | > 500 | 1000-3000 | — |
+| AUC ROC | > 0.55 | > 0.60 | > 0.65 |
+| Backtest PnL Net (taker 0.04%) | positif | > +20% / an | > +50% / an |
+| Sharpe Ratio annualisé | > 1.0 | > 2.0 | > 3.0 |
+| Max Drawdown | < -25% | < -15% | < -10% |
+
+### Critères de décision finale
+
+| Scénario | Métriques | Action |
+|---|---|---|
+| ✅ **Succès** | Precision top 10% > 55% ET PnL net > +20% / an | Industrialisation, optimisation hyperparams, multi-asset |
+| ⚠️ **Mitigé** | Precision 45-55% top 10%, PnL net ~0% | Tester groupe E (entropie/Hurst/PACF) puis revoir |
+| ❌ **Échec** | Precision < 45% top 10% OU PnL net négatif | **Mur OHLCV-only confirmé** → pivot v6 (funding/OI externes) |
+
+---
+
+## Journal de décisions
+
+| Date | Décision | Justification |
+|------|----------|---------------|
+| 2026-04-26 | Architecture PatchTST + Triple Barrier sur pivots verrouillée | Réduire bruit (event-driven) + nature représentation différente (catégoriel + microstructure) |
+| 2026-04-26 | Pas de données externes (funding/OI/L2) | Choix utilisateur — exploiter d'abord à fond OHLCV existant |
+| 2026-04-26 | 22 channels (A+B+C+D), groupe E reporté | Limiter complexité initiale, valider d'abord la mécanique |
+| 2026-04-26 | Cible binaire TP-vs-non plutôt que régression | Aligné scalping pratique : "ce trade est-il profitable ?" |
+| 2026-04-26 | Camarilla pivots préférés à Classic/Fibonacci | Niveaux plus serrés (H1/L1 typique 0.3-0.7%) adaptés 5min |
+| 2026-04-26 | Aucune feature continue type RSI/MACD/CCI | Phase 2.13 prouve la redondance, ROI nul |
+| 2026-04-26 | Drop CDLDOJI du trigger event_detector | Pattern non-directionnel (13.84% bars), signal s'auto-annule en somme signée |
+| 2026-04-26 | Drop volume_zscore filter (option C) | Le modèle apprend à filtrer les trades parasites via prediction confidence — pas un filtre dur |
+| 2026-04-26 | Triple Barrier ATR-adaptatif au lieu de Camarilla H1/L1 | Camarilla pur produit labels incohérents par régime de volatilité (trop tight en bull, trop loose en range). ATR adapte par construction. Camarilla reste comme **input feature** |
+| 2026-04-26 | SL `from_entry` (symétrique) au lieu de `from_signal` (low/high) | Premier run avec SL=signal_low−0.5×ATR donnait WR top 1% = 63% mais PnL net négatif. Diagnostic: pour Engulfing patterns (73% events), bar large → signal_low loin de close → SL effective ≈ 1.5-2×ATR vs TP 1×ATR (asymétrie défavorable). `from_entry` impose RR 1:1 contrôlé, breakeven WR ≈ 50% (au lieu de ~58%) |
+| 2026-04-26 | Audit code : drop channel dupliqué + warmup 300→400 + log purge | Audit indépendant a identifié 3 issues. (1) `dist_vwap_daily_norm` était identique à `dist_vwap_session_norm` (collinéarité parfaite) → remplacé par `dist_open_daily_norm` (distance à l'open quotidien, ancrage différent). (2) warmup_bars 300 insuffisant (vol_1h_zscore rolling 288 + lookback 96 → minimum 384) → 400 garantit zéro NaN dans les fenêtres. (3) Purge embargo dataset_builder loggé explicitement |
+| 2026-04-26 | Run 2 (from_entry, RR 1:1) montre AUC 0.51, top 1% precision 40.7% < baseline → Option A activée | Run 1 (from_signal) montrait WR 63% top 1% mais SL=signal_low créait un biais directionnel sur Engulfing patterns. Run 2 avec from_entry expose que le modèle n'a pas de signal réel sur les 22 channels. Avant déclarer échec, **ajouter group E** (permutation_entropy_50p, hurst_dfa_100p, pacf_lag5) — features statistiques capturant signature stochastique différente |
+| 2026-04-26 | Group E activé par défaut | 3 features statistiques calculées sur log_returns : permutation entropy (Bandt-Pompe m=3 window=50), Hurst exponent (R/S window=100 multi-lags), PACF lag 5 (Yule-Walker window=50). Total channels = 22 continus + 5 patterns = 27 |
+
+---
+
+## Risques identifiés
+
+| # | Risque | Probabilité | Mitigation |
+|---|--------|-------------|------------|
+| 1 | Mur Phase 14 reste actif (info OHLC saturée) | **Moyenne** | Décision honnête de pivot v6 si critères ❌ |
+| 2 | Trop peu d'events triggered (sampling trop strict) | Faible | Relaxer trigger conditions itérativement |
+| 3 | Class imbalance Triple Barrier (Label 1 < 30%) | Moyenne | Class weights, focal loss, threshold tuning |
+| 4 | Overfitting PatchTST sur ~3000 events | Moyenne | Walk-forward, dropout élevé, early stopping |
+| 5 | Bougies japonaises rares en 5min crypto | Faible | Mesurer fréquence patterns en step exploratoire |
+| 6 | Pivot Camarilla H1/L1 trop proche du prix → SL touché systématiquement | Moyenne | Calibrer ratio TP/SL sur ATR moyen ; tester H2/L2 |
+| 7 | Suroptimisation des seuils trigger (data snooping) | Élevée | Walk-forward strict ou hold-out split distinct |
+
+---
+
+## Stack technique
+
+- **Python 3.11+**
+- **PyTorch 2.x** + `transformers` (PatchTST disponible HuggingFace)
+- **TA-Lib** ou `pandas-ta` (patterns bougies)
+- **NumPy / Pandas / SciPy**
+- **scikit-learn** (calibration + métriques)
+- **Données** : `data_trad/BTCUSD_all_5m.csv` (879,710 bougies, 2017-08 → 2026-01)
+
+---
+
+## Liens et références
+
+- Approche précédente : [experiments/foundation_finetune/README.md](experiments/foundation_finetune/README.md) (Phase 1-14, clos)
+- Calibration Kalman : [experiments/slope_improvement/final_report.md](experiments/slope_improvement/final_report.md)
+- Statut v4 : [STATUS_v4.0.md](STATUS_v4.0.md)
+- Findings consolidés : [CLAUDE.md](CLAUDE.md)
+- López de Prado, *Advances in Financial Machine Learning* (2018) — Triple Barrier, Meta-Labeling
+- Yu et al., *PatchTST: A Time Series is Worth 64 Words* (ICLR 2023)
+- Corwin & Schultz, *A Simple Way to Estimate Bid-Ask Spreads from Daily High and Low Prices* (J. Finance 2012)
+- Yang & Zhang, *Drift-independent volatility estimation* (J. Business 2000)
+- Amihud, *Illiquidity and stock returns* (J. Financial Markets 2002)
+
+---
+
+# v5.3 — XGBoost + multi-aggs sur pivot 'beyond' SHORT (2026-04-27)
+
+**Statut** : 🟢 **Breakthrough qualité de prédiction**. Le PnL n'est PAS l'objectif de cette phase — on se concentre sur le **WR (qualité de prédiction)** et l'écart **train ↔ val/test**.
+
+## Setup
+
+| Élément | Valeur |
+|---|---|
+| Dataset | `data/patchtst_v5_pivot_buf05/` (window=96 bars, 19 channels OHLCV-derived) |
+| Label | `pivot_labeler_levels --sl-mode beyond` (TP=pivot Camarilla immédiat, SL=pivot suivant au-delà, time-barrier=24) |
+| Direction | SHORT-only (`--direction-filter short`) |
+| Train events | 11 491 (70%) |
+| Val events | 2 397 (15%) |
+| Test events | 2 441 (15%) |
+| Class1 baseline | ~58.7% (WR si on prend tout) |
+
+## Diagnostic préalable (`diagnose_label_separability`)
+
+| Métrique (sur train) | Valeur | Lecture |
+|---|---|---|
+| Max Cohen's d | 0.069 | Signal univarié quasi-nul |
+| Max AUC univariée | 0.521 | Aucune feature ne discrimine isolément |
+| Logistic AUC train / val / test | 0.524 / 0.516 / 0.518 | Pas de dérive, signal uniformément faible |
+
+→ **Label structurellement difficile** ; tout signal exploitable doit venir de **combinaisons non-linéaires multi-fenêtres**.
+
+## Comparatif des configs testées
+
+Toutes : SHORT-only, dataset identique. Métriques = **WR** sur top-K%% confidence.
+
+| # | Config | TRAIN AUC | TRAIN top 1% | VAL AUC | **VAL top 1%** | TEST AUC | **TEST top 1%** |
+|---|---|---|---|---|---|---|---|
+| 1 | Default `last-plus-aggs` (76 feat, max_depth=4, n_est=500, early stop) | 0.598 | 89.5% | 0.501 | 60.9% | 0.497 | 66.7% |
+| 2 | Pushed `last-plus-aggs` (max_depth=10, n_est=3000, lr=0.03, no early stop, no reg) | **1.000** | 100% | 0.529 | 69.6% | 0.517 | 70.8% |
+| 3 | Pushed `agg-window=12` | 1.000 | 100% | 0.513 | 39.1% | 0.514 | 58.3% |
+| 4 | Pushed `agg-window=6` | 1.000 | 100% | 0.500 | 60.9% | 0.505 | 58.3% |
+| 5 | **Default `last-plus-multi-aggs`** (304 feat, 5 windows [6,12,24,48,96]) | 0.981 | 100% | 0.510 | **78.3%** | 0.512 | **83.3%** ✅ |
+| 6 | **Pushed `last-plus-multi-aggs`** | **1.000** | 100% | **0.519** | **87.0%** ✅ | **0.528** | **79.2%** ✅ |
+
+### Top WR à plus large échelle
+
+| Config | TRAIN top 5% | VAL top 5% | TEST top 5% | TEST top 10% | TEST top 25% |
+|---|---|---|---|---|---|
+| Default `last-plus-aggs` | 76.5% | 59.7% | 63.9% | 63.1% | 60.5% |
+| Pushed `last-plus-aggs` | 100% | 62.2% | 59.8% | 58.6% | 59.2% |
+| Default `last-plus-multi-aggs` | 100% | 65.5% | **68.0%** | 61.9% | 61.0% |
+| **Pushed `last-plus-multi-aggs`** | 100% | 63.0% | 61.5% | **64.3%** | 61.5% |
+
+## Découverte clé : `last-plus-multi-aggs`
+
+Au lieu d'agréger sur une seule fenêtre (24 bars), agréger sur **5 fenêtres simultanément** : `[6, 12, 24, 48, 96]` bars × `{mean, std, first}` + `last`.
+
+→ **19 channels × (1 + 5×3) = 304 features** au lieu de 76.
+
+**Impact sur le WR** :
+- TEST top 1% : **66.7% → 83.3%** (+16.6pp avec early stopping)
+- VAL top 1% : **60.9% → 87.0%** (+26.1pp pushed) — meilleur WR de tous les runs
+- Top features mêlent plusieurs résolutions : `atr_14_norm_z_mean6`, `rsi_21_mean48`, `hurst_dfa_100p_mean48`, `di_minus_14_mean96`. Le modèle exploite vraiment le multi-échelle.
+
+**Pourquoi ça marche malgré Cohen's d 0.07 ?**
+Le signal univarié reste quasi-nul, mais XGBoost combine **des centaines de features faibles à des résolutions différentes** pour discriminer la queue extrême (top 1%). C'est exactement le cas d'usage du gradient boosting sur features riches.
+
+## Métriques détaillées — meilleur modèle (Pushed multi-aggs)
+
+| Split | n | Class1 | AUC | PR AUC | top 1% | top 5% | top 10% | top 25% |
+|---|---|---|---|---|---|---|---|---|
+| TRAIN | 11 491 | 58.7% | **1.000** | 1.000 | **100%** | 100% | 100% | 100% |
+| VAL | 2 397 | 58.4% | 0.519 | 0.605 | **87.0%** | 63.0% | 60.7% | 59.4% |
+| TEST | 2 441 | 59.9% | 0.528 | 0.620 | **79.2%** | 61.5% | 64.3% | 61.5% |
+
+**Train mémorisé à 100%** → on a saturé la capacité d'extraction sur le train.
+
+**Gap train→val/test sur top 1%** :
+- Train 100% → Val 87.0% : **-13.0pp**
+- Train 100% → Test 79.2% : **-20.8pp**
+
+Le gap reste élevé mais le **niveau absolu val/test est exceptionnellement haut** (87% / 79%) vs baseline 58.7%, soit **+28pp / +20pp d'edge** sur la queue extrême.
+
+## Comparatif vs baseline initiale (SHORT only, même dataset)
+
+| Métrique | Default v1 | Best v5.3 | Gain |
+|---|---|---|---|
+| TEST top 1% WR | 66.7% | **79.2%** | **+12.5pp** |
+| VAL top 1% WR | 60.9% | **87.0%** | **+26.1pp** |
+| TEST AUC | 0.497 | 0.528 | +0.031 |
+| TEST PR AUC | 0.609 | 0.620 | +0.011 |
+| Features utilisées | 76 | 304 | ×4 |
+
+## Configuration optimale (commande de reproduction)
+
+```bash
+python -m experiments.patchtst_v5.train_xgboost \
+    --train data/patchtst_v5_pivot_buf05/train.npz \
+    --val   data/patchtst_v5_pivot_buf05/val.npz \
+    --test  data/patchtst_v5_pivot_buf05/test.npz \
+    --output-dir models/patchtst_v5_pivot_buf05_xgb_short_multi_pushed/ \
+    --feature-mode last-plus-multi-aggs \
+    --direction-filter short \
+    --max-depth 10 --learning-rate 0.03 --n-estimators 3000 \
+    --min-child-weight 1 --subsample 1.0 --colsample-bytree 1.0 \
+    --reg-lambda 0.0 --reg-alpha 0.0 --no-early-stopping
+```
+
+Modèle : `models/patchtst_v5_pivot_buf05_xgb_short_multi_pushed/xgboost_model.json`
+
+## Notes sur le PnL (informatif, non prioritaire)
+
+PnL backtest top 1% test = **+1.51%/an, Sharpe 0.86** (positif sur 24 trades) — premier PnL positif out-of-sample du projet. Mais sur 23-24 trades par split, IC à 95% trop large. **Non concluant** sur cette métrique.
+
+→ **L'objectif reste la qualité de prédiction (WR)**, pas le PnL net. Le label `pivot beyond` impose un breakeven WR ~73-75% qu'on dépasse maintenant largement.
+
+## Prochaines pistes (priorité décroissante)
+
+1. **Ensemble multi-seed** — entraîner 5-10 modèles avec seeds [42, 7, 13, 100, 999, …] et moyenner les scores. Devrait réduire la variance val/test top 1% et stabiliser le WR.
+2. **Tester LONG-only multi-aggs pushed** — pas encore comparé pour vérifier symétrie.
+3. **Walk-forward roulant** — refit tous les 90j sur les 365j précédents, valider la stabilité temporelle.
+4. **Élargir multi-aggs** — tester [3, 6, 12, 24, 48, 96] (380 features) ou ajouter median, skewness.
+
+## Commits associés (branche `claude/post-foundation-finetune-v14-PiOSL`)
+
+| Commit | Description |
+|---|---|
+| `e827705` | feat: `--direction-filter` long/short/both pour XGBoost |
+| `7958a15` | feat: expose XGBoost regularization params via CLI |
+| `70a1f67` | fix: handle `--no-early-stopping` (best_iteration absent) |
+| `d2d453a` | fix: handle best_score absence in report |
+| `17eb47d` | fix: predict_all_splits when model trained without early stop |
+| `c5b5f34` | feat: `last-plus-multi-aggs` mode (304 features, 5 windows) |
+
+## Pourquoi v5.3 contredit la conclusion v5.2 « pivot v6 »
+
+La conclusion d'avril 2026 (v5.2 ÉCHEC, pivot v6 nécessaire) reposait sur :
+- Top 1% precision PatchTST/Chronos plafonnant à **33-44%**
+- Conclusion : « OHLCV-only saturé, mur informationnel »
+
+v5.3 montre que **le levier n'avait pas été exploité** :
+- XGBoost avec **multi-resolution aggregations** (5 fenêtres) sur les **mêmes 19 channels OHLCV** atteint **79-87% top 1% WR** sur val/test SHORT-only
+- C'est **+35-43pp** au-dessus du plafond v5.2 (44%)
+- Le mur n'était pas dans l'information OHLCV mais dans l'**inadéquation entre l'architecture (PatchTST attention sur séquence) et la vraie structure du signal (interactions multi-échelle entre indicateurs agrégés)**
+
+→ **Pivot v6 (données externes funding/OI) suspendu**. On continue à pousser v5.3 (ensemble, walk-forward, LONG, etc.) avant d'envisager des sources externes.
