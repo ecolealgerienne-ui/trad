@@ -207,8 +207,13 @@ def _exit(direction: int, entry: float, exit_p: float, bars: int,
 # Data loading
 # ---------------------------------------------------------------------------
 
-def load_predictions(npz_path: Path) -> dict:
-    """Load predictions NPZ (scores, direction, feature_idx, timestamp, etc.)."""
+def load_predictions(npz_path: Path, asset_id_filter: int | None = None) -> dict:
+    """Load predictions NPZ (scores, direction, feature_idx, timestamp, etc.).
+
+    Si asset_id_filter est fourni et que asset_id existe dans le NPZ, filtre
+    pour ne garder que les events de l'asset spécifié. Permet de tester un
+    modèle multi-asset sur un seul asset (ex: BTC).
+    """
     data = np.load(npz_path, allow_pickle=False)
     out = {k: data[k] for k in data.files}
     if "feature_idx" not in out:
@@ -216,6 +221,17 @@ def load_predictions(npz_path: Path) -> dict:
             f"feature_idx missing from {npz_path}. Re-run predict_ensemble after "
             "the asset_id propagation commit (7a09dd3) so feature_idx is preserved."
         )
+    if asset_id_filter is not None:
+        if "asset_id" not in out:
+            raise SystemExit(
+                f"--asset-id={asset_id_filter} demandé mais asset_id absent du NPZ. "
+                "Le modèle a été entraîné en single-asset."
+            )
+        mask = out["asset_id"] == asset_id_filter
+        n_before = len(out["scores"])
+        out = {k: v[mask] for k, v in out.items()}
+        logger.info("asset_id filter (=%d) : %d → %d events", asset_id_filter,
+                    n_before, len(out["scores"]))
     return out
 
 
@@ -304,6 +320,11 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--predictions", type=Path, required=True,
                    help="NPZ from predict_ensemble (single direction)")
+    p.add_argument("--asset-id", type=int, default=None,
+                   help="Filtre les predictions sur un asset_id donné. Permet de "
+                        "tester un modèle multi-asset sur un seul asset. "
+                        "Convention v5.8 : BTC=0, ETH=1, BNB=2, ADA=3, LTC=4. "
+                        "Le --features doit pointer vers le parquet de cet asset.")
     p.add_argument("--features", type=Path, required=True,
                    help="Features parquet for OHLC + Camarilla recomputation")
     p.add_argument("--top-k-pct", type=float, default=10.0,
@@ -347,7 +368,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info("Loading predictions: %s", args.predictions)
-    pred = load_predictions(args.predictions)
+    pred = load_predictions(args.predictions,
+                            asset_id_filter=args.asset_id)
     n_total = len(pred["scores"])
 
     span = (pd.to_datetime(pred["timestamp"]).max() - pd.to_datetime(pred["timestamp"]).min())
