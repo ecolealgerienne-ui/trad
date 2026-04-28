@@ -317,6 +317,12 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
                         "viser le premier pivot rentable. Recommandé : "
                         "2*fees + edge_min (ex: 0.10 pour fees=0.02). "
                         "Mettre 0.0 pour comportement strict-H1.")
+    p.add_argument("--min-pivot-distance-pct", type=float, default=0.0,
+                   help="Filtre PRÉ-SÉLECTION : skip events où l'entry est à "
+                        "moins de X%% du pivot Camarilla immédiat dans la direction "
+                        "du trade. Ex: 0.10 → exclure events où nearest pivot < 0.10%% "
+                        "(label trivialement satisfait, biais du modèle). Défaut 0 = "
+                        "no filter, top-K appliqué sur tous les events.")
     p.add_argument("--no-breakeven-trail", action="store_true",
                    help="Désactive le trail SL→entry après touche du pivot immédiat. "
                         "Par défaut le trail est activé : si H1 (LONG) ou L1 (SHORT) "
@@ -361,13 +367,52 @@ def main(argv: Iterable[str] | None = None) -> int:
                 "OFF" if args.no_breakeven_trail else "ON")
 
     # ------------------------------------------------------------------
+    # Pre-selection filter : skip events où entry est trop proche du pivot
+    # immédiat dans la direction du trade. Ces events sont ceux que le label
+    # récompense trivialement (TP collé) et que le modèle exploite. Filtrer
+    # AVANT le top-K force le modèle à piocher dans des events plus
+    # "structurels".
+    # ------------------------------------------------------------------
+    valid_event_mask = np.ones(n_total, dtype=bool)
+    if args.min_pivot_distance_pct > 0:
+        for k in range(n_total):
+            entry_idx = int(pred["feature_idx"][k])
+            direction = int(pred["direction"][k])
+            entry = float(close[entry_idx])
+            piv = pivots_8col[entry_idx]
+            valid_piv = piv[~np.isnan(piv)]
+            if direction > 0:
+                above = valid_piv[valid_piv > entry]
+                if len(above) == 0:
+                    valid_event_mask[k] = False
+                    continue
+                dist_pct = 100.0 * (above.min() - entry) / entry
+            else:
+                below = valid_piv[valid_piv < entry]
+                if len(below) == 0:
+                    valid_event_mask[k] = False
+                    continue
+                dist_pct = 100.0 * (entry - below.max()) / entry
+            if dist_pct < args.min_pivot_distance_pct:
+                valid_event_mask[k] = False
+        n_kept = int(valid_event_mask.sum())
+        logger.info("Pre-selection filter (min_pivot_distance=%.3f%%) : "
+                    "%d/%d events gardés (%.1f%% retirés)",
+                    args.min_pivot_distance_pct, n_kept, n_total,
+                    100 * (1 - n_kept / n_total))
+
+    # ------------------------------------------------------------------
     # Helper to run sim for a given top-K%% threshold
     # ------------------------------------------------------------------
     def run_for_topk(top_k_pct: float,
                      min_edge_pct: float | None = None) -> tuple[pd.DataFrame, dict]:
-        n_top = max(1, int(n_total * top_k_pct / 100))
-        sorted_idx = np.argsort(-pred["scores"])
-        selected = sorted_idx[:n_top]
+        # Top-K appliqué SUR LES EVENTS VALIDES (post-filtre)
+        valid_idx = np.where(valid_event_mask)[0]
+        n_valid = len(valid_idx)
+        n_top = max(1, int(n_valid * top_k_pct / 100))
+        scores_valid = pred["scores"][valid_idx]
+        order = np.argsort(-scores_valid)
+        selected = valid_idx[order[:n_top]]
         edge = args.min_edge_pct if min_edge_pct is None else min_edge_pct
 
         rows: list[dict] = []
