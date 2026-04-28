@@ -417,8 +417,9 @@ def main(argv: Iterable[str] | None = None) -> int:
     # ------------------------------------------------------------------
     # Diagnostic overlap : combien de trades chevauchent en concurrence ?
     # IMPORTANT : le backtest simule chaque event indépendamment (capital
-    # infini, multi-positions illimitées). Cette mesure indique l'écart
-    # avec une politique single-position réaliste.
+    # infini, multi-positions illimitées). Cette section ajoute un report
+    # des métriques sous politique single-position (un seul trade ouvert
+    # à la fois, signaux ignorés pendant un trade).
     # ------------------------------------------------------------------
     if "entry_idx" in main_df.columns and "exit_bars" in main_df.columns:
         traded = main_df[(main_df["exit_bars"] >= 0) &
@@ -428,9 +429,9 @@ def main(argv: Iterable[str] | None = None) -> int:
         traded = traded.sort_values("start").reset_index(drop=True)
         n_traded = len(traded)
         if n_traded > 0:
-            # Sweep-line : compter les overlaps via events
             starts = traded["start"].values
             ends = traded["end"].values
+            # Sweep-line pour max/mean concurrent
             events = np.concatenate([starts, ends + 1])
             kinds = np.concatenate([np.ones(n_traded, dtype=int),
                                     -np.ones(n_traded, dtype=int)])
@@ -439,30 +440,30 @@ def main(argv: Iterable[str] | None = None) -> int:
             max_concurrent = int(running.max()) if running.size else 0
             mean_concurrent = float(running.mean()) if running.size else 0.0
 
-            # Pour chaque trade, nombre de trades précédents non encore exits
-            n_overlap = np.zeros(n_traded, dtype=int)
+            # Single-position policy (FIFO) : on prend le premier signal,
+            # on ignore tout pendant le trade, on reprend après end+1.
+            kept_mask = np.zeros(n_traded, dtype=bool)
+            cursor = -1
             for i in range(n_traded):
-                # Combien des trades 0..i-1 ont end >= starts[i] ?
-                if i == 0:
-                    continue
-                prev_ends = ends[:i]
-                n_overlap[i] = int((prev_ends >= starts[i]).sum())
-            n_with_overlap = int((n_overlap > 0).sum())
+                if starts[i] > cursor:
+                    kept_mask[i] = True
+                    cursor = ends[i]
+            single_df = traded[kept_mask].copy()
+            n_kept = len(single_df)
+            n_ignored = n_traded - n_kept
 
             logger.info("Overlap analysis (top %.1f%%) :", args.top_k_pct)
-            logger.info("  Trades : %d  |  Avec >= 1 trade actif au moment de l'entrée : "
-                        "%d (%.1f%%)",
-                        n_traded, n_with_overlap, 100 * n_with_overlap / n_traded)
-            logger.info("  Max concurrent trades : %d", max_concurrent)
-            logger.info("  Mean concurrent trades : %.2f", mean_concurrent)
-            # Si politique single-position appliquée : combien de trades
-            # auraient été ignorés ?
-            n_ignored_if_single = n_with_overlap
-            n_kept_if_single = n_traded - n_ignored_if_single
-            logger.info("  → Single-position policy : %d trades gardés "
-                        "(%d ignorés, -%.1f%%)",
-                        n_kept_if_single, n_ignored_if_single,
-                        100 * n_ignored_if_single / n_traded)
+            logger.info("  Trades simulés (multi-position) : %d", n_traded)
+            logger.info("  Max concurrent trades : %d  |  Mean concurrent : %.2f",
+                        max_concurrent, mean_concurrent)
+            logger.info("  → Single-position FIFO : %d gardés, %d ignorés (-%.1f%%)",
+                        n_kept, n_ignored, 100 * n_ignored / n_traded)
+
+            # Métriques sous single-position
+            single_metrics = report_results(single_df, span_days)
+            log_summary(f"top_{args.top_k_pct:.0f}pct_single_pos", single_metrics)
+            single_path = args.output_dir / f"trades_top{int(args.top_k_pct)}pct_single_pos.csv"
+            single_df.to_csv(single_path, index=False)
 
     logger.info("TP rank distribution (rang du pivot atteint à l'exit) :")
     rank_labels = {-3: "SL_BE (break-even)", -2: "SL_INIT/TIMEOUT/AMBIG",
@@ -534,12 +535,30 @@ def main(argv: Iterable[str] | None = None) -> int:
     sweep_results: dict = {}
     if args.also_sweep_topk:
         logger.info("=" * 110)
-        logger.info("SWEEP top-K%%")
+        logger.info("SWEEP top-K%%  (multi-position vs single-position FIFO)")
         logger.info("=" * 110)
         for tk in (1.0, 2.0, 5.0, 10.0, 25.0, 50.0):
-            _, m = run_for_topk(tk)
+            tk_df, m = run_for_topk(tk)
             sweep_results[f"top_{tk:.0f}pct"] = m
-            log_summary(f"top_{tk:.0f}pct", m)
+            log_summary(f"top_{tk:.0f}pct_multi", m)
+
+            # Single-position FIFO sur le même set
+            tk_traded = tk_df[(tk_df["exit_bars"] >= 0) &
+                              (tk_df["pnl_net"].notna())].copy()
+            if len(tk_traded) > 0:
+                tk_traded["start"] = tk_traded["entry_idx"].astype(int) + 1
+                tk_traded["end"] = tk_traded["start"] + tk_traded["exit_bars"].astype(int) - 1
+                tk_traded = tk_traded.sort_values("start").reset_index(drop=True)
+                kept = np.zeros(len(tk_traded), dtype=bool)
+                cursor = -1
+                for i, (s, e) in enumerate(zip(tk_traded["start"].values,
+                                                tk_traded["end"].values)):
+                    if s > cursor:
+                        kept[i] = True
+                        cursor = e
+                single_m = report_results(tk_traded[kept], span_days)
+                sweep_results[f"top_{tk:.0f}pct_single"] = single_m
+                log_summary(f"top_{tk:.0f}pct_single", single_m)
 
     # ------------------------------------------------------------------
     # Save summary JSON
