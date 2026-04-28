@@ -380,6 +380,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             res["score"] = float(pred["scores"][k_idx])
             res["direction"] = direction
             res["timestamp"] = pred["timestamp"][k_idx]
+            res["entry_idx"] = entry_idx
             res["entry_price"] = entry_price
             res["y_true"] = int(pred["y_true"][k_idx]) if "y_true" in pred else -1
             # Sanity-check : pnl du label (calculé par pivot_labeler_levels avec
@@ -412,6 +413,56 @@ def main(argv: Iterable[str] | None = None) -> int:
                                  key=lambda x: -x[1]):
         logger.info("  %-20s : %5d (%.1f%%)",
                     reason, count, 100 * count / max(main_metrics["n_trades"], 1))
+
+    # ------------------------------------------------------------------
+    # Diagnostic overlap : combien de trades chevauchent en concurrence ?
+    # IMPORTANT : le backtest simule chaque event indépendamment (capital
+    # infini, multi-positions illimitées). Cette mesure indique l'écart
+    # avec une politique single-position réaliste.
+    # ------------------------------------------------------------------
+    if "entry_idx" in main_df.columns and "exit_bars" in main_df.columns:
+        traded = main_df[(main_df["exit_bars"] >= 0) &
+                         (main_df["pnl_net"].notna())].copy()
+        traded["start"] = traded["entry_idx"].astype(int) + 1
+        traded["end"] = traded["start"] + traded["exit_bars"].astype(int) - 1
+        traded = traded.sort_values("start").reset_index(drop=True)
+        n_traded = len(traded)
+        if n_traded > 0:
+            # Sweep-line : compter les overlaps via events
+            starts = traded["start"].values
+            ends = traded["end"].values
+            events = np.concatenate([starts, ends + 1])
+            kinds = np.concatenate([np.ones(n_traded, dtype=int),
+                                    -np.ones(n_traded, dtype=int)])
+            order = np.argsort(events, kind="stable")
+            running = np.cumsum(kinds[order])
+            max_concurrent = int(running.max()) if running.size else 0
+            mean_concurrent = float(running.mean()) if running.size else 0.0
+
+            # Pour chaque trade, nombre de trades précédents non encore exits
+            n_overlap = np.zeros(n_traded, dtype=int)
+            for i in range(n_traded):
+                # Combien des trades 0..i-1 ont end >= starts[i] ?
+                if i == 0:
+                    continue
+                prev_ends = ends[:i]
+                n_overlap[i] = int((prev_ends >= starts[i]).sum())
+            n_with_overlap = int((n_overlap > 0).sum())
+
+            logger.info("Overlap analysis (top %.1f%%) :", args.top_k_pct)
+            logger.info("  Trades : %d  |  Avec >= 1 trade actif au moment de l'entrée : "
+                        "%d (%.1f%%)",
+                        n_traded, n_with_overlap, 100 * n_with_overlap / n_traded)
+            logger.info("  Max concurrent trades : %d", max_concurrent)
+            logger.info("  Mean concurrent trades : %.2f", mean_concurrent)
+            # Si politique single-position appliquée : combien de trades
+            # auraient été ignorés ?
+            n_ignored_if_single = n_with_overlap
+            n_kept_if_single = n_traded - n_ignored_if_single
+            logger.info("  → Single-position policy : %d trades gardés "
+                        "(%d ignorés, -%.1f%%)",
+                        n_kept_if_single, n_ignored_if_single,
+                        100 * n_ignored_if_single / n_traded)
 
     logger.info("TP rank distribution (rang du pivot atteint à l'exit) :")
     rank_labels = {-3: "SL_BE (break-even)", -2: "SL_INIT/TIMEOUT/AMBIG",
