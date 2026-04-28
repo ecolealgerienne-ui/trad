@@ -325,6 +325,10 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     p.add_argument("--output-dir", type=Path, required=True)
     p.add_argument("--also-sweep-topk", action="store_true",
                    help="Also report results for several top-K%% (1, 2, 5, 10, 25, 50)")
+    p.add_argument("--grid-search", action="store_true",
+                   help="Grid search sur (min_edge_pct × top_k_pct). Court-circuite "
+                        "le run principal et produit grid_search.csv + log trié par "
+                        "Sharpe. À lancer indépendamment sur train, val, test.")
     p.add_argument("--log-level", type=str, default="INFO", choices=["DEBUG", "INFO", "WARNING"])
     return p.parse_args(argv)
 
@@ -359,10 +363,12 @@ def main(argv: Iterable[str] | None = None) -> int:
     # ------------------------------------------------------------------
     # Helper to run sim for a given top-K%% threshold
     # ------------------------------------------------------------------
-    def run_for_topk(top_k_pct: float) -> tuple[pd.DataFrame, dict]:
+    def run_for_topk(top_k_pct: float,
+                     min_edge_pct: float | None = None) -> tuple[pd.DataFrame, dict]:
         n_top = max(1, int(n_total * top_k_pct / 100))
         sorted_idx = np.argsort(-pred["scores"])
         selected = sorted_idx[:n_top]
+        edge = args.min_edge_pct if min_edge_pct is None else min_edge_pct
 
         rows: list[dict] = []
         for k_idx in selected:
@@ -374,7 +380,7 @@ def main(argv: Iterable[str] | None = None) -> int:
                 direction, entry_idx, entry_price,
                 high, low, close, piv,
                 args.time_barrier, args.fees_pct,
-                args.min_edge_pct,
+                edge,
                 breakeven_trail=not args.no_breakeven_trail,
             )
             res["score"] = float(pred["scores"][k_idx])
@@ -383,14 +389,68 @@ def main(argv: Iterable[str] | None = None) -> int:
             res["entry_idx"] = entry_idx
             res["entry_price"] = entry_price
             res["y_true"] = int(pred["y_true"][k_idx]) if "y_true" in pred else -1
-            # Sanity-check : pnl du label (calculé par pivot_labeler_levels avec
-            # exactement la même logique strict-H1) doit matcher notre pnl_net.
             res["label_pnl_net"] = (float(pred["pnl_after_fees_pct"][k_idx])
                                     if "pnl_after_fees_pct" in pred else np.nan)
             rows.append(res)
         df = pd.DataFrame(rows)
         m = report_results(df, span_days)
         return df, m
+
+    # ------------------------------------------------------------------
+    # Grid search : si activé, court-circuite tout le reste
+    # ------------------------------------------------------------------
+    if args.grid_search:
+        min_edge_grid = [0.05, 0.10, 0.15, 0.20, 0.30]
+        top_k_grid = [1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 15.0, 25.0]
+        logger.info("=" * 110)
+        logger.info("GRID SEARCH : %d configurations (min_edge_pct × top_k_pct)",
+                    len(min_edge_grid) * len(top_k_grid))
+        logger.info("=" * 110)
+        rows = []
+        for me in min_edge_grid:
+            for tk in top_k_grid:
+                _, m = run_for_topk(tk, min_edge_pct=me)
+                if m.get("n_trades", 0) == 0:
+                    continue
+                rows.append({
+                    "min_edge_pct": me,
+                    "top_k_pct": tk,
+                    "n_trades": int(m["n_trades"]),
+                    "win_rate": float(m.get("win_rate", 0.0)),
+                    "avg_net_pct": float(m.get("avg_net_pct", 0.0)),
+                    "cumul_net_pct": float(m.get("cumul_net_pct", 0.0)),
+                    "ann_ret_pct": float(m.get("ann_ret_pct", 0.0)),
+                    "sharpe": float(m.get("sharpe", 0.0)),
+                    "max_dd_pct": float(m.get("max_dd_pct", 0.0)),
+                    "calmar": float(m.get("calmar", 0.0)),
+                })
+        df_grid = pd.DataFrame(rows).sort_values("sharpe", ascending=False)
+        csv_path = args.output_dir / "grid_search.csv"
+        df_grid.to_csv(csv_path, index=False)
+        logger.info("Grid saved : %s", csv_path)
+
+        # Affiche tout, trié par Sharpe
+        logger.info("All configurations sorted by Sharpe (desc) :")
+        for _, r in df_grid.iterrows():
+            logger.info("  min_edge=%.2f%%  top_k=%4.1f%%  n=%5d  WR=%.3f  "
+                        "AvgNet=%+.4f%%  Cumul=%+7.2f%%  AnnRet=%+7.2f%%  "
+                        "Sharpe=%+.2f  Calmar=%+.2f  MaxDD=%+7.2f%%",
+                        r["min_edge_pct"], r["top_k_pct"], int(r["n_trades"]),
+                        r["win_rate"], r["avg_net_pct"], r["cumul_net_pct"],
+                        r["ann_ret_pct"], r["sharpe"], r["calmar"], r["max_dd_pct"])
+
+        # Filtre robuste : Sharpe > 1 ET Calmar > 1 ET au moins 30 trades
+        robust = df_grid[(df_grid["sharpe"] > 1.0) & (df_grid["calmar"] > 1.0) &
+                          (df_grid["n_trades"] >= 30)]
+        logger.info("=" * 110)
+        logger.info("ROBUST configs (Sharpe > 1, Calmar > 1, n >= 30) : %d/%d",
+                    len(robust), len(df_grid))
+        for _, r in robust.iterrows():
+            logger.info("  ✓ min_edge=%.2f%%  top_k=%4.1f%%  n=%5d  Sharpe=%+.2f  "
+                        "Calmar=%+.2f  AnnRet=%+.2f%%",
+                        r["min_edge_pct"], r["top_k_pct"], int(r["n_trades"]),
+                        r["sharpe"], r["calmar"], r["ann_ret_pct"])
+        return 0
 
     # ------------------------------------------------------------------
     # Main run @ requested top-K
