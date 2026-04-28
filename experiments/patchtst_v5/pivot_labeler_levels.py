@@ -88,13 +88,21 @@ def find_neighbor_levels(entry: float, levels: np.ndarray,
 def label_events(events: pd.DataFrame, features: pd.DataFrame,
                  high: np.ndarray, low: np.ndarray, close: np.ndarray,
                  time_barrier: int, sl_mode: str, sl_buffer_atr: float,
-                 fees_pct: float, sl_level: int = 2) -> pd.DataFrame:
+                 fees_pct: float, sl_level: int = 2,
+                 label_mode: str = "tp_first",
+                 pnl_threshold_pct: float = 0.0) -> pd.DataFrame:
     """Triple Barrier avec niveaux Camarilla comme TP/SL dynamiques.
 
     sl_mode:
       - 'immediate-with-buffer': SL = pivot immédiat ± sl_buffer_atr × ATR (mix)
       - 'beyond': SL = niveau Camarilla au n-ième rang opposé (pur pivot)
         n contrôlé par sl_level (défaut 2 = 2e pivot opposé, configurable 2..4)
+
+    label_mode:
+      - 'tp_first' (défaut, legacy) : class1 = first_tp < first_sl
+      - 'pnl_threshold' : class1 = pnl_after_fees_pct > pnl_threshold_pct
+        (cible la profitabilité réelle après frais, indépendamment de la
+        position de TP vs SL — corrige le biais du label trick)
     """
     n_events = len(events)
     n_bars = len(high)
@@ -225,6 +233,11 @@ def label_events(events: pd.DataFrame, features: pd.DataFrame,
             pnl = 100.0 * (entry - exit_p) / entry
         pnl_net[k] = pnl - 2 * fees_pct
 
+        # Override du label si mode pnl_threshold : cible la profitabilité
+        # réelle au lieu de "TP first". Garde exit_reason inchangé pour debug.
+        if label_mode == "pnl_threshold":
+            label[k] = 1 if pnl_net[k] > pnl_threshold_pct else 0
+
     valid = label != -1
     out = events.copy()
     out["tp_price"] = tp_price.astype("float32")
@@ -303,6 +316,16 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     p.add_argument("--sl-buffer-atr", type=float, default=0.0,
                    help="(immediate-with-buffer mode only) buffer ATR au-delà du niveau immédiat")
     p.add_argument("--fees-pct", type=float, default=0.02, help="One-way fee %% (0.02 = maker)")
+    p.add_argument("--label-mode", type=str, default="tp_first",
+                   choices=["tp_first", "pnl_threshold"],
+                   help="'tp_first' (legacy) : class1 = first_tp < first_sl. "
+                        "'pnl_threshold' : class1 = pnl_after_fees_pct > "
+                        "--pnl-threshold-pct. Recommandé pour corriger le biais "
+                        "trick (TP collé). Garde la même logique TP/SL/timeout "
+                        "pour le PnL — seul le label binaire change.")
+    p.add_argument("--pnl-threshold-pct", type=float, default=0.10,
+                   help="Seuil de profitabilité (en %%) pour label_mode=pnl_threshold. "
+                        "0.10 = +0.10%% net après frais. Défaut 0.10.")
     p.add_argument("--log-level", type=str, default="INFO", choices=["DEBUG", "INFO", "WARNING"])
     return p.parse_args(argv)
 
@@ -334,10 +357,15 @@ def main(argv: Iterable[str] | None = None) -> int:
         logger.info("SL mode: IMMEDIATE-WITH-BUFFER (SL = pivot immédiat - %.2f × ATR)",
                     args.sl_buffer_atr)
     logger.info("Fees: %.3f%% one-way (round-trip = %.3f%%)", args.fees_pct, 2 * args.fees_pct)
+    logger.info("Label mode: %s%s", args.label_mode,
+                f" (pnl_threshold={args.pnl_threshold_pct:.3f}%)"
+                if args.label_mode == "pnl_threshold" else "")
 
     labeled = label_events(events, features, high, low, close,
                            args.time_barrier, args.sl_mode, args.sl_buffer_atr,
-                           args.fees_pct, sl_level=args.sl_level)
+                           args.fees_pct, sl_level=args.sl_level,
+                           label_mode=args.label_mode,
+                           pnl_threshold_pct=args.pnl_threshold_pct)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     labeled.to_parquet(args.output, compression="snappy", index=False)
     logger.info("Output: %s (%d events)", args.output, len(labeled))
